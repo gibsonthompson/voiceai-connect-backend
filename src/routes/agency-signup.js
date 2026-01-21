@@ -74,6 +74,9 @@ function validateAgencySignup(body) {
   if (!body.phone || body.phone.replace(/\D/g, '').length < 10) {
     errors.push('Valid phone number is required');
   }
+  if (!body.firstName || body.firstName.trim().length < 1) {
+    errors.push('First name is required');
+  }
   
   return errors;
 }
@@ -93,7 +96,7 @@ async function handleAgencySignup(req, res) {
       });
     }
     
-    const { name, email, phone } = req.body;
+    const { name, email, phone, firstName, lastName } = req.body;
     
     // Check for duplicate email
     const { data: existing } = await supabase
@@ -156,6 +159,8 @@ async function handleAgencySignup(req, res) {
       .insert({
         agency_id: agency.id,
         email: email.toLowerCase(),
+        first_name: firstName,
+        last_name: lastName || null,
         role: 'agency_owner'
       })
       .select()
@@ -178,6 +183,7 @@ async function handleAgencySignup(req, res) {
     
     res.status(200).json({
       success: true,
+      agencyId: agency.id,
       message: 'Agency created! Check your email to complete setup.',
       agency: {
         id: agency.id,
