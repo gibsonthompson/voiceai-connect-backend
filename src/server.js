@@ -17,8 +17,8 @@ const PORT = process.env.PORT || 8080;
 app.use(cors({
   origin: [
     'http://localhost:3000',
-    'https://voiceaiconnect.com',
-    'https://www.voiceaiconnect.com',
+    'https://myvoiceaiconnect.com',
+    'https://www.myvoiceaiconnect.com',
     /\.voiceaiconnect\.com$/,  // All subdomains
   ],
   credentials: true
