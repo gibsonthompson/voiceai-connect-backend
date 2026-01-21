@@ -2,6 +2,7 @@
 // AGENCY SIGNUP & ONBOARDING
 // ============================================================================
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const { supabase } = require('../lib/supabase');
 const { sendAgencyWelcomeEmail } = require('../lib/notifications');
 
@@ -77,6 +78,9 @@ function validateAgencySignup(body) {
   if (!body.firstName || body.firstName.trim().length < 1) {
     errors.push('First name is required');
   }
+  if (!body.password || body.password.length < 6) {
+    errors.push('Password is required (min 6 characters)');
+  }
   
   return errors;
 }
@@ -96,7 +100,7 @@ async function handleAgencySignup(req, res) {
       });
     }
     
-    const { name, email, phone, firstName, lastName } = req.body;
+    const { name, email, phone, firstName, lastName, password } = req.body;
     
     // Check for duplicate email
     const { data: existing } = await supabase
@@ -117,6 +121,9 @@ async function handleAgencySignup(req, res) {
     const slug = await ensureUniqueSlug(baseSlug);
     
     console.log(`🏢 Creating agency: ${name} (${slug})`);
+    
+    // Hash password
+    const passwordHash = await bcrypt.hash(password, 10);
     
     // Create agency record
     const { data: agency, error: agencyError } = await supabase
@@ -153,7 +160,7 @@ async function handleAgencySignup(req, res) {
     
     console.log(`✅ Agency created: ${agency.id}`);
     
-    // Create user record for agency owner
+    // Create user record for agency owner with hashed password
     const { data: user, error: userError } = await supabase
       .from('users')
       .insert({
@@ -161,7 +168,8 @@ async function handleAgencySignup(req, res) {
         email: email.toLowerCase(),
         first_name: firstName,
         last_name: lastName || null,
-        role: 'agency_owner'
+        role: 'agency_owner',
+        password_hash: passwordHash
       })
       .select()
       .single();
@@ -173,11 +181,15 @@ async function handleAgencySignup(req, res) {
     
     console.log(`✅ Agency user created: ${user.id}`);
     
-    // Generate password token
+    // Generate password token (for password reset if needed later)
     const token = await createPasswordToken(user.id, email.toLowerCase());
     
-    // Send welcome email
-    await sendAgencyWelcomeEmail(agency, token);
+    // Send welcome email (optional - skip if not configured)
+    try {
+      await sendAgencyWelcomeEmail(agency, token);
+    } catch (emailError) {
+      console.warn('⚠️ Welcome email failed (non-blocking):', emailError.message);
+    }
     
     console.log('🎉 Agency signup complete:', name);
     
