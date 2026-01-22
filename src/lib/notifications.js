@@ -113,20 +113,33 @@ async function sendCallNotificationSMS(client, agency, callData) {
 }
 
 // ============================================================================
-// WELCOME SMS (with password setup link)
+// WELCOME SMS (with password setup link - uses agency domain)
 // ============================================================================
-async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agencyName = null, passwordToken = null) {
-  const brandName = agencyName || 'VoiceAI Connect';
-  const frontendUrl = process.env.FRONTEND_URL || 'https://myvoiceaiconnect.com';
+async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency = null, passwordToken = null) {
+  const brandName = agency?.name || 'VoiceAI Connect';
+  const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
+  
+  // Build the URL based on agency's domain
+  let baseUrl;
+  if (agency?.marketing_domain && agency?.domain_verified) {
+    // Use custom domain if verified
+    baseUrl = `https://${agency.marketing_domain}`;
+  } else if (agency?.slug) {
+    // Use subdomain
+    baseUrl = `https://${agency.slug}.${platformDomain}`;
+  } else {
+    // Fallback to platform domain
+    baseUrl = `https://${platformDomain}`;
+  }
   
   let message = `🎉 Welcome to ${brandName}!\n\n` +
     `Your AI receptionist for ${businessName} is ready!\n\n` +
     `📞 Your AI Phone: ${formatPhoneDisplay(aiPhoneNumber)}\n\n`;
   
   if (passwordToken) {
-    message += `Set your password & login:\n${frontendUrl}/auth/set-password?token=${passwordToken}`;
+    message += `Set your password & login:\n${baseUrl}/auth/set-password?token=${passwordToken}`;
   } else {
-    message += `Login at: ${frontendUrl}/client/login`;
+    message += `Login at: ${baseUrl}/client/login`;
   }
   
   return sendTelnyxSMS(phone, message);
