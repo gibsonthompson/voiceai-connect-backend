@@ -3,6 +3,7 @@
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const { supabase, getAgencyById, getClientByEmail } = require('../lib/supabase');
 const { 
   createIndustryAssistant, 
@@ -124,6 +125,7 @@ async function handleClientSignup(req, res) {
       lastName = '',
       email,
       phone,
+      password,
       businessName,
       industry,
       businessCity,
@@ -252,8 +254,14 @@ async function handleClientSignup(req, res) {
     console.log(`🎉 Client created: ${newClient.business_name}`);
 
     // ============================================
-    // STEP 5: CREATE USER RECORD
+    // STEP 5: CREATE USER RECORD (with password if provided)
     // ============================================
+    let passwordHash = null;
+    if (password && password.length >= 6) {
+      passwordHash = await bcrypt.hash(password, 10);
+      console.log('🔐 Password hashed and will be stored');
+    }
+    
     const { data: newUser, error: userError } = await supabase
       .from('users')
       .insert({
@@ -261,7 +269,8 @@ async function handleClientSignup(req, res) {
         email: email.toLowerCase(),
         first_name: firstName,
         last_name: lastName || null,
-        role: 'client'
+        role: 'client',
+        password_hash: passwordHash
       })
       .select()
       .single();
