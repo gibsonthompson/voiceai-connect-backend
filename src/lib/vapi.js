@@ -24,7 +24,14 @@ const INDUSTRY_MAPPING = {
   'retail': 'retail',
   'professional_services': 'professional_services',
   'restaurants': 'restaurants',
-  'salon_spa': 'salon_spa'
+  'salon_spa': 'salon_spa',
+  'general': 'professional_services',
+  'legal': 'professional_services',
+  'real_estate': 'professional_services',
+  'restaurant': 'restaurants',
+  'automotive': 'home_services',
+  'fitness': 'salon_spa',
+  'other': 'professional_services'
 };
 
 // ============================================================================
@@ -204,6 +211,37 @@ function sanitizeAssistantName(businessName) {
   return businessName.slice(0, availableLength).trim() + suffix;
 }
 
+/**
+ * Format phone to E.164 format (+1XXXXXXXXXX)
+ * Returns null if invalid
+ */
+function formatPhoneE164(phone) {
+  if (!phone) return null;
+  
+  // Remove all non-digits
+  const digits = phone.replace(/\D/g, '');
+  
+  // Handle different lengths
+  if (digits.length === 10) {
+    return `+1${digits}`;
+  } else if (digits.length === 11 && digits.startsWith('1')) {
+    return `+${digits}`;
+  } else if (digits.length > 10 && digits.startsWith('1')) {
+    return `+${digits.substring(0, 11)}`;
+  }
+  
+  return null; // Invalid phone
+}
+
+/**
+ * Check if phone is valid E.164 format
+ */
+function isValidE164(phone) {
+  if (!phone) return false;
+  // E.164: + followed by 1-15 digits, starting with country code
+  return /^\+1\d{10}$/.test(phone);
+}
+
 // ============================================================================
 // CREATE QUERY TOOL FOR KNOWLEDGE BASE
 // ============================================================================
@@ -277,17 +315,30 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
     // Build tools array
     const tools = [];
 
-    // Add Transfer Tool if owner phone provided
+    // Add Transfer Tool if owner phone provided AND valid E.164
     if (ownerPhone) {
-      tools.push({
-        type: 'transferCall',
-        destinations: [{
-          type: 'number',
-          number: ownerPhone,
-          description: 'Transfer to business owner for urgent matters',
-          message: 'One moment please, let me connect you with the owner.'
-        }]
-      });
+      // Ensure phone is E.164 format
+      let formattedPhone = ownerPhone;
+      if (!isValidE164(ownerPhone)) {
+        formattedPhone = formatPhoneE164(ownerPhone);
+        console.log(`📞 Formatted phone for transfer: ${ownerPhone} → ${formattedPhone}`);
+      }
+      
+      // Only add transfer tool if we have a valid phone
+      if (formattedPhone && isValidE164(formattedPhone)) {
+        tools.push({
+          type: 'transferCall',
+          destinations: [{
+            type: 'number',
+            number: formattedPhone,
+            description: 'Transfer to business owner for urgent matters',
+            message: 'One moment please, let me connect you with the owner.'
+          }]
+        });
+        console.log(`✅ Transfer tool added with phone: ${formattedPhone}`);
+      } else {
+        console.log(`⚠️ Skipping transfer tool - invalid phone: ${ownerPhone}`);
+      }
     }
 
     const assistantConfig = {
@@ -377,7 +428,31 @@ const STATE_AREA_CODES = {
   'TX': ['214', '972', '469', '817', '682', '713', '281', '832', '346', '210', '512', '737', '254', '806', '903'],
   'CA': ['213', '310', '323', '424', '818', '626', '714', '949', '562', '657', '909', '951', '619', '858', '760', '415', '408', '510', '925', '650', '707'],
   'NY': ['212', '718', '917', '347', '646', '929', '516', '631', '914', '845', '518', '607', '315', '585', '716'],
-  // Add more states as needed
+  'AL': ['205', '251', '256', '334', '938'],
+  'AZ': ['480', '520', '602', '623', '928'],
+  'CO': ['303', '719', '720', '970'],
+  'CT': ['203', '475', '860', '959'],
+  'DE': ['302'],
+  'IL': ['217', '224', '309', '312', '331', '618', '630', '708', '773', '779', '815', '847', '872'],
+  'IN': ['219', '260', '317', '463', '574', '765', '812', '930'],
+  'LA': ['225', '318', '337', '504', '985'],
+  'MA': ['339', '351', '413', '508', '617', '774', '781', '857', '978'],
+  'MD': ['240', '301', '410', '443', '667'],
+  'MI': ['231', '248', '269', '313', '517', '586', '616', '734', '810', '906', '947', '989'],
+  'MN': ['218', '320', '507', '612', '651', '763', '952'],
+  'MO': ['314', '417', '573', '636', '660', '816'],
+  'NC': ['252', '336', '704', '743', '828', '910', '919', '980', '984'],
+  'NJ': ['201', '551', '609', '732', '848', '856', '862', '908', '973'],
+  'NV': ['702', '725', '775'],
+  'OH': ['216', '220', '234', '330', '380', '419', '440', '513', '567', '614', '740', '937'],
+  'OK': ['405', '539', '580', '918'],
+  'OR': ['458', '503', '541', '971'],
+  'PA': ['215', '267', '272', '412', '484', '570', '610', '717', '724', '814', '878'],
+  'SC': ['803', '843', '854', '864'],
+  'TN': ['423', '615', '629', '731', '865', '901', '931'],
+  'VA': ['276', '434', '540', '571', '703', '757', '804'],
+  'WA': ['206', '253', '360', '425', '509', '564'],
+  'WI': ['262', '414', '534', '608', '715', '920'],
 };
 
 async function provisionLocalPhone(city, state, assistantId, businessName) {
@@ -535,6 +610,8 @@ module.exports = {
   VOICES,
   INDUSTRY_CONFIGS,
   sanitizeAssistantName,
+  formatPhoneE164,
+  isValidE164,
   createQueryTool,
   createIndustryAssistant,
   provisionPhoneNumber,
