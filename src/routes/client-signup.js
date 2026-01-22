@@ -285,10 +285,10 @@ async function handleClientSignup(req, res) {
     await sendClientWelcomeEmail(newClient, agency, null, token);
 
     // ============================================
-    // STEP 8: SEND WELCOME SMS
+    // STEP 8: SEND WELCOME SMS (with password link)
     // ============================================
     console.log('📱 Sending welcome SMS...');
-    await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneData.number, agency.name);
+    await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneData.number, agency.name, token);
 
     // ============================================
     // RETURN SUCCESS
@@ -297,7 +297,7 @@ async function handleClientSignup(req, res) {
 
     res.status(200).json({
       success: true,
-      message: 'Account created successfully! Check your email to set your password.',
+      message: 'Account created successfully! Check your phone for login instructions.',
       client: {
         id: newClient.id,
         business_name: newClient.business_name,
@@ -405,10 +405,10 @@ async function provisionClient(clientId) {
         .select()
         .single();
       
-      // Send welcome email
+      // Send welcome notifications with password token
       const token = await createPasswordToken(newUser.id, client.email);
       await sendClientWelcomeEmail(updatedClient, agency, null, token);
-      await sendWelcomeSMS(client.owner_phone, client.business_name, phoneData.number, agency?.name);
+      await sendWelcomeSMS(client.owner_phone, client.business_name, phoneData.number, agency?.name, token);
     }
     
     console.log('✅ Client provisioned:', client.business_name);

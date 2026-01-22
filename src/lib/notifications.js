@@ -113,15 +113,21 @@ async function sendCallNotificationSMS(client, agency, callData) {
 }
 
 // ============================================================================
-// WELCOME SMS
+// WELCOME SMS (with password setup link)
 // ============================================================================
-async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agencyName = null) {
+async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agencyName = null, passwordToken = null) {
   const brandName = agencyName || 'VoiceAI Connect';
+  const frontendUrl = process.env.FRONTEND_URL || 'https://myvoiceaiconnect.com';
   
-  const message = `🎉 Welcome to ${brandName}!\n\n` +
+  let message = `🎉 Welcome to ${brandName}!\n\n` +
     `Your AI receptionist for ${businessName} is ready!\n\n` +
-    `📞 Your AI Phone: ${formatPhoneDisplay(aiPhoneNumber)}\n\n` +
-    `Check your email for login details.`;
+    `📞 Your AI Phone: ${formatPhoneDisplay(aiPhoneNumber)}\n\n`;
+  
+  if (passwordToken) {
+    message += `Set your password & login:\n${frontendUrl}/auth/set-password?token=${passwordToken}`;
+  } else {
+    message += `Login at: ${frontendUrl}/client/login`;
+  }
   
   return sendTelnyxSMS(phone, message);
 }
@@ -174,7 +180,7 @@ async function sendClientWelcomeEmail(client, agency, tempPassword, passwordToke
   const agencyName = agency?.name || 'VoiceAI Connect';
   const agencyLogo = agency?.logo_url || 'https://voiceaiconnect.com/logo.png';
   const primaryColor = agency?.primary_color || '#2563eb';
-  const dashboardUrl = process.env.FRONTEND_URL || 'https://voiceaiconnect.com';
+  const dashboardUrl = process.env.FRONTEND_URL || 'https://myvoiceaiconnect.com';
   
   const fromEmail = agency?.support_email 
     ? `${agencyName} <${agency.support_email}>`
@@ -243,7 +249,7 @@ async function sendClientWelcomeEmail(client, agency, tempPassword, passwordToke
 // AGENCY WELCOME EMAIL
 // ============================================================================
 async function sendAgencyWelcomeEmail(agency, passwordToken) {
-  const dashboardUrl = process.env.FRONTEND_URL || 'https://voiceaiconnect.com';
+  const dashboardUrl = process.env.FRONTEND_URL || 'https://myvoiceaiconnect.com';
   
   return sendEmail({
     from: 'VoiceAI Connect <onboarding@voiceaiconnect.com>',
@@ -264,7 +270,7 @@ async function sendAgencyWelcomeEmail(agency, passwordToken) {
           <div style="background-color: #f0f4ff; border-left: 4px solid #2563eb; padding: 20px; margin: 20px 0;">
             <p style="margin: 0;"><strong>Your agency URL:</strong></p>
             <p style="font-size: 18px; color: #2563eb; margin: 5px 0;">
-              https://${agency.slug}.voiceaiconnect.com
+              https://${agency.slug}.myvoiceaiconnect.com
             </p>
           </div>
           
