@@ -98,7 +98,7 @@ async function sendCallNotificationSMS(client, agency, callData) {
   // Use agency name if available, otherwise platform name
   const brandName = agency?.name || 'VoiceAI Connect';
   
-  let smsMessage = `🔔 New Call - ${client.business_name}\n\n`;
+  let smsMessage = `🔔 New Call - ${client.business_name}\n`;
   smsMessage += `Customer: ${customerName}\n`;
   smsMessage += `Phone: ${customerPhone}\n`;
   
@@ -106,41 +106,22 @@ async function sendCallNotificationSMS(client, agency, callData) {
     smsMessage += `⚠️ Urgency: HIGH\n`;
   }
   
-  smsMessage += `\nSummary: ${summary}\n\n`;
+  smsMessage += `Summary: ${summary}\n`;
   smsMessage += `Powered by ${brandName}`;
   
   return sendTelnyxSMS(client.owner_phone, smsMessage);
 }
 
 // ============================================================================
-// WELCOME SMS (with password setup link - uses agency domain)
+// WELCOME SMS (simple confirmation - no password link)
 // ============================================================================
-async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency = null, passwordToken = null) {
+async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency = null) {
   const brandName = agency?.name || 'VoiceAI Connect';
-  const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
   
-  // Build the URL based on agency's domain
-  let baseUrl;
-  if (agency?.marketing_domain && agency?.domain_verified) {
-    // Use custom domain if verified
-    baseUrl = `https://${agency.marketing_domain}`;
-  } else if (agency?.slug) {
-    // Use subdomain
-    baseUrl = `https://${agency.slug}.${platformDomain}`;
-  } else {
-    // Fallback to platform domain
-    baseUrl = `https://${platformDomain}`;
-  }
-  
-  let message = `🎉 Welcome to ${brandName}!\n\n` +
-    `Your AI receptionist for ${businessName} is ready!\n\n` +
-    `📞 Your AI Phone: ${formatPhoneDisplay(aiPhoneNumber)}\n\n`;
-  
-  if (passwordToken) {
-    message += `Set your password & login:\n${baseUrl}/auth/set-password?token=${passwordToken}`;
-  } else {
-    message += `Login at: ${baseUrl}/client/login`;
-  }
+  // Simple, compact message - no link needed
+  const message = `🎉 Welcome to ${brandName}!\n` +
+    `Your AI receptionist for ${businessName} is ready!\n` +
+    `📞 Your AI Phone: ${formatPhoneDisplay(aiPhoneNumber)}`;
   
   return sendTelnyxSMS(phone, message);
 }
@@ -193,7 +174,17 @@ async function sendClientWelcomeEmail(client, agency, tempPassword, passwordToke
   const agencyName = agency?.name || 'VoiceAI Connect';
   const agencyLogo = agency?.logo_url || 'https://voiceaiconnect.com/logo.png';
   const primaryColor = agency?.primary_color || '#2563eb';
-  const dashboardUrl = process.env.FRONTEND_URL || 'https://myvoiceaiconnect.com';
+  const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
+  
+  // Build the URL based on agency's domain
+  let baseUrl;
+  if (agency?.marketing_domain && agency?.domain_verified) {
+    baseUrl = `https://${agency.marketing_domain}`;
+  } else if (agency?.slug) {
+    baseUrl = `https://${agency.slug}.${platformDomain}`;
+  } else {
+    baseUrl = `https://${platformDomain}`;
+  }
   
   const fromEmail = agency?.support_email 
     ? `${agencyName} <${agency.support_email}>`
@@ -234,7 +225,7 @@ async function sendClientWelcomeEmail(client, agency, tempPassword, passwordToke
           </ol>
           
           <div style="text-align: center; margin: 30px 0;">
-            <a href="${dashboardUrl}/auth/set-password?token=${passwordToken}" 
+            <a href="${baseUrl}/auth/set-password?token=${passwordToken}" 
                style="display: inline-block; background-color: ${primaryColor}; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold;">
               Set Your Password →
             </a>

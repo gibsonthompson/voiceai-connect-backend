@@ -125,7 +125,6 @@ async function handleClientSignup(req, res) {
       lastName = '',
       email,
       phone,
-      password,
       businessName,
       industry,
       businessCity,
@@ -254,14 +253,8 @@ async function handleClientSignup(req, res) {
     console.log(`🎉 Client created: ${newClient.business_name}`);
 
     // ============================================
-    // STEP 5: CREATE USER RECORD (with password if provided)
+    // STEP 5: CREATE USER RECORD (no password - will be set later)
     // ============================================
-    let passwordHash = null;
-    if (password && password.length >= 6) {
-      passwordHash = await bcrypt.hash(password, 10);
-      console.log('🔐 Password hashed and will be stored');
-    }
-    
     const { data: newUser, error: userError } = await supabase
       .from('users')
       .insert({
@@ -270,7 +263,7 @@ async function handleClientSignup(req, res) {
         first_name: firstName,
         last_name: lastName || null,
         role: 'client',
-        password_hash: passwordHash
+        password_hash: null  // No password at signup
       })
       .select()
       .single();
@@ -285,28 +278,29 @@ async function handleClientSignup(req, res) {
     // ============================================
     // STEP 6: GENERATE PASSWORD TOKEN
     // ============================================
-    const token = await createPasswordToken(newUser.id, email.toLowerCase());
+    const passwordToken = await createPasswordToken(newUser.id, email.toLowerCase());
 
     // ============================================
     // STEP 7: SEND WELCOME EMAIL (branded with agency)
     // ============================================
     console.log('📧 Sending welcome email...');
-    await sendClientWelcomeEmail(newClient, agency, null, token);
+    await sendClientWelcomeEmail(newClient, agency, null, passwordToken);
 
     // ============================================
-    // STEP 8: SEND WELCOME SMS (with password link)
+    // STEP 8: SEND WELCOME SMS (simple confirmation, no link)
     // ============================================
     console.log('📱 Sending welcome SMS...');
-    await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneData.number, agency, token);
+    await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneData.number, agency);
 
     // ============================================
-    // RETURN SUCCESS
+    // RETURN SUCCESS WITH TOKEN
     // ============================================
     console.log('🎉 Client onboarding complete:', businessName);
 
     res.status(200).json({
       success: true,
-      message: 'Account created successfully! Check your phone for login instructions.',
+      message: 'Account created successfully!',
+      token: passwordToken,  // Return token for immediate redirect to set-password
       client: {
         id: newClient.id,
         business_name: newClient.business_name,
@@ -417,7 +411,7 @@ async function provisionClient(clientId) {
       // Send welcome notifications with password token
       const token = await createPasswordToken(newUser.id, client.email);
       await sendClientWelcomeEmail(updatedClient, agency, null, token);
-      await sendWelcomeSMS(client.owner_phone, client.business_name, phoneData.number, agency, token);
+      await sendWelcomeSMS(client.owner_phone, client.business_name, phoneData.number, agency);
     }
     
     console.log('✅ Client provisioned:', client.business_name);
