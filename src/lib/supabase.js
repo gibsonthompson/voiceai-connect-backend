@@ -31,7 +31,7 @@ async function getAgencyBySlug(slug) {
     .from('agencies')
     .select('*')
     .eq('slug', slug)
-    .eq('status', 'active')
+    .in('status', ['active', 'trial'])
     .single();
   
   if (error) return null;
@@ -46,7 +46,7 @@ async function getAgencyByDomain(domain) {
     .select('*')
     .eq('marketing_domain', cleanDomain)
     .eq('domain_verified', true)
-    .eq('status', 'active')
+    .in('status', ['active', 'trial'])
     .single();
   
   if (error) return null;
