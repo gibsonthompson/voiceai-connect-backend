@@ -78,9 +78,7 @@ function validateAgencySignup(body) {
   if (!body.firstName || body.firstName.trim().length < 1) {
     errors.push('First name is required');
   }
-  if (!body.password || body.password.length < 6) {
-    errors.push('Password is required (min 6 characters)');
-  }
+  // Password removed - set via /auth/set-password after signup
   
   return errors;
 }
@@ -100,7 +98,8 @@ async function handleAgencySignup(req, res) {
       });
     }
     
-    const { name, email, phone, firstName, lastName, password } = req.body;
+    const { name, email, phone, firstName, lastName } = req.body;
+    // Password removed - will be set via /auth/set-password
     
     // Check for duplicate email
     const { data: existing } = await supabase
@@ -121,9 +120,6 @@ async function handleAgencySignup(req, res) {
     const slug = await ensureUniqueSlug(baseSlug);
     
     console.log(`🏢 Creating agency: ${name} (${slug})`);
-    
-    // Hash password
-    const passwordHash = await bcrypt.hash(password, 10);
     
     // Create agency record
     const { data: agency, error: agencyError } = await supabase
@@ -160,7 +156,7 @@ async function handleAgencySignup(req, res) {
     
     console.log(`✅ Agency created: ${agency.id}`);
     
-    // Create user record for agency owner with hashed password
+    // Create user record WITHOUT password (will be set via set-password page)
     const { data: user, error: userError } = await supabase
       .from('users')
       .insert({
@@ -169,7 +165,7 @@ async function handleAgencySignup(req, res) {
         first_name: firstName,
         last_name: lastName || null,
         role: 'agency_owner',
-        password_hash: passwordHash
+        password_hash: null  // No password at signup
       })
       .select()
       .single();
@@ -181,7 +177,7 @@ async function handleAgencySignup(req, res) {
     
     console.log(`✅ Agency user created: ${user.id}`);
     
-    // Generate password token (for password reset if needed later)
+    // Generate password token for set-password flow
     const token = await createPasswordToken(user.id, email.toLowerCase());
     
     // Send welcome email (optional - skip if not configured)
@@ -196,7 +192,8 @@ async function handleAgencySignup(req, res) {
     res.status(200).json({
       success: true,
       agencyId: agency.id,
-      message: 'Agency created! Check your email to complete setup.',
+      token: token,  // Return token for set-password redirect
+      message: 'Agency created! Set your password to continue.',
       agency: {
         id: agency.id,
         name: agency.name,
