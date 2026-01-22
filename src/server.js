@@ -19,7 +19,7 @@ app.use(cors({
     'http://localhost:3000',
     'https://myvoiceaiconnect.com',
     'https://www.myvoiceaiconnect.com',
-    /\.voiceaiconnect\.com$/,  // All subdomains
+    /\.myvoiceaiconnect\.com$/,  // All subdomains
   ],
   credentials: true
 }));
