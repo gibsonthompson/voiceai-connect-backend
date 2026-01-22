@@ -19,7 +19,7 @@ async function getAgencyByHost(req, res) {
     let agency = null;
     
     // Check if it's a subdomain of voiceaiconnect.com
-    const subdomainMatch = host.match(/^([^.]+)\.voiceaiconnect\.com$/);
+    const subdomainMatch = host.match(/^([^.]+)\.myvoiceaiconnect\.com$/);
     if (subdomainMatch) {
       const slug = subdomainMatch[1];
       agency = await getAgencyBySlug(slug);
