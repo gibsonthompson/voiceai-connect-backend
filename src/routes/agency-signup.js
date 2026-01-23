@@ -78,7 +78,7 @@ function validateAgencySignup(body) {
   if (!body.firstName || body.firstName.trim().length < 1) {
     errors.push('First name is required');
   }
-  // Password removed - set via /auth/set-password after signup
+  // Password removed - set via /auth/set-password after onboarding
   
   return errors;
 }
@@ -99,7 +99,7 @@ async function handleAgencySignup(req, res) {
     }
     
     const { name, email, phone, firstName, lastName } = req.body;
-    // Password removed - will be set via /auth/set-password
+    // Password removed - will be set via /auth/set-password after onboarding
     
     // Check for duplicate email
     const { data: existing } = await supabase
@@ -156,7 +156,7 @@ async function handleAgencySignup(req, res) {
     
     console.log(`✅ Agency created: ${agency.id}`);
     
-    // Create user record WITHOUT password (will be set via set-password page)
+    // Create user record WITHOUT password (will be set via set-password page after onboarding)
     const { data: user, error: userError } = await supabase
       .from('users')
       .insert({
@@ -177,7 +177,7 @@ async function handleAgencySignup(req, res) {
     
     console.log(`✅ Agency user created: ${user.id}`);
     
-    // Generate password token for set-password flow
+    // Generate password token for set-password flow (used after onboarding)
     const token = await createPasswordToken(user.id, email.toLowerCase());
     
     // Send welcome email (optional - skip if not configured)
@@ -192,8 +192,8 @@ async function handleAgencySignup(req, res) {
     res.status(200).json({
       success: true,
       agencyId: agency.id,
-      token: token,  // Return token for set-password redirect
-      message: 'Agency created! Set your password to continue.',
+      token: token,  // Return token - frontend stores for use after onboarding
+      message: 'Agency created! Complete onboarding to get started.',
       agency: {
         id: agency.id,
         name: agency.name,
@@ -261,7 +261,10 @@ async function handleAgencyOnboarding(req, res) {
       case 4: // Stripe Connect (handled separately)
         break;
         
-      case 5: // Complete
+      case 5: // Password step (handled by frontend redirect)
+        break;
+        
+      case 6: // Complete
         updateData.onboarding_completed = true;
         break;
     }
@@ -274,8 +277,8 @@ async function handleAgencyOnboarding(req, res) {
     res.json({
       success: true,
       step: step,
-      next_step: step < 5 ? step + 1 : null,
-      completed: step >= 5
+      next_step: step < 6 ? step + 1 : null,
+      completed: step >= 6
     });
     
   } catch (error) {
