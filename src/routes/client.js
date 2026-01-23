@@ -378,6 +378,32 @@ router.put('/:id/knowledge-base', async (req, res) => {
 });
 
 // ============================================================================
+// GET /api/client/:id/calls/:callId - Get single call detail
+// IMPORTANT: This must come BEFORE the /:id/calls route
+// ============================================================================
+router.get('/:id/calls/:callId', async (req, res) => {
+  try {
+    const { id, callId } = req.params;
+    
+    const { data: call, error } = await supabase
+      .from('calls')
+      .select('*')
+      .eq('id', callId)
+      .eq('client_id', id)
+      .single();
+
+    if (error || !call) {
+      return res.status(404).json({ error: 'Call not found' });
+    }
+
+    res.json({ call });
+  } catch (error) {
+    console.error('Error fetching call:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
 // GET /api/client/:id/calls - Get client calls with stats
 // ============================================================================
 router.get('/:id/calls', async (req, res) => {
