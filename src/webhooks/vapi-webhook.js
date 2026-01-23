@@ -1,6 +1,7 @@
 // ============================================================================
 // VAPI WEBHOOK HANDLER - Multi-Tenant Aware
 // Adapted from CallBird's battle-tested webhook
+// UPDATED: Added trial expiration check, agency status check, duration capture
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -77,12 +78,17 @@ Extract and return ONLY valid JSON:
 }
 
 // ============================================================================
-// USAGE WARNING EMAILS
+// USAGE WARNING EMAILS (STUBBED - Email service not configured yet)
 // ============================================================================
 async function sendUsageWarningEmail(client, agency, currentCalls, limit) {
+  // TODO: Configure email service (Brevo, etc.)
+  const agencyName = agency?.name || 'Your AI Receptionist';
+  console.log(`📧 [EMAIL STUB] Would send 80% usage warning to ${client.email}`);
+  console.log(`   Agency: ${agencyName}, Usage: ${currentCalls}/${limit}`);
+  
+  // Uncomment when email is configured:
+  /*
   try {
-    const agencyName = agency?.name || 'Your AI Receptionist';
-    
     await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
@@ -107,12 +113,18 @@ async function sendUsageWarningEmail(client, agency, currentCalls, limit) {
   } catch (error) {
     console.error('❌ Usage warning email failed:', error);
   }
+  */
 }
 
 async function sendLimitReachedEmail(client, agency, limit) {
+  // TODO: Configure email service (Brevo, etc.)
+  const agencyName = agency?.name || 'Your AI Receptionist';
+  console.log(`📧 [EMAIL STUB] Would send limit reached email to ${client.email}`);
+  console.log(`   Agency: ${agencyName}, Limit: ${limit}`);
+  
+  // Uncomment when email is configured:
+  /*
   try {
-    const agencyName = agency?.name || 'Your AI Receptionist';
-    
     await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
@@ -137,6 +149,15 @@ async function sendLimitReachedEmail(client, agency, limit) {
   } catch (error) {
     console.error('❌ Limit reached email failed:', error);
   }
+  */
+}
+
+// ============================================================================
+// NEW: HELPER - Check if trial has expired
+// ============================================================================
+function isTrialExpired(trialEndsAt) {
+  if (!trialEndsAt) return false;
+  return new Date(trialEndsAt) < new Date();
 }
 
 // ============================================================================
@@ -179,7 +200,41 @@ async function handleVapiWebhook(req, res) {
     const agency = client.agencies; // May be null for direct clients
     
     // ============================================
-    // CHECK SUBSCRIPTION STATUS
+    // CHECK AGENCY STATUS (NEW!)
+    // If client belongs to an agency, verify agency is active
+    // ============================================
+    if (agency) {
+      const agencyValidStatuses = ['active', 'trial', 'trialing'];
+      if (!agencyValidStatuses.includes(agency.subscription_status)) {
+        console.log(`🚫 CALL BLOCKED: Agency ${agency.name} subscription not active`);
+        return res.status(200).json({ 
+          received: true,
+          blocked: true,
+          reason: 'Agency subscription not active'
+        });
+      }
+      
+      // Check if agency trial has expired
+      if ((agency.subscription_status === 'trial' || agency.subscription_status === 'trialing') 
+          && isTrialExpired(agency.trial_ends_at)) {
+        console.log(`🚫 CALL BLOCKED: Agency ${agency.name} trial expired`);
+        
+        // Update agency status to expired
+        await supabase
+          .from('agencies')
+          .update({ subscription_status: 'expired' })
+          .eq('id', agency.id);
+        
+        return res.status(200).json({ 
+          received: true,
+          blocked: true,
+          reason: 'Agency trial expired'
+        });
+      }
+    }
+    
+    // ============================================
+    // CHECK CLIENT SUBSCRIPTION STATUS
     // ============================================
     const validStatuses = ['active', 'trial'];
     if (!validStatuses.includes(client.subscription_status)) {
@@ -188,6 +243,25 @@ async function handleVapiWebhook(req, res) {
         received: true,
         blocked: true,
         reason: 'Subscription not active'
+      });
+    }
+    
+    // ============================================
+    // CHECK CLIENT TRIAL EXPIRATION (NEW!)
+    // ============================================
+    if (client.subscription_status === 'trial' && isTrialExpired(client.trial_ends_at)) {
+      console.log(`🚫 CALL BLOCKED: ${client.business_name} trial expired`);
+      
+      // Update client status to expired
+      await supabase
+        .from('clients')
+        .update({ subscription_status: 'expired' })
+        .eq('id', client.id);
+      
+      return res.status(200).json({ 
+        received: true,
+        blocked: true,
+        reason: 'Trial expired'
       });
     }
     
@@ -233,6 +307,21 @@ async function handleVapiWebhook(req, res) {
       null;
     
     // ============================================
+    // EXTRACT CALL DURATION (NEW!)
+    // VAPI sends duration in various places, check all
+    // ============================================
+    const durationSeconds = 
+      call.duration ||
+      message.duration ||
+      message.call?.duration ||
+      message.artifact?.duration ||
+      null;
+    
+    if (durationSeconds) {
+      console.log(`⏱️ Call duration: ${durationSeconds} seconds`);
+    }
+    
+    // ============================================
     // SAVE CALL TO DATABASE
     // ============================================
     const callRecord = {
@@ -243,6 +332,7 @@ async function handleVapiWebhook(req, res) {
       ai_summary: aiSummary,
       transcript: transcript,
       recording_url: recordingUrl,
+      duration_seconds: durationSeconds, // NEW!
       urgency_level: urgency,
       call_status: 'completed',
       created_at: new Date().toISOString()
@@ -269,6 +359,7 @@ async function handleVapiWebhook(req, res) {
     const updateData = { calls_this_month: newCallCount };
     if (isFirstCall) {
       updateData.first_call_received = true;
+      updateData.first_call_received_at = new Date().toISOString(); // Also set timestamp
       console.log('🎉 FIRST CALL for:', client.business_name);
     }
     
@@ -313,7 +404,8 @@ async function handleVapiWebhook(req, res) {
       callId: insertedCall[0]?.id,
       smsSent: smsSent,
       firstCall: isFirstCall,
-      agency: agency?.name || null
+      agency: agency?.name || null,
+      duration: durationSeconds // Include in response for debugging
     });
     
   } catch (error) {
