@@ -87,6 +87,9 @@ const { getAgencyByHost, getAgencySettings, updateAgencySettings } = require('./
 // Client Provisioning (adapted from CallBird)
 const { handleClientSignup, provisionClient } = require('./routes/client-signup');
 
+// Client Dashboard Routes
+const clientRoutes = require('./routes/client');
+
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 
@@ -164,9 +167,40 @@ app.get('/api/agency/connect/status/:agencyId', async (req, res) => {
 // Client signup (via agency's marketing site)
 app.post('/api/client/signup', handleClientSignup);
 
+// Client dashboard routes (settings, voice, greeting, knowledge base)
+app.use('/api/client', clientRoutes);
+
 // Client billing (pays agency via Connect)
 app.post('/api/client/checkout', createClientCheckout);
 app.post('/api/client/portal', createClientPortal);
+
+// ============================================================================
+// VOICES ENDPOINT (Public)
+// ============================================================================
+
+app.get('/api/voices', (req, res) => {
+  const VOICE_OPTIONS = [
+    // Female voices
+    { id: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel', gender: 'female', description: 'Warm and friendly' },
+    { id: 'EXAVITQu4vr4xnSDxMaL', name: 'Sarah', gender: 'female', description: 'Soft and professional' },
+    { id: 'pMsXgVXv3BLzUgSXRplE', name: 'Serena', gender: 'female', description: 'Calm and reassuring' },
+    { id: 'XrExE9yKIg1WjnnlVkGX', name: 'Matilda', gender: 'female', description: 'Bright and energetic' },
+    { id: 'pFZP5JQG7iQjIQuC4Bku', name: 'Lily', gender: 'female', description: 'Young and cheerful' },
+    { id: 'Xb7hH8MSUJpSbSDYk0k2', name: 'Alice', gender: 'female', description: 'Clear and articulate' },
+    { id: 'LcfcDJNUP1GQjkzn1xUU', name: 'Emily', gender: 'female', description: 'Warm and welcoming' },
+    // Male voices
+    { id: 'IKne3meq5aSn9XLyUdCD', name: 'Charlie', gender: 'male', description: 'Friendly and casual' },
+    { id: 'iP95p4xoKVk53GoZ742B', name: 'Chris', gender: 'male', description: 'Professional and confident' },
+    { id: 'nPczCjzI2devNBz1zQrb', name: 'Brian', gender: 'male', description: 'Authoritative and clear' },
+    { id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam', gender: 'male', description: 'Deep and trustworthy' },
+    { id: '29vD33N1CtxCmqQRPOHJ', name: 'Drew', gender: 'male', description: 'Warm and approachable' },
+    { id: 'onwK4e9ZLuTAKqWW03F9', name: 'Daniel', gender: 'male', description: 'Calm and measured' },
+    { id: 'TxGEqnHWrfWFTfGW9XjX', name: 'Josh', gender: 'male', description: 'Energetic and upbeat' },
+    { id: 'JBFqnCBsd6RMkjVDRZzb', name: 'George', gender: 'male', description: 'Mature and refined' },
+    { id: 'TX3LPaxmHKxFdv7VOQHJ', name: 'Liam', gender: 'male', description: 'Young and dynamic' },
+  ];
+  res.json(VOICE_OPTIONS);
+});
 
 // ============================================================================
 // AUTH ROUTES
