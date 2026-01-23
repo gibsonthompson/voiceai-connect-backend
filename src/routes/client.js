@@ -6,7 +6,6 @@ const express = require('express');
 const router = express.Router();
 const fetch = require('node-fetch');
 const { supabase, getClientById } = require('../lib/supabase');
-const { VOICES } = require('../lib/vapi');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 
@@ -45,7 +44,7 @@ router.get('/:id', async (req, res) => {
       .from('clients')
       .select(`
         *,
-        agencies (
+        agency:agencies (
           id, name, slug, 
           primary_color, secondary_color, accent_color,
           logo_url, support_email, support_phone
@@ -58,7 +57,7 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Client not found' });
     }
 
-    res.json(client);
+    res.json({ client });
   } catch (error) {
     console.error('Error fetching client:', error);
     res.status(500).json({ error: 'Server error' });
@@ -379,3 +378,4 @@ router.put('/:id/knowledge-base', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.VOICE_OPTIONS = VOICE_OPTIONS;
