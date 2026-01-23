@@ -5,6 +5,7 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
+const { supabase } = require('./lib/supabase');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -13,16 +14,57 @@ const PORT = process.env.PORT || 8080;
 // MIDDLEWARE
 // ============================================================================
 
-// CORS - Allow frontend origins
-app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'https://myvoiceaiconnect.com',
-    'https://www.myvoiceaiconnect.com',
-    /\.myvoiceaiconnect\.com$/,  // All subdomains
-  ],
+// ============================================================================
+// DYNAMIC CORS - Allows subdomains AND verified custom domains
+// ============================================================================
+const corsOptions = {
+  origin: async function (origin, callback) {
+    // Allow requests with no origin (mobile apps, Postman, server-to-server)
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    // Static allowed origins
+    const staticAllowed = [
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'https://myvoiceaiconnect.com',
+      'https://www.myvoiceaiconnect.com',
+    ];
+
+    if (staticAllowed.includes(origin)) {
+      return callback(null, true);
+    }
+
+    // Check if it's a subdomain of myvoiceaiconnect.com
+    if (/^https:\/\/[^.]+\.myvoiceaiconnect\.com$/.test(origin)) {
+      return callback(null, true);
+    }
+
+    // Check if it's a verified custom domain
+    try {
+      const originHost = new URL(origin).hostname.replace('www.', '');
+      const { data } = await supabase
+        .from('agencies')
+        .select('id')
+        .eq('marketing_domain', originHost)
+        .eq('domain_verified', true)
+        .single();
+
+      if (data) {
+        return callback(null, true);
+      }
+    } catch (err) {
+      console.error('CORS domain check error:', err.message);
+    }
+
+    // Reject unknown origins
+    callback(new Error('Not allowed by CORS'));
+  },
   credentials: true
-}));
+};
+
+app.use(cors(corsOptions));
 
 // Parse JSON for most routes
 app.use((req, res, next) => {
