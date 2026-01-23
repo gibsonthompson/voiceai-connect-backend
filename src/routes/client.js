@@ -377,5 +377,49 @@ router.put('/:id/knowledge-base', async (req, res) => {
   return updateKnowledgeBase(req, res);
 });
 
+// ============================================================================
+// GET /api/client/:id/calls - Get client calls with stats
+// ============================================================================
+router.get('/:id/calls', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const { data: calls, error } = await supabase
+      .from('calls')
+      .select('*')
+      .eq('client_id', id)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    // Calculate stats
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const callsThisMonth = (calls || []).filter(
+      c => new Date(c.created_at) >= startOfMonth
+    ).length;
+
+    const highUrgency = (calls || []).filter(
+      c => c.urgency_level === 'high' || c.urgency_level === 'emergency'
+    ).length;
+
+    res.json({
+      calls: calls || [],
+      stats: {
+        callsThisMonth,
+        highUrgency,
+        total: (calls || []).length,
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching calls:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;
 module.exports.VOICE_OPTIONS = VOICE_OPTIONS;
