@@ -62,22 +62,43 @@ async function agencyLogin(req, res) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
     
+    // Fetch full agency data separately (this was the bug - user.agencies was undefined)
+    const { data: agency, error: agencyError } = await supabase
+      .from('agencies')
+      .select('*')
+      .eq('id', user.agency_id)
+      .single();
+    
+    if (agencyError) {
+      console.error('❌ Agency fetch error:', agencyError);
+    }
+    
+    // Check agency status
+    if (agency && agency.status === 'suspended') {
+      return res.status(403).json({ 
+        error: 'Your account has been suspended. Please contact support.' 
+      });
+    }
+    
     // Update last login
     await supabase
       .from('users')
-      .update({ last_login_at: new Date().toISOString() })
+      .update({ last_login: new Date().toISOString() })
       .eq('id', user.id);
     
-    await supabase
-      .from('agencies')
-      .update({ last_login_at: new Date().toISOString() })
-      .eq('id', user.agency_id);
+    if (user.agency_id) {
+      await supabase
+        .from('agencies')
+        .update({ last_login_at: new Date().toISOString() })
+        .eq('id', user.agency_id);
+    }
     
     // Generate token
     const token = generateToken(user);
     
-    console.log('✅ Agency login:', user.email);
+    console.log('✅ Agency login:', user.email, '| Agency:', agency?.name);
     
+    // Return token, user (with agency_id), and full agency object
     res.json({
       success: true,
       token,
@@ -86,15 +107,10 @@ async function agencyLogin(req, res) {
         email: user.email,
         first_name: user.first_name,
         last_name: user.last_name,
-        role: user.role
+        role: user.role,
+        agency_id: user.agency_id  // CRITICAL: Include agency_id
       },
-      agency: user.agencies ? {
-        id: user.agencies.id,
-        name: user.agencies.name,
-        slug: user.agencies.slug,
-        status: user.agencies.status,
-        subscription_status: user.agencies.subscription_status
-      } : null
+      agency  // CRITICAL: Full agency object from separate query
     });
     
   } catch (error) {
@@ -139,16 +155,27 @@ async function clientLogin(req, res) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
     
+    // Fetch full client data separately
+    const { data: client, error: clientError } = await supabase
+      .from('clients')
+      .select('*')
+      .eq('id', user.client_id)
+      .single();
+    
+    if (clientError) {
+      console.error('❌ Client fetch error:', clientError);
+    }
+    
     // Update last login
     await supabase
       .from('users')
-      .update({ last_login_at: new Date().toISOString() })
+      .update({ last_login: new Date().toISOString() })
       .eq('id', user.id);
     
     // Generate token
     const token = generateToken(user);
     
-    console.log('✅ Client login:', user.email);
+    console.log('✅ Client login:', user.email, '| Client:', client?.business_name);
     
     res.json({
       success: true,
@@ -158,15 +185,10 @@ async function clientLogin(req, res) {
         email: user.email,
         first_name: user.first_name,
         last_name: user.last_name,
-        role: user.role
+        role: user.role,
+        client_id: user.client_id  // Include client_id
       },
-      client: user.clients ? {
-        id: user.clients.id,
-        business_name: user.clients.business_name,
-        status: user.clients.status,
-        subscription_status: user.clients.subscription_status,
-        phone_number: user.clients.vapi_phone_number
-      } : null
+      client  // Full client object
     });
     
   } catch (error) {
