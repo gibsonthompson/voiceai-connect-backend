@@ -424,9 +424,9 @@ router.post('/:agencyId/outreach/log', async (req, res) => {
       return res.status(400).json({ error: 'type, toAddress, and body are required' });
     }
 
-    // Log to outreach_history
+    // Log to outreach_emails
     const { data: outreach, error } = await supabase
-      .from('outreach_history')
+      .from('outreach_emails')
       .insert({
         agency_id: agencyId,
         lead_id: leadId || null,
@@ -463,10 +463,18 @@ router.post('/:agencyId/outreach/log', async (req, res) => {
 
     // Update template use count
     if (templateId) {
-      await supabase
+      const { data: template } = await supabase
         .from('outreach_templates')
-        .update({ use_count: supabase.raw('use_count + 1') })
-        .eq('id', templateId);
+        .select('use_count')
+        .eq('id', templateId)
+        .single();
+      
+      if (template) {
+        await supabase
+          .from('outreach_templates')
+          .update({ use_count: (template.use_count || 0) + 1 })
+          .eq('id', templateId);
+      }
     }
 
     res.status(201).json({ success: true, outreach });
@@ -486,7 +494,7 @@ router.get('/:agencyId/outreach/history', async (req, res) => {
     const { leadId, type, limit = 50, offset = 0 } = req.query;
 
     let query = supabase
-      .from('outreach_history')
+      .from('outreach_emails')
       .select(`
         *,
         lead:leads (id, business_name, contact_name),
