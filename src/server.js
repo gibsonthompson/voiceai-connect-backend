@@ -90,6 +90,11 @@ const { handleClientSignup, provisionClient } = require('./routes/client-signup'
 // Client Dashboard Routes
 const clientRoutes = require('./routes/client');
 
+// Leads & Outreach Routes
+const leadRoutes = require('./routes/leads');
+const activityRoutes = require('./routes/activity');
+const outreachRoutes = require('./routes/outreach');
+
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 
@@ -159,6 +164,14 @@ app.get('/api/agency/connect/status/:agencyId', async (req, res) => {
   const { getConnectStatus } = require('./routes/stripe-connect');
   return getConnectStatus(req, res);
 });
+
+// ============================================================================
+// LEADS & OUTREACH ROUTES (Agency CRM)
+// ============================================================================
+
+app.use('/api/agency', leadRoutes);
+app.use('/api/agency', activityRoutes);
+app.use('/api/agency', outreachRoutes);
 
 // ============================================================================
 // CLIENT ROUTES (Agencies → Clients)
