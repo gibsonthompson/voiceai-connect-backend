@@ -534,5 +534,31 @@ router.get('/:agencyId/outreach/variables', async (req, res) => {
   res.json({ variables: TEMPLATE_VARIABLES });
 });
 
+// ============================================================================
+// POST /api/agency/:agencyId/templates/seed-defaults
+// Seed default templates for an agency (if they don't have any)
+// ============================================================================
+router.post('/:agencyId/templates/seed-defaults', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    
+    const { seedDefaultTemplatesIfNeeded } = require('../lib/default-templates');
+    const result = await seedDefaultTemplatesIfNeeded(agencyId);
+    
+    if (result.skipped) {
+      return res.json({ success: true, message: 'Templates already exist', skipped: true });
+    }
+    
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    
+    res.json({ success: true, message: `Created ${result.count} default templates` });
+  } catch (error) {
+    console.error('Error seeding templates:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;
 module.exports.TEMPLATE_VARIABLES = TEMPLATE_VARIABLES;

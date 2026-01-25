@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { supabase } = require('../lib/supabase');
 const { sendAgencyWelcomeEmail } = require('../lib/notifications');
+const { seedDefaultTemplatesIfNeeded } = require('../lib/default-templates');
 
 // ============================================================================
 // SLUG GENERATION
@@ -155,6 +156,12 @@ async function handleAgencySignup(req, res) {
     }
     
     console.log(`✅ Agency created: ${agency.id}`);
+    
+    // Seed default outreach templates
+    const templateResult = await seedDefaultTemplatesIfNeeded(agency.id);
+    if (templateResult.success && !templateResult.skipped) {
+      console.log(`✅ Default templates seeded: ${templateResult.count} templates`);
+    }
     
     // Create user record WITHOUT password (will be set via set-password page after onboarding)
     const { data: user, error: userError } = await supabase
