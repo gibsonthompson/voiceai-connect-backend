@@ -83,6 +83,10 @@ app.use((req, res, next) => {
 // Agency Management
 const { handleAgencySignup, handleAgencyOnboarding } = require('./routes/agency-signup');
 const { getAgencyByHost, getAgencySettings, updateAgencySettings, verifyAgencyDomain } = require('./routes/agency-settings');
+
+// Domain Management (Automated Vercel Provisioning)
+const domainRoutes = require('./routes/domains');
+
 // Client Provisioning (adapted from CallBird)
 const { handleClientSignup, provisionClient } = require('./routes/client-signup');
 
@@ -134,7 +138,8 @@ app.get('/health', (req, res) => {
     features: {
       multiTenant: true,
       stripeConnect: true,
-      vapiIntegration: true
+      vapiIntegration: true,
+      automatedDomains: true
     }
   });
 });
@@ -151,7 +156,10 @@ app.post('/api/agency/onboarding', handleAgencyOnboarding);
 app.get('/api/agency/by-host', getAgencyByHost);
 app.get('/api/agency/:agencyId/settings', getAgencySettings);
 app.put('/api/agency/:agencyId/settings', updateAgencySettings);
+
+// Legacy domain verify endpoint (keeping for backwards compatibility)
 app.post('/api/agency/:agencyId/domain/verify', verifyAgencyDomain);
+
 // Agency billing (pays platform)
 app.post('/api/agency/checkout', createAgencyCheckout);
 app.post('/api/agency/portal', createAgencyPortal);
@@ -163,6 +171,16 @@ app.get('/api/agency/connect/status/:agencyId', async (req, res) => {
   const { getConnectStatus } = require('./routes/stripe-connect');
   return getConnectStatus(req, res);
 });
+
+// ============================================================================
+// DOMAIN MANAGEMENT ROUTES (Automated Vercel Provisioning)
+// ============================================================================
+
+// Domain routes: POST/DELETE /api/agency/:id/domain, GET /api/agency/:id/domain/status
+app.use('/api/agency', domainRoutes);
+
+// Public DNS config endpoint: GET /api/domain/dns-config
+app.use('/api', domainRoutes);
 
 // ============================================================================
 // LEADS & OUTREACH ROUTES (Agency CRM)
