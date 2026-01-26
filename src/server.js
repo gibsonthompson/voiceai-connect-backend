@@ -150,6 +150,8 @@ const {
 // Stripe Connect (clients pay agencies)
 const {
   createConnectAccountLink,
+  getConnectStatus,
+  disconnectConnectAccount,
   createClientCheckout,
   createClientPortal,
   handleConnectStripeWebhook
@@ -205,11 +207,12 @@ app.post('/api/agency/portal', createAgencyPortal);
 
 // Stripe Connect onboarding
 app.post('/api/agency/connect/onboard', createConnectAccountLink);
-app.get('/api/agency/connect/status/:agencyId', async (req, res) => {
-  // Check Connect account status
-  const { getConnectStatus } = require('./routes/stripe-connect');
-  return getConnectStatus(req, res);
-});
+
+// Stripe Connect status
+app.get('/api/agency/connect/status/:agencyId', getConnectStatus);
+
+// Stripe Connect disconnect
+app.post('/api/agency/:agencyId/connect/disconnect', disconnectConnectAccount);
 
 // ============================================================================
 // DOMAIN MANAGEMENT ROUTES (Automated Vercel Provisioning)

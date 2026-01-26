@@ -68,8 +68,8 @@ async function createConnectAccountLink(req, res) {
     // Create account link for onboarding
     const accountLink = await stripe.accountLinks.create({
       account: accountId,
-      refresh_url: `${process.env.FRONTEND_URL}/agency/settings/stripe?refresh=true`,
-      return_url: `${process.env.FRONTEND_URL}/agency/settings/stripe?success=true`,
+      refresh_url: `${process.env.FRONTEND_URL}/agency/settings?tab=payments&refresh=true`,
+      return_url: `${process.env.FRONTEND_URL}/agency/settings?tab=payments&success=true`,
       type: 'account_onboarding'
     });
 
@@ -143,6 +143,67 @@ async function getConnectStatus(req, res) {
   } catch (error) {
     console.error('❌ Connect status error:', error);
     res.status(500).json({ error: 'Failed to get Connect status' });
+  }
+}
+
+// ============================================================================
+// DISCONNECT CONNECT ACCOUNT
+// ============================================================================
+async function disconnectConnectAccount(req, res) {
+  try {
+    const { agencyId } = req.params;
+
+    if (!agencyId) {
+      return res.status(400).json({ error: 'agencyId required' });
+    }
+
+    // Get agency
+    const { data: agency, error: fetchError } = await supabase
+      .from('agencies')
+      .select('stripe_account_id, name')
+      .eq('id', agencyId)
+      .single();
+
+    if (fetchError || !agency) {
+      return res.status(404).json({ error: 'Agency not found' });
+    }
+
+    if (!agency.stripe_account_id) {
+      return res.status(400).json({ error: 'No Stripe account connected' });
+    }
+
+    console.log('🔌 Disconnecting Stripe Connect for:', agency.name);
+
+    // Note: We don't delete the Stripe account - just remove the association
+    // The agency can reconnect later or the account stays in Stripe
+
+    // Clear the Connect account from database
+    const { error: updateError } = await supabase
+      .from('agencies')
+      .update({
+        stripe_account_id: null,
+        stripe_onboarding_complete: false,
+        stripe_charges_enabled: false,
+        stripe_payouts_enabled: false,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', agencyId);
+
+    if (updateError) {
+      console.error('❌ Failed to update agency:', updateError);
+      return res.status(500).json({ error: 'Failed to disconnect account' });
+    }
+
+    console.log('✅ Stripe Connect disconnected for:', agency.name);
+
+    res.json({
+      success: true,
+      message: 'Stripe account disconnected'
+    });
+
+  } catch (error) {
+    console.error('❌ Disconnect Connect error:', error);
+    res.status(500).json({ error: 'Failed to disconnect Stripe account' });
   }
 }
 
@@ -602,6 +663,7 @@ async function handleClientPaymentFailed(invoice, stripeAccountId) {
 module.exports = {
   createConnectAccountLink,
   getConnectStatus,
+  disconnectConnectAccount,
   createClientCheckout,
   createClientPortal,
   handleConnectStripeWebhook
