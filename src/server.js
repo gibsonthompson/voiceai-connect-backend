@@ -15,6 +15,31 @@ const PORT = process.env.PORT || 8080;
 // ============================================================================
 
 // ============================================================================
+// GLOBAL OPTIONS PREFLIGHT HANDLER (runs before async CORS check)
+// ============================================================================
+app.options('*', (req, res) => {
+  const allowedOrigins = [
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'https://myvoiceaiconnect.com',
+    'https://www.myvoiceaiconnect.com',
+  ];
+  
+  const origin = req.headers.origin;
+  
+  // Allow if static match or subdomain of myvoiceaiconnect.com
+  if (allowedOrigins.includes(origin) || /^https:\/\/[^.]+\.myvoiceaiconnect\.com$/.test(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+  } else {
+    res.header('Access-Control-Allow-Origin', origin); // Allow for now, actual request will be checked
+  }
+  
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.sendStatus(200);
+});
+
 // DYNAMIC CORS - Allows subdomains AND verified custom domains
 // ============================================================================
 const corsOptions = {
