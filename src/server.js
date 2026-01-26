@@ -82,8 +82,7 @@ app.use((req, res, next) => {
 
 // Agency Management
 const { handleAgencySignup, handleAgencyOnboarding } = require('./routes/agency-signup');
-const { getAgencyByHost, getAgencySettings, updateAgencySettings } = require('./routes/agency-settings');
-
+const { getAgencyByHost, getAgencySettings, updateAgencySettings, verifyAgencyDomain } = require('./routes/agency-settings');
 // Client Provisioning (adapted from CallBird)
 const { handleClientSignup, provisionClient } = require('./routes/client-signup');
 
@@ -152,7 +151,7 @@ app.post('/api/agency/onboarding', handleAgencyOnboarding);
 app.get('/api/agency/by-host', getAgencyByHost);
 app.get('/api/agency/:agencyId/settings', getAgencySettings);
 app.put('/api/agency/:agencyId/settings', updateAgencySettings);
-
+app.post('/api/agency/:agencyId/domain/verify', verifyAgencyDomain);
 // Agency billing (pays platform)
 app.post('/api/agency/checkout', createAgencyCheckout);
 app.post('/api/agency/portal', createAgencyPortal);

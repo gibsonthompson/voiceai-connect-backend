@@ -1,6 +1,7 @@
 // ============================================================================
 // AGENCY SETTINGS
 // ============================================================================
+const dns = require('dns').promises;
 const { supabase, getAgencyBySlug, getAgencyByDomain, getAgencyById } = require('../lib/supabase');
 
 // ============================================================================
@@ -18,7 +19,7 @@ async function getAgencyByHost(req, res) {
     
     let agency = null;
     
-    // Check if it's a subdomain of voiceaiconnect.com
+    // Check if it's a subdomain of myvoiceaiconnect.com
     const subdomainMatch = host.match(/^([^.]+)\.myvoiceaiconnect\.com$/);
     if (subdomainMatch) {
       const slug = subdomainMatch[1];
@@ -36,7 +37,7 @@ async function getAgencyByHost(req, res) {
     
     console.log('✅ Agency found:', agency.name);
     
-    // Return public agency info (for branding)
+    // Return public agency info (for branding + marketing website)
     res.json({
       success: true,
       agency: {
@@ -50,14 +51,23 @@ async function getAgencyByHost(req, res) {
         accent_color: agency.accent_color,
         support_email: agency.support_email,
         support_phone: agency.support_phone,
-        // Pricing (for client signup)
+        
+        // Marketing website content
+        company_tagline: agency.company_tagline,
+        website_headline: agency.website_headline,
+        website_subheadline: agency.website_subheadline,
+        marketing_config: agency.marketing_config,
+        
+        // Pricing (for client signup + marketing website)
         price_starter: agency.price_starter,
         price_pro: agency.price_pro,
         price_growth: agency.price_growth,
+        
         // Limits
         limit_starter: agency.limit_starter,
         limit_pro: agency.limit_pro,
         limit_growth: agency.limit_growth,
+        
         // Stripe (needed for checkout)
         stripe_account_id: agency.stripe_account_id,
         stripe_charges_enabled: agency.stripe_charges_enabled
@@ -130,6 +140,12 @@ async function getAgencySettings(req, res) {
         secondary_color: agency.secondary_color,
         accent_color: agency.accent_color,
         
+        // Marketing website content
+        company_tagline: agency.company_tagline,
+        website_headline: agency.website_headline,
+        website_subheadline: agency.website_subheadline,
+        marketing_config: agency.marketing_config,
+        
         // Domain
         marketing_domain: agency.marketing_domain,
         domain_verified: agency.domain_verified,
@@ -179,10 +195,15 @@ async function updateAgencySettings(req, res) {
       'name', 'phone',
       'logo_url', 'favicon_url',
       'primary_color', 'secondary_color', 'accent_color',
-      'marketing_domain',
+      'marketing_domain', 'domain_verified',
       'price_starter', 'price_pro', 'price_growth',
       'limit_starter', 'limit_pro', 'limit_growth',
-      'support_email', 'support_phone', 'timezone'
+      'support_email', 'support_phone', 'timezone',
+      // Marketing website content fields
+      'company_tagline',
+      'website_headline',
+      'website_subheadline',
+      'marketing_config'
     ];
     
     const sanitizedUpdates = {};
@@ -193,7 +214,7 @@ async function updateAgencySettings(req, res) {
     }
     
     // If marketing_domain changed, reset verification
-    if (updates.marketing_domain) {
+    if (updates.marketing_domain !== undefined) {
       const { data: current } = await supabase
         .from('agencies')
         .select('marketing_domain')
@@ -233,36 +254,110 @@ async function updateAgencySettings(req, res) {
 }
 
 // ============================================================================
-// VERIFY CUSTOM DOMAIN
+// VERIFY CUSTOM DOMAIN (DNS Check)
 // ============================================================================
 async function verifyAgencyDomain(req, res) {
   try {
-    const { agency_id, domain } = req.body;
+    const { agencyId } = req.params;
     
-    if (!agency_id || !domain) {
-      return res.status(400).json({ error: 'agency_id and domain required' });
+    // Get agency's custom domain
+    const { data: agency, error } = await supabase
+      .from('agencies')
+      .select('marketing_domain')
+      .eq('id', agencyId)
+      .single();
+    
+    if (error || !agency?.marketing_domain) {
+      return res.status(404).json({ 
+        verified: false, 
+        error: 'No custom domain configured' 
+      });
     }
     
-    // TODO: Implement DNS verification
-    // TODO: Add domain to Vercel via API
+    const domain = agency.marketing_domain;
+    const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
+    const expectedCname = `cname.${platformDomain}`;
     
-    // For now, just mark as verified (you'd implement real verification)
-    await supabase
-      .from('agencies')
-      .update({
-        marketing_domain: domain,
-        domain_verified: true
-      })
-      .eq('id', agency_id);
+    console.log(`🔍 Verifying domain: ${domain}, expecting CNAME to: ${expectedCname}`);
     
-    res.json({
-      success: true,
-      message: 'Domain verified successfully'
-    });
-    
+    try {
+      // Look up CNAME records
+      const records = await dns.resolveCname(domain);
+      console.log(`📋 CNAME records found:`, records);
+      
+      // Check if any CNAME points to our expected value
+      const verified = records.some(record => 
+        record.toLowerCase() === expectedCname.toLowerCase() ||
+        record.toLowerCase().endsWith(`.${platformDomain.toLowerCase()}`) ||
+        record.toLowerCase().includes('vercel')
+      );
+      
+      if (verified) {
+        // Update database to mark as verified
+        await supabase
+          .from('agencies')
+          .update({ domain_verified: true, updated_at: new Date().toISOString() })
+          .eq('id', agencyId);
+        
+        console.log(`✅ Domain verified: ${domain}`);
+        
+        return res.json({ 
+          verified: true, 
+          message: 'Domain verified successfully',
+          cname_found: records[0]
+        });
+      } else {
+        return res.json({ 
+          verified: false, 
+          message: `CNAME found but points to "${records[0]}", expected "${expectedCname}"`,
+          cname_found: records[0],
+          expected: expectedCname
+        });
+      }
+    } catch (dnsError) {
+      // CNAME not found or DNS error
+      console.log(`⚠️ DNS lookup error for ${domain}:`, dnsError.code);
+      
+      // Try A record as fallback (some setups use A records)
+      try {
+        const aRecords = await dns.resolve4(domain);
+        console.log(`📋 A records found:`, aRecords);
+        
+        // Vercel IP ranges (approximate)
+        const vercelIps = ['76.76.21.21', '76.76.21.22', '76.76.21.93'];
+        const hasVercelIp = aRecords.some(ip => vercelIps.includes(ip) || ip.startsWith('76.76.'));
+        
+        if (hasVercelIp) {
+          await supabase
+            .from('agencies')
+            .update({ domain_verified: true, updated_at: new Date().toISOString() })
+            .eq('id', agencyId);
+          
+          console.log(`✅ Domain verified via A record: ${domain}`);
+          
+          return res.json({
+            verified: true,
+            message: 'Domain verified via A record',
+            a_record: aRecords[0]
+          });
+        }
+      } catch (aError) {
+        // No A records either
+      }
+      
+      return res.json({ 
+        verified: false, 
+        message: 'DNS records not found. Changes can take up to 48 hours to propagate.',
+        expected_cname: expectedCname,
+        dns_error: dnsError.code
+      });
+    }
   } catch (error) {
     console.error('❌ Domain verification error:', error);
-    res.status(500).json({ error: 'Domain verification failed' });
+    return res.status(500).json({ 
+      verified: false, 
+      error: 'Failed to verify domain' 
+    });
   }
 }
 
