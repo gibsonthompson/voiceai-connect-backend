@@ -4,11 +4,33 @@
 // ============================================================================
 const express = require('express');
 const router = express.Router();
-const { supabase } = require('../lib/supabase');
+
+let supabase;
+try {
+  const supabaseModule = require('../lib/supabase');
+  supabase = supabaseModule.supabase;
+  console.log('✅ Domain routes: Supabase loaded');
+} catch (err) {
+  console.error('❌ Domain routes: Failed to load supabase:', err.message);
+}
+
+// Log when this file is loaded
+console.log('📁 Domain routes file loaded');
 
 // ============================================================================
 // EXPLICIT OPTIONS HANDLERS (for CORS preflight)
 // ============================================================================
+
+// Simple test endpoint to verify routes are loaded
+router.get('/test', (req, res) => {
+  res.json({ 
+    ok: true, 
+    message: 'Domain routes are loaded and working',
+    timestamp: new Date().toISOString(),
+    supabaseLoaded: !!supabase
+  });
+});
+
 router.options('/:agencyId/domain', (req, res) => {
   res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');

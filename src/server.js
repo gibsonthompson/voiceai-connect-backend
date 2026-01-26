@@ -112,7 +112,19 @@ const { handleAgencySignup, handleAgencyOnboarding } = require('./routes/agency-
 const { getAgencyByHost, getAgencySettings, updateAgencySettings, verifyAgencyDomain } = require('./routes/agency-settings');
 
 // Domain Management (Automated Vercel Provisioning)
-const domainRoutes = require('./routes/domains');
+let domainRoutes;
+try {
+  domainRoutes = require('./routes/domains');
+  console.log('✅ Domain routes module loaded');
+} catch (err) {
+  console.error('❌ Failed to require domain routes:', err.message);
+  // Create a dummy router that returns 500
+  const express = require('express');
+  domainRoutes = express.Router();
+  domainRoutes.all('*', (req, res) => {
+    res.status(500).json({ error: 'Domain routes failed to load', details: err.message });
+  });
+}
 
 // Client Provisioning (adapted from CallBird)
 const { handleClientSignup, provisionClient } = require('./routes/client-signup');
@@ -203,11 +215,28 @@ app.get('/api/agency/connect/status/:agencyId', async (req, res) => {
 // DOMAIN MANAGEMENT ROUTES (Automated Vercel Provisioning)
 // ============================================================================
 
-// Domain routes for agencies: POST/DELETE /:agencyId/domain, GET /:agencyId/domain/status
-app.use('/api/agency', domainRoutes);
+let domainRoutesLoaded = false;
+try {
+  // Domain routes for agencies: POST/DELETE /:agencyId/domain, GET /:agencyId/domain/status
+  app.use('/api/agency', domainRoutes);
+  
+  // Public DNS config endpoint: GET /api/domain/dns-config
+  app.use('/api/domain', domainRoutes);
+  
+  domainRoutesLoaded = true;
+  console.log('✅ Domain routes loaded successfully');
+} catch (err) {
+  console.error('❌ Failed to load domain routes:', err.message);
+}
 
-// Public DNS config endpoint: GET /api/domain/dns-config
-app.use('/api/domain', domainRoutes);
+// Test endpoint to verify domain routes are working
+app.get('/api/domain-test', (req, res) => {
+  res.json({ 
+    domainRoutesLoaded,
+    timestamp: new Date().toISOString(),
+    message: domainRoutesLoaded ? 'Domain routes are loaded' : 'Domain routes failed to load'
+  });
+});
 
 // ============================================================================
 // LEADS & OUTREACH ROUTES (Agency CRM)
