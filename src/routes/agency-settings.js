@@ -58,6 +58,10 @@ async function getAgencyByHost(req, res) {
         website_subheadline: agency.website_subheadline,
         marketing_config: agency.marketing_config,
         
+        // Theme settings
+        website_theme: agency.website_theme,
+        logo_background_color: agency.logo_background_color,
+        
         // Pricing (for client signup + marketing website)
         price_starter: agency.price_starter,
         price_pro: agency.price_pro,
@@ -146,6 +150,10 @@ async function getAgencySettings(req, res) {
         website_subheadline: agency.website_subheadline,
         marketing_config: agency.marketing_config,
         
+        // Theme settings
+        website_theme: agency.website_theme,
+        logo_background_color: agency.logo_background_color,
+        
         // Domain
         marketing_domain: agency.marketing_domain,
         domain_verified: agency.domain_verified,
@@ -203,7 +211,10 @@ async function updateAgencySettings(req, res) {
       'company_tagline',
       'website_headline',
       'website_subheadline',
-      'marketing_config'
+      'marketing_config',
+      // Theme settings
+      'website_theme',
+      'logo_background_color'
     ];
     
     const sanitizedUpdates = {};
