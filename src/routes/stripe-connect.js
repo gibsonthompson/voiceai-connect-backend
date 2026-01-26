@@ -174,9 +174,6 @@ async function disconnectConnectAccount(req, res) {
 
     console.log('🔌 Disconnecting Stripe Connect for:', agency.name);
 
-    // Note: We don't delete the Stripe account - just remove the association
-    // The agency can reconnect later or the account stays in Stripe
-
     // Clear the Connect account from database
     const { error: updateError } = await supabase
       .from('agencies')
@@ -209,26 +206,36 @@ async function disconnectConnectAccount(req, res) {
 
 // ============================================================================
 // CREATE CLIENT CHECKOUT (Client subscribes via agency's Connect account)
+// Updated: Gets agency from client record, no agency_id required
 // ============================================================================
 async function createClientCheckout(req, res) {
   try {
-    const { client_id, plan, agency_id } = req.body;
+    const { client_id, plan } = req.body;
 
-    if (!client_id || !plan || !agency_id) {
+    if (!client_id || !plan) {
       return res.status(400).json({ 
         error: 'Missing required fields',
-        required: ['client_id', 'plan', 'agency_id']
+        required: ['client_id', 'plan']
       });
     }
 
-    // Get agency with Connect account
-    const { data: agency, error: agencyError } = await supabase
-      .from('agencies')
-      .select('*')
-      .eq('id', agency_id)
+    // Get client WITH agency (agency comes from client record)
+    const { data: client, error: clientError } = await supabase
+      .from('clients')
+      .select(`
+        *,
+        agencies (*)
+      `)
+      .eq('id', client_id)
       .single();
 
-    if (agencyError || !agency) {
+    if (clientError || !client) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+
+    const agency = client.agencies;
+
+    if (!agency) {
       return res.status(404).json({ error: 'Agency not found' });
     }
 
@@ -238,25 +245,19 @@ async function createClientCheckout(req, res) {
       });
     }
 
-    // Get client
-    const { data: client, error: clientError } = await supabase
-      .from('clients')
-      .select('*')
-      .eq('id', client_id)
-      .eq('agency_id', agency_id)
-      .single();
-
-    if (clientError || !client) {
-      return res.status(404).json({ error: 'Client not found' });
-    }
-
     console.log('🛒 Creating client checkout for:', client.email, 'via agency:', agency.name);
 
-    // Get price from agency's settings
+    // Get price from agency's settings (prices stored in cents)
     const priceAmounts = {
       starter: agency.price_starter || 4900,
       pro: agency.price_pro || 9900,
       growth: agency.price_growth || 14900
+    };
+
+    const callLimits = {
+      starter: agency.limit_starter || 50,
+      pro: agency.limit_pro || 150,
+      growth: agency.limit_growth || 500
     };
 
     const priceAmount = priceAmounts[plan];
@@ -264,7 +265,7 @@ async function createClientCheckout(req, res) {
       return res.status(400).json({ error: 'Invalid plan' });
     }
 
-    // Create customer on connected account
+    // Create customer on connected account (if not exists)
     let connectedCustomerId = client.stripe_connected_customer_id;
 
     if (!connectedCustomerId) {
@@ -308,9 +309,10 @@ async function createClientCheckout(req, res) {
     // Build success/cancel URLs
     const agencyUrl = agency.marketing_domain && agency.domain_verified
       ? `https://${agency.marketing_domain}`
-      : `https://${agency.slug}.voiceaiconnect.com`;
+      : `https://${agency.slug}.myvoiceaiconnect.com`;
 
     // Create checkout session on connected account
+    // NO trial period - this is for post-trial conversion
     const session = await stripe.checkout.sessions.create({
       customer: connectedCustomerId,
       mode: 'subscription',
@@ -319,21 +321,21 @@ async function createClientCheckout(req, res) {
         price: price.id,
         quantity: 1
       }],
-      subscription_data: {
-        trial_period_days: 7,
-        metadata: {
-          client_id: client_id,
-          agency_id: agency_id,
-          plan: plan
-        }
-      },
-      success_url: `${agencyUrl}/signup/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${agencyUrl}/signup?canceled=true`,
+      success_url: `${agencyUrl}/client/dashboard?upgrade=success`,
+      cancel_url: `${agencyUrl}/client/upgrade?canceled=true`,
       metadata: {
         client_id: client_id,
-        agency_id: agency_id,
+        agency_id: agency.id,
         plan: plan,
+        call_limit: callLimits[plan].toString(),
         type: 'client_subscription'
+      },
+      subscription_data: {
+        metadata: {
+          client_id: client_id,
+          agency_id: agency.id,
+          plan: plan
+        }
       }
     }, {
       stripeAccount: agency.stripe_account_id
@@ -381,7 +383,7 @@ async function createClientPortal(req, res) {
 
     const agencyUrl = agency.marketing_domain && agency.domain_verified
       ? `https://${agency.marketing_domain}`
-      : `https://${agency.slug}.voiceaiconnect.com`;
+      : `https://${agency.slug}.myvoiceaiconnect.com`;
 
     const session = await stripe.billingPortal.sessions.create({
       customer: client.stripe_connected_customer_id,
@@ -399,6 +401,84 @@ async function createClientPortal(req, res) {
     console.error('❌ Client portal error:', error);
     res.status(500).json({ error: 'Failed to create portal session' });
   }
+}
+
+// ============================================================================
+// EXPIRE TRIALS - Cron job to disable expired trials
+// ============================================================================
+async function expireTrials() {
+  console.log('🕐 Checking for expired trials...');
+
+  const now = new Date().toISOString();
+
+  // Find all clients with expired trials
+  const { data: expiredClients, error } = await supabase
+    .from('clients')
+    .select('*, agencies(*)')
+    .eq('subscription_status', 'trial')
+    .lt('trial_ends_at', now);
+
+  if (error) {
+    console.error('Error fetching expired trials:', error);
+    return { success: false, error: error.message };
+  }
+
+  console.log(`Found ${expiredClients?.length || 0} expired trials`);
+
+  const results = [];
+
+  for (const client of expiredClients || []) {
+    try {
+      // Disable VAPI assistant
+      if (client.vapi_assistant_id) {
+        try {
+          await disableAssistant(client.vapi_assistant_id);
+          console.log('🔇 VAPI assistant disabled:', client.vapi_assistant_id);
+        } catch (vapiError) {
+          console.error('Failed to disable VAPI assistant:', vapiError);
+        }
+      }
+
+      // Update status
+      await supabase
+        .from('clients')
+        .update({
+          subscription_status: 'trial_expired',
+          status: 'suspended'
+        })
+        .eq('id', client.id);
+
+      // Send trial expired email
+      const agency = client.agencies;
+      const agencyName = agency?.name || 'AI Receptionist';
+      const agencyUrl = agency?.marketing_domain && agency?.domain_verified
+        ? `https://${agency.marketing_domain}`
+        : `https://${agency?.slug}.myvoiceaiconnect.com`;
+
+      await sendEmail({
+        to: client.email,
+        subject: `⚠️ ${agencyName} - Your Trial Has Ended`,
+        html: `
+          <h2>Your Trial Has Ended</h2>
+          <p>Hi ${client.owner_name || client.business_name},</p>
+          <p>Your 7-day free trial of ${agencyName} has ended.</p>
+          <p>Your AI receptionist is no longer answering calls at ${client.vapi_phone_number}.</p>
+          <p><strong>Don't lose your customers!</strong> Reactivate now to continue:</p>
+          <p><a href="${agencyUrl}/client/upgrade" style="background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; display: inline-block;">Reactivate Now</a></p>
+          <p>Questions? Contact ${agency?.support_email || 'support'}.</p>
+        `
+      });
+
+      console.log('✅ Trial expired for:', client.business_name);
+      results.push({ id: client.id, business_name: client.business_name, success: true });
+
+    } catch (err) {
+      console.error('Error expiring trial for', client.id, err);
+      results.push({ id: client.id, business_name: client.business_name, success: false, error: err.message });
+    }
+  }
+
+  return { success: true, processed: results.length, results };
 }
 
 // ============================================================================
@@ -478,7 +558,6 @@ async function handleAccountUpdated(account) {
 
   if (account.charges_enabled && !agency.stripe_charges_enabled) {
     console.log('✅ Agency can now accept payments:', agency.name);
-    // Send email notification
     await sendEmail({
       to: agency.email,
       subject: '✅ Stripe Connect Setup Complete!',
@@ -497,33 +576,81 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
 
   const clientId = session.metadata?.client_id;
   const plan = session.metadata?.plan || 'starter';
+  const callLimit = parseInt(session.metadata?.call_limit) || 50;
 
-  if (!clientId) return;
+  if (!clientId) {
+    console.error('No client_id in checkout metadata');
+    return;
+  }
 
-  // Get plan limits from agency
-  const client = await getClientById(clientId);
-  if (!client) return;
+  // Get client
+  const { data: client, error } = await supabase
+    .from('clients')
+    .select('*, agencies(*)')
+    .eq('id', clientId)
+    .single();
 
-  const agency = client.agencies;
-  const callLimits = {
-    starter: agency?.limit_starter || 50,
-    pro: agency?.limit_pro || 150,
-    growth: agency?.limit_growth || 500
-  };
+  if (error || !client) {
+    console.error('Client not found:', clientId);
+    return;
+  }
 
-  await supabase
+  // Check if this is an upgrade (from expired trial)
+  const isUpgrade = client.subscription_status === 'trial_expired' || 
+                    client.subscription_status === 'canceled' ||
+                    client.subscription_status === 'past_due';
+
+  // Update client subscription - ACTIVE (not trial)
+  const { error: updateError } = await supabase
     .from('clients')
     .update({
-      subscription_status: 'trial',
+      subscription_status: 'active',
       plan_type: plan,
-      monthly_call_limit: callLimits[plan],
+      monthly_call_limit: callLimit,
       stripe_connected_subscription_id: session.subscription,
-      trial_ends_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      status: 'active'
+      trial_ends_at: null, // Clear trial date
+      status: 'active',
+      calls_this_month: 0
     })
     .eq('id', clientId);
 
-  console.log('✅ Client activated:', clientId);
+  if (updateError) {
+    console.error('Failed to update client:', updateError);
+    return;
+  }
+
+  console.log(`✅ Client ${isUpgrade ? 'upgraded' : 'activated'}:`, client.business_name);
+
+  // Re-enable VAPI assistant if it was disabled
+  if (client.vapi_assistant_id) {
+    try {
+      await enableAssistant(client.vapi_assistant_id);
+      console.log('✅ VAPI assistant re-enabled:', client.vapi_assistant_id);
+    } catch (vapiError) {
+      console.error('Failed to re-enable VAPI assistant:', vapiError);
+    }
+  }
+
+  // Send confirmation email
+  const agency = client.agencies;
+  const agencyName = agency?.name || 'AI Receptionist';
+
+  await sendEmail({
+    to: client.email,
+    subject: `✅ ${agencyName} - Subscription Activated!`,
+    html: `
+      <h2>Welcome${isUpgrade ? ' Back' : ''}!</h2>
+      <p>Hi ${client.owner_name || client.business_name},</p>
+      <p>Your ${plan.charAt(0).toUpperCase() + plan.slice(1)} plan is now active!</p>
+      <p>Your AI receptionist is answering calls 24/7 at: <strong>${client.vapi_phone_number}</strong></p>
+      <p>
+        <strong>Plan:</strong> ${plan.charAt(0).toUpperCase() + plan.slice(1)}<br>
+        <strong>Monthly Calls:</strong> ${callLimit}
+      </p>
+      <p>Log in to your dashboard to view calls and manage settings.</p>
+      <p>Thanks for choosing ${agencyName}!</p>
+    `
+  });
 }
 
 async function handleClientSubscriptionUpdated(subscription, stripeAccountId) {
@@ -540,13 +667,11 @@ async function handleClientSubscriptionUpdated(subscription, stripeAccountId) {
 
   if (status === 'active') {
     clientStatus = 'active';
-    // Re-enable VAPI assistant
     if (client.vapi_assistant_id) {
       await enableAssistant(client.vapi_assistant_id);
     }
   } else if (status === 'canceled' || status === 'unpaid') {
     clientStatus = 'suspended';
-    // Disable VAPI assistant
     if (client.vapi_assistant_id) {
       await disableAssistant(client.vapi_assistant_id);
     }
@@ -573,9 +698,13 @@ async function handleClientSubscriptionDeleted(subscription, stripeAccountId) {
   );
   if (!client) return;
 
-  // Disable VAPI assistant
   if (client.vapi_assistant_id) {
-    await disableAssistant(client.vapi_assistant_id);
+    try {
+      await disableAssistant(client.vapi_assistant_id);
+      console.log('🔇 VAPI assistant disabled:', client.vapi_assistant_id);
+    } catch (vapiError) {
+      console.error('Failed to disable VAPI assistant:', vapiError);
+    }
   }
 
   await supabase
@@ -586,17 +715,17 @@ async function handleClientSubscriptionDeleted(subscription, stripeAccountId) {
     })
     .eq('id', client.id);
 
-  // Send cancellation email (branded with agency)
   const agency = client.agencies;
-  const agencyName = agency?.name || 'Your AI Receptionist';
+  const agencyName = agency?.name || 'AI Receptionist';
 
   await sendEmail({
     to: client.email,
-    subject: `${agencyName} Subscription Cancelled`,
+    subject: `${agencyName} - Subscription Cancelled`,
     html: `
       <p>Hi ${client.owner_name || client.business_name},</p>
-      <p>Your AI receptionist subscription has been cancelled. Your phone number will stop answering calls.</p>
-      <p>To reactivate, contact ${agency?.support_email || 'support'}.</p>
+      <p>Your AI receptionist subscription has been cancelled.</p>
+      <p>Your phone number (${client.vapi_phone_number}) will stop answering calls.</p>
+      <p>To reactivate, visit your dashboard or contact ${agency?.support_email || 'support'}.</p>
     `
   });
 }
@@ -615,11 +744,10 @@ async function handleClientPaymentSucceeded(invoice, stripeAccountId) {
     .update({
       subscription_status: 'active',
       status: 'active',
-      calls_this_month: 0 // Reset for new billing period
+      calls_this_month: 0
     })
     .eq('id', client.id);
 
-  // Re-enable assistant if it was disabled
   if (client.vapi_assistant_id) {
     await enableAssistant(client.vapi_assistant_id);
   }
@@ -641,9 +769,8 @@ async function handleClientPaymentFailed(invoice, stripeAccountId) {
     })
     .eq('id', client.id);
 
-  // Send payment failed email
   const agency = client.agencies;
-  const agencyName = agency?.name || 'Your AI Receptionist';
+  const agencyName = agency?.name || 'AI Receptionist';
 
   await sendEmail({
     to: client.email,
@@ -666,5 +793,6 @@ module.exports = {
   disconnectConnectAccount,
   createClientCheckout,
   createClientPortal,
-  handleConnectStripeWebhook
+  handleConnectStripeWebhook,
+  expireTrials
 };

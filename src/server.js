@@ -154,7 +154,8 @@ const {
   disconnectConnectAccount,
   createClientCheckout,
   createClientPortal,
-  handleConnectStripeWebhook
+  handleConnectStripeWebhook,
+  expireTrials
 } = require('./routes/stripe-connect');
 
 // Auth
@@ -263,6 +264,46 @@ app.use('/api/client', clientRoutes);
 app.post('/api/client/checkout', createClientCheckout);
 app.post('/api/client/portal', createClientPortal);
 
+// Client details with agency info (for upgrade page pricing)
+app.get('/api/client/:clientId/details', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+
+    const { data: client, error } = await supabase
+      .from('clients')
+      .select(`
+        *,
+        agencies (
+          id,
+          name,
+          slug,
+          primary_color,
+          support_email,
+          price_starter,
+          price_pro,
+          price_growth,
+          limit_starter,
+          limit_pro,
+          limit_growth,
+          stripe_account_id,
+          stripe_charges_enabled
+        )
+      `)
+      .eq('id', clientId)
+      .single();
+
+    if (error || !client) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+
+    res.json(client);
+
+  } catch (error) {
+    console.error('Get client details error:', error);
+    res.status(500).json({ error: 'Failed to get client details' });
+  }
+});
+
 // ============================================================================
 // VOICES ENDPOINT (Public)
 // ============================================================================
@@ -300,6 +341,28 @@ app.post('/api/auth/client/login', clientLogin);
 app.post('/api/auth/verify', verifyToken);
 app.post('/api/auth/set-password', setPassword);
 app.post('/api/auth/reset-password', requestPasswordReset);
+
+// ============================================================================
+// CRON ROUTES (Trial Expiration)
+// ============================================================================
+
+// Manual trigger for trial expiration (can be called by cron service)
+// POST /api/cron/expire-trials
+app.post('/api/cron/expire-trials', async (req, res) => {
+  // Verify cron secret (optional security)
+  const cronSecret = req.headers['x-cron-secret'];
+  if (process.env.CRON_SECRET && cronSecret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const result = await expireTrials();
+    res.json({ success: true, message: 'Trial expiration check completed', ...result });
+  } catch (error) {
+    console.error('Cron error:', error);
+    res.status(500).json({ error: 'Failed to run trial expiration' });
+  }
+});
 
 // ============================================================================
 // WEBHOOK ROUTES
