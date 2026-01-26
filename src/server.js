@@ -176,11 +176,11 @@ app.get('/api/agency/connect/status/:agencyId', async (req, res) => {
 // DOMAIN MANAGEMENT ROUTES (Automated Vercel Provisioning)
 // ============================================================================
 
-// Domain routes: POST/DELETE /api/agency/:id/domain, GET /api/agency/:id/domain/status
+// Domain routes for agencies: POST/DELETE /:agencyId/domain, GET /:agencyId/domain/status
 app.use('/api/agency', domainRoutes);
 
 // Public DNS config endpoint: GET /api/domain/dns-config
-app.use('/api', domainRoutes);
+app.use('/api/domain', domainRoutes);
 
 // ============================================================================
 // LEADS & OUTREACH ROUTES (Agency CRM)
