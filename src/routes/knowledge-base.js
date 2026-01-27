@@ -1,122 +1,156 @@
 // ============================================================================
 // KNOWLEDGE BASE ROUTES - VoiceAI Connect Multi-Tenant Backend
 // Location: src/routes/knowledge-base.js
+// 
+// FIXED:
+// 1. Proper merge logic - only overwrites fields if new value is non-empty
+// 2. Deletes old files before uploading new one (no duplicates)
+// 3. Properly attaches file to VAPI assistant
 // ============================================================================
 
 const fetch = require('node-fetch');
 const FormData = require('form-data');
-const { supabase, getClientById } = require('../lib/supabase');
+const { supabase } = require('../lib/supabase');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
-
-// ============================================================================
-// CREATE QUERY TOOL (for Knowledge Base access)
-// ============================================================================
-async function createQueryTool(fileId, businessName) {
-  try {
-    console.log('🔧 Creating Query Tool...');
-    
-    const response = await fetch('https://api.vapi.ai/tool', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${VAPI_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        type: 'query',
-        async: false,
-        function: {
-          name: 'search_knowledge_base',
-          description: `Search ${businessName}'s knowledge base for information about services, pricing, hours, and policies.`,
-          parameters: {
-            type: 'object',
-            properties: {
-              query: {
-                type: 'string',
-                description: 'The search query'
-              }
-            },
-            required: ['query']
-          }
-        },
-        knowledgeBases: [{
-          name: `${businessName} Knowledge Base`,
-          model: 'gemini-1.5-flash',
-          provider: 'google',
-          description: `Information about ${businessName}`,
-          fileIds: [fileId]
-        }]
-      })
-    });
-
-    if (!response.ok) {
-      console.error('⚠️ Query tool creation failed');
-      return null;
-    }
-
-    const data = await response.json();
-    console.log(`✅ Query Tool created: ${data.id}`);
-    return data.id;
-  } catch (error) {
-    console.error('❌ Query tool error:', error);
-    return null;
-  }
-}
 
 // ============================================================================
 // FORMAT KNOWLEDGE BASE CONTENT
 // ============================================================================
 function formatKnowledgeBase(data) {
   const sections = [
-    `# ${data.businessName} - AI Assistant Knowledge Base`,
-    `\n## Business Information`,
+    `# ${data.businessName} - Business Information`,
+    ``,
+    `## Company Details`,
     `- Business Name: ${data.businessName}`,
-    `- Industry: ${data.industry || 'N/A'}`,
-    `- Location: ${data.city}, ${data.state}`,
-    `- Phone Number: ${data.phoneNumber || 'N/A'}`,
   ];
+
+  if (data.industry) {
+    sections.push(`- Industry: ${data.industry}`);
+  }
+  
+  if (data.city || data.state) {
+    sections.push(`- Location: ${[data.city, data.state].filter(Boolean).join(', ')}`);
+  }
+  
+  if (data.phoneNumber) {
+    sections.push(`- Phone: ${data.phoneNumber}`);
+  }
 
   if (data.websiteUrl) {
     sections.push(`- Website: ${data.websiteUrl}`);
   }
 
-  if (data.businessHours) {
-    sections.push(`\n## Business Hours`);
+  if (data.businessHours && data.businessHours.trim()) {
+    sections.push(``);
+    sections.push(`## Business Hours`);
     sections.push(data.businessHours);
   }
 
-  if (data.services) {
-    sections.push(`\n## Services & Pricing`);
+  if (data.services && data.services.trim()) {
+    sections.push(``);
+    sections.push(`## Services & Pricing`);
     sections.push(data.services);
   }
 
-  if (data.faqs) {
-    sections.push(`\n## Frequently Asked Questions`);
+  if (data.faqs && data.faqs.trim()) {
+    sections.push(``);
+    sections.push(`## Frequently Asked Questions`);
     sections.push(data.faqs);
   }
 
-  if (data.additionalInfo) {
-    sections.push(`\n## Additional Information`);
+  if (data.additionalInfo && data.additionalInfo.trim()) {
+    sections.push(``);
+    sections.push(`## Additional Information`);
     sections.push(data.additionalInfo);
   }
 
-  if (data.websiteContent) {
-    sections.push(`\n## Website Content`);
-    sections.push(data.websiteContent.substring(0, 10000));
+  if (data.websiteContent && data.websiteContent.trim()) {
+    sections.push(``);
+    sections.push(`## Website Content`);
+    sections.push(data.websiteContent.substring(0, 8000));
   }
-
-  sections.push(`\n## Instructions for AI Assistant`);
-  sections.push(`You are an AI phone assistant for ${data.businessName}. Use the information above to answer customer questions accurately. Always be professional, friendly, and helpful. If you don't know something, politely say so and offer to take a message.`);
 
   return sections.join('\n');
 }
 
 // ============================================================================
-// UPDATE KNOWLEDGE BASE
+// DELETE OLD FILES FOR THIS CLIENT
+// ============================================================================
+async function deleteOldFiles(businessName, currentFileId = null) {
+  try {
+    const listResponse = await fetch('https://api.vapi.ai/file', {
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
+    });
+    
+    if (!listResponse.ok) return;
+    
+    const files = await listResponse.json();
+    const sanitizedName = businessName.replace(/[^a-zA-Z0-9]/g, '_');
+    
+    // Find old files for this business (exclude current if provided)
+    const oldFiles = files.filter(f => 
+      f.name && 
+      f.name.includes(sanitizedName) && 
+      f.name.includes('_knowledge') &&
+      f.id !== currentFileId
+    );
+    
+    console.log(`🗑️ Found ${oldFiles.length} old files to delete`);
+    
+    for (const file of oldFiles) {
+      try {
+        await fetch(`https://api.vapi.ai/file/${file.id}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
+        });
+        console.log(`   Deleted: ${file.name} (${file.id})`);
+      } catch (e) {
+        console.log(`   ⚠️ Could not delete ${file.id}`);
+      }
+    }
+  } catch (error) {
+    console.log('⚠️ Could not cleanup old files:', error.message);
+  }
+}
+
+// ============================================================================
+// SMART MERGE - Only update fields that have new non-empty values
+// ============================================================================
+function smartMerge(existingData, newData) {
+  const result = { ...existingData };
+  
+  // For each field, only overwrite if new value is non-empty
+  if (newData.businessHours && newData.businessHours.trim()) {
+    result.businessHours = newData.businessHours;
+  }
+  
+  if (newData.services && newData.services.trim()) {
+    result.services = newData.services;
+  }
+  
+  if (newData.faqs && newData.faqs.trim()) {
+    result.faqs = newData.faqs;
+  }
+  
+  if (newData.additionalInfo && newData.additionalInfo.trim()) {
+    result.additionalInfo = newData.additionalInfo;
+  }
+  
+  if (newData.websiteContent && newData.websiteContent.trim()) {
+    result.websiteContent = newData.websiteContent;
+  }
+  
+  return result;
+}
+
+// ============================================================================
+// UPDATE KNOWLEDGE BASE - Main handler
 // ============================================================================
 async function updateKnowledgeBase(req, res) {
   try {
-    console.log('📚 Knowledge base update started');
+    console.log('');
+    console.log('📚 ====== KNOWLEDGE BASE UPDATE ======');
     
     const {
       clientId,
@@ -131,69 +165,102 @@ async function updateKnowledgeBase(req, res) {
       return res.status(400).json({ success: false, error: 'Client ID required' });
     }
 
-    // Get client with agency data
-    const client = await getClientById(clientId);
+    // ========================================
+    // 1. GET CLIENT DATA
+    // ========================================
+    const { data: client, error: clientError } = await supabase
+      .from('clients')
+      .select(`
+        *,
+        agencies (id, name)
+      `)
+      .eq('id', clientId)
+      .single();
 
-    if (!client) {
+    if (clientError || !client) {
+      console.error('❌ Client not found:', clientError);
       return res.status(404).json({ success: false, error: 'Client not found' });
     }
 
-    console.log('✅ Client found:', client.business_name);
-    if (client.agencies) {
-      console.log('🏢 Agency:', client.agencies.name);
-    }
+    console.log('✅ Client:', client.business_name);
+    console.log('   Assistant ID:', client.vapi_assistant_id);
 
-    // Merge logic: Keep existing data if field is empty
+    // ========================================
+    // 2. SMART MERGE - Keep existing data, only update non-empty fields
+    // ========================================
     const existingData = client.knowledge_base_data || {};
-    
-    const finalData = {
-      businessHours: businessHours || existingData.businessHours || '',
-      services: services || existingData.services || '',
-      faqs: faqs || existingData.faqs || '',
-      additionalInfo: additionalInfo || existingData.additionalInfo || '',
-    };
+    console.log('📂 Existing data keys:', Object.keys(existingData).filter(k => existingData[k]));
 
-    // Website scraping (if URL changed)
+    const newData = {
+      businessHours: businessHours || '',
+      services: services || '',
+      faqs: faqs || '',
+      additionalInfo: additionalInfo || '',
+    };
+    console.log('📥 New data keys:', Object.keys(newData).filter(k => newData[k] && newData[k].trim()));
+
+    // Smart merge - only overwrites if new value is non-empty
+    const finalData = smartMerge(existingData, newData);
+    console.log('📦 Final data keys:', Object.keys(finalData).filter(k => finalData[k] && finalData[k].trim()));
+
+    // ========================================
+    // 3. WEBSITE SCRAPING (if URL changed)
+    // ========================================
     let websiteContent = existingData.websiteContent || '';
+    const newWebsiteUrl = websiteUrl || client.business_website;
     
     if (websiteUrl && websiteUrl.trim() && websiteUrl !== client.business_website) {
       try {
         console.log('🌐 Scraping website:', websiteUrl);
-        const scrapeResponse = await fetch(`https://r.jina.ai/${websiteUrl}`);
+        const scrapeResponse = await fetch(`https://r.jina.ai/${websiteUrl}`, {
+          headers: { 'Accept': 'text/plain' },
+          timeout: 10000
+        });
         if (scrapeResponse.ok) {
           websiteContent = await scrapeResponse.text();
+          finalData.websiteContent = websiteContent;
           console.log('✅ Website scraped, length:', websiteContent.length);
         }
       } catch (error) {
-        console.error('⚠️ Website scraping failed:', error.message);
+        console.log('⚠️ Website scraping failed:', error.message);
       }
     }
 
-    // Format knowledge base content
+    // ========================================
+    // 4. FORMAT KNOWLEDGE BASE CONTENT
+    // ========================================
     const content = formatKnowledgeBase({
       businessName: client.business_name,
       industry: client.industry,
       city: client.business_city,
       state: client.business_state,
       phoneNumber: client.vapi_phone_number,
-      websiteUrl: websiteUrl || client.business_website,
-      websiteContent: websiteContent,
-      businessHours: finalData.businessHours,
-      services: finalData.services,
-      faqs: finalData.faqs,
-      additionalInfo: finalData.additionalInfo,
+      websiteUrl: newWebsiteUrl,
+      websiteContent: finalData.websiteContent || '',
+      businessHours: finalData.businessHours || '',
+      services: finalData.services || '',
+      faqs: finalData.faqs || '',
+      additionalInfo: finalData.additionalInfo || '',
     });
 
-    console.log('📄 Knowledge base formatted, length:', content.length);
+    console.log('📄 Formatted KB length:', content.length, 'chars');
 
-    // Upload file to VAPI
+    // ========================================
+    // 5. DELETE OLD FILES (prevent duplicates)
+    // ========================================
+    await deleteOldFiles(client.business_name);
+
+    // ========================================
+    // 6. UPLOAD NEW FILE TO VAPI
+    // ========================================
     const form = new FormData();
+    const filename = `${client.business_name.replace(/[^a-zA-Z0-9]/g, '_')}_knowledge.txt`;
     form.append('file', Buffer.from(content, 'utf-8'), {
-      filename: `${client.business_name.replace(/\s+/g, '_')}_knowledge.txt`,
+      filename: filename,
       contentType: 'text/plain',
     });
 
-    console.log('📤 Uploading to VAPI...');
+    console.log('📤 Uploading file:', filename);
     const uploadResponse = await fetch('https://api.vapi.ai/file', {
       method: 'POST',
       headers: {
@@ -204,6 +271,8 @@ async function updateKnowledgeBase(req, res) {
     });
 
     if (!uploadResponse.ok) {
+      const errorText = await uploadResponse.text();
+      console.error('❌ VAPI upload failed:', errorText);
       throw new Error(`VAPI upload failed: ${uploadResponse.status}`);
     }
 
@@ -211,87 +280,104 @@ async function updateKnowledgeBase(req, res) {
     const fileId = uploadData.id;
     console.log('✅ File uploaded:', fileId);
 
-    // Create knowledge base
-    console.log('📚 Creating knowledge base...');
-    const kbResponse = await fetch('https://api.vapi.ai/knowledge-base', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${VAPI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        provider: 'canonical',
-        fileIds: [fileId],
-      }),
-    });
-
-    if (!kbResponse.ok) {
-      throw new Error('Failed to create knowledge base');
-    }
-
-    const kbData = await kbResponse.json();
-    const knowledgeBaseId = kbData.id;
-    console.log('✅ Knowledge base created:', knowledgeBaseId);
-
-    // Update assistant with new Query Tool
+    // ========================================
+    // 7. ATTACH FILE TO ASSISTANT
+    // ========================================
     if (client.vapi_assistant_id) {
-      console.log('🔧 Creating Query Tool...');
+      console.log('🔗 Attaching file to assistant...');
       
-      const queryToolId = await createQueryTool(fileId, client.business_name);
+      // Get current assistant
+      const getResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
+        headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
+      });
       
-      if (queryToolId) {
-        // Get current assistant config
-        const getResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
-          headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
+      if (getResponse.ok) {
+        const currentAssistant = await getResponse.json();
+        
+        // Build the update payload - attach file via model.knowledgeBase
+        const updatePayload = {
+          model: {
+            ...currentAssistant.model,
+            knowledgeBase: {
+              provider: 'canonical',
+              fileIds: [fileId]
+            }
+          }
+        };
+
+        console.log('   Updating assistant with knowledgeBase.fileIds:', [fileId]);
+        
+        const patchResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
+          method: 'PATCH',
+          headers: {
+            'Authorization': `Bearer ${VAPI_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(updatePayload),
         });
         
-        if (getResponse.ok) {
-          const currentAssistant = await getResponse.json();
+        if (patchResponse.ok) {
+          console.log('✅ File attached to assistant successfully');
+        } else {
+          const errorText = await patchResponse.text();
+          console.error('⚠️ Failed to attach file:', errorText);
           
-          // Update with new Query Tool
-          await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
+          // Try alternative: direct knowledgeBase on assistant root
+          console.log('🔄 Trying alternative method...');
+          const altResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
             method: 'PATCH',
             headers: {
               'Authorization': `Bearer ${VAPI_API_KEY}`,
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              model: {
-                ...currentAssistant.model,
-                toolIds: [queryToolId]
-              },
+              knowledgeBase: {
+                provider: 'canonical', 
+                fileIds: [fileId]
+              }
             }),
           });
           
-          console.log('✅ Assistant updated with Query Tool');
+          if (altResponse.ok) {
+            console.log('✅ File attached via alternative method');
+          } else {
+            const altError = await altResponse.text();
+            console.error('⚠️ Alternative method failed:', altError);
+          }
         }
+      } else {
+        console.error('⚠️ Could not fetch assistant');
       }
+    } else {
+      console.log('⚠️ No vapi_assistant_id - skipping file attachment');
     }
 
-    // Save to database
+    // ========================================
+    // 8. SAVE TO DATABASE
+    // ========================================
     const { error: updateError } = await supabase
       .from('clients')
       .update({
-        knowledge_base_id: knowledgeBaseId,
-        knowledge_base_data: {
-          ...finalData,
-          websiteContent: websiteContent,
-        },
+        knowledge_base_id: fileId,
+        knowledge_base_data: finalData,
         knowledge_base_updated_at: new Date().toISOString(),
-        business_website: websiteUrl || client.business_website,
+        business_website: newWebsiteUrl || client.business_website,
       })
       .eq('id', clientId);
 
     if (updateError) {
+      console.error('❌ Database update error:', updateError);
       throw new Error('Failed to save to database');
     }
 
-    console.log('✅ Knowledge base update complete');
+    console.log('✅ Database updated');
+    console.log('📚 ====== UPDATE COMPLETE ======');
+    console.log('');
 
     return res.json({
       success: true,
       message: 'Knowledge base updated successfully',
-      knowledgeBaseId,
+      fileId: fileId,
     });
 
   } catch (error) {
@@ -303,4 +389,4 @@ async function updateKnowledgeBase(req, res) {
   }
 }
 
-module.exports = { updateKnowledgeBase, createQueryTool, formatKnowledgeBase };
+module.exports = { updateKnowledgeBase, formatKnowledgeBase, smartMerge };
