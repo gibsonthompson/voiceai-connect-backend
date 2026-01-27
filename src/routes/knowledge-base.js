@@ -388,12 +388,19 @@ async function updateKnowledgeBase(req, res) {
       if (getResponse.ok) {
         const currentAssistant = await getResponse.json();
         console.log('   Current model:', currentAssistant.model?.model);
+        console.log('   Has messages:', !!currentAssistant.model?.messages?.length);
         
         // Just use our new KB tool (old one was already deleted)
         const newToolIds = [toolId];
         console.log('   Setting toolIds:', newToolIds);
         
-        // Update assistant with new toolIds
+        // IMPORTANT: Preserve the ENTIRE model object including messages/system prompt
+        const updatedModel = {
+          ...currentAssistant.model,  // Preserve everything (messages, temperature, etc.)
+          toolIds: newToolIds         // Add our new tool
+        };
+        
+        // Update assistant with new toolIds while preserving everything else
         const patchResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
           method: 'PATCH',
           headers: {
@@ -401,12 +408,7 @@ async function updateKnowledgeBase(req, res) {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model: {
-              provider: currentAssistant.model?.provider || 'openai',
-              model: currentAssistant.model?.model || 'gpt-4o-mini',
-              temperature: currentAssistant.model?.temperature || 0.7,
-              toolIds: newToolIds
-            }
+            model: updatedModel
           }),
         });
         
