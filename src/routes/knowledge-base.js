@@ -335,7 +335,33 @@ async function updateKnowledgeBase(req, res) {
     console.log('✅ File uploaded:', fileId);
 
     // ========================================
-    // 7. CREATE QUERY TOOL WITH KNOWLEDGE BASE
+    // 7. CREATE KNOWLEDGE BASE ENTITY (indexes the file)
+    // ========================================
+    console.log('📚 Creating Knowledge Base entity...');
+    
+    const kbResponse = await fetch('https://api.vapi.ai/knowledge-base', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${VAPI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        provider: 'canonical',
+        fileIds: [fileId],
+      }),
+    });
+
+    if (!kbResponse.ok) {
+      const errorText = await kbResponse.text();
+      console.error('⚠️ KB entity creation failed:', errorText);
+      // Continue anyway - Query Tool might still work
+    } else {
+      const kbData = await kbResponse.json();
+      console.log('✅ Knowledge Base entity created:', kbData.id);
+    }
+
+    // ========================================
+    // 8. CREATE QUERY TOOL WITH KNOWLEDGE BASE
     // ========================================
     console.log('🔧 Creating Query Tool...');
     
@@ -383,7 +409,7 @@ async function updateKnowledgeBase(req, res) {
     console.log('✅ Query Tool created:', toolId);
 
     // ========================================
-    // 8. ATTACH QUERY TOOL TO ASSISTANT
+    // 9. ATTACH QUERY TOOL TO ASSISTANT
     // ========================================
     if (client.vapi_assistant_id) {
       console.log('🔗 Attaching Query Tool to assistant...');
@@ -434,7 +460,7 @@ async function updateKnowledgeBase(req, res) {
     }
 
     // ========================================
-    // 9. SAVE TO DATABASE
+    // 10. SAVE TO DATABASE
     // ========================================
     const { error: updateError } = await supabase
       .from('clients')
