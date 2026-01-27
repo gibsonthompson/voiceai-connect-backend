@@ -2,12 +2,11 @@
 // KNOWLEDGE BASE ROUTES - VoiceAI Connect Multi-Tenant Backend
 // Location: src/routes/knowledge-base.js
 // 
-// FIXED: Properly creates VAPI Knowledge Base entity and attaches to assistant
-// 
+// FIXED: Uses Query Tool approach per VAPI 2025 documentation
 // Flow:
 // 1. Upload file → fileId
-// 2. Create Knowledge Base with fileId → knowledgeBaseId
-// 3. Attach knowledgeBaseId to assistant
+// 2. Create Query Tool with knowledgeBases[].fileIds → toolId
+// 3. Attach toolId to assistant via model.toolIds
 // ============================================================================
 
 const fetch = require('node-fetch');
@@ -67,7 +66,7 @@ function formatKnowledgeBase(data) {
     sections.push(data.additionalInfo);
   }
 
-  // Only include website content if it's NOT from callbirdai.com (our marketing site)
+  // Only include website content if it's NOT from our own sites
   if (data.websiteContent && data.websiteContent.trim() && !data.websiteContent.includes('CallBird AI')) {
     sections.push(``);
     sections.push(`## Website Content`);
@@ -116,38 +115,54 @@ async function deleteOldFiles(businessName) {
 }
 
 // ============================================================================
-// DELETE OLD KNOWLEDGE BASES FOR THIS CLIENT
+// DELETE OLD QUERY TOOLS FOR THIS CLIENT
 // ============================================================================
-async function deleteOldKnowledgeBases(businessName) {
+async function deleteOldTools(assistantId) {
+  if (!assistantId) return;
+  
   try {
-    const listResponse = await fetch('https://api.vapi.ai/knowledge-base', {
+    // Get current assistant to find attached tools
+    const getResponse = await fetch(`https://api.vapi.ai/assistant/${assistantId}`, {
       headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
     });
     
-    if (!listResponse.ok) return;
+    if (!getResponse.ok) return;
     
-    const knowledgeBases = await listResponse.json();
-    const sanitizedName = businessName.replace(/[^a-zA-Z0-9]/g, '_');
+    const assistant = await getResponse.json();
+    const toolIds = assistant.model?.toolIds || [];
     
-    const oldKBs = knowledgeBases.filter(kb => 
-      kb.name && kb.name.includes(sanitizedName)
-    );
+    if (toolIds.length === 0) {
+      console.log('🗑️ No existing tools to check');
+      return;
+    }
     
-    console.log(`🗑️ Found ${oldKBs.length} old knowledge bases to delete`);
-    
-    for (const kb of oldKBs) {
+    // Check each tool to see if it's a knowledge base query tool
+    for (const toolId of toolIds) {
       try {
-        await fetch(`https://api.vapi.ai/knowledge-base/${kb.id}`, {
-          method: 'DELETE',
+        const toolResponse = await fetch(`https://api.vapi.ai/tool/${toolId}`, {
           headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
         });
-        console.log(`   Deleted KB: ${kb.name}`);
+        
+        if (toolResponse.ok) {
+          const tool = await toolResponse.json();
+          
+          // Delete if it's a query tool for knowledge base
+          if (tool.type === 'query' && 
+              (tool.function?.name === 'search_knowledge_base' || 
+               tool.function?.name?.includes('kb_search'))) {
+            await fetch(`https://api.vapi.ai/tool/${toolId}`, {
+              method: 'DELETE',
+              headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
+            });
+            console.log(`🗑️ Deleted old KB tool: ${tool.function?.name}`);
+          }
+        }
       } catch (e) {
-        console.log(`   ⚠️ Could not delete KB ${kb.id}`);
+        console.log(`   ⚠️ Could not check/delete tool ${toolId}`);
       }
     }
   } catch (error) {
-    console.log('⚠️ Could not cleanup old knowledge bases:', error.message);
+    console.log('⚠️ Could not cleanup old tools:', error.message);
   }
 }
 
@@ -186,7 +201,7 @@ function smartMerge(existingData, newData) {
 async function updateKnowledgeBase(req, res) {
   try {
     console.log('');
-    console.log('📚 ====== KNOWLEDGE BASE UPDATE ======');
+    console.log('📚 ====== KNOWLEDGE BASE UPDATE (Query Tool Method) ======');
     
     const {
       clientId,
@@ -244,7 +259,6 @@ async function updateKnowledgeBase(req, res) {
     let websiteContent = existingData.websiteContent || '';
     const newWebsiteUrl = websiteUrl || client.business_website;
     
-    // Only scrape if URL is provided, different from before, and NOT our own site
     if (websiteUrl && 
         websiteUrl.trim() && 
         websiteUrl !== client.business_website &&
@@ -285,10 +299,10 @@ async function updateKnowledgeBase(req, res) {
     console.log('📄 Formatted KB length:', content.length, 'chars');
 
     // ========================================
-    // 5. DELETE OLD FILES AND KNOWLEDGE BASES
+    // 5. DELETE OLD FILES AND TOOLS
     // ========================================
     await deleteOldFiles(client.business_name);
-    await deleteOldKnowledgeBases(client.business_name);
+    await deleteOldTools(client.vapi_assistant_id);
 
     // ========================================
     // 6. UPLOAD NEW FILE TO VAPI
@@ -321,50 +335,65 @@ async function updateKnowledgeBase(req, res) {
     console.log('✅ File uploaded:', fileId);
 
     // ========================================
-    // 7. CREATE KNOWLEDGE BASE IN VAPI
+    // 7. CREATE QUERY TOOL WITH KNOWLEDGE BASE
     // ========================================
-    console.log('📚 Creating Knowledge Base...');
+    console.log('🔧 Creating Query Tool...');
     
-    const kbResponse = await fetch('https://api.vapi.ai/knowledge-base', {
+    const toolName = 'search_knowledge_base';  // Matches system prompt instruction
+    
+    const toolResponse = await fetch('https://api.vapi.ai/tool', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${VAPI_API_KEY}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        provider: 'canonical',
-        fileIds: [fileId],
+        type: 'query',
+        function: {
+          name: toolName,
+          description: `Search ${client.business_name}'s knowledge base for business hours, services, pricing, FAQs, and policies.`
+        },
+        knowledgeBases: [
+          {
+            provider: 'google',
+            name: `${client.business_name} Knowledge Base`,
+            description: `Contains information about ${client.business_name} including services, pricing, business hours, FAQs, and policies.`,
+            fileIds: [fileId]
+          }
+        ]
       }),
     });
 
-    if (!kbResponse.ok) {
-      const errorText = await kbResponse.text();
-      console.error('❌ Knowledge Base creation failed:', errorText);
-      throw new Error(`Knowledge Base creation failed: ${kbResponse.status}`);
+    if (!toolResponse.ok) {
+      const errorText = await toolResponse.text();
+      console.error('❌ Query Tool creation failed:', errorText);
+      throw new Error(`Query Tool creation failed: ${toolResponse.status}`);
     }
 
-    const kbData = await kbResponse.json();
-    const knowledgeBaseId = kbData.id;
-    console.log('✅ Knowledge Base created:', knowledgeBaseId);
+    const toolData = await toolResponse.json();
+    const toolId = toolData.id;
+    console.log('✅ Query Tool created:', toolId);
 
     // ========================================
-    // 8. ATTACH KNOWLEDGE BASE TO ASSISTANT VIA MODEL
+    // 8. ATTACH QUERY TOOL TO ASSISTANT
     // ========================================
     if (client.vapi_assistant_id) {
-      console.log('🔗 Attaching Knowledge Base to assistant...');
+      console.log('🔗 Attaching Query Tool to assistant...');
       
-      // First get current assistant to preserve model settings
+      // Get current assistant to preserve settings
       const getResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
         headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
       });
       
       if (getResponse.ok) {
         const currentAssistant = await getResponse.json();
-        console.log('   Current model provider:', currentAssistant.model?.provider);
         console.log('   Current model:', currentAssistant.model?.model);
         
-        // Try exactly like CallBird - just model.knowledgeBase, no spread
-        console.log('   Trying method 1: model.knowledgeBase with id...');
+        // Just use our new KB tool (old one was already deleted)
+        const newToolIds = [toolId];
+        console.log('   Setting toolIds:', newToolIds);
+        
+        // Update assistant with new toolIds
         const patchResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
           method: 'PATCH',
           headers: {
@@ -373,96 +402,25 @@ async function updateKnowledgeBase(req, res) {
           },
           body: JSON.stringify({
             model: {
-              knowledgeBase: {
-                provider: 'canonical',
-                id: knowledgeBaseId,
-              }
+              provider: currentAssistant.model?.provider || 'openai',
+              model: currentAssistant.model?.model || 'gpt-4o-mini',
+              temperature: currentAssistant.model?.temperature || 0.7,
+              toolIds: newToolIds
             }
           }),
         });
         
         if (patchResponse.ok) {
-          console.log('✅ Method 1 worked! Knowledge Base attached!');
+          console.log('✅ Query Tool attached to assistant!');
         } else {
           const errorText = await patchResponse.text();
-          console.error('   Method 1 failed:', errorText);
-          
-          // Try method 2: knowledgeBase at root level
-          console.log('   Trying method 2: knowledgeBase at root...');
-          const patch2 = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
-            method: 'PATCH',
-            headers: {
-              'Authorization': `Bearer ${VAPI_API_KEY}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              knowledgeBase: {
-                provider: 'canonical',
-                id: knowledgeBaseId,
-              }
-            }),
-          });
-          
-          if (patch2.ok) {
-            console.log('✅ Method 2 worked! Knowledge Base attached!');
-          } else {
-            const error2 = await patch2.text();
-            console.error('   Method 2 failed:', error2);
-            
-            // Try method 3: model with provider + knowledgeBase
-            console.log('   Trying method 3: model with provider...');
-            const patch3 = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
-              method: 'PATCH',
-              headers: {
-                'Authorization': `Bearer ${VAPI_API_KEY}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                model: {
-                  provider: currentAssistant.model?.provider || 'openai',
-                  model: currentAssistant.model?.model || 'gpt-4o',
-                  knowledgeBase: {
-                    provider: 'canonical',
-                    id: knowledgeBaseId,
-                  }
-                }
-              }),
-            });
-            
-            if (patch3.ok) {
-              console.log('✅ Method 3 worked! Knowledge Base attached!');
-            } else {
-              const error3 = await patch3.text();
-              console.error('   Method 3 failed:', error3);
-              
-              // Try method 4: knowledgeBaseId direct
-              console.log('   Trying method 4: knowledgeBaseId direct...');
-              const patch4 = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
-                method: 'PATCH',
-                headers: {
-                  'Authorization': `Bearer ${VAPI_API_KEY}`,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                  knowledgeBaseId: knowledgeBaseId
-                }),
-              });
-              
-              if (patch4.ok) {
-                console.log('✅ Method 4 worked! Knowledge Base attached!');
-              } else {
-                const error4 = await patch4.text();
-                console.error('   Method 4 failed:', error4);
-                console.log('❌ All methods failed - manual attachment needed');
-              }
-            }
-          }
+          console.error('⚠️ Failed to attach tool:', errorText);
         }
       } else {
         console.error('⚠️ Could not fetch assistant');
       }
     } else {
-      console.log('⚠️ No vapi_assistant_id - skipping attachment');
+      console.log('⚠️ No vapi_assistant_id - skipping tool attachment');
     }
 
     // ========================================
@@ -471,7 +429,7 @@ async function updateKnowledgeBase(req, res) {
     const { error: updateError } = await supabase
       .from('clients')
       .update({
-        knowledge_base_id: knowledgeBaseId,
+        knowledge_base_id: toolId, // Store tool ID for reference
         knowledge_base_data: finalData,
         knowledge_base_updated_at: new Date().toISOString(),
         business_website: newWebsiteUrl || client.business_website,
@@ -491,7 +449,7 @@ async function updateKnowledgeBase(req, res) {
       success: true,
       message: 'Knowledge base updated successfully',
       fileId: fileId,
-      knowledgeBaseId: knowledgeBaseId,
+      toolId: toolId,
     });
 
   } catch (error) {
