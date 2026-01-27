@@ -361,8 +361,10 @@ async function updateKnowledgeBase(req, res) {
       if (getResponse.ok) {
         const currentAssistant = await getResponse.json();
         console.log('   Current model provider:', currentAssistant.model?.provider);
+        console.log('   Current model:', currentAssistant.model?.model);
         
-        // Attach via model.knowledgeBase.id (like CallBird does)
+        // Try exactly like CallBird - just model.knowledgeBase, no spread
+        console.log('   Trying method 1: model.knowledgeBase with id...');
         const patchResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
           method: 'PATCH',
           headers: {
@@ -371,7 +373,6 @@ async function updateKnowledgeBase(req, res) {
           },
           body: JSON.stringify({
             model: {
-              ...currentAssistant.model,
               knowledgeBase: {
                 provider: 'canonical',
                 id: knowledgeBaseId,
@@ -381,10 +382,81 @@ async function updateKnowledgeBase(req, res) {
         });
         
         if (patchResponse.ok) {
-          console.log('✅ Knowledge Base attached via model.knowledgeBase.id!');
+          console.log('✅ Method 1 worked! Knowledge Base attached!');
         } else {
           const errorText = await patchResponse.text();
-          console.error('⚠️ model.knowledgeBase.id failed:', errorText);
+          console.error('   Method 1 failed:', errorText);
+          
+          // Try method 2: knowledgeBase at root level
+          console.log('   Trying method 2: knowledgeBase at root...');
+          const patch2 = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
+            method: 'PATCH',
+            headers: {
+              'Authorization': `Bearer ${VAPI_API_KEY}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              knowledgeBase: {
+                provider: 'canonical',
+                id: knowledgeBaseId,
+              }
+            }),
+          });
+          
+          if (patch2.ok) {
+            console.log('✅ Method 2 worked! Knowledge Base attached!');
+          } else {
+            const error2 = await patch2.text();
+            console.error('   Method 2 failed:', error2);
+            
+            // Try method 3: model with provider + knowledgeBase
+            console.log('   Trying method 3: model with provider...');
+            const patch3 = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
+              method: 'PATCH',
+              headers: {
+                'Authorization': `Bearer ${VAPI_API_KEY}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                model: {
+                  provider: currentAssistant.model?.provider || 'openai',
+                  model: currentAssistant.model?.model || 'gpt-4o',
+                  knowledgeBase: {
+                    provider: 'canonical',
+                    id: knowledgeBaseId,
+                  }
+                }
+              }),
+            });
+            
+            if (patch3.ok) {
+              console.log('✅ Method 3 worked! Knowledge Base attached!');
+            } else {
+              const error3 = await patch3.text();
+              console.error('   Method 3 failed:', error3);
+              
+              // Try method 4: knowledgeBaseId direct
+              console.log('   Trying method 4: knowledgeBaseId direct...');
+              const patch4 = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
+                method: 'PATCH',
+                headers: {
+                  'Authorization': `Bearer ${VAPI_API_KEY}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  knowledgeBaseId: knowledgeBaseId
+                }),
+              });
+              
+              if (patch4.ok) {
+                console.log('✅ Method 4 worked! Knowledge Base attached!');
+              } else {
+                const error4 = await patch4.text();
+                console.error('   Method 4 failed:', error4);
+                console.log('❌ All methods failed - manual attachment needed');
+              }
+            }
+          }
         }
       } else {
         console.error('⚠️ Could not fetch assistant');
