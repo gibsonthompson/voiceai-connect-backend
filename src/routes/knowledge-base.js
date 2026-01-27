@@ -1,7 +1,8 @@
 // ============================================================================
-// KNOWLEDGE BASE MANAGEMENT - Multi-Tenant
-// Adapted from CallBird's knowledge-base.js
+// KNOWLEDGE BASE ROUTES - VoiceAI Connect Multi-Tenant Backend
+// Location: src/routes/knowledge-base.js
 // ============================================================================
+
 const fetch = require('node-fetch');
 const FormData = require('form-data');
 const { supabase, getClientById } = require('../lib/supabase');
@@ -127,14 +128,14 @@ async function updateKnowledgeBase(req, res) {
     } = req.body;
 
     if (!clientId) {
-      return res.status(400).json({ error: 'Client ID required' });
+      return res.status(400).json({ success: false, error: 'Client ID required' });
     }
 
     // Get client with agency data
     const client = await getClientById(clientId);
 
     if (!client) {
-      return res.status(404).json({ error: 'Client not found' });
+      return res.status(404).json({ success: false, error: 'Client not found' });
     }
 
     console.log('✅ Client found:', client.business_name);

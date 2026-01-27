@@ -491,7 +491,7 @@ router.put('/:id/business-hours', async (req, res) => {
 
 // ============================================================================
 // GET /api/client/:id/knowledge-base - Get knowledge base content
-// FIXED: Response format to match frontend expectations
+// UPDATED: Returns structured data for the new Knowledge Base form
 // ============================================================================
 router.get('/:id/knowledge-base', async (req, res) => {
   try {
@@ -499,7 +499,7 @@ router.get('/:id/knowledge-base', async (req, res) => {
     
     const { data: client } = await supabase
       .from('clients')
-      .select('knowledge_base_data, knowledge_base_id, knowledge_base_updated_at')
+      .select('knowledge_base_data, knowledge_base_id, knowledge_base_updated_at, business_website')
       .eq('id', id)
       .single();
 
@@ -507,21 +507,31 @@ router.get('/:id/knowledge-base', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Client not found' });
     }
 
-    // Extract content from knowledge_base_data if it exists
-    let content = '';
+    // Handle both old format (content string) and new format (structured object)
+    let data = {};
+    
     if (client.knowledge_base_data) {
       if (typeof client.knowledge_base_data === 'string') {
-        content = client.knowledge_base_data;
-      } else if (client.knowledge_base_data.content) {
-        content = client.knowledge_base_data.content;
-      } else if (client.knowledge_base_data.text) {
-        content = client.knowledge_base_data.text;
+        // Old format: plain text content
+        data = { additionalInfo: client.knowledge_base_data };
+      } else if (client.knowledge_base_data.content && typeof client.knowledge_base_data.content === 'string') {
+        // Old format: { content: "..." }
+        data = { additionalInfo: client.knowledge_base_data.content };
+      } else {
+        // New format: structured object with services, faqs, businessHours, additionalInfo
+        data = {
+          services: client.knowledge_base_data.services || '',
+          faqs: client.knowledge_base_data.faqs || '',
+          businessHours: client.knowledge_base_data.businessHours || '',
+          additionalInfo: client.knowledge_base_data.additionalInfo || '',
+        };
       }
     }
 
     res.json({
       success: true,
-      content: content,
+      data: data,
+      websiteUrl: client.business_website || '',
       knowledge_base_id: client.knowledge_base_id,
       updated_at: client.knowledge_base_updated_at
     });
@@ -532,22 +542,34 @@ router.get('/:id/knowledge-base', async (req, res) => {
 });
 
 // ============================================================================
-// PUT /api/client/:id/knowledge-base - Update knowledge base
+// PUT /api/client/:id/knowledge-base - Update knowledge base (simple update)
+// Note: For full KB update with VAPI sync, use POST /api/knowledge-base/update
 // ============================================================================
 router.put('/:id/knowledge-base', async (req, res) => {
   try {
     const { id } = req.params;
-    const { content } = req.body;
+    const { content, services, faqs, businessHours, additionalInfo } = req.body;
 
-    if (content === undefined) {
-      return res.status(400).json({ success: false, error: 'content required' });
+    // Support both old format (content) and new format (structured)
+    let knowledgeBaseData;
+    
+    if (content !== undefined) {
+      // Old format
+      knowledgeBaseData = { content };
+    } else {
+      // New structured format
+      knowledgeBaseData = {
+        services: services || '',
+        faqs: faqs || '',
+        businessHours: businessHours || '',
+        additionalInfo: additionalInfo || '',
+      };
     }
 
-    // Store content in knowledge_base_data
     const { error } = await supabase
       .from('clients')
       .update({ 
-        knowledge_base_data: { content },
+        knowledge_base_data: knowledgeBaseData,
         knowledge_base_updated_at: new Date().toISOString()
       })
       .eq('id', id);
@@ -555,9 +577,6 @@ router.put('/:id/knowledge-base', async (req, res) => {
     if (error) {
       return res.status(400).json({ success: false, error: error.message });
     }
-
-    // TODO: Update VAPI knowledge base file if needed
-    // This would require re-uploading the file to VAPI
 
     console.log(`✅ Knowledge base updated for client ${id}`);
     res.json({ success: true });
