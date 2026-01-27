@@ -332,7 +332,6 @@ async function updateKnowledgeBase(req, res) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        name: `${client.business_name.replace(/[^a-zA-Z0-9]/g, '_')}_KB`,
         provider: 'canonical',
         fileIds: [fileId],
       }),
