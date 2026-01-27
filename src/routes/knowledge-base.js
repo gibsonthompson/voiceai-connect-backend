@@ -2,10 +2,12 @@
 // KNOWLEDGE BASE ROUTES - VoiceAI Connect Multi-Tenant Backend
 // Location: src/routes/knowledge-base.js
 // 
-// FIXED:
-// 1. Proper merge logic - only overwrites fields if new value is non-empty
-// 2. Deletes old files before uploading new one (no duplicates)
-// 3. Properly attaches file to VAPI assistant
+// FIXED: Properly creates VAPI Knowledge Base entity and attaches to assistant
+// 
+// Flow:
+// 1. Upload file → fileId
+// 2. Create Knowledge Base with fileId → knowledgeBaseId
+// 3. Attach knowledgeBaseId to assistant
 // ============================================================================
 
 const fetch = require('node-fetch');
@@ -65,7 +67,8 @@ function formatKnowledgeBase(data) {
     sections.push(data.additionalInfo);
   }
 
-  if (data.websiteContent && data.websiteContent.trim()) {
+  // Only include website content if it's NOT from callbirdai.com (our marketing site)
+  if (data.websiteContent && data.websiteContent.trim() && !data.websiteContent.includes('CallBird AI')) {
     sections.push(``);
     sections.push(`## Website Content`);
     sections.push(data.websiteContent.substring(0, 8000));
@@ -77,7 +80,7 @@ function formatKnowledgeBase(data) {
 // ============================================================================
 // DELETE OLD FILES FOR THIS CLIENT
 // ============================================================================
-async function deleteOldFiles(businessName, currentFileId = null) {
+async function deleteOldFiles(businessName) {
   try {
     const listResponse = await fetch('https://api.vapi.ai/file', {
       headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
@@ -88,12 +91,10 @@ async function deleteOldFiles(businessName, currentFileId = null) {
     const files = await listResponse.json();
     const sanitizedName = businessName.replace(/[^a-zA-Z0-9]/g, '_');
     
-    // Find old files for this business (exclude current if provided)
     const oldFiles = files.filter(f => 
       f.name && 
       f.name.includes(sanitizedName) && 
-      f.name.includes('_knowledge') &&
-      f.id !== currentFileId
+      f.name.includes('_knowledge')
     );
     
     console.log(`🗑️ Found ${oldFiles.length} old files to delete`);
@@ -104,7 +105,7 @@ async function deleteOldFiles(businessName, currentFileId = null) {
           method: 'DELETE',
           headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
         });
-        console.log(`   Deleted: ${file.name} (${file.id})`);
+        console.log(`   Deleted: ${file.name}`);
       } catch (e) {
         console.log(`   ⚠️ Could not delete ${file.id}`);
       }
@@ -115,12 +116,47 @@ async function deleteOldFiles(businessName, currentFileId = null) {
 }
 
 // ============================================================================
+// DELETE OLD KNOWLEDGE BASES FOR THIS CLIENT
+// ============================================================================
+async function deleteOldKnowledgeBases(businessName) {
+  try {
+    const listResponse = await fetch('https://api.vapi.ai/knowledge-base', {
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
+    });
+    
+    if (!listResponse.ok) return;
+    
+    const knowledgeBases = await listResponse.json();
+    const sanitizedName = businessName.replace(/[^a-zA-Z0-9]/g, '_');
+    
+    const oldKBs = knowledgeBases.filter(kb => 
+      kb.name && kb.name.includes(sanitizedName)
+    );
+    
+    console.log(`🗑️ Found ${oldKBs.length} old knowledge bases to delete`);
+    
+    for (const kb of oldKBs) {
+      try {
+        await fetch(`https://api.vapi.ai/knowledge-base/${kb.id}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
+        });
+        console.log(`   Deleted KB: ${kb.name}`);
+      } catch (e) {
+        console.log(`   ⚠️ Could not delete KB ${kb.id}`);
+      }
+    }
+  } catch (error) {
+    console.log('⚠️ Could not cleanup old knowledge bases:', error.message);
+  }
+}
+
+// ============================================================================
 // SMART MERGE - Only update fields that have new non-empty values
 // ============================================================================
 function smartMerge(existingData, newData) {
   const result = { ...existingData };
   
-  // For each field, only overwrite if new value is non-empty
   if (newData.businessHours && newData.businessHours.trim()) {
     result.businessHours = newData.businessHours;
   }
@@ -199,7 +235,6 @@ async function updateKnowledgeBase(req, res) {
     };
     console.log('📥 New data keys:', Object.keys(newData).filter(k => newData[k] && newData[k].trim()));
 
-    // Smart merge - only overwrites if new value is non-empty
     const finalData = smartMerge(existingData, newData);
     console.log('📦 Final data keys:', Object.keys(finalData).filter(k => finalData[k] && finalData[k].trim()));
 
@@ -209,12 +244,16 @@ async function updateKnowledgeBase(req, res) {
     let websiteContent = existingData.websiteContent || '';
     const newWebsiteUrl = websiteUrl || client.business_website;
     
-    if (websiteUrl && websiteUrl.trim() && websiteUrl !== client.business_website) {
+    // Only scrape if URL is provided, different from before, and NOT our own site
+    if (websiteUrl && 
+        websiteUrl.trim() && 
+        websiteUrl !== client.business_website &&
+        !websiteUrl.includes('callbirdai.com') &&
+        !websiteUrl.includes('myvoiceaiconnect.com')) {
       try {
         console.log('🌐 Scraping website:', websiteUrl);
         const scrapeResponse = await fetch(`https://r.jina.ai/${websiteUrl}`, {
-          headers: { 'Accept': 'text/plain' },
-          timeout: 10000
+          headers: { 'Accept': 'text/plain' }
         });
         if (scrapeResponse.ok) {
           websiteContent = await scrapeResponse.text();
@@ -246,9 +285,10 @@ async function updateKnowledgeBase(req, res) {
     console.log('📄 Formatted KB length:', content.length, 'chars');
 
     // ========================================
-    // 5. DELETE OLD FILES (prevent duplicates)
+    // 5. DELETE OLD FILES AND KNOWLEDGE BASES
     // ========================================
     await deleteOldFiles(client.business_name);
+    await deleteOldKnowledgeBases(client.business_name);
 
     // ========================================
     // 6. UPLOAD NEW FILE TO VAPI
@@ -272,8 +312,8 @@ async function updateKnowledgeBase(req, res) {
 
     if (!uploadResponse.ok) {
       const errorText = await uploadResponse.text();
-      console.error('❌ VAPI upload failed:', errorText);
-      throw new Error(`VAPI upload failed: ${uploadResponse.status}`);
+      console.error('❌ VAPI file upload failed:', errorText);
+      throw new Error(`VAPI file upload failed: ${uploadResponse.status}`);
     }
 
     const uploadData = await uploadResponse.json();
@@ -281,84 +321,90 @@ async function updateKnowledgeBase(req, res) {
     console.log('✅ File uploaded:', fileId);
 
     // ========================================
-    // 7. ATTACH FILE TO ASSISTANT
+    // 7. CREATE KNOWLEDGE BASE IN VAPI
+    // ========================================
+    console.log('📚 Creating Knowledge Base...');
+    
+    const kbResponse = await fetch('https://api.vapi.ai/knowledge-base', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${VAPI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `${client.business_name.replace(/[^a-zA-Z0-9]/g, '_')}_KB`,
+        provider: 'canonical',
+        fileIds: [fileId],
+      }),
+    });
+
+    if (!kbResponse.ok) {
+      const errorText = await kbResponse.text();
+      console.error('❌ Knowledge Base creation failed:', errorText);
+      throw new Error(`Knowledge Base creation failed: ${kbResponse.status}`);
+    }
+
+    const kbData = await kbResponse.json();
+    const knowledgeBaseId = kbData.id;
+    console.log('✅ Knowledge Base created:', knowledgeBaseId);
+
+    // ========================================
+    // 8. ATTACH KNOWLEDGE BASE TO ASSISTANT
     // ========================================
     if (client.vapi_assistant_id) {
-      console.log('🔗 Attaching file to assistant...');
+      console.log('🔗 Attaching Knowledge Base to assistant...');
       
-      // Get current assistant
-      const getResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
-        headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
+      const patchResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${VAPI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          knowledgeBaseId: knowledgeBaseId
+        }),
       });
       
-      if (getResponse.ok) {
-        const currentAssistant = await getResponse.json();
+      if (patchResponse.ok) {
+        console.log('✅ Knowledge Base attached to assistant!');
+      } else {
+        const errorText = await patchResponse.text();
+        console.error('⚠️ Failed to attach KB to assistant:', errorText);
         
-        // Build the update payload - attach file via model.knowledgeBase
-        const updatePayload = {
-          model: {
-            ...currentAssistant.model,
-            knowledgeBase: {
-              provider: 'canonical',
-              fileIds: [fileId]
-            }
-          }
-        };
-
-        console.log('   Updating assistant with knowledgeBase.fileIds:', [fileId]);
-        
-        const patchResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
+        // Try alternative: knowledgeBase object
+        console.log('🔄 Trying alternative attachment method...');
+        const altResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
           method: 'PATCH',
           headers: {
             'Authorization': `Bearer ${VAPI_API_KEY}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify(updatePayload),
+          body: JSON.stringify({
+            knowledgeBase: {
+              provider: 'canonical',
+              fileIds: [fileId]
+            }
+          }),
         });
         
-        if (patchResponse.ok) {
-          console.log('✅ File attached to assistant successfully');
+        if (altResponse.ok) {
+          console.log('✅ Attached via alternative method');
         } else {
-          const errorText = await patchResponse.text();
-          console.error('⚠️ Failed to attach file:', errorText);
-          
-          // Try alternative: direct knowledgeBase on assistant root
-          console.log('🔄 Trying alternative method...');
-          const altResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
-            method: 'PATCH',
-            headers: {
-              'Authorization': `Bearer ${VAPI_API_KEY}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              knowledgeBase: {
-                provider: 'canonical', 
-                fileIds: [fileId]
-              }
-            }),
-          });
-          
-          if (altResponse.ok) {
-            console.log('✅ File attached via alternative method');
-          } else {
-            const altError = await altResponse.text();
-            console.error('⚠️ Alternative method failed:', altError);
-          }
+          const altError = await altResponse.text();
+          console.error('⚠️ Alternative method also failed:', altError);
         }
-      } else {
-        console.error('⚠️ Could not fetch assistant');
       }
     } else {
-      console.log('⚠️ No vapi_assistant_id - skipping file attachment');
+      console.log('⚠️ No vapi_assistant_id - skipping attachment');
     }
 
     // ========================================
-    // 8. SAVE TO DATABASE
+    // 9. SAVE TO DATABASE
     // ========================================
     const { error: updateError } = await supabase
       .from('clients')
       .update({
-        knowledge_base_id: fileId,
+        knowledge_base_id: knowledgeBaseId,
         knowledge_base_data: finalData,
         knowledge_base_updated_at: new Date().toISOString(),
         business_website: newWebsiteUrl || client.business_website,
@@ -378,6 +424,7 @@ async function updateKnowledgeBase(req, res) {
       success: true,
       message: 'Knowledge base updated successfully',
       fileId: fileId,
+      knowledgeBaseId: knowledgeBaseId,
     });
 
   } catch (error) {
