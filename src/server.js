@@ -277,6 +277,7 @@ app.get('/api/client/:clientId/details', async (req, res) => {
           id,
           name,
           slug,
+          logo_url,
           primary_color,
           support_email,
           price_starter,
