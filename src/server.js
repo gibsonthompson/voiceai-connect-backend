@@ -306,31 +306,199 @@ app.get('/api/client/:clientId/details', async (req, res) => {
 });
 
 // ============================================================================
-// VOICES ENDPOINT (Public)
+// VOICES ENDPOINT (Public) - UPDATED with complete metadata & correct format
 // ============================================================================
 
 app.get('/api/voices', (req, res) => {
   const VOICE_OPTIONS = [
     // Female voices
-    { id: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel', gender: 'female', description: 'Warm and friendly' },
-    { id: 'EXAVITQu4vr4xnSDxMaL', name: 'Sarah', gender: 'female', description: 'Soft and professional' },
-    { id: 'pMsXgVXv3BLzUgSXRplE', name: 'Serena', gender: 'female', description: 'Calm and reassuring' },
-    { id: 'XrExE9yKIg1WjnnlVkGX', name: 'Matilda', gender: 'female', description: 'Bright and energetic' },
-    { id: 'pFZP5JQG7iQjIQuC4Bku', name: 'Lily', gender: 'female', description: 'Young and cheerful' },
-    { id: 'Xb7hH8MSUJpSbSDYk0k2', name: 'Alice', gender: 'female', description: 'Clear and articulate' },
-    { id: 'LcfcDJNUP1GQjkzn1xUU', name: 'Emily', gender: 'female', description: 'Warm and welcoming' },
+    { 
+      id: '21m00Tcm4TlvDq8ikWAM', 
+      name: 'Rachel', 
+      gender: 'female', 
+      accent: 'American',
+      style: 'Calm',
+      description: 'Warm and professional. Perfect all-purpose receptionist voice.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/21m00Tcm4TlvDq8ikWAM/df6788f9-5c96-470d-8312-aab3b3d8f50a.mp3',
+      recommended: true
+    },
+    { 
+      id: 'EXAVITQu4vr4xnSDxMaL', 
+      name: 'Sarah', 
+      gender: 'female', 
+      accent: 'American',
+      style: 'Soft',
+      description: 'Gentle and reassuring. Great for medical and professional services.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/EXAVITQu4vr4xnSDxMaL/6851ec91-9950-471f-8586-357c52539069.mp3',
+      recommended: true
+    },
+    { 
+      id: 'pMsXgVXv3BLzUgSXRplE', 
+      name: 'Serena', 
+      gender: 'female', 
+      accent: 'American',
+      style: 'Pleasant',
+      description: 'Engaging and interactive. Built for back-and-forth conversations.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/pMsXgVXv3BLzUgSXRplE/d61f18ed-e5b0-4d0b-a33c-5c6e7e33b053.mp3',
+      recommended: true
+    },
+    { 
+      id: 'XrExE9yKIg1WjnnlVkGX', 
+      name: 'Matilda', 
+      gender: 'female', 
+      accent: 'American',
+      style: 'Warm',
+      description: 'Friendly and approachable. Perfect for retail and hospitality.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/XrExE9yKIg1WjnnlVkGX/b930e18d-6b4d-466e-bab2-0ae97c6d8535.mp3',
+      recommended: false
+    },
+    { 
+      id: 'pFZP5JQG7iQjIQuC4Bku', 
+      name: 'Lily', 
+      gender: 'female', 
+      accent: 'British',
+      style: 'Raspy',
+      description: 'Sophisticated British accent. Great for upscale businesses.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/pFZP5JQG7iQjIQuC4Bku/d10f7534-11f6-41fe-a012-2de1e482d336.mp3',
+      recommended: false
+    },
+    { 
+      id: 'Xb7hH8MSUJpSbSDYk0k2', 
+      name: 'Alice', 
+      gender: 'female', 
+      accent: 'British',
+      style: 'Confident',
+      description: 'Clear and authoritative. Great for corporate environments.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/Xb7hH8MSUJpSbSDYk0k2/42a5afce-c06c-4a26-b1ea-50d4c423a8f8.mp3',
+      recommended: false
+    },
+    { 
+      id: 'LcfcDJNUP1GQjkzn1xUU', 
+      name: 'Emily', 
+      gender: 'female', 
+      accent: 'American',
+      style: 'Calm',
+      description: 'Warm and welcoming. Perfect for wellness and spa.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/LcfcDJNUP1GQjkzn1xUU/e4b994e7-9713-4238-84f3-add8cccb7ec0.mp3',
+      recommended: false
+    },
+    
     // Male voices
-    { id: 'IKne3meq5aSn9XLyUdCD', name: 'Charlie', gender: 'male', description: 'Friendly and casual' },
-    { id: 'iP95p4xoKVk53GoZ742B', name: 'Chris', gender: 'male', description: 'Professional and confident' },
-    { id: 'nPczCjzI2devNBz1zQrb', name: 'Brian', gender: 'male', description: 'Authoritative and clear' },
-    { id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam', gender: 'male', description: 'Deep and trustworthy' },
-    { id: '29vD33N1CtxCmqQRPOHJ', name: 'Drew', gender: 'male', description: 'Warm and approachable' },
-    { id: 'onwK4e9ZLuTAKqWW03F9', name: 'Daniel', gender: 'male', description: 'Calm and measured' },
-    { id: 'TxGEqnHWrfWFTfGW9XjX', name: 'Josh', gender: 'male', description: 'Energetic and upbeat' },
-    { id: 'JBFqnCBsd6RMkjVDRZzb', name: 'George', gender: 'male', description: 'Mature and refined' },
-    { id: 'TX3LPaxmHKxFdv7VOQHJ', name: 'Liam', gender: 'male', description: 'Young and dynamic' },
+    { 
+      id: 'IKne3meq5aSn9XLyUdCD', 
+      name: 'Charlie', 
+      gender: 'male', 
+      accent: 'Australian',
+      style: 'Casual',
+      description: 'Friendly and conversational. Officially tagged for conversational AI.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/IKne3meq5aSn9XLyUdCD/102de6f2-22ed-43e0-a1f1-111fa75c5481.mp3',
+      recommended: true
+    },
+    { 
+      id: 'iP95p4xoKVk53GoZ742B', 
+      name: 'Chris', 
+      gender: 'male', 
+      accent: 'American',
+      style: 'Casual',
+      description: 'Natural and easygoing. Officially tagged for conversational AI.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/iP95p4xoKVk53GoZ742B/c1bda571-7123-418e-a796-a2b464b373b4.mp3',
+      recommended: true
+    },
+    { 
+      id: 'nPczCjzI2devNBz1zQrb', 
+      name: 'Brian', 
+      gender: 'male', 
+      accent: 'American',
+      style: 'Deep',
+      description: 'Deep and trustworthy. Great for professional and corporate.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/nPczCjzI2devNBz1zQrb/f4dbda0c-aff0-45c0-93fa-f5d5ec95a2eb.mp3',
+      recommended: false
+    },
+    { 
+      id: 'pNInz6obpgDQGcFmaJgB', 
+      name: 'Adam', 
+      gender: 'male', 
+      accent: 'American',
+      style: 'Deep',
+      description: 'Authoritative and clear. Excellent for narration and professional use.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/pNInz6obpgDQGcFmaJgB/38a69695-2ca9-4b9e-b9ec-f07ced494a58.mp3',
+      recommended: false
+    },
+    { 
+      id: '29vD33N1CtxCmqQRPOHJ', 
+      name: 'Drew', 
+      gender: 'male', 
+      accent: 'American',
+      style: 'Well-rounded',
+      description: 'Balanced and professional. Works well across industries.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/29vD33N1CtxCmqQRPOHJ/e8b52a3f-9732-440f-b78a-16d5e26407a1.mp3',
+      recommended: false
+    },
+    { 
+      id: 'onwK4e9ZLuTAKqWW03F9', 
+      name: 'Daniel', 
+      gender: 'male', 
+      accent: 'British',
+      style: 'Deep',
+      description: 'Sophisticated British voice. Perfect for premium businesses.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/onwK4e9ZLuTAKqWW03F9/7eee0236-1a72-4b86-b303-5dcadc007ba9.mp3',
+      recommended: false
+    },
+    { 
+      id: 'TxGEqnHWrfWFTfGW9XjX', 
+      name: 'Josh', 
+      gender: 'male', 
+      accent: 'American',
+      style: 'Deep',
+      description: 'Younger professional voice. Great for tech and modern businesses.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/TxGEqnHWrfWFTfGW9XjX/3ae2fc71-d5f9-4769-bb71-2a43633cd186.mp3',
+      recommended: false
+    },
+    { 
+      id: 'JBFqnCBsd6RMkjVDRZzb', 
+      name: 'George', 
+      gender: 'male', 
+      accent: 'British',
+      style: 'Raspy',
+      description: 'Distinguished British voice with character. Great for storytelling.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/JBFqnCBsd6RMkjVDRZzb/365e8ae8-5364-4b07-9a3b-1bfb4a390248.mp3',
+      recommended: false
+    },
+    { 
+      id: 'TX3LPaxmHKxFdv7VOQHJ', 
+      name: 'Liam', 
+      gender: 'male', 
+      accent: 'American',
+      style: 'Young',
+      description: 'Energetic younger voice. Perfect for trendy businesses.',
+      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/TX3LPaxmHKxFdv7VOQHJ/63148076-6363-42db-aea8-31424308b92c.mp3',
+      recommended: false
+    },
   ];
-  res.json(VOICE_OPTIONS);
+
+  // Sort: recommended first, then alphabetically
+  const sortVoices = (voices) => {
+    return voices.sort((a, b) => {
+      if (a.recommended && !b.recommended) return -1;
+      if (!a.recommended && b.recommended) return 1;
+      return a.name.localeCompare(b.name);
+    });
+  };
+
+  // Group by gender
+  const femaleVoices = sortVoices(VOICE_OPTIONS.filter(v => v.gender === 'female'));
+  const maleVoices = sortVoices(VOICE_OPTIONS.filter(v => v.gender === 'male'));
+
+  // Return in format frontend expects
+  res.json({
+    success: true,
+    total: VOICE_OPTIONS.length,
+    grouped: {
+      female: femaleVoices,
+      male: maleVoices
+    },
+    voices: VOICE_OPTIONS
+  });
 });
 
 // ============================================================================
