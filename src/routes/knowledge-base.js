@@ -348,50 +348,46 @@ async function updateKnowledgeBase(req, res) {
     console.log('✅ Knowledge Base created:', knowledgeBaseId);
 
     // ========================================
-    // 8. ATTACH KNOWLEDGE BASE TO ASSISTANT
+    // 8. ATTACH KNOWLEDGE BASE TO ASSISTANT VIA MODEL
     // ========================================
     if (client.vapi_assistant_id) {
       console.log('🔗 Attaching Knowledge Base to assistant...');
       
-      const patchResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${VAPI_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          knowledgeBaseId: knowledgeBaseId
-        }),
+      // First get current assistant to preserve model settings
+      const getResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
+        headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
       });
       
-      if (patchResponse.ok) {
-        console.log('✅ Knowledge Base attached to assistant!');
-      } else {
-        const errorText = await patchResponse.text();
-        console.error('⚠️ Failed to attach KB to assistant:', errorText);
+      if (getResponse.ok) {
+        const currentAssistant = await getResponse.json();
+        console.log('   Current model provider:', currentAssistant.model?.provider);
         
-        // Try alternative: knowledgeBase object
-        console.log('🔄 Trying alternative attachment method...');
-        const altResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
+        // Attach via model.knowledgeBase.id (like CallBird does)
+        const patchResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
           method: 'PATCH',
           headers: {
             'Authorization': `Bearer ${VAPI_API_KEY}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            knowledgeBase: {
-              provider: 'canonical',
-              fileIds: [fileId]
+            model: {
+              ...currentAssistant.model,
+              knowledgeBase: {
+                provider: 'canonical',
+                id: knowledgeBaseId,
+              }
             }
           }),
         });
         
-        if (altResponse.ok) {
-          console.log('✅ Attached via alternative method');
+        if (patchResponse.ok) {
+          console.log('✅ Knowledge Base attached via model.knowledgeBase.id!');
         } else {
-          const altError = await altResponse.text();
-          console.error('⚠️ Alternative method also failed:', altError);
+          const errorText = await patchResponse.text();
+          console.error('⚠️ model.knowledgeBase.id failed:', errorText);
         }
+      } else {
+        console.error('⚠️ Could not fetch assistant');
       }
     } else {
       console.log('⚠️ No vapi_assistant_id - skipping attachment');
