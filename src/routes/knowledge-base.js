@@ -339,8 +339,6 @@ async function updateKnowledgeBase(req, res) {
     // ========================================
     console.log('🔧 Creating Query Tool...');
     
-    const toolName = 'search_knowledge_base';  // Matches system prompt instruction
-    
     const toolResponse = await fetch('https://api.vapi.ai/tool', {
       method: 'POST',
       headers: {
@@ -349,18 +347,28 @@ async function updateKnowledgeBase(req, res) {
       },
       body: JSON.stringify({
         type: 'query',
+        async: false,
         function: {
-          name: toolName,
-          description: `Search ${client.business_name}'s knowledge base for business hours, services, pricing, FAQs, and policies.`
-        },
-        knowledgeBases: [
-          {
-            provider: 'google',
-            name: `${client.business_name} Knowledge Base`,
-            description: `Contains information about ${client.business_name} including services, pricing, business hours, FAQs, and policies.`,
-            fileIds: [fileId]
+          name: 'search_knowledge_base',
+          description: `Search ${client.business_name}'s knowledge base for information about services, pricing, hours, policies, and company information.`,
+          parameters: {
+            type: 'object',
+            properties: {
+              query: {
+                type: 'string',
+                description: 'The search query to find relevant information'
+              }
+            },
+            required: ['query']
           }
-        ]
+        },
+        knowledgeBases: [{
+          name: `${client.business_name} Knowledge Base`,
+          model: 'gemini-1.5-flash',
+          provider: 'google',
+          description: `Contains information about ${client.business_name}'s services, pricing, hours, policies, and company details`,
+          fileIds: [fileId]
+        }]
       }),
     });
 
