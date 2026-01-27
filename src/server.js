@@ -352,48 +352,8 @@ app.get('/api/voices', (req, res) => {
       previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/XrExE9yKIg1WjnnlVkGX/b930e18d-6b4d-466e-bab2-0ae97c6d8535.mp3',
       recommended: false
     },
-    { 
-      id: 'pFZP5JQG7iQjIQuC4Bku', 
-      name: 'Lily', 
-      gender: 'female', 
-      accent: 'British',
-      style: 'Raspy',
-      description: 'Sophisticated British accent. Great for upscale businesses.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/pFZP5JQG7iQjIQuC4Bku/d10f7534-11f6-41fe-a012-2de1e482d336.mp3',
-      recommended: false
-    },
-    { 
-      id: 'Xb7hH8MSUJpSbSDYk0k2', 
-      name: 'Alice', 
-      gender: 'female', 
-      accent: 'British',
-      style: 'Confident',
-      description: 'Clear and authoritative. Great for corporate environments.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/Xb7hH8MSUJpSbSDYk0k2/42a5afce-c06c-4a26-b1ea-50d4c423a8f8.mp3',
-      recommended: false
-    },
-    { 
-      id: 'LcfcDJNUP1GQjkzn1xUU', 
-      name: 'Emily', 
-      gender: 'female', 
-      accent: 'American',
-      style: 'Calm',
-      description: 'Warm and welcoming. Perfect for wellness and spa.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/LcfcDJNUP1GQjkzn1xUU/e4b994e7-9713-4238-84f3-add8cccb7ec0.mp3',
-      recommended: false
-    },
     
     // Male voices
-    { 
-      id: 'IKne3meq5aSn9XLyUdCD', 
-      name: 'Charlie', 
-      gender: 'male', 
-      accent: 'Australian',
-      style: 'Casual',
-      description: 'Friendly and conversational. Officially tagged for conversational AI.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/IKne3meq5aSn9XLyUdCD/102de6f2-22ed-43e0-a1f1-111fa75c5481.mp3',
-      recommended: true
-    },
     { 
       id: 'iP95p4xoKVk53GoZ742B', 
       name: 'Chris', 
@@ -412,37 +372,7 @@ app.get('/api/voices', (req, res) => {
       style: 'Deep',
       description: 'Deep and trustworthy. Great for professional and corporate.',
       previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/nPczCjzI2devNBz1zQrb/f4dbda0c-aff0-45c0-93fa-f5d5ec95a2eb.mp3',
-      recommended: false
-    },
-    { 
-      id: 'pNInz6obpgDQGcFmaJgB', 
-      name: 'Adam', 
-      gender: 'male', 
-      accent: 'American',
-      style: 'Deep',
-      description: 'Authoritative and clear. Excellent for narration and professional use.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/pNInz6obpgDQGcFmaJgB/38a69695-2ca9-4b9e-b9ec-f07ced494a58.mp3',
-      recommended: false
-    },
-    { 
-      id: '29vD33N1CtxCmqQRPOHJ', 
-      name: 'Drew', 
-      gender: 'male', 
-      accent: 'American',
-      style: 'Well-rounded',
-      description: 'Balanced and professional. Works well across industries.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/29vD33N1CtxCmqQRPOHJ/e8b52a3f-9732-440f-b78a-16d5e26407a1.mp3',
-      recommended: false
-    },
-    { 
-      id: 'onwK4e9ZLuTAKqWW03F9', 
-      name: 'Daniel', 
-      gender: 'male', 
-      accent: 'British',
-      style: 'Deep',
-      description: 'Sophisticated British voice. Perfect for premium businesses.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/onwK4e9ZLuTAKqWW03F9/7eee0236-1a72-4b86-b303-5dcadc007ba9.mp3',
-      recommended: false
+      recommended: true
     },
     { 
       id: 'TxGEqnHWrfWFTfGW9XjX', 
@@ -452,16 +382,6 @@ app.get('/api/voices', (req, res) => {
       style: 'Deep',
       description: 'Younger professional voice. Great for tech and modern businesses.',
       previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/TxGEqnHWrfWFTfGW9XjX/3ae2fc71-d5f9-4769-bb71-2a43633cd186.mp3',
-      recommended: false
-    },
-    { 
-      id: 'JBFqnCBsd6RMkjVDRZzb', 
-      name: 'George', 
-      gender: 'male', 
-      accent: 'British',
-      style: 'Raspy',
-      description: 'Distinguished British voice with character. Great for storytelling.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/JBFqnCBsd6RMkjVDRZzb/365e8ae8-5364-4b07-9a3b-1bfb4a390248.mp3',
       recommended: false
     },
     { 
