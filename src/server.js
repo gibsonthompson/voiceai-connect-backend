@@ -111,6 +111,9 @@ app.use((req, res, next) => {
 const { handleAgencySignup, handleAgencyOnboarding } = require('./routes/agency-signup');
 const { getAgencyByHost, getAgencySettings, updateAgencySettings, verifyAgencyDomain } = require('./routes/agency-settings');
 
+// Referral Program
+const referralRoutes = require('./routes/referrals');
+
 // Domain Management (Automated Vercel Provisioning)
 let domainRoutes;
 try {
@@ -181,7 +184,8 @@ app.get('/health', (req, res) => {
       multiTenant: true,
       stripeConnect: true,
       vapiIntegration: true,
-      automatedDomains: true
+      automatedDomains: true,
+      referralProgram: true
     }
   });
 });
@@ -214,6 +218,12 @@ app.get('/api/agency/connect/status/:agencyId', getConnectStatus);
 
 // Stripe Connect disconnect
 app.post('/api/agency/:agencyId/connect/disconnect', disconnectConnectAccount);
+
+// ============================================================================
+// REFERRAL PROGRAM ROUTES
+// ============================================================================
+
+app.use('/api/agency', referralRoutes);
 
 // ============================================================================
 // DOMAIN MANAGEMENT ROUTES (Automated Vercel Provisioning)

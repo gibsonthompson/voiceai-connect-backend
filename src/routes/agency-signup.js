@@ -85,6 +85,50 @@ function validateAgencySignup(body) {
 }
 
 // ============================================================================
+// REFERRAL ATTRIBUTION HELPER
+// ============================================================================
+async function attributeReferral(agencyId, referralCode) {
+  try {
+    if (!referralCode) return { success: false, reason: 'No referral code provided' };
+
+    const cleanCode = referralCode.toLowerCase().trim();
+
+    // Verify referral code exists and isn't self-referral
+    const { data: referrer } = await supabase
+      .from('agencies')
+      .select('id, referral_code')
+      .eq('referral_code', cleanCode)
+      .single();
+
+    if (!referrer) {
+      return { success: false, reason: 'Invalid referral code' };
+    }
+
+    if (referrer.id === agencyId) {
+      return { success: false, reason: 'Cannot use own referral code' };
+    }
+
+    // Update the new agency with referred_by
+    const { error } = await supabase
+      .from('agencies')
+      .update({ referred_by: cleanCode })
+      .eq('id', agencyId);
+
+    if (error) {
+      console.error('Error attributing referral:', error);
+      return { success: false, reason: error.message };
+    }
+
+    console.log(`🤝 Referral attributed: ${agencyId} referred by ${cleanCode}`);
+    return { success: true, referrerCode: cleanCode };
+
+  } catch (error) {
+    console.error('Error attributing referral:', error);
+    return { success: false, reason: error.message };
+  }
+}
+
+// ============================================================================
 // AGENCY SIGNUP HANDLER
 // ============================================================================
 async function handleAgencySignup(req, res) {
@@ -99,7 +143,7 @@ async function handleAgencySignup(req, res) {
       });
     }
     
-    const { name, email, phone, firstName, lastName } = req.body;
+    const { name, email, phone, firstName, lastName, referralCode } = req.body;
     // Password removed - will be set via /auth/set-password after onboarding
     
     // Check for duplicate email
@@ -145,7 +189,9 @@ async function handleAgencySignup(req, res) {
         // Default limits
         limit_starter: 50,
         limit_pro: 150,
-        limit_growth: 500
+        limit_growth: 500,
+        // Referral code defaults to slug
+        referral_code: slug
       })
       .select()
       .single();
@@ -156,6 +202,16 @@ async function handleAgencySignup(req, res) {
     }
     
     console.log(`✅ Agency created: ${agency.id}`);
+    
+    // Attribute referral if code provided
+    if (referralCode) {
+      const result = await attributeReferral(agency.id, referralCode);
+      if (result.success) {
+        console.log(`🤝 Referral attributed: referred by ${result.referrerCode}`);
+      } else {
+        console.log(`⚠️ Referral attribution failed: ${result.reason}`);
+      }
+    }
     
     // Seed default outreach templates
     const templateResult = await seedDefaultTemplatesIfNeeded(agency.id);
@@ -299,5 +355,6 @@ async function handleAgencyOnboarding(req, res) {
 // ============================================================================
 module.exports = {
   handleAgencySignup,
-  handleAgencyOnboarding
+  handleAgencyOnboarding,
+  attributeReferral
 };

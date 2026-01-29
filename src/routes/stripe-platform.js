@@ -20,6 +20,9 @@ const PLAN_DETAILS = {
   enterprise: { name: 'Enterprise', clientLimit: -1, price: 29900 }      // $299/mo - unlimited + priority support
 }; // -1 = unlimited
 
+// Referral commission rate
+const COMMISSION_RATE = 0.20; // 20%
+
 // ============================================================================
 // CREATE CHECKOUT SESSION (Agency subscribes to platform)
 // ============================================================================
@@ -338,6 +341,71 @@ async function handleAgencyPaymentSucceeded(invoice) {
       status: 'active'
     })
     .eq('id', agency.id);
+
+  // =========================================================================
+  // PROCESS REFERRAL COMMISSION
+  // =========================================================================
+  if (agency.referred_by) {
+    try {
+      // Find the referrer by their referral code
+      const { data: referrer, error: referrerError } = await supabase
+        .from('agencies')
+        .select('id, name, referral_earnings_cents, referral_balance_cents, stripe_account_id')
+        .eq('referral_code', agency.referred_by)
+        .single();
+
+      if (referrerError || !referrer) {
+        console.warn(`⚠️ Referrer not found for code: ${agency.referred_by}`);
+      } else {
+        // Check for duplicate (same invoice already processed)
+        const { data: existingCommission } = await supabase
+          .from('referral_commissions')
+          .select('id')
+          .eq('stripe_invoice_id', invoice.id)
+          .single();
+
+        if (existingCommission) {
+          console.log(`ℹ️ Commission already processed for invoice: ${invoice.id}`);
+        } else {
+          // Calculate commission (20% of payment)
+          const paymentAmount = invoice.amount_paid; // in cents
+          const commissionAmount = Math.round(paymentAmount * COMMISSION_RATE);
+
+          // Create commission record
+          const { error: insertError } = await supabase
+            .from('referral_commissions')
+            .insert({
+              referrer_id: referrer.id,
+              referred_id: agency.id,
+              payment_amount_cents: paymentAmount,
+              commission_rate: COMMISSION_RATE,
+              commission_amount_cents: commissionAmount,
+              stripe_invoice_id: invoice.id,
+              status: 'pending'
+            });
+
+          if (insertError) {
+            console.error('❌ Error inserting commission:', insertError);
+          } else {
+            // Update referrer's earnings and balance
+            await supabase
+              .from('agencies')
+              .update({
+                referral_earnings_cents: (referrer.referral_earnings_cents || 0) + commissionAmount,
+                referral_balance_cents: (referrer.referral_balance_cents || 0) + commissionAmount
+              })
+              .eq('id', referrer.id);
+
+            console.log(`💰 Referral commission: $${(commissionAmount / 100).toFixed(2)} for ${referrer.name} (referred ${agency.name})`);
+          }
+        }
+      }
+    } catch (commissionError) {
+      console.error('❌ Error processing referral commission:', commissionError);
+      // Don't throw - payment succeeded, commission is secondary
+    }
+  }
+  // =========================================================================
 }
 
 async function handleAgencyPaymentFailed(invoice) {
