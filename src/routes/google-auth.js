@@ -4,7 +4,8 @@
 
 const { OAuth2Client } = require('google-auth-library');
 const { supabase } = require('../lib/supabase');
-const { generateToken, createPasswordToken } = require('./auth');
+const { generateToken } = require('./auth');
+const { createPasswordToken } = require('./agency-signup');
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
