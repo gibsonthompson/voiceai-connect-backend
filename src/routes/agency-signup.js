@@ -18,16 +18,22 @@ function generateSlug(name) {
     .substring(0, 30);
 }
 
-async function ensureUniqueSlug(baseSlug) {
+async function ensureUniqueSlug(baseSlug, excludeAgencyId = null) {
   let slug = baseSlug;
   let counter = 1;
   
   while (true) {
-    const { data } = await supabase
+    let query = supabase
       .from('agencies')
       .select('id')
-      .eq('slug', slug)
-      .single();
+      .eq('slug', slug);
+    
+    // Exclude current agency when updating slug
+    if (excludeAgencyId) {
+      query = query.neq('id', excludeAgencyId);
+    }
+    
+    const { data } = await query.single();
     
     if (!data) break;
     
@@ -62,24 +68,18 @@ async function createPasswordToken(userId, email) {
 }
 
 // ============================================================================
-// VALIDATE AGENCY SIGNUP
+// VALIDATE AGENCY SIGNUP (SIMPLIFIED - just email and firstName required)
 // ============================================================================
 function validateAgencySignup(body) {
   const errors = [];
   
-  if (!body.name || body.name.trim().length < 2) {
-    errors.push('Agency name is required (min 2 characters)');
-  }
+  // Name and phone are now optional - collected in onboarding step 1
   if (!body.email || !body.email.includes('@')) {
     errors.push('Valid email is required');
-  }
-  if (!body.phone || body.phone.replace(/\D/g, '').length < 10) {
-    errors.push('Valid phone number is required');
   }
   if (!body.firstName || body.firstName.trim().length < 1) {
     errors.push('First name is required');
   }
-  // Password removed - set via /auth/set-password after onboarding
   
   return errors;
 }
@@ -129,7 +129,9 @@ async function attributeReferral(agencyId, referralCode) {
 }
 
 // ============================================================================
-// AGENCY SIGNUP HANDLER
+// AGENCY SIGNUP HANDLER (SIMPLIFIED)
+// Only requires: email, firstName, lastName
+// Agency name and phone collected in onboarding step 1
 // ============================================================================
 async function handleAgencySignup(req, res) {
   try {
@@ -143,8 +145,15 @@ async function handleAgencySignup(req, res) {
       });
     }
     
-    const { name, email, phone, firstName, lastName, referralCode } = req.body;
-    // Password removed - will be set via /auth/set-password after onboarding
+    const { 
+      email, 
+      firstName, 
+      lastName, 
+      referralCode,
+      // Optional - if provided, skip onboarding step 1
+      name: agencyName,
+      phone 
+    } = req.body;
     
     // Check for duplicate email
     const { data: existing } = await supabase
@@ -160,28 +169,30 @@ async function handleAgencySignup(req, res) {
       });
     }
     
-    // Generate unique slug
-    const baseSlug = generateSlug(name);
+    // Generate temp agency name from user's first name (updated in onboarding step 1)
+    const tempName = agencyName || `${firstName}'s Agency`;
+    const baseSlug = generateSlug(tempName);
     const slug = await ensureUniqueSlug(baseSlug);
     
-    console.log(`🏢 Creating agency: ${name} (${slug})`);
+    console.log(`🏢 Creating agency for: ${firstName} ${lastName || ''} (${email})`);
     
     // Create agency record
     const { data: agency, error: agencyError } = await supabase
       .from('agencies')
       .insert({
-        name: name,
+        name: tempName,
         slug: slug,
         email: email.toLowerCase(),
-        phone: phone,
+        phone: phone || null,
         status: 'pending_payment',
         subscription_status: 'pending',
         plan_type: 'starter',
-        onboarding_step: 0,
+        onboarding_step: 1, // Start at step 1 (agency details)
+        onboarding_completed: false,
         // Default branding
-        primary_color: '#2563eb',
-        secondary_color: '#1e40af',
-        accent_color: '#3b82f6',
+        primary_color: '#10b981',
+        secondary_color: '#059669',
+        accent_color: '#34d399',
         // Default pricing
         price_starter: 4900,
         price_pro: 9900,
@@ -250,18 +261,17 @@ async function handleAgencySignup(req, res) {
       console.warn('⚠️ Welcome email failed (non-blocking):', emailError.message);
     }
     
-    console.log('🎉 Agency signup complete:', name);
+    console.log('🎉 Agency signup complete:', email);
     
     res.status(200).json({
       success: true,
       agencyId: agency.id,
       token: token,  // Return token - frontend stores for use after onboarding
-      message: 'Agency created! Complete onboarding to get started.',
+      message: 'Account created! Complete setup to get started.',
       agency: {
         id: agency.id,
         name: agency.name,
         slug: agency.slug,
-        url: `https://${slug}.voiceaiconnect.com`
       }
     });
     
@@ -275,7 +285,14 @@ async function handleAgencySignup(req, res) {
 }
 
 // ============================================================================
-// AGENCY ONBOARDING HANDLER (After plan selection)
+// AGENCY ONBOARDING HANDLER (UPDATED - 7 steps with agency details as step 1)
+// Step 1: Agency name + phone (NEW)
+// Step 2: Logo upload
+// Step 3: Brand colors
+// Step 4: Pricing
+// Step 5: Stripe Connect
+// Step 6: Set Password
+// Step 7: Complete
 // ============================================================================
 async function handleAgencyOnboarding(req, res) {
   try {
@@ -297,37 +314,58 @@ async function handleAgencyOnboarding(req, res) {
     
     console.log(`📝 Onboarding step ${step} for: ${agency.name}`);
     
-    let updateData = { onboarding_step: step };
+    let updateData = { 
+      onboarding_step: step + 1,
+      updated_at: new Date().toISOString()
+    };
     
     switch (step) {
-      case 1: // Logo upload
-        if (data.logo_url) {
-          updateData.logo_url = data.logo_url;
+      case 1: // Agency Details (NEW STEP)
+        if (data.name && data.name.trim()) {
+          updateData.name = data.name.trim();
+          
+          // Generate new slug from agency name
+          const baseSlug = generateSlug(data.name);
+          const uniqueSlug = await ensureUniqueSlug(baseSlug, agency_id);
+          updateData.slug = uniqueSlug;
+          updateData.referral_code = uniqueSlug; // Update referral code too
+          
+          console.log(`📛 Agency name set: ${data.name} (slug: ${uniqueSlug})`);
+        }
+        if (data.phone !== undefined) {
+          updateData.phone = data.phone || null;
         }
         break;
         
-      case 2: // Brand colors
+      case 2: // Logo upload
+        if (data.logo_url !== undefined) {
+          updateData.logo_url = data.logo_url || null;
+        }
+        break;
+        
+      case 3: // Brand colors
         if (data.primary_color) updateData.primary_color = data.primary_color;
         if (data.secondary_color) updateData.secondary_color = data.secondary_color;
         if (data.accent_color) updateData.accent_color = data.accent_color;
         break;
         
-      case 3: // Pricing
-        if (data.price_starter) updateData.price_starter = data.price_starter;
-        if (data.price_pro) updateData.price_pro = data.price_pro;
-        if (data.price_growth) updateData.price_growth = data.price_growth;
-        if (data.limit_starter) updateData.limit_starter = data.limit_starter;
-        if (data.limit_pro) updateData.limit_pro = data.limit_pro;
-        if (data.limit_growth) updateData.limit_growth = data.limit_growth;
+      case 4: // Pricing
+        if (data.price_starter !== undefined) updateData.price_starter = data.price_starter;
+        if (data.price_pro !== undefined) updateData.price_pro = data.price_pro;
+        if (data.price_growth !== undefined) updateData.price_growth = data.price_growth;
+        if (data.limit_starter !== undefined) updateData.limit_starter = data.limit_starter;
+        if (data.limit_pro !== undefined) updateData.limit_pro = data.limit_pro;
+        if (data.limit_growth !== undefined) updateData.limit_growth = data.limit_growth;
         break;
         
-      case 4: // Stripe Connect (handled separately)
+      case 5: // Stripe Connect (handled separately via /api/agency/connect/onboard)
         break;
         
-      case 5: // Password step (handled by frontend redirect)
+      case 6: // Password step (handled by frontend redirect to /auth/set-password)
+        updateData.onboarding_completed = true;
         break;
         
-      case 6: // Complete
+      case 7: // Complete
         updateData.onboarding_completed = true;
         break;
     }
@@ -340,8 +378,8 @@ async function handleAgencyOnboarding(req, res) {
     res.json({
       success: true,
       step: step,
-      next_step: step < 6 ? step + 1 : null,
-      completed: step >= 6
+      next_step: step < 7 ? step + 1 : null,
+      completed: step >= 7
     });
     
   } catch (error) {
@@ -356,5 +394,6 @@ async function handleAgencyOnboarding(req, res) {
 module.exports = {
   handleAgencySignup,
   handleAgencyOnboarding,
-  attributeReferral
+  attributeReferral,
+  createPasswordToken
 };

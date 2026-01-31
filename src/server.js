@@ -170,6 +170,9 @@ const {
   requestPasswordReset
 } = require('./routes/auth');
 
+// Google OAuth
+const { googleAuth, googleCallback } = require('./routes/google-auth');
+
 // ============================================================================
 // HEALTH CHECK
 // ============================================================================
@@ -185,7 +188,8 @@ app.get('/health', (req, res) => {
       stripeConnect: true,
       vapiIntegration: true,
       automatedDomains: true,
-      referralProgram: true
+      referralProgram: true,
+      googleOAuth: true
     }
   });
 });
@@ -440,6 +444,10 @@ app.post('/api/auth/client/login', clientLogin);
 app.post('/api/auth/verify', verifyToken);
 app.post('/api/auth/set-password', setPassword);
 app.post('/api/auth/reset-password', requestPasswordReset);
+
+// Google OAuth
+app.get('/api/auth/google', googleAuth);
+app.get('/api/auth/google/callback', googleCallback);
 
 // ============================================================================
 // CRON ROUTES (Trial Expiration)
