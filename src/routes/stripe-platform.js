@@ -20,8 +20,8 @@ const PLAN_DETAILS = {
   enterprise: { name: 'Enterprise', clientLimit: -1, price: 29900 }      // $299/mo - unlimited + priority support
 }; // -1 = unlimited
 
-// Referral commission rate
-const COMMISSION_RATE = 0.20; // 20%
+// Referral commission rate - 40% to match GoHighLevel
+const COMMISSION_RATE = 0.40; // 40%
 
 // ============================================================================
 // CREATE CHECKOUT SESSION (Agency subscribes to platform)
@@ -343,7 +343,7 @@ async function handleAgencyPaymentSucceeded(invoice) {
     .eq('id', agency.id);
 
   // =========================================================================
-  // PROCESS REFERRAL COMMISSION
+  // PROCESS REFERRAL COMMISSION (40%)
   // =========================================================================
   if (agency.referred_by) {
     try {
@@ -367,7 +367,7 @@ async function handleAgencyPaymentSucceeded(invoice) {
         if (existingCommission) {
           console.log(`ℹ️ Commission already processed for invoice: ${invoice.id}`);
         } else {
-          // Calculate commission (20% of payment)
+          // Calculate commission (40% of payment)
           const paymentAmount = invoice.amount_paid; // in cents
           const commissionAmount = Math.round(paymentAmount * COMMISSION_RATE);
 

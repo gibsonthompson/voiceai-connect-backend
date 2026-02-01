@@ -1,12 +1,12 @@
 // ============================================================================
 // REFERRAL SYSTEM ROUTES
-// VoiceAI Connect - Agency referral program (20% recurring commission)
+// VoiceAI Connect - Agency referral program (40% recurring commission)
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase, getAgencyById } = require('../lib/supabase');
 
-const COMMISSION_RATE = 0.20; // 20%
+const COMMISSION_RATE = 0.40; // 40% - matching GoHighLevel
 
 // ============================================================================
 // GET /api/agency/:agencyId/referrals
@@ -279,7 +279,7 @@ async function processReferralCommission(invoice, agency) {
       return { processed: false, reason: 'Commission already processed for this invoice' };
     }
 
-    // Calculate commission (20% of payment)
+    // Calculate commission (40% of payment)
     const paymentAmount = invoice.amount_paid; // in cents
     const commissionAmount = Math.round(paymentAmount * COMMISSION_RATE);
 
