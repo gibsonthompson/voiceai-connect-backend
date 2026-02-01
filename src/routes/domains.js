@@ -27,7 +27,9 @@ router.get('/test', (req, res) => {
     ok: true, 
     message: 'Domain routes are loaded and working',
     timestamp: new Date().toISOString(),
-    supabaseLoaded: !!supabase
+    supabaseLoaded: !!supabase,
+    hasVercelToken: !!process.env.VERCEL_API_TOKEN,
+    hasProjectId: !!process.env.VERCEL_PROJECT_ID,
   });
 });
 
@@ -79,7 +81,9 @@ const DEFAULT_DNS_CONFIG = {
 
 console.log('📡 Domain routes loaded with config:', {
   hasVercelToken: !!VERCEL_TOKEN,
+  tokenPrefix: VERCEL_TOKEN ? VERCEL_TOKEN.substring(0, 10) + '...' : 'none',
   hasProjectId: !!VERCEL_PROJECT_ID,
+  projectId: VERCEL_PROJECT_ID || 'not set',
   hasTeamId: !!VERCEL_TEAM_ID,
 });
 
@@ -87,7 +91,9 @@ console.log('📡 Domain routes loaded with config:', {
 // HELPER: Make Vercel API Request
 // ============================================================================
 async function vercelRequest(method, endpoint, body = null) {
-  const teamParam = VERCEL_TEAM_ID ? `?teamId=${VERCEL_TEAM_ID}` : '';
+  // Build URL with team parameter if present
+  const separator = endpoint.includes('?') ? '&' : '?';
+  const teamParam = VERCEL_TEAM_ID ? `${separator}teamId=${VERCEL_TEAM_ID}` : '';
   const url = `${VERCEL_API}${endpoint}${teamParam}`;
   
   const options = {
@@ -102,14 +108,16 @@ async function vercelRequest(method, endpoint, body = null) {
     options.body = JSON.stringify(body);
   }
   
-  console.log(`🔗 Vercel API: ${method} ${endpoint}`);
+  console.log(`🔗 Vercel API: ${method} ${url}`);
   
   const response = await fetch(url, options);
   const data = await response.json();
   
+  console.log(`📥 Vercel API Response (${response.status}):`, JSON.stringify(data, null, 2));
+  
   if (!response.ok) {
     console.error(`❌ Vercel API Error:`, data);
-    throw new Error(data.error?.message || data.error?.code || 'Vercel API error');
+    throw new Error(data.error?.message || data.error?.code || `Vercel API error: ${response.status}`);
   }
   
   return data;
@@ -117,7 +125,8 @@ async function vercelRequest(method, endpoint, body = null) {
 
 // ============================================================================
 // HELPER: Fetch Project-Specific DNS Values from Vercel
-// This is CRITICAL - using generic 76.76.21.21 causes SSL issues!
+// CRITICAL: Using generic 76.76.21.21 causes SSL certificate issues!
+// The /v6/domains/{domain}/config endpoint returns project-specific values
 // ============================================================================
 async function fetchVercelDnsConfig(domain) {
   if (!VERCEL_TOKEN) {
@@ -126,7 +135,9 @@ async function fetchVercelDnsConfig(domain) {
   }
 
   try {
-    // The /v6/domains/{domain}/config endpoint returns project-specific DNS values
+    // The /v6/domains/{domain}/config endpoint returns:
+    // - recommendedIPv4: [{ rank: 1, value: ["216.198.79.1"] }]
+    // - recommendedCNAME: [{ rank: 1, value: "52f2ec7ccc7d7f3b.vercel-dns-017.com" }]
     const teamParam = VERCEL_TEAM_ID ? `?teamId=${VERCEL_TEAM_ID}` : '';
     const configUrl = `${VERCEL_API}/v6/domains/${domain}/config${teamParam}`;
     
@@ -136,21 +147,19 @@ async function fetchVercelDnsConfig(domain) {
       headers: { 'Authorization': `Bearer ${VERCEL_TOKEN}` }
     });
 
-    if (!response.ok) {
-      console.log(`⚠️ Config endpoint returned ${response.status}, using defaults`);
-      return DEFAULT_DNS_CONFIG;
-    }
-
     const data = await response.json();
     console.log('📋 Vercel DNS config response:', JSON.stringify(data, null, 2));
 
+    if (!response.ok) {
+      console.log(`⚠️ Config endpoint returned ${response.status}: ${data.error?.message || 'Unknown error'}`);
+      return DEFAULT_DNS_CONFIG;
+    }
+
     // Extract the rank=1 (preferred) values
-    // recommendedIPv4 format: [{ rank: 1, value: ["216.198.79.1"] }]
-    // recommendedCNAME format: [{ rank: 1, value: "52f2ec7ccc7d7f3b.vercel-dns-017.com" }]
-    
     let aRecord = DEFAULT_DNS_CONFIG.aRecord;
     let cnameRecord = DEFAULT_DNS_CONFIG.cnameRecord;
 
+    // recommendedIPv4 format: [{ rank: 1, value: ["216.198.79.1"] }]
     if (data.recommendedIPv4 && Array.isArray(data.recommendedIPv4)) {
       const preferred = data.recommendedIPv4.find(r => r.rank === 1);
       if (preferred?.value?.[0]) {
@@ -159,6 +168,7 @@ async function fetchVercelDnsConfig(domain) {
       }
     }
 
+    // recommendedCNAME format: [{ rank: 1, value: "52f2ec7ccc7d7f3b.vercel-dns-017.com" }]
     if (data.recommendedCNAME && Array.isArray(data.recommendedCNAME)) {
       const preferred = data.recommendedCNAME.find(r => r.rank === 1);
       if (preferred?.value) {
@@ -167,7 +177,12 @@ async function fetchVercelDnsConfig(domain) {
       }
     }
 
-    return { aRecord, cnameRecord, misconfigured: data.misconfigured };
+    return { 
+      aRecord, 
+      cnameRecord, 
+      misconfigured: data.misconfigured,
+      source: aRecord !== DEFAULT_DNS_CONFIG.aRecord ? 'vercel-api' : 'fallback'
+    };
 
   } catch (error) {
     console.error('❌ Failed to fetch Vercel DNS config:', error);
@@ -184,20 +199,29 @@ router.get('/dns-config', async (req, res) => {
   const { domain } = req.query;
   console.log('📋 DNS config requested', domain ? `for domain: ${domain}` : '(no domain)');
   
-  let config = DEFAULT_DNS_CONFIG;
+  let config = { ...DEFAULT_DNS_CONFIG, source: 'fallback' };
   
   // If a domain is provided, try to get project-specific values
   if (domain && VERCEL_TOKEN) {
-    config = await fetchVercelDnsConfig(domain);
+    const vercelConfig = await fetchVercelDnsConfig(domain);
+    config = {
+      aRecord: vercelConfig.aRecord,
+      cnameRecord: vercelConfig.cnameRecord,
+      source: vercelConfig.source || (vercelConfig.aRecord !== DEFAULT_DNS_CONFIG.aRecord ? 'vercel-api' : 'fallback'),
+      misconfigured: vercelConfig.misconfigured,
+    };
   }
+  
+  console.log(`📤 Returning DNS config: A=${config.aRecord}, CNAME=${config.cnameRecord}, source=${config.source}`);
   
   res.json({
     a_record: config.aRecord,
     cname_record: config.cnameRecord,
-    source: config.aRecord === DEFAULT_DNS_CONFIG.aRecord ? 'fallback' : 'vercel-api',
+    source: config.source,
+    misconfigured: config.misconfigured,
     instructions: {
       apex: `Point your A record (@) to ${config.aRecord}`,
-      subdomain: `Point your CNAME to ${config.cnameRecord}`
+      www: `Point your CNAME (www) to ${config.cnameRecord}`
     }
   });
 });
@@ -211,6 +235,7 @@ router.post('/:agencyId/domain', async (req, res) => {
   console.log(`\n🌐 ===== ADD DOMAIN REQUEST =====`);
   console.log(`   Agency ID: ${agencyId}`);
   console.log(`   Body:`, req.body);
+  console.log(`   Vercel Config: token=${!!VERCEL_TOKEN}, projectId=${VERCEL_PROJECT_ID || 'not set'}`);
   
   try {
     const { domain } = req.body;
@@ -256,37 +281,57 @@ router.post('/:agencyId/domain', async (req, res) => {
       });
     }
     
-    // Step 1: Add domain to Vercel project (if configured)
-    let vercelResponse = null;
+    // Step 1: Add BOTH apex and www domains to Vercel project
+    let vercelApexResponse = null;
+    let vercelWwwResponse = null;
     let vercelError = null;
     
     if (VERCEL_TOKEN && VERCEL_PROJECT_ID) {
       console.log(`   🔄 Adding to Vercel project: ${VERCEL_PROJECT_ID}`);
+      
+      // Add apex domain (example.com)
       try {
-        vercelResponse = await vercelRequest(
+        vercelApexResponse = await vercelRequest(
           'POST',
           `/v10/projects/${VERCEL_PROJECT_ID}/domains`,
           { name: normalizedDomain }
         );
-        console.log(`   ✅ Domain added to Vercel:`, vercelResponse.name);
+        console.log(`   ✅ Apex domain added to Vercel: ${vercelApexResponse.name}`);
       } catch (err) {
-        // Domain might already exist on Vercel - that's OK
-        if (err.message.includes('already') || err.message.includes('exists')) {
-          console.log(`   ℹ️ Domain already exists on Vercel, continuing...`);
+        if (err.message.includes('already') || err.message.includes('exists') || err.message.includes('DOMAIN_ALREADY_EXISTS')) {
+          console.log(`   ℹ️ Apex domain already exists on Vercel, continuing...`);
         } else {
           vercelError = err.message;
-          console.log(`   ⚠️ Vercel error (non-fatal):`, err.message);
+          console.log(`   ⚠️ Vercel apex domain error (non-fatal):`, err.message);
+        }
+      }
+      
+      // Add www subdomain (www.example.com)
+      try {
+        vercelWwwResponse = await vercelRequest(
+          'POST',
+          `/v10/projects/${VERCEL_PROJECT_ID}/domains`,
+          { name: `www.${normalizedDomain}` }
+        );
+        console.log(`   ✅ WWW domain added to Vercel: ${vercelWwwResponse.name}`);
+      } catch (err) {
+        if (err.message.includes('already') || err.message.includes('exists') || err.message.includes('DOMAIN_ALREADY_EXISTS')) {
+          console.log(`   ℹ️ WWW domain already exists on Vercel, continuing...`);
+        } else {
+          console.log(`   ⚠️ Vercel www domain error (non-fatal):`, err.message);
         }
       }
     } else {
-      console.log(`   ⚠️ Vercel credentials not configured, skipping API call`);
+      console.log(`   ⚠️ Vercel credentials not configured!`);
+      console.log(`      VERCEL_TOKEN: ${VERCEL_TOKEN ? 'SET' : 'MISSING'}`);
+      console.log(`      VERCEL_PROJECT_ID: ${VERCEL_PROJECT_ID || 'MISSING'}`);
     }
     
     // Step 2: Fetch PROJECT-SPECIFIC DNS values from Vercel
-    // This is critical - using generic 76.76.21.21 causes SSL certificate issues!
+    // CRITICAL: This must happen AFTER adding the domain to Vercel
     console.log(`   🔍 Fetching project-specific DNS values...`);
     const dnsConfig = await fetchVercelDnsConfig(normalizedDomain);
-    console.log(`   📋 DNS Config: A=${dnsConfig.aRecord}, CNAME=${dnsConfig.cnameRecord}`);
+    console.log(`   📋 DNS Config: A=${dnsConfig.aRecord}, CNAME=${dnsConfig.cnameRecord}, source=${dnsConfig.source || 'unknown'}`);
     
     // Step 3: Update agency in database
     console.log(`   💾 Updating database...`);
@@ -333,15 +378,15 @@ router.post('/:agencyId/domain', async (req, res) => {
     res.json({
       success: true,
       domain: normalizedDomain,
-      vercel_added: !!vercelResponse,
+      vercel_added: !!(vercelApexResponse || vercelWwwResponse),
       vercel_error: vercelError,
       dns_instructions: dnsInstructions,
       dns_config: {
         a_record: dnsConfig.aRecord,
         cname_record: dnsConfig.cnameRecord,
-        source: dnsConfig.aRecord === DEFAULT_DNS_CONFIG.aRecord ? 'fallback' : 'vercel-api'
+        source: dnsConfig.source || (dnsConfig.aRecord !== DEFAULT_DNS_CONFIG.aRecord ? 'vercel-api' : 'fallback')
       },
-      verification: vercelResponse?.verification || null
+      verification: vercelApexResponse?.verification || null
     });
     
   } catch (error) {
@@ -450,6 +495,7 @@ router.post('/:agencyId/domain/verify', async (req, res) => {
     // Fetch the expected DNS values from Vercel
     const dnsConfig = await fetchVercelDnsConfig(domain);
     console.log(`   Expected A record: ${dnsConfig.aRecord}`);
+    console.log(`   Expected CNAME: ${dnsConfig.cnameRecord}`);
     
     // Step 1: Try to verify on Vercel
     let vercelVerified = false;
@@ -484,7 +530,7 @@ router.post('/:agencyId/domain/verify', async (req, res) => {
         console.log(`   ⚠️ A record doesn't match. Expected: ${dnsConfig.aRecord}, Found: ${aRecords.join(', ')}`);
       }
     } catch (e) {
-      console.log(`   No A record found`);
+      console.log(`   No A record found for apex domain`);
     }
     
     if (!dnsVerified) {
@@ -496,7 +542,7 @@ router.post('/:agencyId/domain/verify', async (req, res) => {
           dnsVerified = true;
         }
       } catch (e) {
-        console.log(`   No CNAME record found`);
+        console.log(`   No CNAME record found for apex domain`);
       }
     }
     
@@ -524,9 +570,10 @@ router.post('/:agencyId/domain/verify', async (req, res) => {
       dns_verified: dnsVerified,
       dns_details: dnsDetails,
       expected_a_record: dnsConfig.aRecord,
+      expected_cname: dnsConfig.cnameRecord,
       message: isVerified 
         ? 'Domain verified successfully!'
-        : `DNS records not found. Please set your A record to ${dnsConfig.aRecord} and allow up to 48 hours for propagation.`
+        : `DNS records not found. Please set your A record to ${dnsConfig.aRecord} and CNAME (www) to ${dnsConfig.cnameRecord}. Allow up to 48 hours for propagation.`
     });
     
   } catch (error) {
@@ -562,17 +609,28 @@ router.delete('/:agencyId/domain', async (req, res) => {
     const domain = agency.marketing_domain;
     console.log(`   Removing domain: ${domain}`);
     
-    // Step 1: Remove from Vercel
+    // Step 1: Remove BOTH apex and www from Vercel
     if (VERCEL_TOKEN && VERCEL_PROJECT_ID) {
+      // Remove apex
       try {
         await vercelRequest(
           'DELETE',
           `/v9/projects/${VERCEL_PROJECT_ID}/domains/${domain}`
         );
-        console.log(`   ✅ Domain removed from Vercel`);
+        console.log(`   ✅ Apex domain removed from Vercel`);
       } catch (err) {
-        console.log(`   ⚠️ Could not remove from Vercel:`, err.message);
-        // Continue anyway - might not exist on Vercel
+        console.log(`   ⚠️ Could not remove apex from Vercel:`, err.message);
+      }
+      
+      // Remove www
+      try {
+        await vercelRequest(
+          'DELETE',
+          `/v9/projects/${VERCEL_PROJECT_ID}/domains/www.${domain}`
+        );
+        console.log(`   ✅ WWW domain removed from Vercel`);
+      } catch (err) {
+        console.log(`   ⚠️ Could not remove www from Vercel:`, err.message);
       }
     }
     

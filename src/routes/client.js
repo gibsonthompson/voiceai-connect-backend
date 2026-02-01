@@ -170,6 +170,7 @@ const VOICE_OPTIONS = [
 
 // ============================================================================
 // GET /api/client/:id - Full client data with agency
+// UPDATED: Added website_theme to agency select
 // ============================================================================
 router.get('/:id', async (req, res) => {
   try {
@@ -182,7 +183,8 @@ router.get('/:id', async (req, res) => {
         agency:agencies (
           id, name, slug, 
           primary_color, secondary_color, accent_color,
-          logo_url, support_email, support_phone
+          logo_url, support_email, support_phone,
+          website_theme
         )
       `)
       .eq('id', id)
