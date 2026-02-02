@@ -143,7 +143,7 @@ async function createAgencyPortal(req, res) {
 
     const session = await stripe.billingPortal.sessions.create({
       customer: agency.stripe_customer_id,
-      return_url: `${process.env.FRONTEND_URL}/agency/settings/billing`
+      return_url: `${process.env.FRONTEND_URL}/agency/settings?tab=billing`
     });
 
     res.json({
@@ -233,7 +233,7 @@ async function handleAgencyCheckoutCompleted(session) {
     .from('agencies')
     .update({
       status: 'trial',
-      subscription_status: 'trial',
+      subscription_status: 'trialing',
       plan_type: plan,
       stripe_subscription_id: session.subscription,
       trial_ends_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
