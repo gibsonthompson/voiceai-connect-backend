@@ -214,6 +214,75 @@ app.post('/api/agency/:agencyId/domain/verify', verifyAgencyDomain);
 app.post('/api/agency/checkout', createAgencyCheckout);
 app.post('/api/agency/portal', createAgencyPortal);
 
+// Agency cancel subscription (during trial)
+app.post('/api/agency/cancel', async (req, res) => {
+  const { agency_id } = req.body;
+  
+  if (!agency_id) {
+    return res.status(400).json({ error: 'agency_id required' });
+  }
+
+  try {
+    const { data: agency, error } = await supabase
+      .from('agencies')
+      .select('id, name, stripe_subscription_id')
+      .eq('id', agency_id)
+      .single();
+
+    if (error || !agency) {
+      return res.status(404).json({ error: 'Agency not found' });
+    }
+
+    console.log('🛑 Canceling subscription for:', agency.name);
+
+    // Cancel Stripe subscription if exists
+    if (agency.stripe_subscription_id) {
+      const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+      try {
+        await stripe.subscriptions.cancel(agency.stripe_subscription_id);
+        console.log('✅ Stripe subscription canceled');
+      } catch (stripeErr) {
+        console.error('Stripe cancel error (continuing):', stripeErr.message);
+      }
+    }
+
+    // Update agency status
+    await supabase
+      .from('agencies')
+      .update({ 
+        subscription_status: 'canceled', 
+        status: 'canceled',
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', agency_id);
+
+    // Suspend all agency's clients
+    const { data: clients } = await supabase
+      .from('clients')
+      .select('id')
+      .eq('agency_id', agency_id);
+
+    if (clients && clients.length > 0) {
+      await supabase
+        .from('clients')
+        .update({ 
+          status: 'suspended', 
+          subscription_status: 'agency_canceled' 
+        })
+        .eq('agency_id', agency_id);
+      
+      console.log(`⚠️ Suspended ${clients.length} clients`);
+    }
+
+    console.log('✅ Agency subscription canceled:', agency.name);
+    res.json({ success: true, message: 'Subscription canceled' });
+
+  } catch (err) {
+    console.error('❌ Cancel error:', err);
+    res.status(500).json({ error: 'Failed to cancel subscription' });
+  }
+});
+
 // Stripe Connect onboarding
 app.post('/api/agency/connect/onboard', createConnectAccountLink);
 
