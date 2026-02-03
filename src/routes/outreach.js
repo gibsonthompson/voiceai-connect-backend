@@ -414,28 +414,32 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
 // ============================================================================
 // POST /api/agency/:agencyId/outreach/log
 // Log that an outreach was sent (copy-to-clipboard flow)
+// FIXED: Uses outreach_history table with correct column names
 // ============================================================================
 router.post('/:agencyId/outreach/log', async (req, res) => {
   try {
     const { agencyId } = req.params;
-    const { leadId, templateId, type, toAddress, subject, body, userId } = req.body;
+    const { leadId, templateId, type, toAddress, toPhone, subject, body, userId } = req.body;
 
-    if (!type || !toAddress || !body) {
-      return res.status(400).json({ error: 'type, toAddress, and body are required' });
+    if (!type || !body) {
+      return res.status(400).json({ error: 'type and body are required' });
     }
 
-    // Log to outreach_emails
+    // Log to outreach_history (NOT outreach_emails)
+    // Use correct column names: recipient_email, recipient_phone (NOT to_address)
     const { data: outreach, error } = await supabase
-      .from('outreach_emails')
+      .from('outreach_history')
       .insert({
         agency_id: agencyId,
         lead_id: leadId || null,
         template_id: templateId || null,
         type,
-        to_address: toAddress,
+        recipient_email: toAddress || null,
+        recipient_phone: toPhone || null,
         subject: subject || null,
         body,
-        status: 'sent'
+        status: 'sent',
+        sent_at: new Date().toISOString()
       })
       .select()
       .single();
@@ -454,7 +458,7 @@ router.post('/:agencyId/outreach/log', async (req, res) => {
         type === 'email' ? ACTION_TYPES.EMAIL_SENT : ACTION_TYPES.SMS_SENT,
         { 
           subject, 
-          to_address: toAddress,
+          recipient: toAddress || toPhone,
           outreach_id: outreach.id 
         },
         userId
@@ -487,6 +491,7 @@ router.post('/:agencyId/outreach/log', async (req, res) => {
 // ============================================================================
 // GET /api/agency/:agencyId/outreach/history
 // Get outreach history
+// FIXED: Uses outreach_history table (NOT outreach_emails)
 // ============================================================================
 router.get('/:agencyId/outreach/history', async (req, res) => {
   try {
@@ -494,7 +499,7 @@ router.get('/:agencyId/outreach/history', async (req, res) => {
     const { leadId, type, limit = 50, offset = 0 } = req.query;
 
     let query = supabase
-      .from('outreach_emails')
+      .from('outreach_history')
       .select(`
         *,
         lead:leads (id, business_name, contact_name),

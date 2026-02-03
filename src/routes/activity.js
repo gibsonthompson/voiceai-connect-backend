@@ -31,14 +31,11 @@ router.get('/:agencyId/activity/:entityType/:entityId', async (req, res) => {
     const { agencyId, entityType, entityId } = req.params;
     const { limit = 50, offset = 0 } = req.query;
 
+    // Note: Using 'activity' table (not 'activity_log')
+    // The performed_by join to users may fail if no FK exists - handle gracefully
     const { data: activities, error, count } = await supabase
-      .from('activity_log')
-      .select(`
-        *,
-        performer:users!activity_log_performed_by_fkey (
-          id, first_name, last_name, email
-        )
-      `, { count: 'exact' })
+      .from('activity')
+      .select('*', { count: 'exact' })
       .eq('agency_id', agencyId)
       .eq('entity_type', entityType)
       .eq('entity_id', entityId)
@@ -71,13 +68,8 @@ router.get('/:agencyId/activity', async (req, res) => {
     const { limit = 50, offset = 0, entityType, actionType } = req.query;
 
     let query = supabase
-      .from('activity_log')
-      .select(`
-        *,
-        performer:users!activity_log_performed_by_fkey (
-          id, first_name, last_name, email
-        )
-      `, { count: 'exact' })
+      .from('activity')
+      .select('*', { count: 'exact' })
       .eq('agency_id', agencyId)
       .order('created_at', { ascending: false });
 
@@ -122,7 +114,7 @@ router.post('/:agencyId/activity', async (req, res) => {
     }
 
     const { data: activity, error } = await supabase
-      .from('activity_log')
+      .from('activity')
       .insert({
         agency_id: agencyId,
         entity_type: entityType,
@@ -152,7 +144,7 @@ router.post('/:agencyId/activity', async (req, res) => {
 async function logActivity(agencyId, entityType, entityId, actionType, actionData = {}, performedBy = null) {
   try {
     const { error } = await supabase
-      .from('activity_log')
+      .from('activity')
       .insert({
         agency_id: agencyId,
         entity_type: entityType,

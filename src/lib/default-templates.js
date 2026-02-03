@@ -1,13 +1,12 @@
 // ============================================================================
-// DEFAULT OUTREACH TEMPLATES
-// Automatically created for each new agency on signup
+// DEFAULT TEMPLATES - Seed templates for new agencies
+// VoiceAI Connect
 // ============================================================================
-const { supabase } = require('../lib/supabase');
+const { supabase } = require('./supabase');
 
+// Default templates - NO 'category' column (doesn't exist in schema)
 const DEFAULT_TEMPLATES = [
-  // ============================================================================
-  // EMAIL TEMPLATES - Initial Outreach Sequence
-  // ============================================================================
+  // ==================== EMAIL TEMPLATES ====================
   {
     name: 'Initial Outreach',
     description: 'First contact with a new lead - friendly, value-focused',
@@ -27,13 +26,15 @@ Best,
 {agency_owner_name}
 {agency_name}
 {agency_phone}`,
-    is_default: true,
+    is_default: false, // Will be owned by agency, not global
+    is_follow_up: false,
+    sequence_name: 'initial_sequence',
     sequence_order: 1,
     delay_days: 0
   },
   {
     name: 'Follow-up #1 - Value Add',
-    description: 'First follow-up - share a specific benefit',
+    description: 'First follow-up - share a specific benefit or testimonial',
     type: 'email',
     subject: 'Following up - {lead_business_name}',
     body: `Hi {lead_contact_first_name},
@@ -50,14 +51,15 @@ Would tomorrow or Thursday work for a quick call?
 
 {agency_owner_name}
 {agency_name}`,
-    is_default: true,
+    is_default: false,
     is_follow_up: true,
+    sequence_name: 'initial_sequence',
     sequence_order: 2,
     delay_days: 3
   },
   {
     name: 'Follow-up #2 - Social Proof',
-    description: 'Second follow-up - ROI focused',
+    description: 'Second follow-up - ROI focused with statistics',
     type: 'email',
     subject: 'Real numbers from {lead_industry} businesses',
     body: `Hi {lead_contact_first_name},
@@ -76,8 +78,9 @@ Just reply "interested" and I'll send over a few time options.
 
 {agency_owner_name}
 {agency_phone}`,
-    is_default: true,
+    is_default: false,
     is_follow_up: true,
+    sequence_name: 'initial_sequence',
     sequence_order: 3,
     delay_days: 4
   },
@@ -98,8 +101,9 @@ Either way is totally fine - just let me know and I'll adjust accordingly.
 
 {agency_owner_name}
 {agency_name}`,
-    is_default: true,
+    is_default: false,
     is_follow_up: true,
+    sequence_name: 'initial_sequence',
     sequence_order: 4,
     delay_days: 5
   },
@@ -121,18 +125,15 @@ Wishing you and {lead_business_name} continued success.
 Best,
 {agency_owner_name}
 {agency_name}`,
-    is_default: true,
+    is_default: false,
     is_follow_up: true,
+    sequence_name: 'initial_sequence',
     sequence_order: 5,
     delay_days: 7
   },
-
-  // ============================================================================
-  // EMAIL TEMPLATES - Situational
-  // ============================================================================
   {
     name: 'Referral Introduction',
-    description: 'When you get a warm referral',
+    description: 'When you get a warm referral from an existing client',
     type: 'email',
     subject: '{lead_contact_first_name} - [Referrer Name] suggested I reach out',
     body: `Hi {lead_contact_first_name},
@@ -149,7 +150,9 @@ Best,
 {agency_owner_name}
 {agency_name}
 {agency_phone}`,
-    is_default: true,
+    is_default: false,
+    is_follow_up: false,
+    sequence_name: null,
     sequence_order: null,
     delay_days: null
   },
@@ -167,7 +170,7 @@ As promised, here's a quick recap:
 - Your AI receptionist will answer calls 24/7
 - It'll handle FAQs, book appointments, and take messages
 - Setup takes about 24-48 hours
-- You can try it risk-free for 14 days
+- You can try it risk-free for 7 days
 
 Ready to get started? Just reply "let's do it" and I'll send over the signup link.
 
@@ -175,13 +178,15 @@ Or if you have any questions, I'm happy to jump on another quick call.
 
 {agency_owner_name}
 {agency_phone}`,
-    is_default: true,
+    is_default: false,
+    is_follow_up: false,
+    sequence_name: null,
     sequence_order: null,
     delay_days: null
   },
   {
     name: 'Re-engagement - Past Lead',
-    description: 'Reaching back out to cold leads',
+    description: 'Reaching back out to cold leads after some time',
     type: 'email',
     subject: 'Still missing calls at {lead_business_name}?',
     body: `Hi {lead_contact_first_name},
@@ -196,21 +201,23 @@ Worth a quick 10-minute call?
 
 {agency_owner_name}
 {agency_name}`,
-    is_default: true,
+    is_default: false,
+    is_follow_up: false,
+    sequence_name: null,
     sequence_order: null,
     delay_days: null
   },
 
-  // ============================================================================
-  // SMS TEMPLATES
-  // ============================================================================
+  // ==================== SMS TEMPLATES ====================
   {
     name: 'SMS - Initial Outreach',
     description: 'First SMS contact - short and direct',
     type: 'sms',
     subject: null,
     body: `Hi {lead_contact_first_name}, this is {agency_owner_name} from {agency_name}. I help {lead_industry} businesses like {lead_business_name} never miss a call with AI receptionists. Worth a quick chat? Let me know!`,
-    is_default: true,
+    is_default: false,
+    is_follow_up: false,
+    sequence_name: 'sms_sequence',
     sequence_order: 1,
     delay_days: 0
   },
@@ -220,8 +227,9 @@ Worth a quick 10-minute call?
     type: 'sms',
     subject: null,
     body: `Hi {lead_contact_first_name}, following up on my message about AI receptionists for {lead_business_name}. Our clients see 40% more booked appointments. Quick call this week? - {agency_owner_name}`,
-    is_default: true,
+    is_default: false,
     is_follow_up: true,
+    sequence_name: 'sms_sequence',
     sequence_order: 2,
     delay_days: 2
   },
@@ -231,104 +239,122 @@ Worth a quick 10-minute call?
     type: 'sms',
     subject: null,
     body: `Hi {lead_contact_first_name}, just left you a voicemail about AI receptionists for {lead_business_name}. Happy to answer any questions via text if that's easier! - {agency_owner_name}`,
-    is_default: true,
+    is_default: false,
+    is_follow_up: false,
+    sequence_name: null,
     sequence_order: null,
     delay_days: null
   },
   {
     name: 'SMS - Demo Reminder',
-    description: 'Remind about scheduled demo',
+    description: 'Remind about scheduled demo call',
     type: 'sms',
     subject: null,
     body: `Hi {lead_contact_first_name}! Just a reminder about our call today at [TIME]. Looking forward to showing you how AI receptionists can help {lead_business_name}. Talk soon! - {agency_owner_name}`,
-    is_default: true,
+    is_default: false,
+    is_follow_up: false,
+    sequence_name: null,
     sequence_order: null,
     delay_days: null
   },
   {
     name: 'SMS - Quick Question',
-    description: 'Casual check-in',
+    description: 'Casual check-in to start a conversation',
     type: 'sms',
     subject: null,
     body: `Hey {lead_contact_first_name}, quick question - how many calls does {lead_business_name} miss per week? Just curious if our AI receptionist could help. - {agency_owner_name}`,
-    is_default: true,
+    is_default: false,
+    is_follow_up: false,
+    sequence_name: null,
     sequence_order: null,
     delay_days: null
   }
 ];
 
-// ============================================================================
-// SEED FUNCTION - Call this when a new agency signs up
-// ============================================================================
-async function seedDefaultTemplates(agencyId) {
+/**
+ * Seed default templates for an agency if they don't have any
+ * @param {string} agencyId - The agency ID to seed templates for
+ * @returns {Promise<{success: boolean, count?: number, skipped?: boolean, error?: string}>}
+ */
+async function seedDefaultTemplatesIfNeeded(agencyId) {
   try {
-    console.log(`Seeding default templates for agency: ${agencyId}`);
+    // Check if agency already has templates
+    const { data: existingTemplates, error: checkError } = await supabase
+      .from('outreach_templates')
+      .select('id')
+      .eq('agency_id', agencyId)
+      .limit(1);
 
+    if (checkError) {
+      console.error('Error checking existing templates:', checkError);
+      return { success: false, error: checkError.message };
+    }
+
+    // If templates exist, skip seeding
+    if (existingTemplates && existingTemplates.length > 0) {
+      console.log(`⏭️ Agency ${agencyId} already has templates, skipping seed`);
+      return { success: true, skipped: true };
+    }
+
+    // Add agency_id to each template
     const templatesToInsert = DEFAULT_TEMPLATES.map(template => ({
-      agency_id: agencyId,
-      name: template.name,
-      description: template.description,
-      type: template.type,
-      subject: template.subject,
-      body: template.body,
-      is_default: template.is_default,
-      is_follow_up: template.is_follow_up || false,
-      sequence_order: template.sequence_order,
-      delay_days: template.delay_days,
-      use_count: 0
+      ...template,
+      agency_id: agencyId
     }));
 
-    const { data, error } = await supabase
+    // Insert templates
+    const { data: insertedTemplates, error: insertError } = await supabase
       .from('outreach_templates')
       .insert(templatesToInsert)
       .select();
 
-    if (error) {
-      console.error('Error seeding templates:', error);
-      return { success: false, error: error.message };
+    if (insertError) {
+      console.error('Error inserting templates:', insertError);
+      return { success: false, error: insertError.message };
     }
 
-    console.log(`Successfully seeded ${data.length} templates for agency ${agencyId}`);
-    return { success: true, count: data.length };
-  } catch (err) {
-    console.error('Error in seedDefaultTemplates:', err);
-    return { success: false, error: err.message };
+    console.log(`✅ Seeded ${insertedTemplates.length} default templates for agency ${agencyId}`);
+    return { success: true, count: insertedTemplates.length };
+  } catch (error) {
+    console.error('Error seeding templates:', error);
+    return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// CHECK IF AGENCY HAS TEMPLATES (avoid duplicates)
-// ============================================================================
-async function agencyHasTemplates(agencyId) {
-  const { count, error } = await supabase
-    .from('outreach_templates')
-    .select('*', { count: 'exact', head: true })
-    .eq('agency_id', agencyId);
+/**
+ * Force seed templates (even if some exist - useful for adding new defaults)
+ * @param {string} agencyId - The agency ID to seed templates for
+ * @returns {Promise<{success: boolean, count?: number, error?: string}>}
+ */
+async function forceSeedTemplates(agencyId) {
+  try {
+    // Add agency_id to each template
+    const templatesToInsert = DEFAULT_TEMPLATES.map(template => ({
+      ...template,
+      agency_id: agencyId
+    }));
 
-  if (error) {
-    console.error('Error checking templates:', error);
-    return false;
+    // Insert templates
+    const { data: insertedTemplates, error: insertError } = await supabase
+      .from('outreach_templates')
+      .insert(templatesToInsert)
+      .select();
+
+    if (insertError) {
+      console.error('Error inserting templates:', insertError);
+      return { success: false, error: insertError.message };
+    }
+
+    console.log(`✅ Force seeded ${insertedTemplates.length} templates for agency ${agencyId}`);
+    return { success: true, count: insertedTemplates.length };
+  } catch (error) {
+    console.error('Error force seeding templates:', error);
+    return { success: false, error: error.message };
   }
-
-  return count > 0;
-}
-
-// ============================================================================
-// SEED IF NEEDED - Safe to call multiple times
-// ============================================================================
-async function seedDefaultTemplatesIfNeeded(agencyId) {
-  const hasTemplates = await agencyHasTemplates(agencyId);
-  
-  if (hasTemplates) {
-    console.log(`Agency ${agencyId} already has templates, skipping seed`);
-    return { success: true, skipped: true };
-  }
-
-  return seedDefaultTemplates(agencyId);
 }
 
 module.exports = {
-  seedDefaultTemplates,
   seedDefaultTemplatesIfNeeded,
+  forceSeedTemplates,
   DEFAULT_TEMPLATES
 };
