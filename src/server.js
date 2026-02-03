@@ -293,6 +293,279 @@ app.get('/api/agency/connect/status/:agencyId', getConnectStatus);
 app.post('/api/agency/:agencyId/connect/disconnect', disconnectConnectAccount);
 
 // ============================================================================
+// AGENCY DASHBOARD & CLIENTS ROUTES (for agency dashboard frontend)
+// ============================================================================
+
+// GET /api/agency/:agencyId/dashboard - Dashboard stats
+app.get('/api/agency/:agencyId/dashboard', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+
+    // Get all clients for this agency
+    const { data: clients, error } = await supabase
+      .from('clients')
+      .select('id, business_name, plan_type, subscription_status, status, calls_this_month, created_at')
+      .eq('agency_id', agencyId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching agency clients:', error);
+      return res.status(400).json({ error: error.message });
+    }
+
+    const clientList = clients || [];
+
+    // Calculate MRR from active clients
+    const { data: agency } = await supabase
+      .from('agencies')
+      .select('price_starter, price_pro, price_growth')
+      .eq('id', agencyId)
+      .single();
+
+    let mrr = 0;
+    clientList.forEach(client => {
+      if (client.subscription_status === 'active') {
+        switch (client.plan_type) {
+          case 'starter':
+            mrr += agency?.price_starter || 4900;
+            break;
+          case 'pro':
+            mrr += agency?.price_pro || 9900;
+            break;
+          case 'growth':
+            mrr += agency?.price_growth || 14900;
+            break;
+        }
+      }
+    });
+
+    // Calculate total calls this month
+    const totalCalls = clientList.reduce((sum, c) => sum + (c.calls_this_month || 0), 0);
+
+    // Recent clients (last 5)
+    const recentClients = clientList.slice(0, 5);
+
+    console.log(`📊 Dashboard loaded for agency ${agencyId}: ${clientList.length} clients, $${mrr/100} MRR`);
+
+    res.json({
+      clientCount: clientList.length,
+      mrr,
+      totalCalls,
+      recentClients,
+    });
+  } catch (error) {
+    console.error('Error fetching dashboard:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/agency/:agencyId/clients - List all clients for agency
+app.get('/api/agency/:agencyId/clients', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+
+    const { data: clients, error } = await supabase
+      .from('clients')
+      .select('*')
+      .eq('agency_id', agencyId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching agency clients:', error);
+      return res.status(400).json({ error: error.message });
+    }
+
+    console.log(`📋 Fetched ${(clients || []).length} clients for agency ${agencyId}`);
+
+    res.json({ clients: clients || [] });
+  } catch (error) {
+    console.error('Error fetching agency clients:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/agency/:agencyId/clients/:clientId - Get single client
+app.get('/api/agency/:agencyId/clients/:clientId', async (req, res) => {
+  try {
+    const { agencyId, clientId } = req.params;
+
+    const { data: client, error } = await supabase
+      .from('clients')
+      .select('*')
+      .eq('id', clientId)
+      .eq('agency_id', agencyId)
+      .single();
+
+    if (error || !client) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+
+    res.json({ client });
+  } catch (error) {
+    console.error('Error fetching client:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/agency/:agencyId/clients/:clientId/calls - Get client calls
+app.get('/api/agency/:agencyId/clients/:clientId/calls', async (req, res) => {
+  try {
+    const { agencyId, clientId } = req.params;
+    const limit = parseInt(req.query.limit) || 50;
+
+    // Verify client belongs to agency
+    const { data: client } = await supabase
+      .from('clients')
+      .select('id')
+      .eq('id', clientId)
+      .eq('agency_id', agencyId)
+      .single();
+
+    if (!client) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+
+    const { data: calls, error } = await supabase
+      .from('calls')
+      .select('*')
+      .eq('client_id', clientId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      console.error('Error fetching calls:', error);
+      return res.status(400).json({ error: error.message });
+    }
+
+    res.json({ calls: calls || [] });
+  } catch (error) {
+    console.error('Error fetching client calls:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/agency/:agencyId/analytics - Analytics & Revenue data
+app.get('/api/agency/:agencyId/analytics', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+
+    // Get agency pricing
+    const { data: agency } = await supabase
+      .from('agencies')
+      .select('price_starter, price_pro, price_growth')
+      .eq('id', agencyId)
+      .single();
+
+    // Get all clients for this agency
+    const { data: clients, error: clientsError } = await supabase
+      .from('clients')
+      .select('id, business_name, plan_type, subscription_status, status, created_at')
+      .eq('agency_id', agencyId)
+      .order('created_at', { ascending: false });
+
+    if (clientsError) {
+      console.error('Error fetching clients for analytics:', clientsError);
+      return res.status(400).json({ error: clientsError.message });
+    }
+
+    const clientList = clients || [];
+
+    // Calculate client counts
+    const activeClients = clientList.filter(c => c.subscription_status === 'active').length;
+    const trialClients = clientList.filter(c => 
+      c.subscription_status === 'trial' || c.subscription_status === 'trialing'
+    ).length;
+    const totalClients = clientList.length;
+
+    // Calculate MRR from active clients
+    let mrr = 0;
+    clientList.forEach(client => {
+      if (client.subscription_status === 'active') {
+        switch (client.plan_type) {
+          case 'starter':
+            mrr += agency?.price_starter || 4900;
+            break;
+          case 'pro':
+            mrr += agency?.price_pro || 9900;
+            break;
+          case 'growth':
+            mrr += agency?.price_growth || 14900;
+            break;
+        }
+      }
+    });
+
+    // Get payments for this agency's clients
+    const clientIds = clientList.map(c => c.id);
+    let payments = [];
+    let totalEarned = 0;
+    let pendingPayout = 0;
+
+    if (clientIds.length > 0) {
+      const { data: paymentsData, error: paymentsError } = await supabase
+        .from('payments')
+        .select('*')
+        .in('client_id', clientIds)
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      if (!paymentsError && paymentsData) {
+        payments = paymentsData;
+        
+        // Calculate totals
+        payments.forEach(p => {
+          if (p.status === 'succeeded') {
+            totalEarned += p.amount || 0;
+            if (!p.paid_out) {
+              pendingPayout += p.amount || 0;
+            }
+          }
+        });
+      }
+    }
+
+    // Calculate revenue by month (last 6 months)
+    const revenueByMonth = [];
+    const now = new Date();
+    
+    for (let i = 5; i >= 0; i--) {
+      const monthDate = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const monthStr = `${monthDate.getFullYear()}-${String(monthDate.getMonth() + 1).padStart(2, '0')}`;
+      
+      const monthRevenue = payments
+        .filter(p => {
+          if (p.status !== 'succeeded') return false;
+          const paymentDate = new Date(p.created_at);
+          return paymentDate.getFullYear() === monthDate.getFullYear() &&
+                 paymentDate.getMonth() === monthDate.getMonth();
+        })
+        .reduce((sum, p) => sum + (p.amount || 0), 0);
+      
+      revenueByMonth.push({ month: monthStr, amount: monthRevenue });
+    }
+
+    console.log(`📊 Analytics loaded for agency ${agencyId}: ${activeClients} active, $${mrr/100} MRR`);
+
+    res.json({
+      stats: {
+        mrr,
+        totalEarned,
+        pendingPayout,
+        activeClients,
+        trialClients,
+        totalClients,
+      },
+      revenueByMonth,
+      payments,
+      clients: clientList,
+    });
+  } catch (error) {
+    console.error('Error fetching analytics:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
 // REFERRAL PROGRAM ROUTES
 // ============================================================================
 

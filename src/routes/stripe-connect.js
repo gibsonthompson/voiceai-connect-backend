@@ -631,6 +631,33 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
     }
   }
 
+  // ============================================================================
+  // RECORD INITIAL PAYMENT (if amount_total > 0)
+  // ============================================================================
+  if (session.amount_total > 0) {
+    const { error: paymentError } = await supabase
+      .from('payments')
+      .insert({
+        client_id: clientId,
+        agency_id: client.agency_id,
+        stripe_payment_intent_id: session.payment_intent,
+        stripe_subscription_id: session.subscription,
+        amount: session.amount_total,
+        currency: session.currency || 'usd',
+        status: 'succeeded',
+        type: 'subscription',
+        description: `${isUpgrade ? 'Upgrade' : 'Initial'} subscription - ${plan} plan`,
+        plan_type: plan,
+        paid_out: false
+      });
+
+    if (paymentError) {
+      console.error('❌ Failed to record checkout payment:', paymentError);
+    } else {
+      console.log(`💰 Payment recorded: $${(session.amount_total / 100).toFixed(2)} for ${client.business_name}`);
+    }
+  }
+
   // Send confirmation email
   const agency = client.agencies;
   const agencyName = agency?.name || 'AI Receptionist';
@@ -737,19 +764,56 @@ async function handleClientPaymentSucceeded(invoice, stripeAccountId) {
     invoice.customer,
     stripeAccountId
   );
-  if (!client) return;
+  
+  if (!client) {
+    console.error('Client not found for payment:', invoice.customer);
+    return;
+  }
 
+  // Update client status
   await supabase
     .from('clients')
     .update({
       subscription_status: 'active',
       status: 'active',
-      calls_this_month: 0
+      calls_this_month: 0  // Reset for new billing period
     })
     .eq('id', client.id);
 
+  // Re-enable VAPI assistant if needed
   if (client.vapi_assistant_id) {
-    await enableAssistant(client.vapi_assistant_id);
+    try {
+      await enableAssistant(client.vapi_assistant_id);
+    } catch (vapiError) {
+      console.error('Failed to enable VAPI assistant:', vapiError);
+    }
+  }
+
+  // ============================================================================
+  // RECORD THE PAYMENT
+  // ============================================================================
+  const { error: paymentError } = await supabase
+    .from('payments')
+    .insert({
+      client_id: client.id,
+      agency_id: client.agency_id,
+      stripe_invoice_id: invoice.id,
+      stripe_payment_intent_id: invoice.payment_intent,
+      stripe_charge_id: invoice.charge,
+      stripe_subscription_id: invoice.subscription,
+      amount: invoice.amount_paid || 0,  // Amount in cents
+      currency: invoice.currency || 'usd',
+      status: 'succeeded',
+      type: 'subscription',
+      description: invoice.lines?.data?.[0]?.description || 'Subscription payment',
+      plan_type: client.plan_type,
+      paid_out: false  // Will be marked true when agency payout happens
+    });
+
+  if (paymentError) {
+    console.error('❌ Failed to record payment:', paymentError);
+  } else {
+    console.log(`💰 Payment recorded: $${((invoice.amount_paid || 0) / 100).toFixed(2)} for ${client.business_name}`);
   }
 }
 
