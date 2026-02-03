@@ -1,7 +1,7 @@
 // ============================================================================
 // LEADS ROUTES - Agency Lead Management (Mini CRM)
 // VoiceAI Connect Multi-Tenant
-// WITH ACTIVITY LOGGING
+// WITH ACTIVITY LOGGING AND OUTREACH TRACKING
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -28,6 +28,45 @@ const LEAD_SOURCES = [
   { value: 'event', label: 'Event/Trade Show' },
   { value: 'other', label: 'Other' },
 ];
+
+// ============================================================================
+// HELPER: Get outreach stats for a lead
+// ============================================================================
+async function getLeadOutreachStats(agencyId, leadId) {
+  try {
+    const { data: history, error } = await supabase
+      .from('outreach_history')
+      .select('id, type, sent_at, subject, template_id')
+      .eq('agency_id', agencyId)
+      .eq('lead_id', leadId)
+      .order('sent_at', { ascending: true });
+
+    if (error) {
+      console.error('Error fetching outreach stats:', error);
+      return null;
+    }
+
+    const emails = history?.filter(h => h.type === 'email') || [];
+    const sms = history?.filter(h => h.type === 'sms') || [];
+
+    return {
+      email_count: emails.length,
+      sms_count: sms.length,
+      total_count: (history || []).length,
+      last_email: emails.length > 0 ? emails[emails.length - 1] : null,
+      last_sms: sms.length > 0 ? sms[sms.length - 1] : null,
+      last_outreach: history && history.length > 0 ? history[history.length - 1] : null,
+      // Next suggested outreach numbers
+      next_email_number: emails.length + 1,
+      next_sms_number: sms.length + 1,
+      // Full history for timeline
+      history: history || []
+    };
+  } catch (err) {
+    console.error('Error in getLeadOutreachStats:', err);
+    return null;
+  }
+}
 
 // ============================================================================
 // GET /api/agency/:agencyId/leads - List all leads with stats
@@ -63,8 +102,45 @@ router.get('/:agencyId/leads', async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
 
+    // Get outreach counts for all leads in one query
+    const leadIds = (leads || []).map(l => l.id);
+    let outreachCounts = {};
+    
+    if (leadIds.length > 0) {
+      const { data: outreachData } = await supabase
+        .from('outreach_history')
+        .select('lead_id, type, sent_at')
+        .eq('agency_id', agencyId)
+        .in('lead_id', leadIds);
+
+      // Aggregate counts per lead
+      (outreachData || []).forEach(o => {
+        if (!outreachCounts[o.lead_id]) {
+          outreachCounts[o.lead_id] = { 
+            email_count: 0, 
+            sms_count: 0, 
+            last_contacted: null 
+          };
+        }
+        if (o.type === 'email') outreachCounts[o.lead_id].email_count++;
+        if (o.type === 'sms') outreachCounts[o.lead_id].sms_count++;
+        
+        // Track most recent outreach
+        if (!outreachCounts[o.lead_id].last_contacted || 
+            new Date(o.sent_at) > new Date(outreachCounts[o.lead_id].last_contacted)) {
+          outreachCounts[o.lead_id].last_contacted = o.sent_at;
+        }
+      });
+    }
+
+    // Attach outreach counts to leads
+    const leadsWithOutreach = (leads || []).map(lead => ({
+      ...lead,
+      outreach: outreachCounts[lead.id] || { email_count: 0, sms_count: 0, last_contacted: null }
+    }));
+
     // Calculate stats
-    const allLeads = leads || [];
+    const allLeads = leadsWithOutreach;
     const stats = {
       total: allLeads.length,
       new: allLeads.filter(l => l.status === 'new').length,
@@ -85,7 +161,7 @@ router.get('/:agencyId/leads', async (req, res) => {
     };
 
     res.json({ 
-      leads: allLeads, 
+      leads: leadsWithOutreach, 
       stats,
       statuses: LEAD_STATUSES,
       sources: LEAD_SOURCES
@@ -180,7 +256,7 @@ router.post('/:agencyId/leads', async (req, res) => {
 });
 
 // ============================================================================
-// GET /api/agency/:agencyId/leads/:leadId - Get single lead
+// GET /api/agency/:agencyId/leads/:leadId - Get single lead WITH outreach stats
 // ============================================================================
 router.get('/:agencyId/leads/:leadId', async (req, res) => {
   try {
@@ -197,7 +273,15 @@ router.get('/:agencyId/leads/:leadId', async (req, res) => {
       return res.status(404).json({ error: 'Lead not found' });
     }
 
-    res.json({ lead, statuses: LEAD_STATUSES, sources: LEAD_SOURCES });
+    // Get outreach stats for this lead
+    const outreachStats = await getLeadOutreachStats(agencyId, leadId);
+
+    res.json({ 
+      lead, 
+      outreach: outreachStats,
+      statuses: LEAD_STATUSES, 
+      sources: LEAD_SOURCES 
+    });
   } catch (error) {
     console.error('Error fetching lead:', error);
     res.status(500).json({ error: 'Server error' });
@@ -307,8 +391,11 @@ router.put('/:agencyId/leads/:leadId', async (req, res) => {
       );
     }
 
+    // Get updated outreach stats
+    const outreachStats = await getLeadOutreachStats(agencyId, leadId);
+
     console.log(`✅ Lead updated: ${lead.business_name}`);
-    res.json({ success: true, lead });
+    res.json({ success: true, lead, outreach: outreachStats });
   } catch (error) {
     console.error('Error updating lead:', error);
     res.status(500).json({ error: 'Server error' });
@@ -426,6 +513,26 @@ router.post('/:agencyId/leads/:leadId/log-call', async (req, res) => {
 });
 
 // ============================================================================
+// GET /api/agency/:agencyId/leads/:leadId/outreach - Get lead's outreach history
+// ============================================================================
+router.get('/:agencyId/leads/:leadId/outreach', async (req, res) => {
+  try {
+    const { agencyId, leadId } = req.params;
+
+    const outreachStats = await getLeadOutreachStats(agencyId, leadId);
+
+    if (!outreachStats) {
+      return res.status(400).json({ error: 'Failed to fetch outreach stats' });
+    }
+
+    res.json({ outreach: outreachStats });
+  } catch (error) {
+    console.error('Error fetching lead outreach:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
 // GET /api/agency/:agencyId/leads-stats - Get lead pipeline stats
 // ============================================================================
 router.get('/:agencyId/leads-stats', async (req, res) => {
@@ -485,3 +592,4 @@ router.get('/:agencyId/leads-stats', async (req, res) => {
 module.exports = router;
 module.exports.LEAD_STATUSES = LEAD_STATUSES;
 module.exports.LEAD_SOURCES = LEAD_SOURCES;
+module.exports.getLeadOutreachStats = getLeadOutreachStats;
