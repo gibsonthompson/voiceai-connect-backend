@@ -173,6 +173,9 @@ const {
 // Google OAuth
 const { googleAuth, googleCallback } = require('./routes/google-auth');
 
+// Platform Admin Routes
+const adminRoutes = require('./routes/admin');
+
 // ============================================================================
 // HEALTH CHECK
 // ============================================================================
@@ -790,6 +793,12 @@ app.post('/api/auth/reset-password', requestPasswordReset);
 // Google OAuth
 app.get('/api/auth/google', googleAuth);
 app.get('/api/auth/google/callback', googleCallback);
+
+// ============================================================================
+// PLATFORM ADMIN ROUTES
+// ============================================================================
+
+app.use('/api/admin', adminRoutes);
 
 // ============================================================================
 // CRON ROUTES (Trial Expiration)
