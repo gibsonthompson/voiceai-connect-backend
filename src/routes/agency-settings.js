@@ -62,6 +62,9 @@ async function getAgencyByHost(req, res) {
         website_theme: agency.website_theme,
         logo_background_color: agency.logo_background_color,
         
+        // Plan type (for feature gating - e.g., marketing site access)
+        plan_type: agency.plan_type,
+        
         // Pricing (for client signup + marketing website)
         price_starter: agency.price_starter,
         price_pro: agency.price_pro,
