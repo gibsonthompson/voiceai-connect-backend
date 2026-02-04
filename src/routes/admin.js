@@ -28,8 +28,8 @@ function requireAdmin(req, res, next) {
     const token = authHeader.split(' ')[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    // Check if email is in admin whitelist
-    if (!decoded.email || !ADMIN_EMAILS.includes(decoded.email.toLowerCase())) {
+    // Check if role is platform_admin (from PIN login)
+    if (decoded.role !== 'platform_admin') {
       return res.status(403).json({ error: 'Not authorized as platform admin' });
     }
 
