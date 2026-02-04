@@ -16,6 +16,9 @@ const {
   sendWelcomeSMS 
 } = require('../lib/notifications');
 
+// Import client limit checker from stripe-platform
+const { canAgencyAddClient } = require('./stripe-platform');
+
 // ============================================================================
 // VALIDATION
 // ============================================================================
@@ -142,6 +145,22 @@ async function handleClientSignup(req, res) {
     if (agency.status !== 'active' && agency.status !== 'trial') {
       return res.status(403).json({ error: 'Agency is not active' });
     }
+
+    // ============================================
+    // CHECK CLIENT LIMIT BEFORE CREATING
+    // ============================================
+    const limitCheck = await canAgencyAddClient(agencyId);
+    if (!limitCheck.allowed) {
+      console.log(`🚫 Client limit reached for agency ${agency.name}: ${limitCheck.reason}`);
+      return res.status(403).json({ 
+        error: 'Client limit reached',
+        message: limitCheck.reason,
+        limit: limitCheck.limit,
+        current: limitCheck.current
+      });
+    }
+    
+    console.log(`✅ Client limit check passed: ${limitCheck.current}/${limitCheck.limit === -1 ? 'unlimited' : limitCheck.limit}`);
 
     console.log(`🏢 Agency: ${agency.name}`);
 
