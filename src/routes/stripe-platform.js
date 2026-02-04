@@ -11,13 +11,13 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const PLATFORM_PRICES = {
   starter: process.env.STRIPE_PRICE_AGENCY_STARTER,       // $99/mo
   professional: process.env.STRIPE_PRICE_AGENCY_PRO,      // $199/mo
-  enterprise: process.env.STRIPE_PRICE_AGENCY_ENTERPRISE  // $299/mo
+  enterprise: process.env.STRIPE_PRICE_AGENCY_ENTERPRISE  // $499/mo
 };
 
 const PLAN_DETAILS = {
-  starter: { name: 'Starter', clientLimit: 50, price: 9900 },        // $99/mo - 50 clients max
-  professional: { name: 'Professional', clientLimit: -1, price: 19900 }, // $199/mo - unlimited
-  enterprise: { name: 'Enterprise', clientLimit: -1, price: 29900 }      // $299/mo - unlimited + priority support
+  starter: { name: 'Starter', clientLimit: 25, price: 9900 },           // $99/mo - 25 clients max
+  professional: { name: 'Professional', clientLimit: 100, price: 19900 }, // $199/mo - 100 clients max
+  enterprise: { name: 'Enterprise', clientLimit: -1, price: 49900 }       // $499/mo - unlimited
 }; // -1 = unlimited
 
 // Referral commission rate - 40% to match GoHighLevel
@@ -155,6 +155,71 @@ async function createAgencyPortal(req, res) {
     console.error('❌ Portal error:', error);
     res.status(500).json({ error: 'Failed to create portal session' });
   }
+}
+
+// ============================================================================
+// GET CLIENT LIMIT FOR PLAN
+// ============================================================================
+function getClientLimitForPlan(plan) {
+  const details = PLAN_DETAILS[plan];
+  if (!details) return 25; // Default to starter limit
+  return details.clientLimit;
+}
+
+// ============================================================================
+// CHECK IF AGENCY CAN ADD MORE CLIENTS
+// ============================================================================
+async function canAgencyAddClient(agencyId) {
+  const { data: agency, error } = await supabase
+    .from('agencies')
+    .select('plan_type, subscription_status')
+    .eq('id', agencyId)
+    .single();
+
+  if (error || !agency) {
+    return { allowed: false, reason: 'Agency not found' };
+  }
+
+  // Check subscription is active or trialing
+  if (!['active', 'trialing', 'trial'].includes(agency.subscription_status)) {
+    return { allowed: false, reason: 'Subscription not active' };
+  }
+
+  const clientLimit = getClientLimitForPlan(agency.plan_type);
+  
+  // -1 means unlimited
+  if (clientLimit === -1) {
+    return { allowed: true, limit: 'unlimited', current: 0 };
+  }
+
+  // Count current clients
+  const { count, error: countError } = await supabase
+    .from('clients')
+    .select('*', { count: 'exact', head: true })
+    .eq('agency_id', agencyId)
+    .neq('status', 'deleted');
+
+  if (countError) {
+    return { allowed: false, reason: 'Error counting clients' };
+  }
+
+  const currentCount = count || 0;
+  
+  if (currentCount >= clientLimit) {
+    return { 
+      allowed: false, 
+      reason: `Client limit reached (${currentCount}/${clientLimit}). Upgrade your plan to add more clients.`,
+      limit: clientLimit,
+      current: currentCount
+    };
+  }
+
+  return { 
+    allowed: true, 
+    limit: clientLimit, 
+    current: currentCount,
+    remaining: clientLimit - currentCount
+  };
 }
 
 // ============================================================================
@@ -461,6 +526,8 @@ module.exports = {
   createAgencyCheckout,
   createAgencyPortal,
   handlePlatformStripeWebhook,
+  getClientLimitForPlan,
+  canAgencyAddClient,
   PLATFORM_PRICES,
   PLAN_DETAILS
 };
