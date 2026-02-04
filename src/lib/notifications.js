@@ -4,6 +4,9 @@
 // ============================================================================
 const fetch = require('node-fetch');
 
+// Platform owner phone for important notifications
+const PLATFORM_OWNER_PHONE = process.env.PLATFORM_OWNER_PHONE || '+16783161454';
+
 // ============================================================================
 // PHONE FORMATTING
 // ============================================================================
@@ -90,8 +93,100 @@ async function sendTelnyxSMS(toPhone, message) {
 }
 
 // ============================================================================
-// CALL NOTIFICATION SMS (Multi-tenant)
+// PLATFORM NOTIFICATION SMS (To Gibson for important events)
 // ============================================================================
+async function sendPlatformNotificationSMS(message) {
+  return sendTelnyxSMS(PLATFORM_OWNER_PHONE, `🔔 VoiceAI Connect\n${message}`);
+}
+
+// ============================================================================
+// AGENCY SMS NOTIFICATIONS
+// ============================================================================
+
+// New agency signed up - notify platform owner
+async function sendAgencySignupNotificationSMS(agency) {
+  const message = `🎉 New Agency Signup!\n` +
+    `Name: ${agency.name}\n` +
+    `Email: ${agency.email}\n` +
+    `Plan: ${agency.plan_type || 'Starter'}`;
+  
+  return sendPlatformNotificationSMS(message);
+}
+
+// New client signed up - notify platform owner
+async function sendClientSignupNotificationSMS(client, agency) {
+  const message = `👤 New Client!\n` +
+    `Business: ${client.business_name}\n` +
+    `Agency: ${agency?.name || 'Unknown'}\n` +
+    `Phone: ${formatPhoneDisplay(client.vapi_phone_number)}`;
+  
+  return sendPlatformNotificationSMS(message);
+}
+
+// Agency trial ending in X days - notify agency owner
+async function sendAgencyTrialEndingSMS(agency, daysLeft) {
+  if (!agency.phone) {
+    console.log(`⚠️ Agency ${agency.name} has no phone number`);
+    return false;
+  }
+  
+  const message = `⏰ VoiceAI Connect Trial Ending\n\n` +
+    `Hi ${agency.name}, your trial ends in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}.\n\n` +
+    `Your card will be charged automatically. Update payment at:\n` +
+    `myvoiceaiconnect.com/agency/settings/billing`;
+  
+  return sendTelnyxSMS(agency.phone, message);
+}
+
+// Agency payment failed - notify agency owner
+async function sendAgencyPaymentFailedSMS(agency) {
+  if (!agency.phone) {
+    console.log(`⚠️ Agency ${agency.name} has no phone number`);
+    return false;
+  }
+  
+  const message = `🚨 Payment Failed - VoiceAI Connect\n\n` +
+    `Hi ${agency.name}, your payment failed.\n\n` +
+    `Update your payment method to avoid service interruption:\n` +
+    `myvoiceaiconnect.com/agency/settings/billing`;
+  
+  return sendTelnyxSMS(agency.phone, message);
+}
+
+// Agency subscription canceled - notify agency owner
+async function sendAgencySubscriptionCanceledSMS(agency) {
+  if (!agency.phone) {
+    console.log(`⚠️ Agency ${agency.name} has no phone number`);
+    return false;
+  }
+  
+  const message = `❌ Subscription Canceled - VoiceAI Connect\n\n` +
+    `Hi ${agency.name}, your subscription has been canceled.\n\n` +
+    `Your agency and all client AI assistants are now suspended.\n\n` +
+    `Reactivate at: myvoiceaiconnect.com/agency/settings/billing`;
+  
+  return sendTelnyxSMS(agency.phone, message);
+}
+
+// Agency payment succeeded (after failed) - notify agency owner
+async function sendAgencyPaymentSucceededSMS(agency) {
+  if (!agency.phone) {
+    console.log(`⚠️ Agency ${agency.name} has no phone number`);
+    return false;
+  }
+  
+  const message = `✅ Payment Successful - VoiceAI Connect\n\n` +
+    `Hi ${agency.name}, your payment was processed successfully!\n\n` +
+    `Your agency is now active. Thank you!`;
+  
+  return sendTelnyxSMS(agency.phone, message);
+}
+
+// ============================================================================
+// CLIENT SMS NOTIFICATIONS
+// ============================================================================
+
+// Call notification SMS (Multi-tenant)
 async function sendCallNotificationSMS(client, agency, callData) {
   const { customerName, customerPhone, urgency, summary } = callData;
   
@@ -112,9 +207,7 @@ async function sendCallNotificationSMS(client, agency, callData) {
   return sendTelnyxSMS(client.owner_phone, smsMessage);
 }
 
-// ============================================================================
-// WELCOME SMS (simple confirmation - no password link)
-// ============================================================================
+// Welcome SMS (simple confirmation - no password link)
 async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency = null) {
   const brandName = agency?.name || 'VoiceAI Connect';
   
@@ -124,6 +217,51 @@ async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency = null)
     `📞 Your AI Phone: ${formatPhoneDisplay(aiPhoneNumber)}`;
   
   return sendTelnyxSMS(phone, message);
+}
+
+// Client trial expired - notify client
+async function sendClientTrialExpiredSMS(client, agency) {
+  const brandName = agency?.name || 'AI Receptionist';
+  
+  // Build upgrade URL
+  let upgradeUrl;
+  if (agency?.marketing_domain && agency?.domain_verified) {
+    upgradeUrl = `${agency.marketing_domain}/client/upgrade`;
+  } else if (agency?.slug) {
+    upgradeUrl = `${agency.slug}.myvoiceaiconnect.com/client/upgrade`;
+  } else {
+    upgradeUrl = `myvoiceaiconnect.com/client/upgrade`;
+  }
+  
+  const message = `⚠️ ${brandName} Trial Ended\n\n` +
+    `Hi ${client.owner_name || client.business_name}, your 7-day trial has ended.\n\n` +
+    `Your AI receptionist is no longer answering calls.\n\n` +
+    `Reactivate now: ${upgradeUrl}`;
+  
+  return sendTelnyxSMS(client.owner_phone, message);
+}
+
+// Client payment failed - notify client
+async function sendClientPaymentFailedSMS(client, agency) {
+  const brandName = agency?.name || 'AI Receptionist';
+  
+  const message = `🚨 ${brandName} Payment Failed\n\n` +
+    `Hi ${client.owner_name || client.business_name}, your payment failed.\n\n` +
+    `Update your payment method to keep your AI receptionist active.`;
+  
+  return sendTelnyxSMS(client.owner_phone, message);
+}
+
+// Client subscription activated - notify client
+async function sendClientSubscriptionActivatedSMS(client, agency, plan) {
+  const brandName = agency?.name || 'AI Receptionist';
+  
+  const message = `✅ ${brandName} Subscription Active!\n\n` +
+    `Hi ${client.owner_name || client.business_name}, your ${plan || 'Starter'} plan is now active!\n\n` +
+    `Your AI receptionist is answering calls 24/7 at:\n` +
+    `📞 ${formatPhoneDisplay(client.vapi_phone_number)}`;
+  
+  return sendTelnyxSMS(client.owner_phone, message);
 }
 
 // ============================================================================
@@ -312,11 +450,32 @@ async function sendAgencyWelcomeEmail(agency, passwordToken) {
 // EXPORTS
 // ============================================================================
 module.exports = {
+  // Phone formatting
   formatPhoneE164,
   formatPhoneDisplay,
+  
+  // Base SMS
   sendTelnyxSMS,
+  
+  // Platform notifications (to Gibson)
+  sendPlatformNotificationSMS,
+  sendAgencySignupNotificationSMS,
+  sendClientSignupNotificationSMS,
+  
+  // Agency SMS
+  sendAgencyTrialEndingSMS,
+  sendAgencyPaymentFailedSMS,
+  sendAgencySubscriptionCanceledSMS,
+  sendAgencyPaymentSucceededSMS,
+  
+  // Client SMS
   sendCallNotificationSMS,
   sendWelcomeSMS,
+  sendClientTrialExpiredSMS,
+  sendClientPaymentFailedSMS,
+  sendClientSubscriptionActivatedSMS,
+  
+  // Email
   sendEmail,
   sendClientWelcomeEmail,
   sendAgencyWelcomeEmail

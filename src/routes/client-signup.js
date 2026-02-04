@@ -13,7 +13,8 @@ const {
 const { 
   formatPhoneE164, 
   sendClientWelcomeEmail,
-  sendWelcomeSMS 
+  sendWelcomeSMS,
+  sendClientSignupNotificationSMS
 } = require('../lib/notifications');
 
 // Import client limit checker from stripe-platform
@@ -310,6 +311,12 @@ async function handleClientSignup(req, res) {
     // ============================================
     console.log('📱 Sending welcome SMS...');
     await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneData.number, agency);
+
+    // ============================================
+    // STEP 9: NOTIFY PLATFORM OWNER OF NEW CLIENT
+    // ============================================
+    console.log('📱 Notifying platform owner...');
+    await sendClientSignupNotificationSMS(newClient, agency);
 
     // ============================================
     // RETURN SUCCESS WITH TOKEN

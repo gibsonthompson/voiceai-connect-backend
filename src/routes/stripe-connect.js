@@ -9,7 +9,12 @@ const {
   getClientByStripeConnectedCustomerId,
   getClientById
 } = require('../lib/supabase');
-const { sendEmail } = require('../lib/notifications');
+const { 
+  sendEmail,
+  sendClientTrialExpiredSMS,
+  sendClientPaymentFailedSMS,
+  sendClientSubscriptionActivatedSMS
+} = require('../lib/notifications');
 const { enableAssistant, disableAssistant } = require('../lib/vapi');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -448,26 +453,9 @@ async function expireTrials() {
         })
         .eq('id', client.id);
 
-      // Send trial expired email
+      // Send trial expired SMS
       const agency = client.agencies;
-      const agencyName = agency?.name || 'AI Receptionist';
-      const agencyUrl = agency?.marketing_domain && agency?.domain_verified
-        ? `https://${agency.marketing_domain}`
-        : `https://${agency?.slug}.myvoiceaiconnect.com`;
-
-      await sendEmail({
-        to: client.email,
-        subject: `⚠️ ${agencyName} - Your Trial Has Ended`,
-        html: `
-          <h2>Your Trial Has Ended</h2>
-          <p>Hi ${client.owner_name || client.business_name},</p>
-          <p>Your 7-day free trial of ${agencyName} has ended.</p>
-          <p>Your AI receptionist is no longer answering calls at ${client.vapi_phone_number}.</p>
-          <p><strong>Don't lose your customers!</strong> Reactivate now to continue:</p>
-          <p><a href="${agencyUrl}/client/upgrade" style="background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; display: inline-block;">Reactivate Now</a></p>
-          <p>Questions? Contact ${agency?.support_email || 'support'}.</p>
-        `
-      });
+      await sendClientTrialExpiredSMS(client, agency);
 
       console.log('✅ Trial expired for:', client.business_name);
       results.push({ id: client.id, business_name: client.business_name, success: true });
@@ -558,16 +546,6 @@ async function handleAccountUpdated(account) {
 
   if (account.charges_enabled && !agency.stripe_charges_enabled) {
     console.log('✅ Agency can now accept payments:', agency.name);
-    await sendEmail({
-      to: agency.email,
-      subject: '✅ Stripe Connect Setup Complete!',
-      html: `
-        <h2>You can now accept payments!</h2>
-        <p>Hi ${agency.name},</p>
-        <p>Your Stripe Connect setup is complete. Client payments will now go directly to your Stripe account.</p>
-        <p>Start acquiring clients with your signup link!</p>
-      `
-    });
   }
 }
 
@@ -608,7 +586,7 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
       plan_type: plan,
       monthly_call_limit: callLimit,
       stripe_connected_subscription_id: session.subscription,
-      trial_ends_at: null, // Clear trial date
+      trial_ends_at: null,
       status: 'active',
       calls_this_month: 0
     })
@@ -631,11 +609,9 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
     }
   }
 
-  // ============================================================================
-  // RECORD INITIAL PAYMENT (if amount_total > 0)
-  // ============================================================================
+  // Record payment
   if (session.amount_total > 0) {
-    const { error: paymentError } = await supabase
+    await supabase
       .from('payments')
       .insert({
         client_id: clientId,
@@ -650,34 +626,13 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
         plan_type: plan,
         paid_out: false
       });
-
-    if (paymentError) {
-      console.error('❌ Failed to record checkout payment:', paymentError);
-    } else {
-      console.log(`💰 Payment recorded: $${(session.amount_total / 100).toFixed(2)} for ${client.business_name}`);
-    }
+    
+    console.log(`💰 Payment recorded: $${(session.amount_total / 100).toFixed(2)}`);
   }
 
-  // Send confirmation email
+  // Send SMS notification
   const agency = client.agencies;
-  const agencyName = agency?.name || 'AI Receptionist';
-
-  await sendEmail({
-    to: client.email,
-    subject: `✅ ${agencyName} - Subscription Activated!`,
-    html: `
-      <h2>Welcome${isUpgrade ? ' Back' : ''}!</h2>
-      <p>Hi ${client.owner_name || client.business_name},</p>
-      <p>Your ${plan.charAt(0).toUpperCase() + plan.slice(1)} plan is now active!</p>
-      <p>Your AI receptionist is answering calls 24/7 at: <strong>${client.vapi_phone_number}</strong></p>
-      <p>
-        <strong>Plan:</strong> ${plan.charAt(0).toUpperCase() + plan.slice(1)}<br>
-        <strong>Monthly Calls:</strong> ${callLimit}
-      </p>
-      <p>Log in to your dashboard to view calls and manage settings.</p>
-      <p>Thanks for choosing ${agencyName}!</p>
-    `
-  });
+  await sendClientSubscriptionActivatedSMS(client, agency, plan);
 }
 
 async function handleClientSubscriptionUpdated(subscription, stripeAccountId) {
@@ -741,20 +696,6 @@ async function handleClientSubscriptionDeleted(subscription, stripeAccountId) {
       status: 'suspended'
     })
     .eq('id', client.id);
-
-  const agency = client.agencies;
-  const agencyName = agency?.name || 'AI Receptionist';
-
-  await sendEmail({
-    to: client.email,
-    subject: `${agencyName} - Subscription Cancelled`,
-    html: `
-      <p>Hi ${client.owner_name || client.business_name},</p>
-      <p>Your AI receptionist subscription has been cancelled.</p>
-      <p>Your phone number (${client.vapi_phone_number}) will stop answering calls.</p>
-      <p>To reactivate, visit your dashboard or contact ${agency?.support_email || 'support'}.</p>
-    `
-  });
 }
 
 async function handleClientPaymentSucceeded(invoice, stripeAccountId) {
@@ -770,17 +711,15 @@ async function handleClientPaymentSucceeded(invoice, stripeAccountId) {
     return;
   }
 
-  // Update client status
   await supabase
     .from('clients')
     .update({
       subscription_status: 'active',
       status: 'active',
-      calls_this_month: 0  // Reset for new billing period
+      calls_this_month: 0
     })
     .eq('id', client.id);
 
-  // Re-enable VAPI assistant if needed
   if (client.vapi_assistant_id) {
     try {
       await enableAssistant(client.vapi_assistant_id);
@@ -789,10 +728,7 @@ async function handleClientPaymentSucceeded(invoice, stripeAccountId) {
     }
   }
 
-  // ============================================================================
-  // RECORD THE PAYMENT
-  // ============================================================================
-  const { error: paymentError } = await supabase
+  await supabase
     .from('payments')
     .insert({
       client_id: client.id,
@@ -801,20 +737,16 @@ async function handleClientPaymentSucceeded(invoice, stripeAccountId) {
       stripe_payment_intent_id: invoice.payment_intent,
       stripe_charge_id: invoice.charge,
       stripe_subscription_id: invoice.subscription,
-      amount: invoice.amount_paid || 0,  // Amount in cents
+      amount: invoice.amount_paid || 0,
       currency: invoice.currency || 'usd',
       status: 'succeeded',
       type: 'subscription',
       description: invoice.lines?.data?.[0]?.description || 'Subscription payment',
       plan_type: client.plan_type,
-      paid_out: false  // Will be marked true when agency payout happens
+      paid_out: false
     });
 
-  if (paymentError) {
-    console.error('❌ Failed to record payment:', paymentError);
-  } else {
-    console.log(`💰 Payment recorded: $${((invoice.amount_paid || 0) / 100).toFixed(2)} for ${client.business_name}`);
-  }
+  console.log(`💰 Payment recorded: $${((invoice.amount_paid || 0) / 100).toFixed(2)}`);
 }
 
 async function handleClientPaymentFailed(invoice, stripeAccountId) {
@@ -833,19 +765,9 @@ async function handleClientPaymentFailed(invoice, stripeAccountId) {
     })
     .eq('id', client.id);
 
+  // Send SMS notification
   const agency = client.agencies;
-  const agencyName = agency?.name || 'AI Receptionist';
-
-  await sendEmail({
-    to: client.email,
-    subject: `🚨 ${agencyName} Payment Failed`,
-    html: `
-      <h2>Payment Failed</h2>
-      <p>Hi ${client.owner_name || client.business_name},</p>
-      <p>We couldn't process your payment. Please update your payment method to avoid service interruption.</p>
-      <p><a href="${invoice.hosted_invoice_url}">Update Payment Method</a></p>
-    `
-  });
+  await sendClientPaymentFailedSMS(client, agency, invoice.hosted_invoice_url);
 }
 
 // ============================================================================

@@ -3,7 +3,12 @@
 // ============================================================================
 const Stripe = require('stripe');
 const { supabase, getAgencyByStripeCustomerId } = require('../lib/supabase');
-const { sendEmail } = require('../lib/notifications');
+const { 
+  sendEmail,
+  sendAgencyTrialEndingSMS,
+  sendAgencyPaymentFailedSMS,
+  sendAgencySubscriptionCanceledSMS
+} = require('../lib/notifications');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -381,16 +386,8 @@ async function handleAgencySubscriptionDeleted(subscription) {
   
   // TODO: Disable all agency's client assistants
   
-  await sendEmail({
-    to: agency.email,
-    subject: 'VoiceAI Connect Subscription Cancelled',
-    html: `
-      <h2>Your subscription has been cancelled</h2>
-      <p>Hi ${agency.name},</p>
-      <p>Your VoiceAI Connect subscription has been cancelled. Your agency and all client AI assistants will be suspended.</p>
-      <p>To reactivate, visit your dashboard.</p>
-    `
-  });
+  // Send SMS notification
+  await sendAgencySubscriptionCanceledSMS(agency);
 }
 
 async function handleAgencyPaymentSucceeded(invoice) {
@@ -486,16 +483,8 @@ async function handleAgencyPaymentFailed(invoice) {
     })
     .eq('id', agency.id);
   
-  await sendEmail({
-    to: agency.email,
-    subject: '🚨 VoiceAI Connect Payment Failed - Action Required',
-    html: `
-      <h2>Payment Failed</h2>
-      <p>Hi ${agency.name},</p>
-      <p>We couldn't process your payment. Please update your payment method to avoid service interruption.</p>
-      <p><a href="${invoice.hosted_invoice_url}">Update Payment Method</a></p>
-    `
-  });
+  // Send SMS notification
+  await sendAgencyPaymentFailedSMS(agency);
 }
 
 async function handleAgencyTrialEnding(subscription) {
@@ -507,16 +496,8 @@ async function handleAgencyTrialEnding(subscription) {
   const trialEnd = new Date(subscription.trial_end * 1000);
   const daysLeft = Math.ceil((trialEnd - new Date()) / (1000 * 60 * 60 * 24));
   
-  await sendEmail({
-    to: agency.email,
-    subject: `⏰ Your VoiceAI Connect trial ends in ${daysLeft} days`,
-    html: `
-      <h2>Your trial is ending soon</h2>
-      <p>Hi ${agency.name},</p>
-      <p>Your 14-day trial ends on ${trialEnd.toLocaleDateString()}.</p>
-      <p>Add a payment method to continue growing your AI agency.</p>
-    `
-  });
+  // Send SMS notification
+  await sendAgencyTrialEndingSMS(agency, daysLeft);
 }
 
 // ============================================================================
