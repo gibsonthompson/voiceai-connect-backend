@@ -103,7 +103,7 @@ async function sendPlatformNotificationSMS(message) {
 // AGENCY SMS NOTIFICATIONS
 // ============================================================================
 
-// New agency signed up - notify platform owner
+// New agency signed up - notify platform owner (Gibson)
 async function sendAgencySignupNotificationSMS(agency) {
   const message = `🎉 New Agency Signup!\n` +
     `Name: ${agency.name}\n` +
@@ -113,14 +113,21 @@ async function sendAgencySignupNotificationSMS(agency) {
   return sendPlatformNotificationSMS(message);
 }
 
-// New client signed up - notify platform owner
+// New client signed up - notify AGENCY OWNER (not platform owner)
 async function sendClientSignupNotificationSMS(client, agency) {
-  const message = `👤 New Client!\n` +
-    `Business: ${client.business_name}\n` +
-    `Agency: ${agency?.name || 'Unknown'}\n` +
-    `Phone: ${formatPhoneDisplay(client.vapi_phone_number)}`;
+  // Send to agency owner's phone, not platform owner
+  if (!agency?.phone) {
+    console.log(`⚠️ Agency ${agency?.name || 'Unknown'} has no phone number - skipping client signup SMS`);
+    return false;
+  }
   
-  return sendPlatformNotificationSMS(message);
+  const message = `🔔 ${agency.name}\n` +
+    `👤 New Client Signup!\n` +
+    `Business: ${client.business_name}\n` +
+    `Phone: ${formatPhoneDisplay(client.owner_phone || client.vapi_phone_number)}`;
+  
+  console.log(`📱 Notifying agency owner (${agency.name}) of new client: ${client.business_name}`);
+  return sendTelnyxSMS(agency.phone, message);
 }
 
 // Agency trial ending in X days - notify agency owner
@@ -460,7 +467,9 @@ module.exports = {
   // Platform notifications (to Gibson)
   sendPlatformNotificationSMS,
   sendAgencySignupNotificationSMS,
-  sendClientSignupNotificationSMS,
+  
+  // Agency owner notifications
+  sendClientSignupNotificationSMS,  // Now goes to agency owner, not platform owner
   
   // Agency SMS
   sendAgencyTrialEndingSMS,

@@ -4,7 +4,7 @@
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { supabase } = require('../lib/supabase');
-const { sendAgencyWelcomeEmail } = require('../lib/notifications');
+const { sendAgencyWelcomeEmail, sendAgencySignupNotificationSMS } = require('../lib/notifications');
 const { seedDefaultTemplatesIfNeeded } = require('../lib/default-templates');
 
 // ============================================================================
@@ -259,6 +259,16 @@ async function handleAgencySignup(req, res) {
       await sendAgencyWelcomeEmail(agency, token);
     } catch (emailError) {
       console.warn('⚠️ Welcome email failed (non-blocking):', emailError.message);
+    }
+    
+    // ============================================
+    // NOTIFY PLATFORM OWNER OF NEW AGENCY SIGNUP
+    // ============================================
+    console.log('📱 Notifying platform owner of new agency signup...');
+    try {
+      await sendAgencySignupNotificationSMS(agency);
+    } catch (smsError) {
+      console.warn('⚠️ Agency signup SMS notification failed (non-blocking):', smsError.message);
     }
     
     console.log('🎉 Agency signup complete:', email);
