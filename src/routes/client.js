@@ -170,7 +170,7 @@ const VOICE_OPTIONS = [
 
 // ============================================================================
 // GET /api/client/:id - Full client data with agency
-// UPDATED: Added website_theme to agency select
+// UPDATED: Added pricing fields to agency select
 // ============================================================================
 router.get('/:id', async (req, res) => {
   try {
@@ -184,7 +184,9 @@ router.get('/:id', async (req, res) => {
           id, name, slug, 
           primary_color, secondary_color, accent_color,
           logo_url, support_email, support_phone,
-          website_theme
+          website_theme,
+          price_starter, price_pro, price_growth,
+          limit_starter, limit_pro, limit_growth
         )
       `)
       .eq('id', id)
@@ -194,7 +196,7 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Client not found' });
     }
 
-    res.json({ client });
+    res.json({ client, agency: client.agency });
   } catch (error) {
     console.error('Error fetching client:', error);
     res.status(500).json({ error: 'Server error' });
