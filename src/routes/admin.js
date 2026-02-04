@@ -42,63 +42,37 @@ function requireAdmin(req, res, next) {
 }
 
 // ============================================================================
-// ADMIN LOGIN
+// ADMIN LOGIN - Simple PIN
 // ============================================================================
 router.post('/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { pin } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password required' });
-    }
-
-    const normalizedEmail = email.toLowerCase();
-
-    // Check if email is in admin whitelist
-    if (!ADMIN_EMAILS.includes(normalizedEmail)) {
-      return res.status(403).json({ error: 'Not authorized as platform admin' });
-    }
-
-    // Find agency with this email to verify password
-    const { data: agency, error } = await supabase
-      .from('agencies')
-      .select('id, name, email, password_hash')
-      .eq('email', normalizedEmail)
-      .single();
-
-    if (error || !agency) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    // Verify password
-    const bcrypt = require('bcryptjs');
-    const validPassword = await bcrypt.compare(password, agency.password_hash);
-
-    if (!validPassword) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+    if (pin !== '1234') {
+      return res.status(401).json({ error: 'Invalid PIN' });
     }
 
     // Generate admin JWT
     const token = jwt.sign(
       { 
-        id: agency.id,
-        email: normalizedEmail,
-        name: agency.name,
+        id: 'platform-admin',
+        email: 'admin@voiceaiconnect.com',
+        name: 'Platform Admin',
         role: 'platform_admin'
       },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
 
-    console.log('🔐 Platform admin logged in:', normalizedEmail);
+    console.log('🔐 Platform admin logged in via PIN');
 
     res.json({
       success: true,
       token,
       admin: {
-        id: agency.id,
-        email: normalizedEmail,
-        name: agency.name,
+        id: 'platform-admin',
+        email: 'admin@voiceaiconnect.com',
+        name: 'Platform Admin',
         role: 'platform_admin'
       }
     });
