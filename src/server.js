@@ -447,6 +447,43 @@ app.get('/api/agency/:agencyId/clients/:clientId/calls', async (req, res) => {
   }
 });
 
+// GET /api/agency/:agencyId/clients/:clientId/calls/:callId - Get single call detail
+app.get('/api/agency/:agencyId/clients/:clientId/calls/:callId', async (req, res) => {
+  try {
+    const { agencyId, clientId, callId } = req.params;
+
+    // Verify client belongs to agency
+    const { data: client } = await supabase
+      .from('clients')
+      .select('id')
+      .eq('id', clientId)
+      .eq('agency_id', agencyId)
+      .single();
+
+    if (!client) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+
+    // Fetch the call, scoped to this client
+    const { data: call, error } = await supabase
+      .from('calls')
+      .select('*')
+      .eq('id', callId)
+      .eq('client_id', clientId)
+      .single();
+
+    if (error || !call) {
+      return res.status(404).json({ error: 'Call not found' });
+    }
+
+    console.log(`📞 Call detail loaded: ${callId} for client ${clientId}`);
+    res.json({ call });
+  } catch (error) {
+    console.error('Error fetching call detail:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET /api/agency/:agencyId/analytics - Analytics & Revenue data
 app.get('/api/agency/:agencyId/analytics', async (req, res) => {
   try {
