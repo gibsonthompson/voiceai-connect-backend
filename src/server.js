@@ -130,7 +130,7 @@ try {
 }
 
 // Client Provisioning (adapted from CallBird)
-const { handleClientSignup, provisionClient } = require('./routes/client-signup');
+const { handleClientSignup, provisionClient, handleAgencyAddClient } = require('./routes/client-signup');
 
 // Client Dashboard Routes
 const clientRoutes = require('./routes/client');
@@ -386,6 +386,9 @@ app.get('/api/agency/:agencyId/clients', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+// POST /api/agency/:agencyId/clients/add - Agency adds a new client
+app.post('/api/agency/:agencyId/clients/add', handleAgencyAddClient);
 
 // GET /api/agency/:agencyId/clients/:clientId - Get single client
 app.get('/api/agency/:agencyId/clients/:clientId', async (req, res) => {

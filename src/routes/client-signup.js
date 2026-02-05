@@ -349,6 +349,222 @@ async function handleClientSignup(req, res) {
 }
 
 // ============================================================================
+// AGENCY ADD CLIENT HANDLER
+// Called when agency owner adds a client from the agency dashboard
+// Same provisioning flow as self-signup, but initiated by the agency
+// ============================================================================
+async function handleAgencyAddClient(req, res) {
+  try {
+    const { agencyId } = req.params;
+
+    console.log('📝 Agency Add Client Request');
+
+    // --- Validate ---
+    const {
+      firstName,
+      lastName = '',
+      email,
+      phone,
+      businessName,
+      industry,
+      businessCity,
+      businessState,
+      websiteUrl: rawWebsiteUrl,
+      planType = 'starter'
+    } = req.body;
+
+    const errors = [];
+    if (!firstName || firstName.trim().length < 1) errors.push('First name is required');
+    if (!email || !email.includes('@')) errors.push('Valid email is required');
+    if (!phone || phone.replace(/\D/g, '').length < 10) errors.push('Valid phone number is required');
+    if (!businessName || businessName.trim().length < 2) errors.push('Business name is required');
+    if (!businessCity || businessCity.trim().length < 2) errors.push('City is required');
+    if (!businessState || businessState.trim().length < 2) errors.push('State is required');
+    if (!industry) errors.push('Industry is required');
+
+    if (errors.length > 0) {
+      return res.status(400).json({ error: 'Validation failed', errors });
+    }
+
+    // --- Get & verify agency ---
+    const agency = await getAgencyById(agencyId);
+    if (!agency) {
+      return res.status(404).json({ error: 'Agency not found' });
+    }
+    if (agency.status !== 'active' && agency.status !== 'trial') {
+      return res.status(403).json({ error: 'Agency is not active' });
+    }
+
+    // --- Check client limit ---
+    const limitCheck = await canAgencyAddClient(agencyId);
+    if (!limitCheck.allowed) {
+      console.log(`🚫 Client limit reached for agency ${agency.name}: ${limitCheck.reason}`);
+      return res.status(403).json({
+        error: 'Client limit reached',
+        message: limitCheck.reason,
+        limit: limitCheck.limit,
+        current: limitCheck.current
+      });
+    }
+
+    console.log(`✅ Limit check passed: ${limitCheck.current}/${limitCheck.limit === -1 ? 'unlimited' : limitCheck.limit}`);
+    console.log(`🏢 Agency: ${agency.name} → Adding: ${businessName}`);
+
+    // --- Normalize inputs ---
+    let websiteUrl = rawWebsiteUrl;
+    if (websiteUrl && !websiteUrl.startsWith('http')) {
+      websiteUrl = `https://${websiteUrl}`;
+    }
+    const ownerName = lastName ? `${firstName} ${lastName}`.trim() : firstName;
+    const formattedOwnerPhone = formatPhoneE164(phone);
+
+    // --- Check duplicate ---
+    const existingClient = await getClientByEmail(email.toLowerCase(), agencyId);
+    if (existingClient) {
+      return res.status(409).json({
+        error: 'Duplicate client',
+        message: 'A client with this email already exists.'
+      });
+    }
+
+    // === STEP 1: Knowledge Base (if website provided) ===
+    let knowledgeBaseData = null;
+    if (websiteUrl && websiteUrl.trim().length > 0) {
+      console.log('🌐 Creating knowledge base from website...');
+      try {
+        knowledgeBaseData = await createKnowledgeBaseFromWebsite(websiteUrl, businessName);
+        if (knowledgeBaseData) {
+          console.log(`✅ Knowledge base ready: ${knowledgeBaseData.knowledgeBaseId}`);
+        }
+      } catch (kbError) {
+        console.error('⚠️ Knowledge base error (non-blocking):', kbError.message);
+      }
+    }
+
+    // === STEP 2: Create VAPI Assistant ===
+    console.log(`🤖 Creating VAPI assistant for: ${industry}`);
+    const assistant = await createIndustryAssistant(
+      businessName,
+      industry,
+      knowledgeBaseData,
+      formattedOwnerPhone
+    );
+    console.log(`✅ Assistant created: ${assistant.id}`);
+
+    // === STEP 3: Provision Phone Number ===
+    const phoneData = await provisionLocalPhone(
+      businessCity,
+      businessState,
+      assistant.id,
+      businessName
+    );
+    console.log(`✅ Phone provisioned: ${phoneData.number}`);
+
+    await configurePhoneWebhook(phoneData.id, assistant.id);
+
+    // === STEP 4: Create Client Record ===
+    const trialEndsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const callLimitKey = `limit_${planType}`;
+    const callLimit = agency[callLimitKey] || agency.limit_starter || 50;
+
+    const { data: newClient, error: clientError } = await supabase
+      .from('clients')
+      .insert({
+        agency_id: agencyId,
+        business_name: businessName,
+        business_city: businessCity,
+        business_state: businessState,
+        phone_number: phoneData.number,
+        phone_area_code: phoneData.number.substring(2, 5),
+        owner_name: ownerName,
+        owner_phone: formattedOwnerPhone,
+        email: email.toLowerCase(),
+        industry: industry,
+        vapi_assistant_id: assistant.id,
+        vapi_phone_number: phoneData.number,
+        knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
+        subscription_status: 'trial',
+        trial_ends_at: trialEndsAt,
+        status: 'active',
+        plan_type: planType,
+        monthly_call_limit: callLimit,
+        calls_this_month: 0,
+        business_website: websiteUrl || null
+      })
+      .select()
+      .single();
+
+    if (clientError) {
+      console.error('❌ Database error:', clientError);
+      throw clientError;
+    }
+    console.log(`🎉 Client created: ${newClient.business_name}`);
+
+    // === STEP 5: Create User Record ===
+    const { data: newUser, error: userError } = await supabase
+      .from('users')
+      .insert({
+        client_id: newClient.id,
+        email: email.toLowerCase(),
+        first_name: firstName,
+        last_name: lastName || null,
+        role: 'client',
+        password_hash: null
+      })
+      .select()
+      .single();
+
+    if (userError) {
+      console.error('❌ User creation error:', userError);
+      throw userError;
+    }
+
+    // === STEP 6: Password Token ===
+    const passwordToken = await createPasswordToken(newUser.id, email.toLowerCase());
+
+    // === STEP 7: Welcome Email ===
+    console.log('📧 Sending welcome email...');
+    await sendClientWelcomeEmail(newClient, agency, null, passwordToken);
+
+    // === STEP 8: Welcome SMS ===
+    console.log('📱 Sending welcome SMS...');
+    await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneData.number, agency);
+
+    // === STEP 9: Notify Agency Owner ===
+    console.log('📱 Notifying agency owner...');
+    await sendClientSignupNotificationSMS(newClient, agency);
+
+    // === Done ===
+    console.log('🎉 Agency add client complete:', businessName);
+
+    res.status(200).json({
+      success: true,
+      message: 'Client added successfully!',
+      client: {
+        id: newClient.id,
+        business_name: newClient.business_name,
+        phone_number: phoneData.number,
+        email: newClient.email,
+        owner_name: ownerName,
+        industry: newClient.industry,
+        location: `${businessCity}, ${businessState}`,
+        trial_ends_at: newClient.trial_ends_at,
+        subscription_status: 'trial',
+        plan_type: newClient.plan_type
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Agency add client error:', error);
+    res.status(500).json({
+      error: 'Failed to add client',
+      message: 'Something went wrong during client provisioning. Please try again.',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+}
+
+// ============================================================================
 // PROVISION CLIENT (Called after Stripe checkout)
 // ============================================================================
 async function provisionClient(clientId) {
@@ -454,5 +670,6 @@ async function provisionClient(clientId) {
 // ============================================================================
 module.exports = {
   handleClientSignup,
-  provisionClient
+  provisionClient,
+  handleAgencyAddClient
 };
