@@ -1,12 +1,11 @@
 // ============================================================================
 // VAPI INTEGRATION - Multi-Tenant Voice AI Platform
-// Adapted from CallBird's battle-tested patterns
 // WITH AGENCY TEMPLATE OVERRIDE SUPPORT (Enterprise Feature)
+// ALL 11 INDUSTRIES WITH UNIQUE KEYS
 // ============================================================================
 const fetch = require('node-fetch');
 const FormData = require('form-data');
 
-// Import supabase for template lookups
 let supabase;
 try {
   const supabaseModule = require('./supabase');
@@ -19,31 +18,37 @@ const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 
 // ============================================================================
-// INDUSTRY MAPPING
+// INDUSTRY MAPPING - Each industry has its own unique key
 // ============================================================================
 const INDUSTRY_MAPPING = {
+  // Legacy names
   'Home Services (plumbing, HVAC, contractors)': 'home_services',
   'Medical/Dental': 'medical',
   'Retail/E-commerce': 'retail',
   'Professional Services (legal, accounting)': 'professional_services',
   'Restaurants/Food Service': 'restaurants',
   'Salon/Spa (hair, nails, skincare)': 'salon_spa',
-  // Direct mappings (from frontend dropdown values)
+  
+  // Direct mappings
   'home_services': 'home_services',
   'medical': 'medical',
   'medical_dental': 'medical',
   'retail': 'retail',
   'professional_services': 'professional_services',
   'restaurants': 'restaurants',
+  'restaurant': 'restaurants',
   'salon_spa': 'salon_spa',
   'beauty_wellness': 'salon_spa',
-  'financial_services': 'professional_services',
+  
+  // NEW: Each gets unique key
+  'fitness': 'fitness',
+  'legal': 'legal',
+  'real_estate': 'real_estate',
+  'financial_services': 'financial',
+  'financial': 'financial',
+  'automotive': 'automotive',
+  
   'general': 'professional_services',
-  'legal': 'professional_services',
-  'real_estate': 'professional_services',
-  'restaurant': 'restaurants',
-  'automotive': 'home_services',
-  'fitness': 'salon_spa',
   'other': 'professional_services'
 };
 
@@ -51,27 +56,15 @@ const INDUSTRY_MAPPING = {
 // VOICES - ElevenLabs
 // ============================================================================
 const VOICES = {
-  male_professional: '29vD33N1CtxCmqQRPOHJ',
-  female_warm: '21m00Tcm4TlvDq8ikWAM',
-  male_adam: 'pNInz6obpgDQGcFmaJgB',
-  female_soft: 'EXAVITQu4vr4xnSDxMaL',
   chris: 'iP95p4xoKVk53GoZ742B',
   sarah: 'EXAVITQu4vr4xnSDxMaL',
   rachel: '21m00Tcm4TlvDq8ikWAM',
-  brian: 'nPczCjzI2devNBz1zQrb'
-};
-
-const INDUSTRY_VOICES = {
-  home_services: VOICES.chris,
-  medical: VOICES.sarah,
-  retail: VOICES.female_warm,
-  professional_services: VOICES.brian,
-  restaurants: VOICES.rachel,
-  salon_spa: VOICES.rachel
+  brian: 'nPczCjzI2devNBz1zQrb',
+  female_warm: '21m00Tcm4TlvDq8ikWAM'
 };
 
 // ============================================================================
-// INDUSTRY CONFIGURATIONS (DEFAULT PROMPTS)
+// INDUSTRY CONFIGURATIONS
 // ============================================================================
 const INDUSTRY_CONFIGS = {
   home_services: {
@@ -89,17 +82,23 @@ Listen to customers' problems, collect their information, and let them know when
    - Name: "What's your name?" → "Thanks [name]"
    - Phone: "Best number to reach you?" → "Got it"
    - Address: "What's the property address?" → "Perfect"
-   - Issue: "Can you describe what's happening?" → Listen and acknowledge
-4. Assess urgency silently (emergency/urgent/routine)
-5. Let them know next steps: "Our team will call you back [timeframe]"
-6. Ask: "Is there anything else I can help you with?"
+   - Issue: "Can you describe what's happening?"
+4. Assess urgency (emergency/urgent/routine)
+5. For emergencies: "This sounds urgent. Let me get someone to call you right away."
+6. For routine: "Our team will call you back to schedule."
+7. Ask: "Is there anything else I can help you with?"
 
-## KNOWLEDGE BASE USAGE
-When customers ask about services, pricing, hours, or policies, use the 'search_knowledge_base' tool to find accurate information.
+## KNOWLEDGE BASE
+Use 'search_knowledge_base' for services, pricing, hours, service areas.
+
+## BOUNDARIES
+- Never quote exact prices
+- Never promise specific appointment times
+- Never diagnose problems
 
 ## CRITICAL RULE
-You do NOT have the ability to end calls. The customer will hang up when they're ready.`,
-    firstMessage: (businessName) => `Hi, you've reached ${businessName}. This call may be recorded for quality purposes. What can I help you with today?`
+You do NOT have the ability to end calls. The customer will hang up when ready.`,
+    firstMessage: (businessName) => `Hi, you've reached ${businessName}. This call may be recorded. What can I help you with today?`
   },
 
   medical: {
@@ -108,20 +107,28 @@ You do NOT have the ability to end calls. The customer will hang up when they're
     systemPrompt: (businessName) => `You are the receptionist for ${businessName}, a medical/dental practice.
 
 ## YOUR ROLE
-Determine patient needs, collect basic HIPAA-compliant information, and route appropriately.
+Determine patient needs, collect basic HIPAA-compliant information, and ensure follow-up. Be warm, calm, and reassuring.
 
 ## CONVERSATION FLOW
 1. Ask: "Are you a current patient or would this be your first visit?"
-2. Collect: Name, date of birth, phone, general reason
-3. NEVER ask for specific medical details
-4. Assess urgency (emergency → 911, urgent → work in, routine → schedule)
+2. Collect ONE item at a time: Name, date of birth, phone, general reason
+3. Assess urgency:
+   - Emergency: "If this is a medical emergency, please call 911."
+   - Urgent: "I'll mark this as urgent and have someone call you back shortly."
+   - Routine: "Someone will call you back to schedule."
+4. End: "Is there anything else I can help you with?"
 
-## HIPAA COMPLIANCE
-- Only collect: name, DOB, phone, general reason
-- If they share medical info: "Our doctor will discuss that at your appointment"
+## HIPAA COMPLIANCE - CRITICAL
+- Only collect: name, DOB, phone, GENERAL reason
+- If they share symptoms: "Our medical team will discuss the details at your appointment."
+- NEVER ask follow-up questions about symptoms
+- NEVER repeat back specific medical information
+
+## KNOWLEDGE BASE
+Use for office hours, location, insurance accepted, services offered.
 
 ## CRITICAL RULE
-You do NOT have the ability to end calls. The patient will hang up when ready.`,
+You do NOT have the ability to end calls.`,
     firstMessage: (businessName) => `Hello, you've reached ${businessName}. This call may be recorded. Are you a current patient or would this be your first visit?`
   },
 
@@ -131,18 +138,22 @@ You do NOT have the ability to end calls. The patient will hang up when ready.`,
     systemPrompt: (businessName) => `You are the professional receptionist for ${businessName}.
 
 ## YOUR ROLE
-Greet callers professionally, understand their needs, collect contact information, and route appropriately.
+Greet callers professionally, understand needs, collect contact info, ensure follow-up.
 
 ## CONVERSATION FLOW
-1. Determine if new or existing client
-2. Collect: Name, phone, company (if business), general service needed
-3. Assess urgency
-4. Confirm details and next steps
+1. Ask: "Are you an existing client or is this a new inquiry?"
+2. Collect: Name, company (if applicable), phone, what they're looking for, best callback time
+3. Confirm: "Great, someone will be in touch."
+4. Ask: "Is there anything else I can help you with?"
+
+## KNOWLEDGE BASE
+Use for services, team members, company background, general pricing.
 
 ## BOUNDARIES
 - Never make promises about outcomes
 - Never discuss other clients
-- Never quote prices without checking
+- Never quote specific prices
+- Never commit to specific meeting times
 
 ## CRITICAL RULE
 You do NOT have the ability to end calls.`,
@@ -155,37 +166,60 @@ You do NOT have the ability to end calls.`,
     systemPrompt: (businessName) => `You are the phone assistant for ${businessName}, a restaurant.
 
 ## YOUR ROLE
-Take reservations, handle takeout orders, answer menu questions.
+Handle reservations, takeout orders, and inquiries. Be friendly and upbeat.
 
 ## CONVERSATION FLOW
-1. Ask: "Is this for a reservation or a takeout order?"
-2. For reservations: date, time, party size, name, phone
-3. For takeout: take order item by item, name, phone
-4. Confirm all details
+1. Ask: "Are you calling about a reservation, takeout, or do you have a question?"
+
+### RESERVATIONS:
+- Date, time, party size, name, phone, special requests
+- "I've noted your request. Someone will call back to confirm availability."
+
+### TAKEOUT:
+- Take order item by item, name, phone
+- "Someone will call back to confirm and take payment."
+
+### QUESTIONS:
+Use knowledge base for menu, hours, dietary options.
+
+## BOUNDARIES
+- Don't guarantee availability
+- Don't process payments
 
 ## CRITICAL RULE
 You do NOT have the ability to end calls.`,
-    firstMessage: (businessName) => `Hi! You've reached ${businessName}. This call may be recorded. How can I help you?`
+    firstMessage: (businessName) => `Hi, thanks for calling ${businessName}! This call may be recorded. Are you calling about a reservation, takeout, or do you have a question?`
   },
 
   salon_spa: {
     voiceId: VOICES.rachel,
     temperature: 0.7,
-    systemPrompt: (businessName) => `You are the welcoming receptionist for ${businessName}, a salon and spa.
+    systemPrompt: (businessName) => `You are the receptionist for ${businessName}, a salon and spa.
 
 ## YOUR ROLE
-Book appointments, answer service questions, make clients feel pampered.
+Help clients book appointments and answer questions. Be warm and welcoming.
 
 ## CONVERSATION FLOW
-1. Ask: "Are you a new client or have you been here before?"
-2. Determine their need (booking, rescheduling, question)
-3. For bookings: service, preferred date/time, name, phone
-4. Suggest add-ons naturally
-5. Confirm appointment details
+1. Ask: "Are you a returning client or is this your first time?"
+2. Determine need: "Are you looking to book an appointment?"
+
+### APPOINTMENTS:
+- Service, stylist preference, date/time, name, phone
+- "Someone will call back to confirm availability."
+
+### QUESTIONS:
+Use knowledge base for services, pricing, products.
+
+## UPSELLING (Natural)
+- "Would you like to add a conditioning treatment?"
+
+## BOUNDARIES
+- Don't guarantee availability
+- Don't quote complex pricing
 
 ## CRITICAL RULE
 You do NOT have the ability to end calls.`,
-    firstMessage: (businessName) => `Hi! You've reached ${businessName}. This call may be recorded. Are you calling to book an appointment?`
+    firstMessage: (businessName) => `Hi, thanks for calling ${businessName}! This call may be recorded. Are you looking to book an appointment?`
   },
 
   retail: {
@@ -194,96 +228,272 @@ You do NOT have the ability to end calls.`,
     systemPrompt: (businessName) => `You are the phone assistant for ${businessName}, a retail store.
 
 ## YOUR ROLE
-Answer questions, help find products, take orders. Be enthusiastic!
+Answer product questions, check availability, help with orders/returns.
 
 ## CONVERSATION FLOW
-1. Understand their need (product question, stock check, order, return)
-2. Help based on their need using knowledge base
-3. Get contact info when needed
-4. Confirm orders/details
+1. Ask: "Are you looking for a product, checking on an order, or have a question?"
+
+### PRODUCTS:
+- Use knowledge base for info
+- "Would you like me to have someone hold it for you?"
+
+### ORDERS/RETURNS:
+- Get name, order number, details
+- "Someone will call you back with an update."
+
+## KNOWLEDGE BASE
+Use for product info, hours, return policy, shipping.
 
 ## CRITICAL RULE
 You do NOT have the ability to end calls.`,
-    firstMessage: (businessName) => `Hi! You've reached ${businessName}. This call may be recorded. How can I help you today?`
+    firstMessage: (businessName) => `Hi, thanks for calling ${businessName}! This call may be recorded. How can I help you today?`
+  },
+
+  fitness: {
+    voiceId: VOICES.rachel,
+    temperature: 0.7,
+    systemPrompt: (businessName) => `You are the front desk assistant for ${businessName}, a fitness center.
+
+## YOUR ROLE
+Help with membership inquiries, class info, and questions. Be energetic and motivating.
+
+## CONVERSATION FLOW
+1. Ask: "Are you a current member or interested in joining?"
+
+### MEMBERSHIP INQUIRIES:
+- "Let me get some info and have someone reach out."
+- Collect: Name, phone, what they're looking for (general fitness, classes, training), best callback time
+- "Someone will call to discuss options and schedule a tour."
+
+### CURRENT MEMBERS:
+- Class schedules: Use knowledge base
+- Account questions: "Let me have a team member call you."
+- Personal training: "I can have a trainer reach out."
+
+## TONE
+- Encouraging: "That's a great goal!"
+- Inclusive: "We have options for all fitness levels"
+- Motivating: "You'll love it here"
+
+## BOUNDARIES
+- Never give health/medical advice
+- Never recommend specific routines
+- Don't quote exact prices
+
+## CRITICAL RULE
+You do NOT have the ability to end calls.`,
+    firstMessage: (businessName) => `Hey, thanks for calling ${businessName}! This call may be recorded. Are you a current member or interested in learning about membership?`
+  },
+
+  legal: {
+    voiceId: VOICES.brian,
+    temperature: 0.6,
+    systemPrompt: (businessName) => `You are the receptionist for ${businessName}, a law firm.
+
+## YOUR ROLE
+Conduct professional intake, determine general matter type, ensure attorney follow-up. Be professional and reassuring.
+
+## CONVERSATION FLOW
+1. Ask: "Are you a current client or is this a new matter?"
+
+### CURRENT CLIENTS:
+- Get name, have attorney return call
+- "Is this urgent?"
+
+### NEW INQUIRIES:
+- "Let me get some basic information."
+- Collect ONE at a time: Name, phone, general matter type ("car accident," "divorce," etc.), urgency
+- "An attorney will call you back to discuss."
+
+## CRITICAL BOUNDARIES - NEVER VIOLATE
+- NEVER give legal advice
+- NEVER say whether they have a case
+- NEVER interpret laws
+- NEVER discuss other clients
+- NEVER estimate outcomes, timelines, or costs
+- If pressed: "I can't provide legal advice, but an attorney will call you back."
+
+## CONFIDENTIALITY
+- "Everything you share is kept strictly confidential."
+
+## KNOWLEDGE BASE
+Use ONLY for: hours, location, practice areas, attorney bios.
+
+## CRITICAL RULE
+You do NOT have the ability to end calls.`,
+    firstMessage: (businessName) => `Hello, you've reached ${businessName}. This call may be recorded and is confidential. Are you a current client or is this regarding a new matter?`
+  },
+
+  real_estate: {
+    voiceId: VOICES.rachel,
+    temperature: 0.7,
+    systemPrompt: (businessName) => `You are the assistant for ${businessName}, a real estate company.
+
+## YOUR ROLE
+Handle buyer, seller, and renter inquiries. Collect info and ensure agent follow-up.
+
+## CONVERSATION FLOW
+1. Ask: "Are you looking to buy, sell, or rent?"
+
+### BUYERS:
+- Collect: Name, phone, area, property type, budget range, timeline
+- "An agent will call back to discuss options."
+
+### SELLERS:
+- Collect: Name, phone, property address, type, size, timeline
+- "An agent will schedule a consultation."
+
+### RENTERS:
+- Collect: Name, phone, area, budget, move-in timeline
+- "Someone will call with available rentals."
+
+### SPECIFIC PROPERTY:
+- Get property address, name, phone
+- "An agent will call with details."
+
+## KNOWLEDGE BASE
+Use for listings, agent bios, service areas.
+
+## BOUNDARIES
+- Don't quote property values
+- Don't guarantee showing times
+- Don't discuss financing
+
+## CRITICAL RULE
+You do NOT have the ability to end calls.`,
+    firstMessage: (businessName) => `Hi, thanks for calling ${businessName}! This call may be recorded. Are you looking to buy, sell, or rent?`
+  },
+
+  financial: {
+    voiceId: VOICES.brian,
+    temperature: 0.6,
+    systemPrompt: (businessName) => `You are the receptionist for ${businessName}, a financial services firm.
+
+## YOUR ROLE
+Handle inquiries professionally, determine service needs, ensure advisor follow-up.
+
+## CONVERSATION FLOW
+1. Ask: "Are you a current client or is this a new inquiry?"
+
+### CURRENT CLIENTS:
+- Get name, have advisor return call
+- Note general topic
+
+### NEW INQUIRIES:
+- Determine: "Are you looking for help with taxes, bookkeeping, financial planning, or something else?"
+- Collect: Name, phone, business/personal, general needs, timeline
+- "Someone will call to discuss how we can help."
+
+## SERVICE NOTES:
+- Tax: "Personal, business, or both?"
+- Bookkeeping: "New or existing business?"
+- Planning: "Retirement, investments, or general guidance?"
+
+## CRITICAL BOUNDARIES - COMPLIANCE
+- NEVER give financial, tax, or investment advice
+- NEVER discuss specific products
+- NEVER estimate refunds/liabilities
+- NEVER guarantee outcomes
+- If pressed: "An advisor would be happy to discuss that."
+
+## CONFIDENTIALITY
+- "Everything you share is kept strictly confidential."
+
+## KNOWLEDGE BASE
+Use for services, team bios, hours.
+
+## CRITICAL RULE
+You do NOT have the ability to end calls.`,
+    firstMessage: (businessName) => `Hello, you've reached ${businessName}. This call may be recorded. Are you a current client or is this a new inquiry?`
+  },
+
+  automotive: {
+    voiceId: VOICES.chris,
+    temperature: 0.7,
+    systemPrompt: (businessName) => `You are the service advisor assistant for ${businessName}, an automotive business.
+
+## YOUR ROLE
+Help with service appointments, repair inquiries, and questions. Be friendly and reassuring.
+
+## CONVERSATION FLOW
+1. Ask: "Are you calling about a service appointment, a repair question, or something else?"
+
+### SERVICE APPOINTMENTS:
+- Collect: Name, phone, vehicle (year/make/model), service needed, preferred date/time
+- "Someone will call to confirm your appointment."
+
+### REPAIR INQUIRIES:
+- Collect: Name, phone, vehicle, description of issue
+- Listen for safety concerns:
+  - Brakes/steering/warning lights: "That sounds like something we should look at soon."
+  - Minor issues: "We can definitely take a look."
+- "A service advisor will call to discuss and schedule."
+
+### ESTIMATES:
+- "Pricing depends on what we find. Someone can give a detailed estimate after looking at it."
+
+## URGENCY:
+- Safety issues: "Can you bring it in today or tomorrow?"
+- Normal wear: "We can schedule at your convenience."
+
+## KNOWLEDGE BASE
+Use for services, hours, location, payment methods.
+
+## BOUNDARIES
+- Don't diagnose problems
+- Don't quote specific prices
+- Don't guarantee repair timelines
+
+## CRITICAL RULE
+You do NOT have the ability to end calls.`,
+    firstMessage: (businessName) => `Hey, thanks for calling ${businessName}! This call may be recorded. Are you calling about a service appointment or do you have a question about your vehicle?`
   }
 };
 
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
-
 function sanitizeAssistantName(businessName) {
   const suffix = ' AI Receptionist';
   const maxLength = 40;
-  
   if ((businessName + suffix).length <= maxLength) {
     return businessName + suffix;
   }
-  
-  const availableLength = maxLength - suffix.length;
-  return businessName.slice(0, availableLength).trim() + suffix;
+  return businessName.slice(0, maxLength - suffix.length).trim() + suffix;
 }
 
-/**
- * Format phone to E.164 format (+1XXXXXXXXXX)
- * Returns null if invalid
- */
 function formatPhoneE164(phone) {
   if (!phone) return null;
-  
-  // Remove all non-digits
   const digits = phone.replace(/\D/g, '');
-  
-  // Handle different lengths
-  if (digits.length === 10) {
-    return `+1${digits}`;
-  } else if (digits.length === 11 && digits.startsWith('1')) {
-    return `+${digits}`;
-  } else if (digits.length > 10 && digits.startsWith('1')) {
-    return `+${digits.substring(0, 11)}`;
-  }
-  
-  return null; // Invalid phone
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  return null;
 }
 
-/**
- * Check if phone is valid E.164 format
- */
 function isValidE164(phone) {
-  if (!phone) return false;
-  // E.164: + followed by 1-15 digits, starting with country code
-  return /^\+1\d{10}$/.test(phone);
+  return phone && /^\+1\d{10}$/.test(phone);
 }
 
-/**
- * Replace {businessName} placeholder in prompts
- */
 function replacePlaceholders(text, businessName) {
   if (!text) return text;
   return text.replace(/\{businessName\}/g, businessName);
 }
 
 // ============================================================================
-// FETCH AGENCY CUSTOM TEMPLATE (Enterprise Feature)
+// FETCH AGENCY CUSTOM TEMPLATE
 // ============================================================================
 async function getAgencyTemplate(agencyId, industryKey) {
-  if (!supabase || !agencyId) {
-    return null;
-  }
+  if (!supabase || !agencyId) return null;
   
   try {
-    // First check if agency is on enterprise plan
     const { data: agency, error: agencyError } = await supabase
       .from('agencies')
       .select('plan_type')
       .eq('id', agencyId)
       .single();
     
-    if (agencyError || agency?.plan_type !== 'enterprise') {
-      return null; // Not enterprise, use defaults
-    }
+    if (agencyError || agency?.plan_type !== 'enterprise') return null;
     
-    // Fetch custom template
     const { data: template, error } = await supabase
       .from('agency_prompt_templates')
       .select('*')
@@ -292,15 +502,11 @@ async function getAgencyTemplate(agencyId, industryKey) {
       .eq('is_active', true)
       .single();
     
-    if (error && error.code !== 'PGRST116') { // PGRST116 = no rows
-      console.warn(`⚠️ Error fetching agency template: ${error.message}`);
-      return null;
-    }
+    if (error && error.code !== 'PGRST116') return null;
     
     if (template) {
       console.log(`✅ Found custom template for agency ${agencyId}, industry ${industryKey}`);
     }
-    
     return template;
   } catch (error) {
     console.error('❌ Error fetching agency template:', error);
@@ -309,12 +515,10 @@ async function getAgencyTemplate(agencyId, industryKey) {
 }
 
 // ============================================================================
-// CREATE QUERY TOOL FOR KNOWLEDGE BASE
+// CREATE QUERY TOOL
 // ============================================================================
 async function createQueryTool(fileId, businessName) {
   try {
-    console.log('🔧 Creating Query Tool for knowledge base...');
-    
     const response = await fetch('https://api.vapi.ai/tool', {
       method: 'POST',
       headers: {
@@ -326,15 +530,10 @@ async function createQueryTool(fileId, businessName) {
         async: false,
         function: {
           name: 'search_knowledge_base',
-          description: `Search ${businessName}'s knowledge base for information about services, pricing, hours, and policies.`,
+          description: `Search ${businessName}'s knowledge base.`,
           parameters: {
             type: 'object',
-            properties: {
-              query: {
-                type: 'string',
-                description: 'The search query'
-              }
-            },
+            properties: { query: { type: 'string', description: 'The search query' } },
             required: ['query']
           }
         },
@@ -347,12 +546,7 @@ async function createQueryTool(fileId, businessName) {
         }]
       })
     });
-
-    if (!response.ok) {
-      console.error('⚠️ Query tool creation failed');
-      return null;
-    }
-
+    if (!response.ok) return null;
     const data = await response.json();
     console.log(`✅ Query Tool created: ${data.id}`);
     return data.id;
@@ -363,73 +557,55 @@ async function createQueryTool(fileId, businessName) {
 }
 
 // ============================================================================
-// CREATE INDUSTRY ASSISTANT (WITH AGENCY TEMPLATE OVERRIDE)
+// CREATE INDUSTRY ASSISTANT
 // ============================================================================
 async function createIndustryAssistant(businessName, industry, knowledgeBaseData = null, ownerPhone = null, clientId = null, agencyId = null) {
   try {
     const industryKey = INDUSTRY_MAPPING[industry] || 'professional_services';
-    const defaultConfig = INDUSTRY_CONFIGS[industryKey];
+    const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
 
     console.log(`🎯 Creating ${industryKey} assistant for ${businessName}`);
-    if (agencyId) {
-      console.log(`   Agency ID: ${agencyId}`);
-    }
+    if (agencyId) console.log(`   Agency ID: ${agencyId}`);
 
-    // Check for agency-specific template override (Enterprise feature)
     let customTemplate = null;
     if (agencyId) {
       customTemplate = await getAgencyTemplate(agencyId, industryKey);
     }
 
-    // Determine final config (custom overrides default)
     let systemPrompt, firstMessage, voiceId, temperature;
     
     if (customTemplate) {
-      console.log(`   📝 Using CUSTOM template from agency`);
+      console.log(`   📝 Using CUSTOM template`);
       systemPrompt = replacePlaceholders(customTemplate.system_prompt, businessName);
       firstMessage = replacePlaceholders(customTemplate.first_message, businessName);
-      voiceId = customTemplate.voice_id || defaultConfig.voiceId;
-      temperature = customTemplate.temperature || defaultConfig.temperature;
+      voiceId = customTemplate.voice_id || config.voiceId;
+      temperature = customTemplate.temperature || config.temperature;
     } else {
       console.log(`   📝 Using DEFAULT template`);
-      systemPrompt = defaultConfig.systemPrompt(businessName);
-      firstMessage = defaultConfig.firstMessage(businessName);
-      voiceId = defaultConfig.voiceId;
-      temperature = defaultConfig.temperature;
+      systemPrompt = config.systemPrompt(businessName);
+      firstMessage = config.firstMessage(businessName);
+      voiceId = config.voiceId;
+      temperature = config.temperature;
     }
 
-    // Create Query Tool if knowledge base exists
     let queryToolId = null;
     if (knowledgeBaseData?.fileId) {
       queryToolId = await createQueryTool(knowledgeBaseData.fileId, businessName);
     }
 
-    // Build tools array
     const tools = [];
-
-    // Add Transfer Tool if owner phone provided AND valid E.164
     if (ownerPhone) {
-      // Ensure phone is E.164 format
-      let formattedPhone = ownerPhone;
-      if (!isValidE164(ownerPhone)) {
-        formattedPhone = formatPhoneE164(ownerPhone);
-        console.log(`📞 Formatted phone for transfer: ${ownerPhone} → ${formattedPhone}`);
-      }
-      
-      // Only add transfer tool if we have a valid phone
+      let formattedPhone = isValidE164(ownerPhone) ? ownerPhone : formatPhoneE164(ownerPhone);
       if (formattedPhone && isValidE164(formattedPhone)) {
         tools.push({
           type: 'transferCall',
           destinations: [{
             type: 'number',
             number: formattedPhone,
-            description: 'Transfer to business owner for urgent matters',
-            message: 'One moment please, let me connect you with the owner.'
+            description: 'Transfer to business owner',
+            message: 'One moment, let me connect you.'
           }]
         });
-        console.log(`✅ Transfer tool added with phone: ${formattedPhone}`);
-      } else {
-        console.log(`⚠️ Skipping transfer tool - invalid phone: ${ownerPhone}`);
       }
     }
 
@@ -438,19 +614,13 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       model: {
         provider: 'openai',
         model: 'gpt-4o-mini',
-        temperature: temperature,
-        messages: [{ 
-          role: 'system', 
-          content: systemPrompt
-        }],
+        temperature,
+        messages: [{ role: 'system', content: systemPrompt }],
         ...(queryToolId && { toolIds: [queryToolId] }),
         ...(tools.length > 0 && { tools })
       },
-      voice: {
-        provider: '11labs',
-        voiceId: voiceId
-      },
-      firstMessage: firstMessage,
+      voice: { provider: '11labs', voiceId },
+      firstMessage,
       recordingEnabled: true,
       serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
       serverUrl: `${BACKEND_URL}/webhook/vapi`
@@ -465,10 +635,7 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       body: JSON.stringify(assistantConfig)
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`VAPI API error: ${errorText}`);
-    }
+    if (!response.ok) throw new Error(`VAPI API error: ${await response.text()}`);
 
     const assistant = await response.json();
     console.log(`✅ Assistant created: ${assistant.id}`);
@@ -480,111 +647,72 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
 }
 
 // ============================================================================
-// PROVISION PHONE NUMBER
+// PHONE PROVISIONING
 // ============================================================================
-async function provisionPhoneNumber(areaCode, assistantId, businessName) {
-  try {
-    console.log(`📞 Buying phone number with area code ${areaCode}...`);
-    
-    const response = await fetch('https://api.vapi.ai/phone-number/buy', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${VAPI_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        areaCode: areaCode,
-        name: `${businessName} - Business Line`,
-        assistantId: assistantId
-      })
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.message || 'Failed to buy phone number');
-    }
-
-    const data = await response.json();
-    console.log(`✅ Phone provisioned: ${data.number}`);
-    return data;
-  } catch (error) {
-    console.error(`❌ Phone provisioning failed for ${areaCode}:`, error.message);
-    throw error;
-  }
-}
-
-// State area codes for fallback
 const STATE_AREA_CODES = {
-  'GA': ['404', '678', '770', '470', '706', '762', '912', '229'],
-  'FL': ['305', '786', '954', '754', '561', '407', '321', '904', '352', '386', '239', '941', '727', '813', '850'],
-  'TX': ['214', '972', '469', '817', '682', '713', '281', '832', '346', '210', '512', '737', '254', '806', '903'],
-  'CA': ['213', '310', '323', '424', '818', '626', '714', '949', '562', '657', '909', '951', '619', '858', '760', '415', '408', '510', '925', '650', '707'],
-  'NY': ['212', '718', '917', '347', '646', '929', '516', '631', '914', '845', '518', '607', '315', '585', '716'],
-  'AL': ['205', '251', '256', '334', '938'],
-  'AZ': ['480', '520', '602', '623', '928'],
+  'GA': ['404', '678', '770', '470'],
+  'FL': ['305', '786', '954', '561', '407'],
+  'TX': ['214', '972', '713', '281', '210', '512'],
+  'CA': ['213', '310', '323', '818', '714', '949', '619', '415', '408'],
+  'NY': ['212', '718', '917', '347', '646', '516', '631'],
+  'AL': ['205', '251', '256', '334'],
+  'AZ': ['480', '520', '602', '623'],
   'CO': ['303', '719', '720', '970'],
-  'CT': ['203', '475', '860', '959'],
-  'DE': ['302'],
-  'IL': ['217', '224', '309', '312', '331', '618', '630', '708', '773', '779', '815', '847', '872'],
-  'IN': ['219', '260', '317', '463', '574', '765', '812', '930'],
-  'LA': ['225', '318', '337', '504', '985'],
-  'MA': ['339', '351', '413', '508', '617', '774', '781', '857', '978'],
-  'MD': ['240', '301', '410', '443', '667'],
-  'MI': ['231', '248', '269', '313', '517', '586', '616', '734', '810', '906', '947', '989'],
-  'MN': ['218', '320', '507', '612', '651', '763', '952'],
-  'MO': ['314', '417', '573', '636', '660', '816'],
-  'NC': ['252', '336', '704', '743', '828', '910', '919', '980', '984'],
-  'NJ': ['201', '551', '609', '732', '848', '856', '862', '908', '973'],
-  'NV': ['702', '725', '775'],
-  'OH': ['216', '220', '234', '330', '380', '419', '440', '513', '567', '614', '740', '937'],
-  'OK': ['405', '539', '580', '918'],
-  'OR': ['458', '503', '541', '971'],
-  'PA': ['215', '267', '272', '412', '484', '570', '610', '717', '724', '814', '878'],
-  'SC': ['803', '843', '854', '864'],
-  'TN': ['423', '615', '629', '731', '865', '901', '931'],
-  'VA': ['276', '434', '540', '571', '703', '757', '804'],
-  'WA': ['206', '253', '360', '425', '509', '564'],
-  'WI': ['262', '414', '534', '608', '715', '920'],
+  'IL': ['312', '773', '847', '630', '708'],
+  'NC': ['704', '919', '336', '252'],
+  'NJ': ['201', '973', '732', '609'],
+  'OH': ['216', '614', '513', '330'],
+  'PA': ['215', '412', '610', '717'],
+  'TN': ['615', '901', '423', '865'],
+  'VA': ['703', '804', '757', '540'],
+  'WA': ['206', '253', '425', '509']
 };
 
+async function provisionPhoneNumber(areaCode, assistantId, businessName) {
+  const response = await fetch('https://api.vapi.ai/phone-number/buy', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${VAPI_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      areaCode,
+      name: `${businessName} - Business Line`,
+      assistantId
+    })
+  });
+  if (!response.ok) throw new Error('Failed to buy phone number');
+  return response.json();
+}
+
 async function provisionLocalPhone(city, state, assistantId, businessName) {
-  console.log(`\n📞 Provisioning phone for ${businessName} in ${city}, ${state}`);
-  
-  const stateUpper = state.toUpperCase();
-  const areaCodes = STATE_AREA_CODES[stateUpper] || ['404']; // Default to Atlanta
+  console.log(`📞 Provisioning phone for ${businessName} in ${city}, ${state}`);
+  const areaCodes = STATE_AREA_CODES[state.toUpperCase()] || ['404'];
   
   for (const areaCode of areaCodes) {
     try {
       const phoneData = await provisionPhoneNumber(areaCode, assistantId, businessName);
+      console.log(`✅ Phone provisioned: ${phoneData.number}`);
       return phoneData;
     } catch (error) {
       console.log(`❌ ${areaCode} unavailable, trying next...`);
     }
   }
-  
-  throw new Error(`Failed to provision phone after trying all ${state} area codes`);
+  throw new Error(`Failed to provision phone for ${state}`);
 }
 
 // ============================================================================
-// KNOWLEDGE BASE FROM WEBSITE
+// KNOWLEDGE BASE
 // ============================================================================
 async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
   try {
-    console.log(`🌐 Scraping website: ${websiteUrl}`);
-    
-    // Use Jina for scraping
+    console.log(`🌐 Scraping: ${websiteUrl}`);
     const scrapeResponse = await fetch(`https://r.jina.ai/${websiteUrl}`);
-    if (!scrapeResponse.ok) {
-      throw new Error('Failed to scrape website');
-    }
+    if (!scrapeResponse.ok) throw new Error('Failed to scrape');
     
     const websiteContent = await scrapeResponse.text();
-    console.log(`✅ Website scraped, length: ${websiteContent.length}`);
+    const content = `# ${businessName} - Knowledge Base\n\n${websiteContent.substring(0, 15000)}`;
     
-    // Format content
-    const content = `# ${businessName} - Knowledge Base\n\n## Website Content\n${websiteContent.substring(0, 15000)}`;
-    
-    // Upload to VAPI
     const form = new FormData();
     form.append('file', Buffer.from(content, 'utf-8'), {
       filename: `${businessName.replace(/\s+/g, '_')}_knowledge.txt`,
@@ -593,105 +721,64 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
     
     const uploadResponse = await fetch('https://api.vapi.ai/file', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${VAPI_API_KEY}`,
-        ...form.getHeaders()
-      },
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, ...form.getHeaders() },
       body: form
     });
-    
-    if (!uploadResponse.ok) {
-      throw new Error('Failed to upload to VAPI');
-    }
-    
+    if (!uploadResponse.ok) throw new Error('Failed to upload');
     const uploadData = await uploadResponse.json();
-    console.log(`✅ File uploaded: ${uploadData.id}`);
     
-    // Create knowledge base
     const kbResponse = await fetch('https://api.vapi.ai/knowledge-base', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${VAPI_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        provider: 'canonical',
-        fileIds: [uploadData.id]
-      })
+      body: JSON.stringify({ provider: 'canonical', fileIds: [uploadData.id] })
     });
-    
-    if (!kbResponse.ok) {
-      throw new Error('Failed to create knowledge base');
-    }
-    
+    if (!kbResponse.ok) throw new Error('Failed to create KB');
     const kbData = await kbResponse.json();
-    console.log(`✅ Knowledge base created: ${kbData.id}`);
     
-    return {
-      knowledgeBaseId: kbData.id,
-      fileId: uploadData.id,
-      websiteContent: websiteContent
-    };
+    console.log(`✅ Knowledge base created: ${kbData.id}`);
+    return { knowledgeBaseId: kbData.id, fileId: uploadData.id, websiteContent };
   } catch (error) {
-    console.error('❌ Knowledge base creation failed:', error.message);
+    console.error('❌ KB creation failed:', error.message);
     return null;
   }
 }
 
 // ============================================================================
-// GET PHONE NUMBER FROM VAPI
+// UTILITY FUNCTIONS
 // ============================================================================
 async function getPhoneNumberFromVapi(phoneNumberId) {
   try {
     const response = await fetch(`https://api.vapi.ai/phone-number/${phoneNumberId}`, {
-      headers: {
-        'Authorization': `Bearer ${VAPI_API_KEY}`
-      }
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
     });
-    
     if (!response.ok) return null;
-    
-    const data = await response.json();
-    return data.number;
-  } catch (error) {
-    console.error('❌ Error fetching phone number:', error);
-    return null;
-  }
+    return (await response.json()).number;
+  } catch { return null; }
 }
 
-// ============================================================================
-// DISABLE/ENABLE ASSISTANT
-// ============================================================================
 async function disableAssistant(assistantId) {
   try {
     await fetch(`https://api.vapi.ai/assistant/${assistantId}`, {
       method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${VAPI_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ serverUrl: null })
     });
     return true;
-  } catch (error) {
-    return false;
-  }
+  } catch { return false; }
 }
 
 async function enableAssistant(assistantId) {
   try {
     await fetch(`https://api.vapi.ai/assistant/${assistantId}`, {
       method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${VAPI_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ serverUrl: `${BACKEND_URL}/webhook/vapi` })
     });
     return true;
-  } catch (error) {
-    return false;
-  }
+  } catch { return false; }
 }
 
 // ============================================================================
