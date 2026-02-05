@@ -647,18 +647,19 @@ app.get('/api/domain-test', (req, res) => {
 });
 
 // ============================================================================
+// AGENCY TEMPLATES ROUTES (Enterprise Feature - Custom AI Prompts)
+// IMPORTANT: Must be BEFORE outreach routes to avoid /templates conflict
+// ============================================================================
+
+app.use('/api/agency', agencyTemplatesRoutes);
+
+// ============================================================================
 // LEADS & OUTREACH ROUTES (Agency CRM)
 // ============================================================================
 
 app.use('/api/agency', leadRoutes);
 app.use('/api/agency', activityRoutes);
 app.use('/api/agency', outreachRoutes);
-
-// ============================================================================
-// AGENCY TEMPLATES ROUTES (Enterprise Feature - Custom AI Prompts)
-// ============================================================================
-
-app.use('/api/agency', agencyTemplatesRoutes);
 
 // ============================================================================
 // CLIENT ROUTES (Agencies → Clients)
