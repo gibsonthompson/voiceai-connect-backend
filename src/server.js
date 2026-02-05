@@ -167,6 +167,7 @@ const {
   clientLogin, 
   verifyToken,
   setPassword,
+  changePassword,
   requestPasswordReset
 } = require('./routes/auth');
 
@@ -678,6 +679,8 @@ app.get('/api/client/:clientId/details', async (req, res) => {
           slug,
           logo_url,
           primary_color,
+          secondary_color,
+          accent_color,
           support_email,
           price_starter,
           price_pro,
@@ -828,6 +831,7 @@ app.post('/api/auth/agency/login', agencyLogin);
 app.post('/api/auth/client/login', clientLogin);
 app.post('/api/auth/verify', verifyToken);
 app.post('/api/auth/set-password', setPassword);
+app.post('/api/auth/change-password', changePassword);
 app.post('/api/auth/reset-password', requestPasswordReset);
 
 // Google OAuth

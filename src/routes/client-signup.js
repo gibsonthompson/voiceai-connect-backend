@@ -109,7 +109,7 @@ async function configurePhoneWebhook(phoneId, assistantId) {
 }
 
 // ============================================================================
-// MAIN CLIENT SIGNUP HANDLER
+// MAIN CLIENT SIGNUP HANDLER (from agency marketing site)
 // ============================================================================
 async function handleClientSignup(req, res) {
   try {
@@ -350,8 +350,9 @@ async function handleClientSignup(req, res) {
 
 // ============================================================================
 // AGENCY ADD CLIENT HANDLER
-// Called when agency owner adds a client from the agency dashboard
-// Same provisioning flow as self-signup, but initiated by the agency
+// Agency owner adds a client from the dashboard with a temp password.
+// No password token, no welcome email — just SMS with phone number.
+// Agency tells client their login credentials directly.
 // ============================================================================
 async function handleAgencyAddClient(req, res) {
   try {
@@ -370,7 +371,8 @@ async function handleAgencyAddClient(req, res) {
       businessCity,
       businessState,
       websiteUrl: rawWebsiteUrl,
-      planType = 'starter'
+      planType = 'starter',
+      tempPassword
     } = req.body;
 
     const errors = [];
@@ -381,6 +383,7 @@ async function handleAgencyAddClient(req, res) {
     if (!businessCity || businessCity.trim().length < 2) errors.push('City is required');
     if (!businessState || businessState.trim().length < 2) errors.push('State is required');
     if (!industry) errors.push('Industry is required');
+    if (!tempPassword || tempPassword.length < 6) errors.push('Temporary password is required (min 6 characters)');
 
     if (errors.length > 0) {
       return res.status(400).json({ error: 'Validation failed', errors });
@@ -426,6 +429,10 @@ async function handleAgencyAddClient(req, res) {
         message: 'A client with this email already exists.'
       });
     }
+
+    // --- Hash temp password ---
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(tempPassword, salt);
 
     // === STEP 1: Knowledge Base (if website provided) ===
     let knowledgeBaseData = null;
@@ -500,7 +507,7 @@ async function handleAgencyAddClient(req, res) {
     }
     console.log(`🎉 Client created: ${newClient.business_name}`);
 
-    // === STEP 5: Create User Record ===
+    // === STEP 5: Create User Record WITH hashed password ===
     const { data: newUser, error: userError } = await supabase
       .from('users')
       .insert({
@@ -509,7 +516,7 @@ async function handleAgencyAddClient(req, res) {
         first_name: firstName,
         last_name: lastName || null,
         role: 'client',
-        password_hash: null
+        password_hash: passwordHash  // Temp password set by agency
       })
       .select()
       .single();
@@ -519,18 +526,11 @@ async function handleAgencyAddClient(req, res) {
       throw userError;
     }
 
-    // === STEP 6: Password Token ===
-    const passwordToken = await createPasswordToken(newUser.id, email.toLowerCase());
-
-    // === STEP 7: Welcome Email ===
-    console.log('📧 Sending welcome email...');
-    await sendClientWelcomeEmail(newClient, agency, null, passwordToken);
-
-    // === STEP 8: Welcome SMS ===
+    // === STEP 6: Welcome SMS (phone number only, no link) ===
     console.log('📱 Sending welcome SMS...');
     await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneData.number, agency);
 
-    // === STEP 9: Notify Agency Owner ===
+    // === STEP 7: Notify Agency Owner ===
     console.log('📱 Notifying agency owner...');
     await sendClientSignupNotificationSMS(newClient, agency);
 
