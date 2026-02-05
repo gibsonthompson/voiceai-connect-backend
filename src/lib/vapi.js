@@ -1,9 +1,19 @@
 // ============================================================================
 // VAPI INTEGRATION - Multi-Tenant Voice AI Platform
 // Adapted from CallBird's battle-tested patterns
+// WITH AGENCY TEMPLATE OVERRIDE SUPPORT (Enterprise Feature)
 // ============================================================================
 const fetch = require('node-fetch');
 const FormData = require('form-data');
+
+// Import supabase for template lookups
+let supabase;
+try {
+  const supabaseModule = require('./supabase');
+  supabase = supabaseModule.supabase;
+} catch (err) {
+  console.warn('⚠️ Supabase not available for template lookups');
+}
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
@@ -61,7 +71,7 @@ const INDUSTRY_VOICES = {
 };
 
 // ============================================================================
-// INDUSTRY CONFIGURATIONS
+// INDUSTRY CONFIGURATIONS (DEFAULT PROMPTS)
 // ============================================================================
 const INDUSTRY_CONFIGS = {
   home_services: {
@@ -245,6 +255,59 @@ function isValidE164(phone) {
   return /^\+1\d{10}$/.test(phone);
 }
 
+/**
+ * Replace {businessName} placeholder in prompts
+ */
+function replacePlaceholders(text, businessName) {
+  if (!text) return text;
+  return text.replace(/\{businessName\}/g, businessName);
+}
+
+// ============================================================================
+// FETCH AGENCY CUSTOM TEMPLATE (Enterprise Feature)
+// ============================================================================
+async function getAgencyTemplate(agencyId, industryKey) {
+  if (!supabase || !agencyId) {
+    return null;
+  }
+  
+  try {
+    // First check if agency is on enterprise plan
+    const { data: agency, error: agencyError } = await supabase
+      .from('agencies')
+      .select('plan_type')
+      .eq('id', agencyId)
+      .single();
+    
+    if (agencyError || agency?.plan_type !== 'enterprise') {
+      return null; // Not enterprise, use defaults
+    }
+    
+    // Fetch custom template
+    const { data: template, error } = await supabase
+      .from('agency_prompt_templates')
+      .select('*')
+      .eq('agency_id', agencyId)
+      .eq('industry', industryKey)
+      .eq('is_active', true)
+      .single();
+    
+    if (error && error.code !== 'PGRST116') { // PGRST116 = no rows
+      console.warn(`⚠️ Error fetching agency template: ${error.message}`);
+      return null;
+    }
+    
+    if (template) {
+      console.log(`✅ Found custom template for agency ${agencyId}, industry ${industryKey}`);
+    }
+    
+    return template;
+  } catch (error) {
+    console.error('❌ Error fetching agency template:', error);
+    return null;
+  }
+}
+
 // ============================================================================
 // CREATE QUERY TOOL FOR KNOWLEDGE BASE
 // ============================================================================
@@ -300,14 +363,40 @@ async function createQueryTool(fileId, businessName) {
 }
 
 // ============================================================================
-// CREATE INDUSTRY ASSISTANT
+// CREATE INDUSTRY ASSISTANT (WITH AGENCY TEMPLATE OVERRIDE)
 // ============================================================================
-async function createIndustryAssistant(businessName, industry, knowledgeBaseData = null, ownerPhone = null, clientId = null) {
+async function createIndustryAssistant(businessName, industry, knowledgeBaseData = null, ownerPhone = null, clientId = null, agencyId = null) {
   try {
     const industryKey = INDUSTRY_MAPPING[industry] || 'professional_services';
-    const config = INDUSTRY_CONFIGS[industryKey];
+    const defaultConfig = INDUSTRY_CONFIGS[industryKey];
 
     console.log(`🎯 Creating ${industryKey} assistant for ${businessName}`);
+    if (agencyId) {
+      console.log(`   Agency ID: ${agencyId}`);
+    }
+
+    // Check for agency-specific template override (Enterprise feature)
+    let customTemplate = null;
+    if (agencyId) {
+      customTemplate = await getAgencyTemplate(agencyId, industryKey);
+    }
+
+    // Determine final config (custom overrides default)
+    let systemPrompt, firstMessage, voiceId, temperature;
+    
+    if (customTemplate) {
+      console.log(`   📝 Using CUSTOM template from agency`);
+      systemPrompt = replacePlaceholders(customTemplate.system_prompt, businessName);
+      firstMessage = replacePlaceholders(customTemplate.first_message, businessName);
+      voiceId = customTemplate.voice_id || defaultConfig.voiceId;
+      temperature = customTemplate.temperature || defaultConfig.temperature;
+    } else {
+      console.log(`   📝 Using DEFAULT template`);
+      systemPrompt = defaultConfig.systemPrompt(businessName);
+      firstMessage = defaultConfig.firstMessage(businessName);
+      voiceId = defaultConfig.voiceId;
+      temperature = defaultConfig.temperature;
+    }
 
     // Create Query Tool if knowledge base exists
     let queryToolId = null;
@@ -349,19 +438,19 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       model: {
         provider: 'openai',
         model: 'gpt-4o-mini',
-        temperature: config.temperature,
+        temperature: temperature,
         messages: [{ 
           role: 'system', 
-          content: config.systemPrompt(businessName)
+          content: systemPrompt
         }],
         ...(queryToolId && { toolIds: [queryToolId] }),
         ...(tools.length > 0 && { tools })
       },
       voice: {
         provider: '11labs',
-        voiceId: config.voiceId
+        voiceId: voiceId
       },
-      firstMessage: config.firstMessage(businessName),
+      firstMessage: firstMessage,
       recordingEnabled: true,
       serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
       serverUrl: `${BACKEND_URL}/webhook/vapi`
@@ -615,6 +704,8 @@ module.exports = {
   sanitizeAssistantName,
   formatPhoneE164,
   isValidE164,
+  replacePlaceholders,
+  getAgencyTemplate,
   createQueryTool,
   createIndustryAssistant,
   provisionPhoneNumber,

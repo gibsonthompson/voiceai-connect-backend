@@ -140,6 +140,9 @@ const leadRoutes = require('./routes/leads');
 const activityRoutes = require('./routes/activity');
 const outreachRoutes = require('./routes/outreach');
 
+// Agency Templates Routes (Enterprise Feature - Custom AI Prompts)
+const agencyTemplatesRoutes = require('./routes/agency-templates');
+
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 
@@ -193,7 +196,8 @@ app.get('/health', (req, res) => {
       vapiIntegration: true,
       automatedDomains: true,
       referralProgram: true,
-      googleOAuth: true
+      googleOAuth: true,
+      aiTemplates: true
     }
   });
 });
@@ -649,6 +653,12 @@ app.get('/api/domain-test', (req, res) => {
 app.use('/api/agency', leadRoutes);
 app.use('/api/agency', activityRoutes);
 app.use('/api/agency', outreachRoutes);
+
+// ============================================================================
+// AGENCY TEMPLATES ROUTES (Enterprise Feature - Custom AI Prompts)
+// ============================================================================
+
+app.use('/api/agency', agencyTemplatesRoutes);
 
 // ============================================================================
 // CLIENT ROUTES (Agencies → Clients)

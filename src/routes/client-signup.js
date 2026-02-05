@@ -210,7 +210,9 @@ async function handleClientSignup(req, res) {
       businessName,
       industry,
       knowledgeBaseData,
-      formattedOwnerPhone
+      formattedOwnerPhone,
+      null,     // clientId (not created yet)
+      agencyId  // Pass agencyId for template override lookup (Enterprise feature)
     );
     
     console.log(`✅ Assistant created: ${assistant.id}`);
@@ -454,7 +456,9 @@ async function handleAgencyAddClient(req, res) {
       businessName,
       industry,
       knowledgeBaseData,
-      formattedOwnerPhone
+      formattedOwnerPhone,
+      null,     // clientId (not created yet)
+      agencyId  // Pass agencyId for template override lookup (Enterprise feature)
     );
     console.log(`✅ Assistant created: ${assistant.id}`);
 
@@ -598,12 +602,14 @@ async function provisionClient(clientId) {
       );
     }
     
-    // Create VAPI assistant
+    // Create VAPI assistant (with agencyId for template override)
     const assistant = await createIndustryAssistant(
       client.business_name,
       client.industry,
       knowledgeBaseData,
-      client.owner_phone
+      client.owner_phone,
+      client.id,        // clientId
+      client.agency_id  // Pass agencyId for template override lookup (Enterprise feature)
     );
     
     // Provision phone
