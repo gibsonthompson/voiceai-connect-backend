@@ -85,6 +85,26 @@ function validateAgencySignup(body) {
 }
 
 // ============================================================================
+// REFERRAL SOURCE LABELS (for SMS/display)
+// ============================================================================
+const REFERRAL_SOURCE_LABELS = {
+  'google_search': 'Google Search',
+  'ai_recommendation': 'AI (ChatGPT/Claude/Perplexity)',
+  'linkedin': 'LinkedIn',
+  'twitter': 'Twitter/X',
+  'facebook_instagram': 'Facebook/Instagram',
+  'youtube': 'YouTube',
+  'podcast': 'Podcast',
+  'friend_colleague': 'Friend/Colleague',
+  'blog_article': 'Blog/Article',
+  'other': 'Other',
+};
+
+function getReferralSourceLabel(source) {
+  return REFERRAL_SOURCE_LABELS[source] || source || 'Not specified';
+}
+
+// ============================================================================
 // REFERRAL ATTRIBUTION HELPER
 // ============================================================================
 async function attributeReferral(agencyId, referralCode) {
@@ -296,7 +316,7 @@ async function handleAgencySignup(req, res) {
 
 // ============================================================================
 // AGENCY ONBOARDING HANDLER (UPDATED - 7 steps with agency details as step 1)
-// Step 1: Agency name + phone (NEW)
+// Step 1: Agency name + phone + referral source
 // Step 2: Logo upload
 // Step 3: Brand colors
 // Step 4: Pricing
@@ -330,7 +350,7 @@ async function handleAgencyOnboarding(req, res) {
     };
     
     switch (step) {
-      case 1: // Agency Details (NEW STEP)
+      case 1: // Agency Details (includes referral source)
         if (data.name && data.name.trim()) {
           updateData.name = data.name.trim();
           
@@ -344,6 +364,11 @@ async function handleAgencyOnboarding(req, res) {
         }
         if (data.phone !== undefined) {
           updateData.phone = data.phone || null;
+        }
+        // Save referral source
+        if (data.referral_source !== undefined) {
+          updateData.referral_source = data.referral_source || null;
+          console.log(`📊 Referral source: ${getReferralSourceLabel(data.referral_source)}`);
         }
         break;
         
@@ -385,6 +410,24 @@ async function handleAgencyOnboarding(req, res) {
       .update(updateData)
       .eq('id', agency_id);
     
+    // If step 1 completed and we now have agency name + referral source, send updated SMS
+    if (step === 1 && data.name) {
+      try {
+        // Fetch updated agency data
+        const { data: updatedAgency } = await supabase
+          .from('agencies')
+          .select('*')
+          .eq('id', agency_id)
+          .single();
+        
+        if (updatedAgency) {
+          await sendAgencySignupNotificationSMS(updatedAgency);
+        }
+      } catch (smsError) {
+        console.warn('⚠️ Updated agency SMS notification failed (non-blocking):', smsError.message);
+      }
+    }
+    
     res.json({
       success: true,
       step: step,
@@ -405,5 +448,6 @@ module.exports = {
   handleAgencySignup,
   handleAgencyOnboarding,
   attributeReferral,
-  createPasswordToken
+  createPasswordToken,
+  getReferralSourceLabel
 };

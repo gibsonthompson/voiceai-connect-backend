@@ -8,6 +8,26 @@ const fetch = require('node-fetch');
 const PLATFORM_OWNER_PHONE = process.env.PLATFORM_OWNER_PHONE || '+16783161454';
 
 // ============================================================================
+// REFERRAL SOURCE LABELS (for SMS/display)
+// ============================================================================
+const REFERRAL_SOURCE_LABELS = {
+  'google_search': 'Google Search',
+  'ai_recommendation': 'AI (ChatGPT/Claude)',
+  'linkedin': 'LinkedIn',
+  'twitter': 'Twitter/X',
+  'facebook_instagram': 'Facebook/IG',
+  'youtube': 'YouTube',
+  'podcast': 'Podcast',
+  'friend_colleague': 'Friend/Colleague',
+  'blog_article': 'Blog/Article',
+  'other': 'Other',
+};
+
+function getReferralSourceLabel(source) {
+  return REFERRAL_SOURCE_LABELS[source] || source || null;
+}
+
+// ============================================================================
 // PHONE FORMATTING
 // ============================================================================
 function formatPhoneE164(phone) {
@@ -105,10 +125,19 @@ async function sendPlatformNotificationSMS(message) {
 
 // New agency signed up - notify platform owner (Gibson)
 async function sendAgencySignupNotificationSMS(agency) {
-  const message = `🎉 New Agency Signup!\n` +
+  // Build message with referral source if available
+  let message = `🎉 New Agency Signup!\n` +
     `Name: ${agency.name}\n` +
-    `Email: ${agency.email}\n` +
-    `Plan: ${agency.plan_type || 'Starter'}`;
+    `Email: ${agency.email}`;
+  
+  // Add referral source if available
+  const referralLabel = getReferralSourceLabel(agency.referral_source);
+  if (referralLabel) {
+    message += `\nSource: ${referralLabel}`;
+  }
+  
+  // Add plan type
+  message += `\nPlan: ${agency.plan_type || 'Starter'}`;
   
   return sendPlatformNotificationSMS(message);
 }
@@ -487,5 +516,8 @@ module.exports = {
   // Email
   sendEmail,
   sendClientWelcomeEmail,
-  sendAgencyWelcomeEmail
+  sendAgencyWelcomeEmail,
+  
+  // Helpers
+  getReferralSourceLabel
 };
