@@ -259,6 +259,32 @@ async function requireEnterprisePlan(req, res, next) {
 }
 
 // ============================================================================
+// GET /api/agency/:agencyId/templates/check
+// Check if agency has enterprise plan (for frontend gating)
+// IMPORTANT: This MUST be before /:industry routes or "check" gets matched as industry
+// ============================================================================
+router.get('/:agencyId/templates/check', async (req, res) => {
+  const { agencyId } = req.params;
+  
+  try {
+    const agency = await getAgencyById(agencyId);
+    
+    if (!agency) {
+      return res.status(404).json({ error: 'Agency not found' });
+    }
+    
+    res.json({
+      hasAccess: agency.plan_type === 'enterprise',
+      plan_type: agency.plan_type,
+      upgrade_url: '/agency/settings?tab=billing',
+    });
+  } catch (error) {
+    console.error('Error checking access:', error);
+    res.status(500).json({ error: 'Failed to check access' });
+  }
+});
+
+// ============================================================================
 // GET /api/agency/:agencyId/templates/industries
 // Get list of all industries with their config
 // ============================================================================
@@ -476,31 +502,6 @@ router.delete('/:agencyId/templates/:industry', requireEnterprisePlan, async (re
   } catch (error) {
     console.error('Error resetting template:', error);
     res.status(500).json({ error: 'Failed to reset template' });
-  }
-});
-
-// ============================================================================
-// GET /api/agency/:agencyId/templates/check
-// Check if agency has enterprise plan (for frontend gating)
-// ============================================================================
-router.get('/:agencyId/templates/check', async (req, res) => {
-  const { agencyId } = req.params;
-  
-  try {
-    const agency = await getAgencyById(agencyId);
-    
-    if (!agency) {
-      return res.status(404).json({ error: 'Agency not found' });
-    }
-    
-    res.json({
-      hasAccess: agency.plan_type === 'enterprise',
-      plan_type: agency.plan_type,
-      upgrade_url: '/agency/settings?tab=billing',
-    });
-  } catch (error) {
-    console.error('Error checking access:', error);
-    res.status(500).json({ error: 'Failed to check access' });
   }
 });
 
