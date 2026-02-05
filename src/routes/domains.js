@@ -75,7 +75,7 @@ const VERCEL_TEAM_ID = process.env.VERCEL_TEAM_ID; // Optional, for team account
 
 // Default DNS Configuration (fallback only - prefer fetching from Vercel)
 const DEFAULT_DNS_CONFIG = {
-  aRecord: '76.76.21.21',
+  aRecord: '216.198.79.1',
   cnameRecord: 'cname.vercel-dns.com',
 };
 
@@ -125,7 +125,7 @@ async function vercelRequest(method, endpoint, body = null) {
 
 // ============================================================================
 // HELPER: Fetch Project-Specific DNS Values from Vercel
-// CRITICAL: Using generic 76.76.21.21 causes SSL certificate issues!
+// CRITICAL: Using generic IPs causes SSL certificate issues!
 // The /v6/domains/{domain}/config endpoint returns project-specific values
 // ============================================================================
 async function fetchVercelDnsConfig(domain) {
