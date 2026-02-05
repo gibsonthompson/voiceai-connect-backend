@@ -18,13 +18,16 @@ const INDUSTRY_MAPPING = {
   'Professional Services (legal, accounting)': 'professional_services',
   'Restaurants/Food Service': 'restaurants',
   'Salon/Spa (hair, nails, skincare)': 'salon_spa',
-  // Direct mappings
+  // Direct mappings (from frontend dropdown values)
   'home_services': 'home_services',
   'medical': 'medical',
+  'medical_dental': 'medical',
   'retail': 'retail',
   'professional_services': 'professional_services',
   'restaurants': 'restaurants',
   'salon_spa': 'salon_spa',
+  'beauty_wellness': 'salon_spa',
+  'financial_services': 'professional_services',
   'general': 'professional_services',
   'legal': 'professional_services',
   'real_estate': 'professional_services',
