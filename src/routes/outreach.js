@@ -47,7 +47,7 @@ router.get('/:agencyId/templates', async (req, res) => {
     let query = supabase
       .from('outreach_templates')
       .select('*')
-      .or(`agency_id.eq.${agencyId},is_default.eq.true`)
+      .eq('agency_id', agencyId)
       .order('sequence_order', { ascending: true, nullsFirst: false })
       .order('created_at', { ascending: false });
 
@@ -153,7 +153,7 @@ router.get('/:agencyId/templates/:templateId', async (req, res) => {
       .from('outreach_templates')
       .select('*')
       .eq('id', templateId)
-      .or(`agency_id.eq.${agencyId},is_default.eq.true`)
+      .eq('agency_id', agencyId)
       .single();
 
     if (error || !template) {
