@@ -293,7 +293,8 @@ async function handleAgencyCheckoutCompleted(session) {
   console.log('🎉 Agency checkout completed:', session.id);
   
   const agencyId = session.metadata?.agency_id;
-  const plan = session.metadata?.plan || 'starter';
+  // Frontend sends 'plan_type', backend checkout sends 'plan' — check both
+  const plan = session.metadata?.plan_type || session.metadata?.plan || 'starter';
   
   if (!agencyId) return;
   
@@ -319,7 +320,7 @@ async function handleAgencyCheckoutCompleted(session) {
     metadata: { plan }
   });
   
-  console.log('✅ Agency activated:', agencyId);
+  console.log('✅ Agency activated:', agencyId, 'Plan:', plan);
 }
 
 async function handleAgencySubscriptionCreated(subscription) {
@@ -328,7 +329,8 @@ async function handleAgencySubscriptionCreated(subscription) {
   const agency = await getAgencyByStripeCustomerId(subscription.customer);
   if (!agency) return;
   
-  const plan = subscription.metadata?.plan || 'starter';
+  // Frontend sends 'plan_type', backend checkout sends 'plan' — check both
+  const plan = subscription.metadata?.plan_type || subscription.metadata?.plan || 'starter';
   
   await supabase
     .from('agencies')

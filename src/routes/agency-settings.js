@@ -171,6 +171,8 @@ async function getAgencySettings(req, res) {
         
         // Stripe
         stripe_account_id: agency.stripe_account_id,
+        stripe_customer_id: agency.stripe_customer_id,
+        stripe_subscription_id: agency.stripe_subscription_id,
         stripe_onboarding_complete: agency.stripe_onboarding_complete,
         stripe_charges_enabled: agency.stripe_charges_enabled,
         stripe_payouts_enabled: agency.stripe_payouts_enabled,
