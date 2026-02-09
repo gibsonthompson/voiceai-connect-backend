@@ -481,6 +481,8 @@ function replacePlaceholders(text, businessName) {
 
 // ============================================================================
 // FETCH AGENCY CUSTOM TEMPLATE
+// Checks if agency has enterprise access (including during trial)
+// and returns their custom template if one exists for the industry
 // ============================================================================
 async function getAgencyTemplate(agencyId, industryKey) {
   if (!supabase || !agencyId) return null;
@@ -488,11 +490,15 @@ async function getAgencyTemplate(agencyId, industryKey) {
   try {
     const { data: agency, error: agencyError } = await supabase
       .from('agencies')
-      .select('plan_type')
+      .select('plan_type, subscription_status')
       .eq('id', agencyId)
       .single();
     
-    if (agencyError || agency?.plan_type !== 'enterprise') return null;
+    // During trial, grant enterprise access for template lookups
+    const isTrialing = ['trialing', 'trial'].includes(agency?.subscription_status);
+    const effectivePlan = isTrialing ? 'enterprise' : agency?.plan_type;
+    
+    if (agencyError || effectivePlan !== 'enterprise') return null;
     
     const { data: template, error } = await supabase
       .from('agency_prompt_templates')
