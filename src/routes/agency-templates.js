@@ -625,7 +625,8 @@ You do NOT have the ability to end calls.`,
 };
 
 // ============================================================================
-// MIDDLEWARE: Check Enterprise Plan
+// MIDDLEWARE: Check Enterprise Plan (with trial access)
+// During trial, agencies get enterprise-level access regardless of chosen plan
 // ============================================================================
 async function requireEnterprisePlan(req, res, next) {
   const { agencyId } = req.params;
@@ -637,7 +638,11 @@ async function requireEnterprisePlan(req, res, next) {
       return res.status(404).json({ error: 'Agency not found' });
     }
     
-    if (agency.plan_type !== 'enterprise') {
+    // During trial, grant enterprise access regardless of chosen plan
+    const isTrialing = ['trialing', 'trial'].includes(agency.subscription_status);
+    const effectivePlan = isTrialing ? 'enterprise' : agency.plan_type;
+    
+    if (effectivePlan !== 'enterprise') {
       return res.status(403).json({ 
         error: 'Enterprise plan required',
         feature: 'ai_templates',
@@ -669,9 +674,14 @@ router.get('/:agencyId/templates/check', async (req, res) => {
       return res.status(404).json({ error: 'Agency not found' });
     }
     
+    // During trial, grant enterprise access regardless of chosen plan
+    const isTrialing = ['trialing', 'trial'].includes(agency.subscription_status);
+    const effectivePlan = isTrialing ? 'enterprise' : agency.plan_type;
+    
     res.json({
-      hasAccess: agency.plan_type === 'enterprise',
+      hasAccess: effectivePlan === 'enterprise',
       plan_type: agency.plan_type,
+      effective_plan: effectivePlan,
       upgrade_url: '/agency/settings?tab=billing',
     });
   } catch (error) {
