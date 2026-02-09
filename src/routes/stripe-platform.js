@@ -190,7 +190,11 @@ async function canAgencyAddClient(agencyId) {
     return { allowed: false, reason: 'Subscription not active' };
   }
 
-  const clientLimit = getClientLimitForPlan(agency.plan_type);
+  // During trial, grant enterprise-level access (unlimited clients)
+const isTrialing = ['active', 'trialing', 'trial'].includes(agency.subscription_status) 
+  && ['trialing', 'trial'].includes(agency.subscription_status);
+const effectivePlan = isTrialing ? 'enterprise' : agency.plan_type;
+const clientLimit = getClientLimitForPlan(effectivePlan);
   
   // -1 means unlimited
   if (clientLimit === -1) {
