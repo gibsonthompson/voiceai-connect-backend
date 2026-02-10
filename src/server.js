@@ -110,7 +110,7 @@ app.use((req, res, next) => {
 // Agency Management
 const { handleAgencySignup, handleAgencyOnboarding } = require('./routes/agency-signup');
 const { getAgencyByHost, getAgencySettings, updateAgencySettings, verifyAgencyDomain } = require('./routes/agency-settings');
-
+const demoPhoneRoutes = require('./routes/demo-phone');
 // Referral Program
 const referralRoutes = require('./routes/referrals');
 
@@ -645,6 +645,13 @@ app.get('/api/domain-test', (req, res) => {
     message: domainRoutesLoaded ? 'Domain routes are loaded' : 'Domain routes failed to load'
   });
 });
+
+// ============================================================================
+// DEMO PHONE MANAGEMENT (Paid plans only)
+// POST/DELETE /api/agency/:agencyId/demo-phone
+// ============================================================================
+
+app.use('/api/agency', demoPhoneRoutes);
 
 // ============================================================================
 // AGENCY TEMPLATES ROUTES (Enterprise Feature - Custom AI Prompts)

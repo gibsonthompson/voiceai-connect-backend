@@ -75,6 +75,11 @@ async function getAgencyByHost(req, res) {
         limit_pro: agency.limit_pro,
         limit_growth: agency.limit_growth,
         
+        // Demo phone (auto-provisioned per agency via VAPI)
+        demo_phone_number: agency.demo_phone_number || null,
+        // Legacy manual override field
+        demo_phone: agency.demo_phone || null,
+        
         // Stripe (needed for checkout)
         stripe_account_id: agency.stripe_account_id,
         stripe_charges_enabled: agency.stripe_charges_enabled
@@ -168,6 +173,11 @@ async function getAgencySettings(req, res) {
         limit_starter: agency.limit_starter,
         limit_pro: agency.limit_pro,
         limit_growth: agency.limit_growth,
+        
+        // Demo phone (auto-provisioned per agency via VAPI)
+        demo_phone_number: agency.demo_phone_number || null,
+        demo_assistant_id: agency.demo_assistant_id || null,
+        demo_vapi_phone_id: agency.demo_vapi_phone_id || null,
         
         // Stripe
         stripe_account_id: agency.stripe_account_id,

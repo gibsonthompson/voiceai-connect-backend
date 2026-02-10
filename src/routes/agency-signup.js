@@ -28,7 +28,6 @@ async function ensureUniqueSlug(baseSlug, excludeAgencyId = null) {
       .select('id')
       .eq('slug', slug);
     
-    // Exclude current agency when updating slug
     if (excludeAgencyId) {
       query = query.neq('id', excludeAgencyId);
     }
@@ -68,12 +67,11 @@ async function createPasswordToken(userId, email) {
 }
 
 // ============================================================================
-// VALIDATE AGENCY SIGNUP (SIMPLIFIED - just email and firstName required)
+// VALIDATE AGENCY SIGNUP
 // ============================================================================
 function validateAgencySignup(body) {
   const errors = [];
   
-  // Name and phone are now optional - collected in onboarding step 1
   if (!body.email || !body.email.includes('@')) {
     errors.push('Valid email is required');
   }
@@ -85,7 +83,7 @@ function validateAgencySignup(body) {
 }
 
 // ============================================================================
-// REFERRAL SOURCE LABELS (for SMS/display)
+// REFERRAL SOURCE LABELS
 // ============================================================================
 const REFERRAL_SOURCE_LABELS = {
   'google_search': 'Google Search',
@@ -113,7 +111,6 @@ async function attributeReferral(agencyId, referralCode) {
 
     const cleanCode = referralCode.toLowerCase().trim();
 
-    // Verify referral code exists and isn't self-referral
     const { data: referrer } = await supabase
       .from('agencies')
       .select('id, referral_code')
@@ -128,7 +125,6 @@ async function attributeReferral(agencyId, referralCode) {
       return { success: false, reason: 'Cannot use own referral code' };
     }
 
-    // Update the new agency with referred_by
     const { error } = await supabase
       .from('agencies')
       .update({ referred_by: cleanCode })
@@ -149,9 +145,7 @@ async function attributeReferral(agencyId, referralCode) {
 }
 
 // ============================================================================
-// AGENCY SIGNUP HANDLER (SIMPLIFIED)
-// Only requires: email, firstName, lastName
-// Agency name and phone collected in onboarding step 1
+// AGENCY SIGNUP HANDLER
 // ============================================================================
 async function handleAgencySignup(req, res) {
   try {
@@ -170,7 +164,6 @@ async function handleAgencySignup(req, res) {
       firstName, 
       lastName, 
       referralCode,
-      // Optional - if provided, skip onboarding step 1
       name: agencyName,
       phone 
     } = req.body;
@@ -189,7 +182,6 @@ async function handleAgencySignup(req, res) {
       });
     }
     
-    // Generate temp agency name from user's first name (updated in onboarding step 1)
     const tempName = agencyName || `${firstName}'s Agency`;
     const baseSlug = generateSlug(tempName);
     const slug = await ensureUniqueSlug(baseSlug);
@@ -207,21 +199,17 @@ async function handleAgencySignup(req, res) {
         status: 'pending_payment',
         subscription_status: 'pending',
         plan_type: 'starter',
-        onboarding_step: 1, // Start at step 1 (agency details)
+        onboarding_step: 1,
         onboarding_completed: false,
-        // Default branding
         primary_color: '#10b981',
         secondary_color: '#059669',
         accent_color: '#34d399',
-        // Default pricing
         price_starter: 4900,
         price_pro: 9900,
         price_growth: 14900,
-        // Default limits
         limit_starter: 50,
         limit_pro: 150,
         limit_growth: 500,
-        // Referral code defaults to slug
         referral_code: slug
       })
       .select()
@@ -250,7 +238,7 @@ async function handleAgencySignup(req, res) {
       console.log(`✅ Default templates seeded: ${templateResult.count} templates`);
     }
     
-    // Create user record WITHOUT password (will be set via set-password page after onboarding)
+    // Create user record
     const { data: user, error: userError } = await supabase
       .from('users')
       .insert({
@@ -259,7 +247,7 @@ async function handleAgencySignup(req, res) {
         first_name: firstName,
         last_name: lastName || null,
         role: 'agency_owner',
-        password_hash: null  // No password at signup
+        password_hash: null
       })
       .select()
       .single();
@@ -271,19 +259,17 @@ async function handleAgencySignup(req, res) {
     
     console.log(`✅ Agency user created: ${user.id}`);
     
-    // Generate password token for set-password flow (used after onboarding)
+    // Generate password token
     const token = await createPasswordToken(user.id, email.toLowerCase());
     
-    // Send welcome email (optional - skip if not configured)
+    // Send welcome email (non-blocking)
     try {
       await sendAgencyWelcomeEmail(agency, token);
     } catch (emailError) {
       console.warn('⚠️ Welcome email failed (non-blocking):', emailError.message);
     }
     
-    // ============================================
-    // NOTIFY PLATFORM OWNER OF NEW AGENCY SIGNUP
-    // ============================================
+    // Notify platform owner (non-blocking)
     console.log('📱 Notifying platform owner of new agency signup...');
     try {
       await sendAgencySignupNotificationSMS(agency);
@@ -296,7 +282,7 @@ async function handleAgencySignup(req, res) {
     res.status(200).json({
       success: true,
       agencyId: agency.id,
-      token: token,  // Return token - frontend stores for use after onboarding
+      token: token,
       message: 'Account created! Complete setup to get started.',
       agency: {
         id: agency.id,
@@ -315,14 +301,7 @@ async function handleAgencySignup(req, res) {
 }
 
 // ============================================================================
-// AGENCY ONBOARDING HANDLER (UPDATED - 7 steps with agency details as step 1)
-// Step 1: Agency name + phone + referral source
-// Step 2: Logo upload
-// Step 3: Brand colors
-// Step 4: Pricing
-// Step 5: Stripe Connect
-// Step 6: Set Password
-// Step 7: Complete
+// AGENCY ONBOARDING HANDLER
 // ============================================================================
 async function handleAgencyOnboarding(req, res) {
   try {
@@ -350,22 +329,20 @@ async function handleAgencyOnboarding(req, res) {
     };
     
     switch (step) {
-      case 1: // Agency Details (includes referral source)
+      case 1: // Agency Details
         if (data.name && data.name.trim()) {
           updateData.name = data.name.trim();
           
-          // Generate new slug from agency name
           const baseSlug = generateSlug(data.name);
           const uniqueSlug = await ensureUniqueSlug(baseSlug, agency_id);
           updateData.slug = uniqueSlug;
-          updateData.referral_code = uniqueSlug; // Update referral code too
+          updateData.referral_code = uniqueSlug;
           
           console.log(`📛 Agency name set: ${data.name} (slug: ${uniqueSlug})`);
         }
         if (data.phone !== undefined) {
           updateData.phone = data.phone || null;
         }
-        // Save referral source
         if (data.referral_source !== undefined) {
           updateData.referral_source = data.referral_source || null;
           console.log(`📊 Referral source: ${getReferralSourceLabel(data.referral_source)}`);
@@ -393,10 +370,10 @@ async function handleAgencyOnboarding(req, res) {
         if (data.limit_growth !== undefined) updateData.limit_growth = data.limit_growth;
         break;
         
-      case 5: // Stripe Connect (handled separately via /api/agency/connect/onboard)
+      case 5: // Stripe Connect
         break;
         
-      case 6: // Password step (handled by frontend redirect to /auth/set-password)
+      case 6: // Password step
         updateData.onboarding_completed = true;
         break;
         
@@ -410,10 +387,9 @@ async function handleAgencyOnboarding(req, res) {
       .update(updateData)
       .eq('id', agency_id);
     
-    // If step 1 completed and we now have agency name + referral source, send updated SMS
+    // If step 1 completed, send updated SMS
     if (step === 1 && data.name) {
       try {
-        // Fetch updated agency data
         const { data: updatedAgency } = await supabase
           .from('agencies')
           .select('*')

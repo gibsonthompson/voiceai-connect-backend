@@ -1,11 +1,10 @@
 // ============================================================================
 // VAPI WEBHOOK HANDLER - Multi-Tenant Aware
-// Adapted from CallBird's battle-tested webhook
-// UPDATED: Added trial expiration check, agency status check, duration capture
+// UPDATED: Demo call detection + agency follow-up SMS
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
-const { sendCallNotificationSMS } = require('../lib/notifications');
+const { sendCallNotificationSMS, sendDemoCallFollowUpSMS } = require('../lib/notifications');
 
 // ============================================================================
 // AI SUMMARY GENERATION (via Claude)
@@ -66,7 +65,6 @@ Extract and return ONLY valid JSON:
   } catch (error) {
     console.error('❌ AI summary failed, using fallback:', error.message);
     
-    // Fallback extraction
     return {
       customerName: 'Unknown',
       customerPhone: callerPhone,
@@ -78,82 +76,22 @@ Extract and return ONLY valid JSON:
 }
 
 // ============================================================================
-// USAGE WARNING EMAILS (STUBBED - Email service not configured yet)
+// USAGE WARNING EMAILS (STUBBED)
 // ============================================================================
 async function sendUsageWarningEmail(client, agency, currentCalls, limit) {
-  // TODO: Configure email service (Brevo, etc.)
   const agencyName = agency?.name || 'Your AI Receptionist';
   console.log(`📧 [EMAIL STUB] Would send 80% usage warning to ${client.email}`);
   console.log(`   Agency: ${agencyName}, Usage: ${currentCalls}/${limit}`);
-  
-  // Uncomment when email is configured:
-  /*
-  try {
-    await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`
-      },
-      body: JSON.stringify({
-        from: `${agencyName} <notifications@voiceaiconnect.com>`,
-        to: [client.email],
-        subject: `⚠️ ${agencyName}: 80% of Monthly Calls Used`,
-        html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #F59E0B;">You're approaching your call limit</h2>
-            <p>Hi ${client.owner_name || client.business_name},</p>
-            <p>You've used <strong>${currentCalls} of ${limit} calls</strong> (${Math.round((currentCalls/limit)*100)}%) this month.</p>
-            <p><strong>Upgrade to avoid service interruption.</strong></p>
-          </div>
-        `
-      })
-    });
-    console.log('✅ Usage warning email sent');
-  } catch (error) {
-    console.error('❌ Usage warning email failed:', error);
-  }
-  */
 }
 
 async function sendLimitReachedEmail(client, agency, limit) {
-  // TODO: Configure email service (Brevo, etc.)
   const agencyName = agency?.name || 'Your AI Receptionist';
   console.log(`📧 [EMAIL STUB] Would send limit reached email to ${client.email}`);
   console.log(`   Agency: ${agencyName}, Limit: ${limit}`);
-  
-  // Uncomment when email is configured:
-  /*
-  try {
-    await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`
-      },
-      body: JSON.stringify({
-        from: `${agencyName} <notifications@voiceaiconnect.com>`,
-        to: [client.email],
-        subject: `🚨 ${agencyName}: Monthly Call Limit Reached`,
-        html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #dc2626;">You've reached your monthly call limit</h2>
-            <p>Hi ${client.owner_name || client.business_name},</p>
-            <p>You've used all <strong>${limit} calls</strong> included in your plan.</p>
-            <p><strong>Additional calls are being limited. Upgrade now to resume full service.</strong></p>
-          </div>
-        `
-      })
-    });
-    console.log('✅ Limit reached email sent');
-  } catch (error) {
-    console.error('❌ Limit reached email failed:', error);
-  }
-  */
 }
 
 // ============================================================================
-// NEW: HELPER - Check if trial has expired
+// HELPER - Check if trial has expired
 // ============================================================================
 function isTrialExpired(trialEndsAt) {
   if (!trialEndsAt) return false;
@@ -161,7 +99,86 @@ function isTrialExpired(trialEndsAt) {
 }
 
 // ============================================================================
+// HELPER - Find agency by demo phone number
+// ============================================================================
+async function getAgencyByDemoPhone(phoneNumber) {
+  try {
+    const { data, error } = await supabase
+      .from('agencies')
+      .select('*')
+      .eq('demo_phone_number', phoneNumber)
+      .single();
+    
+    if (error || !data) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+// ============================================================================
+// HANDLE DEMO CALL
+// When a call comes in on an agency's demo line:
+// 1. Log it (optional - no DB record needed for demo calls)
+// 2. Send follow-up SMS with signup link to the caller
+// 3. Notify the agency owner that someone tried their demo
+// ============================================================================
+async function handleDemoCall(agency, message) {
+  const call = message.call;
+  const callerPhone = call.customer?.number || null;
+  const transcript = message.transcript || '';
+  const durationSeconds = call.duration || message.duration || null;
+
+  console.log(`🎤 Demo call completed for agency: ${agency.name}`);
+  console.log(`   Caller: ${callerPhone || 'Unknown'}`);
+  console.log(`   Duration: ${durationSeconds ? `${durationSeconds}s` : 'Unknown'}`);
+
+  // 1. Send follow-up SMS to the caller with signup link
+  if (callerPhone && callerPhone !== 'Unknown') {
+    try {
+      await sendDemoCallFollowUpSMS(callerPhone, agency);
+      console.log('✅ Demo follow-up SMS sent');
+    } catch (smsErr) {
+      console.warn('⚠️ Demo follow-up SMS failed:', smsErr.message);
+    }
+  }
+
+  // 2. Notify agency owner that someone tried their demo
+  if (agency.phone) {
+    const { formatPhoneDisplay } = require('../lib/notifications');
+    const callerDisplay = callerPhone ? formatPhoneDisplay(callerPhone) : 'Unknown number';
+    const durationDisplay = durationSeconds ? `${Math.round(durationSeconds / 60)}min ${durationSeconds % 60}s` : 'Unknown';
+    
+    const ownerMsg = 
+      `🎤 Demo Call - ${agency.name}\n` +
+      `Caller: ${callerDisplay}\n` +
+      `Duration: ${durationDisplay}\n` +
+      `They received your signup link via SMS.`;
+    
+    try {
+      const { sendTelnyxSMS } = require('../lib/notifications');
+      await sendTelnyxSMS(agency.phone, ownerMsg);
+      console.log('✅ Agency owner notified of demo call');
+    } catch (ownerSmsErr) {
+      console.warn('⚠️ Agency owner demo notification failed:', ownerSmsErr.message);
+    }
+  }
+
+  // 3. Optionally save to a demo_calls table for analytics
+  // (skipping for now — can add later if agencies want demo call tracking)
+
+  return {
+    type: 'demo',
+    agency: agency.name,
+    callerPhone,
+    durationSeconds,
+    followUpSent: !!callerPhone
+  };
+}
+
+// ============================================================================
 // MAIN WEBHOOK HANDLER
+// UPDATED: Checks for demo calls when no client is found
 // ============================================================================
 async function handleVapiWebhook(req, res) {
   try {
@@ -189,19 +206,36 @@ async function handleVapiWebhook(req, res) {
     // Find client by VAPI phone number (includes agency data)
     const client = await getClientByVapiPhoneNumber(phoneNumber);
     
+    // ============================================
+    // IF NO CLIENT FOUND → CHECK IF IT'S A DEMO CALL
+    // ============================================
     if (!client) {
       console.log('⚠️ No client found for phone:', phoneNumber);
+      console.log('🔍 Checking if this is a demo call...');
+      
+      const demoAgency = await getAgencyByDemoPhone(phoneNumber);
+      
+      if (demoAgency) {
+        console.log(`✅ Demo call detected for agency: ${demoAgency.name}`);
+        const result = await handleDemoCall(demoAgency, message);
+        return res.status(200).json({ 
+          received: true,
+          demo: true,
+          ...result
+        });
+      }
+      
+      console.log('⚠️ Not a demo call either — ignoring');
       return res.status(200).json({ received: true });
     }
     
     console.log('✅ Client found:', client.business_name);
     console.log('🏢 Agency:', client.agencies?.name || 'Direct (no agency)');
     
-    const agency = client.agencies; // May be null for direct clients
+    const agency = client.agencies;
     
     // ============================================
-    // CHECK AGENCY STATUS (NEW!)
-    // If client belongs to an agency, verify agency is active
+    // CHECK AGENCY STATUS
     // ============================================
     if (agency) {
       const agencyValidStatuses = ['active', 'trial', 'trialing'];
@@ -214,12 +248,10 @@ async function handleVapiWebhook(req, res) {
         });
       }
       
-      // Check if agency trial has expired
       if ((agency.subscription_status === 'trial' || agency.subscription_status === 'trialing') 
           && isTrialExpired(agency.trial_ends_at)) {
         console.log(`🚫 CALL BLOCKED: Agency ${agency.name} trial expired`);
         
-        // Update agency status to expired
         await supabase
           .from('agencies')
           .update({ subscription_status: 'expired' })
@@ -247,12 +279,11 @@ async function handleVapiWebhook(req, res) {
     }
     
     // ============================================
-    // CHECK CLIENT TRIAL EXPIRATION (NEW!)
+    // CHECK CLIENT TRIAL EXPIRATION
     // ============================================
     if (client.subscription_status === 'trial' && isTrialExpired(client.trial_ends_at)) {
       console.log(`🚫 CALL BLOCKED: ${client.business_name} trial expired`);
       
-      // Update client status to expired
       await supabase
         .from('clients')
         .update({ subscription_status: 'expired' })
@@ -299,17 +330,12 @@ async function handleVapiWebhook(req, res) {
     
     const { customerName, customerPhone, customerEmail, urgency, summary: aiSummary } = aiData;
     
-    // Extract recording URL
     const recordingUrl = 
       message.recordingUrl ||
       message.artifact?.recordingUrl ||
       call.recordingUrl ||
       null;
     
-    // ============================================
-    // EXTRACT CALL DURATION (NEW!)
-    // VAPI sends duration in various places, check all
-    // ============================================
     const durationSeconds = 
       call.duration ||
       message.duration ||
@@ -332,7 +358,7 @@ async function handleVapiWebhook(req, res) {
       ai_summary: aiSummary,
       transcript: transcript,
       recording_url: recordingUrl,
-      duration_seconds: durationSeconds, // NEW!
+      duration_seconds: durationSeconds,
       urgency_level: urgency,
       call_status: 'completed',
       created_at: new Date().toISOString()
@@ -359,7 +385,7 @@ async function handleVapiWebhook(req, res) {
     const updateData = { calls_this_month: newCallCount };
     if (isFirstCall) {
       updateData.first_call_received = true;
-      updateData.first_call_received_at = new Date().toISOString(); // Also set timestamp
+      updateData.first_call_received_at = new Date().toISOString();
       console.log('🎉 FIRST CALL for:', client.business_name);
     }
     
@@ -405,7 +431,7 @@ async function handleVapiWebhook(req, res) {
       smsSent: smsSent,
       firstCall: isFirstCall,
       agency: agency?.name || null,
-      duration: durationSeconds // Include in response for debugging
+      duration: durationSeconds
     });
     
   } catch (error) {

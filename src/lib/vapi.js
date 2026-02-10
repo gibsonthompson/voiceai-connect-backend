@@ -1,6 +1,7 @@
 // ============================================================================
 // VAPI INTEGRATION - Multi-Tenant Voice AI Platform
 // WITH AGENCY TEMPLATE OVERRIDE SUPPORT (Enterprise Feature)
+// WITH DEMO ASSISTANT PROVISIONING (Agency-level)
 // ALL 11 INDUSTRIES WITH UNIQUE KEYS
 // ============================================================================
 const fetch = require('node-fetch');
@@ -563,7 +564,7 @@ async function createQueryTool(fileId, businessName) {
 }
 
 // ============================================================================
-// CREATE INDUSTRY ASSISTANT
+// CREATE INDUSTRY ASSISTANT (Client-level)
 // ============================================================================
 async function createIndustryAssistant(businessName, industry, knowledgeBaseData = null, ownerPhone = null, clientId = null, agencyId = null) {
   try {
@@ -649,6 +650,215 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
   } catch (error) {
     console.error('❌ Error creating assistant:', error);
     throw error;
+  }
+}
+
+// ============================================================================
+// DEMO ASSISTANT SYSTEM PROMPT
+// Extracted so createDemoAssistant and updateDemoAssistantName share it
+// ============================================================================
+function getDemoSystemPrompt(agencyName) {
+  return `You are a demo AI receptionist for ${agencyName}. Your job is to showcase how an AI receptionist works for businesses.
+
+## YOUR ROLE
+You're demonstrating what it's like to have an AI answer your business phone. Be professional, warm, and impressive. Show the caller how natural and capable AI phone answering can be.
+
+## CONVERSATION FLOW
+1. Greet warmly and explain this is a live demo
+2. Ask what type of business they run
+3. Based on their answer, roleplay a realistic scenario:
+   - If they say plumber/contractor: Act as their receptionist taking a service call
+   - If they say restaurant: Act as their host taking a reservation
+   - If they say doctor/dentist: Act as their front desk scheduling an appointment
+   - If they say lawyer: Act as their intake coordinator
+   - For any other business: Act as their professional receptionist
+4. Walk through collecting caller info naturally (name, phone, reason for call)
+5. Show how you'd summarize the call
+6. Mention key features: "After this call, you'd get an instant text summary with all the details"
+7. Ask if they have any questions about the service
+
+## TONE
+- Professional but friendly
+- Confident and capable
+- Enthusiastic about the technology without being salesy
+- Natural conversation — don't sound robotic
+
+## KEY POINTS TO MENTION (naturally, not as a list)
+- 24/7 availability
+- Instant text summaries after every call
+- Works for any industry
+- Setup takes just minutes
+- Callers often can't tell it's AI
+
+## BOUNDARIES
+- Don't make specific pricing promises
+- Don't claim features that don't exist
+- If asked about pricing, say "plans start at an affordable monthly rate — you'll see all the options when you sign up for a free trial"
+- Be honest if directly asked whether you're AI
+
+## CRITICAL RULE
+You do NOT have the ability to end calls. The caller will hang up when ready.`;
+}
+
+function getDemoFirstMessage(agencyName) {
+  return `Hi there! Thanks for calling ${agencyName}'s AI receptionist demo. I'm an AI assistant, and I'm here to show you exactly how I'd answer the phone for your business. What type of business do you run?`;
+}
+
+// ============================================================================
+// CREATE DEMO ASSISTANT (Agency-level, industry-agnostic)
+// Creates a showcase assistant that demonstrates AI receptionist capabilities
+// without being tied to any specific client or industry.
+// ============================================================================
+async function createDemoAssistant(agencyName) {
+  try {
+    console.log(`🎤 Creating demo assistant for agency: ${agencyName}`);
+
+    const assistantConfig = {
+      name: `${agencyName.slice(0, 25)} Demo Assistant`,
+      model: {
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        temperature: 0.7,
+        messages: [{ role: 'system', content: getDemoSystemPrompt(agencyName) }]
+      },
+      voice: {
+        provider: '11labs',
+        voiceId: VOICES.sarah // Warm, professional
+      },
+      firstMessage: getDemoFirstMessage(agencyName),
+      recordingEnabled: true,
+      serverMessages: ['end-of-call-report'],
+      serverUrl: `${BACKEND_URL}/webhook/vapi`
+    };
+
+    const response = await fetch('https://api.vapi.ai/assistant', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${VAPI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(assistantConfig)
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`VAPI API error: ${errorText}`);
+    }
+
+    const assistant = await response.json();
+    console.log(`✅ Demo assistant created: ${assistant.id}`);
+    return assistant;
+  } catch (error) {
+    console.error('❌ Error creating demo assistant:', error);
+    throw error;
+  }
+}
+
+// ============================================================================
+// PROVISION DEMO PHONE FOR AGENCY
+// Provisions a phone number + demo assistant and stores on agency record.
+// Called during agency signup (non-blocking).
+// ============================================================================
+async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
+  try {
+    console.log(`📞 Provisioning demo phone for agency: ${agencyName} (area code: ${areaCode})`);
+
+    // 1. Create the demo assistant
+    const assistant = await createDemoAssistant(agencyName);
+
+    // 2. Provision a phone number with requested area code
+    const phoneData = await provisionPhoneNumber(areaCode, assistant.id, `${agencyName} Demo`);
+    console.log(`✅ Demo phone provisioned: ${phoneData.number}`);
+
+    // 3. Configure webhook on the phone
+    try {
+      const webhookResponse = await fetch(`https://api.vapi.ai/phone-number/${phoneData.id}`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${VAPI_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          assistantId: assistant.id,
+          serverUrl: `${BACKEND_URL}/webhook/vapi`
+        })
+      });
+      if (webhookResponse.ok) {
+        console.log('✅ Demo phone webhook configured');
+      }
+    } catch (whErr) {
+      console.warn('⚠️ Demo phone webhook config failed (non-blocking):', whErr.message);
+    }
+
+    // 4. Store on agency record
+    if (!supabase) {
+      console.warn('⚠️ Supabase not available — cannot save demo phone to agency');
+      return { phoneNumber: phoneData.number, assistantId: assistant.id, phoneId: phoneData.id };
+    }
+
+    const { error: updateError } = await supabase
+      .from('agencies')
+      .update({
+        demo_phone_number: phoneData.number,
+        demo_assistant_id: assistant.id,
+        demo_vapi_phone_id: phoneData.id
+      })
+      .eq('id', agencyId);
+
+    if (updateError) {
+      console.error('❌ Failed to save demo phone to agency:', updateError);
+      throw updateError;
+    }
+
+    console.log(`🎉 Demo provisioning complete for ${agencyName}: ${phoneData.number}`);
+    return {
+      phoneNumber: phoneData.number,
+      assistantId: assistant.id,
+      phoneId: phoneData.id
+    };
+  } catch (error) {
+    console.error(`❌ Demo provisioning failed for ${agencyName}:`, error.message);
+    // Non-fatal — agency can still function without demo
+    return null;
+  }
+}
+
+// ============================================================================
+// UPDATE DEMO ASSISTANT NAME
+// Called when agency name changes (onboarding step 1) to keep assistant
+// greeting in sync with the agency name.
+// ============================================================================
+async function updateDemoAssistantName(assistantId, newAgencyName) {
+  if (!assistantId) return false;
+
+  try {
+    const response = await fetch(`https://api.vapi.ai/assistant/${assistantId}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${VAPI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: `${newAgencyName.slice(0, 25)} Demo Assistant`,
+        firstMessage: getDemoFirstMessage(newAgencyName),
+        model: {
+          provider: 'openai',
+          model: 'gpt-4o-mini',
+          temperature: 0.7,
+          messages: [{ role: 'system', content: getDemoSystemPrompt(newAgencyName) }]
+        }
+      })
+    });
+
+    if (response.ok) {
+      console.log(`✅ Demo assistant updated for: ${newAgencyName}`);
+      return true;
+    }
+    console.warn(`⚠️ Demo assistant update failed: ${response.status}`);
+    return false;
+  } catch (error) {
+    console.error('❌ Error updating demo assistant:', error.message);
+    return false;
   }
 }
 
@@ -806,5 +1016,11 @@ module.exports = {
   createKnowledgeBaseFromWebsite,
   getPhoneNumberFromVapi,
   disableAssistant,
-  enableAssistant
+  enableAssistant,
+  // Demo provisioning
+  getDemoSystemPrompt,
+  getDemoFirstMessage,
+  createDemoAssistant,
+  provisionAgencyDemo,
+  updateDemoAssistantName
 };

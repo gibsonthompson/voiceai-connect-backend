@@ -1,6 +1,7 @@
 // ============================================================================
 // NOTIFICATIONS - SMS (Telnyx) & Email (Resend)
 // Multi-tenant aware with agency branding
+// WITH DEMO CALL FOLLOW-UP SMS
 // ============================================================================
 const fetch = require('node-fetch');
 
@@ -216,6 +217,41 @@ async function sendAgencyPaymentSucceededSMS(agency) {
     `Your agency is now active. Thank you!`;
   
   return sendTelnyxSMS(agency.phone, message);
+}
+
+// ============================================================================
+// DEMO CALL FOLLOW-UP SMS
+// Sent to the caller after they try an agency's demo line.
+// Includes the agency's signup URL so they can start a free trial.
+// ============================================================================
+async function sendDemoCallFollowUpSMS(callerPhone, agency) {
+  if (!callerPhone || callerPhone === 'Unknown') {
+    console.log('⚠️ No caller phone for demo follow-up SMS');
+    return false;
+  }
+
+  const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
+
+  // Build signup URL — prioritize custom domain, fallback to subdomain
+  let signupUrl;
+  if (agency.marketing_domain && agency.domain_verified) {
+    signupUrl = `https://${agency.marketing_domain}/signup`;
+  } else if (agency.slug) {
+    signupUrl = `https://${agency.slug}.${platformDomain}/signup`;
+  } else {
+    signupUrl = `https://${platformDomain}/signup`;
+  }
+
+  const agencyName = agency.name || 'our';
+
+  const message =
+    `Thanks for trying ${agencyName}'s AI receptionist demo! 🎉\n\n` +
+    `Ready to get one for your business? Start your free trial:\n` +
+    `${signupUrl}\n\n` +
+    `Setup takes under 10 minutes. No credit card required.`;
+
+  console.log(`📱 Sending demo follow-up SMS to ${callerPhone} for agency: ${agencyName}`);
+  return sendTelnyxSMS(callerPhone, message);
 }
 
 // ============================================================================
@@ -498,13 +534,16 @@ module.exports = {
   sendAgencySignupNotificationSMS,
   
   // Agency owner notifications
-  sendClientSignupNotificationSMS,  // Now goes to agency owner, not platform owner
+  sendClientSignupNotificationSMS,
   
   // Agency SMS
   sendAgencyTrialEndingSMS,
   sendAgencyPaymentFailedSMS,
   sendAgencySubscriptionCanceledSMS,
   sendAgencyPaymentSucceededSMS,
+  
+  // Demo call follow-up
+  sendDemoCallFollowUpSMS,
   
   // Client SMS
   sendCallNotificationSMS,
