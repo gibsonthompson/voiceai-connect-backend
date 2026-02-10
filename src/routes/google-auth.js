@@ -45,6 +45,22 @@ async function ensureUniqueSlug(baseSlug) {
   return slug;
 }
 
+// ============================================================================
+// Helper: Check if agency has moved past onboarding
+// An agency is "past onboarding" if they have a subscription (trialing/active)
+// OR if onboarding_completed is true
+// ============================================================================
+function isAgencyPastOnboarding(agency) {
+  if (!agency) return false;
+  if (agency.onboarding_completed) return true;
+  // If they have a subscription, they clearly completed onboarding even if the flag is wrong
+  const activeStatuses = ['trialing', 'trial', 'active', 'past_due'];
+  if (activeStatuses.includes(agency.subscription_status)) return true;
+  // If they have a stripe subscription ID, they went through checkout
+  if (agency.stripe_subscription_id) return true;
+  return false;
+}
+
 // GET /api/auth/google
 async function googleAuth(req, res) {
   try {
@@ -116,20 +132,37 @@ async function googleCallback(req, res) {
     if (existingUser) {
       if (existingUser.agency_id && existingUser.agencies) {
         const token = generateToken(existingUser);
+        const agency = existingUser.agencies;
         
         await supabase
           .from('users')
           .update({ last_login_at: new Date().toISOString() })
           .eq('id', existingUser.id);
 
-        console.log(`✅ Google login: ${email}`);
+        await supabase
+          .from('agencies')
+          .update({ last_login_at: new Date().toISOString() })
+          .eq('id', agency.id);
 
-        const agency = existingUser.agencies;
-        if (!agency.onboarding_completed) {
-          return res.redirect(`${FRONTEND_URL}/auth/google-success?token=${token}&agencyId=${agency.id}&redirect=/onboarding`);
+        // If the agency has moved past onboarding (has subscription, completed flag, etc.)
+        // → go straight to dashboard
+        if (isAgencyPastOnboarding(agency)) {
+          // Also fix onboarding_completed if it was stuck at false
+          if (!agency.onboarding_completed) {
+            await supabase
+              .from('agencies')
+              .update({ onboarding_completed: true, onboarding_step: 7 })
+              .eq('id', agency.id);
+            console.log(`🔧 Fixed onboarding_completed for agency: ${agency.name}`);
+          }
+
+          console.log(`✅ Google login: ${email} → dashboard`);
+          return res.redirect(`${FRONTEND_URL}/auth/google-success?token=${token}&agencyId=${agency.id}&redirect=/agency/dashboard`);
         }
 
-        return res.redirect(`${FRONTEND_URL}/auth/google-success?token=${token}&redirect=/agency/dashboard`);
+        // Agency hasn't completed onboarding yet → send to onboarding
+        console.log(`✅ Google login: ${email} → onboarding (step ${agency.onboarding_step})`);
+        return res.redirect(`${FRONTEND_URL}/auth/google-success?token=${token}&agencyId=${agency.id}&redirect=/onboarding`);
       } else {
         return res.redirect(`${FRONTEND_URL}/signup?error=account_exists`);
       }

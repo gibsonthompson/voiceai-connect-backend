@@ -299,6 +299,25 @@ async function setPassword(req, res) {
     // Get user for response
     const user = await getUserById(tokenRecord.user_id);
     
+    // If this is an agency owner, mark onboarding as completed
+    // This is the password step (step 6) — the last required onboarding step
+    if (user && user.agency_id && (user.role === 'agency_owner' || user.role === 'agency_staff')) {
+      const { error: onboardingError } = await supabase
+        .from('agencies')
+        .update({ 
+          onboarding_completed: true, 
+          onboarding_step: 7,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', user.agency_id);
+      
+      if (onboardingError) {
+        console.warn('⚠️ Failed to update onboarding status (non-blocking):', onboardingError.message);
+      } else {
+        console.log(`✅ Onboarding marked complete for agency: ${user.agency_id}`);
+      }
+    }
+    
     // Generate login token
     const authToken = generateToken(user);
     
