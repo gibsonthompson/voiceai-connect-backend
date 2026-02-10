@@ -224,7 +224,8 @@ async function handleClientSignup(req, res) {
       businessCity,
       businessState,
       assistant.id,
-      businessName
+      businessName,
+      phone  // Pass client's phone for area code matching
     );
     
     console.log(`✅ Phone provisioned: ${phoneData.number}`);
@@ -467,7 +468,8 @@ async function handleAgencyAddClient(req, res) {
       businessCity,
       businessState,
       assistant.id,
-      businessName
+      businessName,
+      phone  // Pass client's phone for area code matching
     );
     console.log(`✅ Phone provisioned: ${phoneData.number}`);
 
@@ -612,12 +614,13 @@ async function provisionClient(clientId) {
       client.agency_id  // Pass agencyId for template override lookup (Enterprise feature)
     );
     
-    // Provision phone
+    // Provision phone — pass owner_phone for area code matching
     const phoneData = await provisionLocalPhone(
       client.business_city,
       client.business_state,
       assistant.id,
-      client.business_name
+      client.business_name,
+      client.owner_phone  // Pass client's phone for area code matching
     );
     
     // Configure webhook
