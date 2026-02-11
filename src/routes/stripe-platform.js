@@ -12,24 +12,88 @@ const {
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// Platform subscription price IDs (agencies pay these)
-const PLATFORM_PRICES = {
-  starter: process.env.STRIPE_PRICE_AGENCY_STARTER,       // $99/mo
-  professional: process.env.STRIPE_PRICE_AGENCY_PRO,      // $199/mo
-  enterprise: process.env.STRIPE_PRICE_AGENCY_ENTERPRISE  // $499/mo
+// ============================================================================
+// PLAN DETAILS (USD base prices in cents)
+// ============================================================================
+const PLAN_DETAILS = {
+  starter: { name: 'Starter', clientLimit: 25, priceUsdCents: 9900 },
+  professional: { name: 'Professional', clientLimit: 100, priceUsdCents: 19900 },
+  enterprise: { name: 'Enterprise', clientLimit: -1, priceUsdCents: 49900 }
+}; // -1 = unlimited
+
+// ============================================================================
+// COUNTRY → CURRENCY MAPPING + EXCHANGE RATES
+// Duplicated from frontend lib/currency.ts for backend use
+// Update rates monthly
+// ============================================================================
+const CURRENCY_CONFIG = {
+  USD: { code: 'usd', rate: 1.00, zeroDecimal: false },
+  CAD: { code: 'cad', rate: 1.36, zeroDecimal: false },
+  GBP: { code: 'gbp', rate: 0.79, zeroDecimal: false },
+  EUR: { code: 'eur', rate: 0.92, zeroDecimal: false },
+  AUD: { code: 'aud', rate: 1.55, zeroDecimal: false },
+  NZD: { code: 'nzd', rate: 1.70, zeroDecimal: false },
+  JPY: { code: 'jpy', rate: 152, zeroDecimal: true },
+  SGD: { code: 'sgd', rate: 1.34, zeroDecimal: false },
+  CHF: { code: 'chf', rate: 0.88, zeroDecimal: false },
+  HKD: { code: 'hkd', rate: 7.82, zeroDecimal: false },
+  SEK: { code: 'sek', rate: 10.5, zeroDecimal: false },
+  NOK: { code: 'nok', rate: 10.8, zeroDecimal: false },
+  DKK: { code: 'dkk', rate: 6.87, zeroDecimal: false },
+  PLN: { code: 'pln', rate: 4.02, zeroDecimal: false },
+  BRL: { code: 'brl', rate: 5.85, zeroDecimal: false },
+  MXN: { code: 'mxn', rate: 17.2, zeroDecimal: false },
+  INR: { code: 'inr', rate: 83.5, zeroDecimal: false },
+  THB: { code: 'thb', rate: 34.5, zeroDecimal: false },
+  MYR: { code: 'myr', rate: 4.42, zeroDecimal: false },
+  CZK: { code: 'czk', rate: 23.5, zeroDecimal: false },
+  HUF: { code: 'huf', rate: 375, zeroDecimal: false },
+  RON: { code: 'ron', rate: 4.58, zeroDecimal: false },
+  BGN: { code: 'bgn', rate: 1.80, zeroDecimal: false },
+  AED: { code: 'aed', rate: 3.67, zeroDecimal: false },
 };
 
-const PLAN_DETAILS = {
-  starter: { name: 'Starter', clientLimit: 25, price: 9900 },           // $99/mo - 25 clients max
-  professional: { name: 'Professional', clientLimit: 100, price: 19900 }, // $199/mo - 100 clients max
-  enterprise: { name: 'Enterprise', clientLimit: -1, price: 49900 }       // $499/mo - unlimited
-}; // -1 = unlimited
+const COUNTRY_CURRENCY_MAP = {
+  US: 'USD', CA: 'CAD', GB: 'GBP', MX: 'MXN', BR: 'BRL',
+  AT: 'EUR', BE: 'EUR', CY: 'EUR', EE: 'EUR', FI: 'EUR', FR: 'EUR',
+  DE: 'EUR', GR: 'EUR', IE: 'EUR', IT: 'EUR', LV: 'EUR', LT: 'EUR',
+  LU: 'EUR', MT: 'EUR', NL: 'EUR', PT: 'EUR', SK: 'EUR', SI: 'EUR',
+  ES: 'EUR', HR: 'EUR',
+  BG: 'BGN', CZ: 'CZK', DK: 'DKK', HU: 'HUF', NO: 'NOK',
+  PL: 'PLN', RO: 'RON', SE: 'SEK', CH: 'CHF',
+  AU: 'AUD', NZ: 'NZD', JP: 'JPY', SG: 'SGD', HK: 'HKD',
+  MY: 'MYR', TH: 'THB', IN: 'INR',
+  AE: 'AED',
+};
+
+/**
+ * Convert USD cents to local currency Stripe amount
+ * Returns the amount Stripe expects (cents for normal currencies, whole units for zero-decimal)
+ */
+function convertToStripeAmount(usdCents, countryCode) {
+  const currencyKey = COUNTRY_CURRENCY_MAP[countryCode] || 'USD';
+  const config = CURRENCY_CONFIG[currencyKey] || CURRENCY_CONFIG.USD;
+  
+  const usdDollars = usdCents / 100;
+  const localAmount = Math.round(usdDollars * config.rate);
+  
+  // For zero-decimal currencies (JPY etc), Stripe expects whole units
+  // For normal currencies, Stripe expects cents (multiply by 100)
+  return config.zeroDecimal ? localAmount : localAmount * 100;
+}
+
+function getCurrencyCode(countryCode) {
+  const currencyKey = COUNTRY_CURRENCY_MAP[countryCode] || 'USD';
+  const config = CURRENCY_CONFIG[currencyKey] || CURRENCY_CONFIG.USD;
+  return config.code; // lowercase for Stripe
+}
 
 // Referral commission rate - 40% to match GoHighLevel
 const COMMISSION_RATE = 0.40; // 40%
 
 // ============================================================================
 // CREATE CHECKOUT SESSION (Agency subscribes to platform)
+// Updated: Uses price_data with agency's local currency
 // ============================================================================
 async function createAgencyCheckout(req, res) {
   try {
@@ -42,14 +106,15 @@ async function createAgencyCheckout(req, res) {
       });
     }
 
-    if (!PLATFORM_PRICES[plan]) {
+    const planDetails = PLAN_DETAILS[plan];
+    if (!planDetails) {
       return res.status(400).json({ 
         error: 'Invalid plan',
-        valid_plans: Object.keys(PLATFORM_PRICES)
+        valid_plans: Object.keys(PLAN_DETAILS)
       });
     }
 
-    // Get agency
+    // Get agency (including country)
     const { data: agency, error } = await supabase
       .from('agencies')
       .select('*')
@@ -60,7 +125,16 @@ async function createAgencyCheckout(req, res) {
       return res.status(404).json({ error: 'Agency not found' });
     }
 
-    console.log('🛒 Creating platform checkout for:', agency.email, 'Plan:', plan);
+    // Determine currency from agency's country
+    const countryCode = agency.country || 'US';
+    const currency = getCurrencyCode(countryCode);
+    const stripeAmount = convertToStripeAmount(planDetails.priceUsdCents, countryCode);
+
+    console.log('🛒 Creating platform checkout for:', agency.email, 
+      '| Plan:', plan, 
+      '| Country:', countryCode,
+      '| Currency:', currency.toUpperCase(),
+      '| Amount:', stripeAmount);
 
     // Create or get Stripe customer
     let customerId = agency.stripe_customer_id;
@@ -82,14 +156,22 @@ async function createAgencyCheckout(req, res) {
         .eq('id', agency_id);
     }
 
-    // Create checkout session with 14-day trial
+    // Create checkout session with price_data (dynamic currency)
     const session = await stripe.checkout.sessions.create({
       customer: customerId,
       mode: 'subscription',
       payment_method_types: ['card'],
       line_items: [{
-        price: PLATFORM_PRICES[plan],
-        quantity: 1
+        price_data: {
+          currency: currency,
+          unit_amount: stripeAmount,
+          recurring: { interval: 'month' },
+          product_data: {
+            name: `VoiceAI Connect ${planDetails.name} Plan`,
+            description: `White-label AI receptionist platform — ${planDetails.name}`,
+          },
+        },
+        quantity: 1,
       }],
       subscription_data: {
         trial_period_days: 14,
@@ -107,7 +189,7 @@ async function createAgencyCheckout(req, res) {
       }
     });
 
-    console.log('✅ Checkout session created:', session.id);
+    console.log('✅ Checkout session created:', session.id, '| Currency:', currency.toUpperCase());
 
     res.json({
       success: true,
@@ -301,8 +383,6 @@ async function handleAgencyCheckoutCompleted(session) {
   
   if (!agencyId) return;
   
-  const planDetails = PLAN_DETAILS[plan];
-  
   await supabase
     .from('agencies')
     .update({
@@ -316,12 +396,16 @@ async function handleAgencyCheckoutCompleted(session) {
     .eq('id', agencyId);
   
   // Log event
-  await supabase.from('agency_subscription_events').insert({
-    agency_id: agencyId,
-    event_type: 'checkout_completed',
-    stripe_event_id: session.id,
-    metadata: { plan }
-  });
+  try {
+    await supabase.from('agency_subscription_events').insert({
+      agency_id: agencyId,
+      event_type: 'checkout_completed',
+      stripe_event_id: session.id,
+      metadata: { plan }
+    });
+  } catch (e) {
+    // Non-critical
+  }
   
   console.log('✅ Agency activated:', agencyId, 'Plan:', plan);
 }
@@ -336,7 +420,7 @@ async function handleAgencySubscriptionCreated(subscription) {
   const plan = subscription.metadata?.plan_type || subscription.metadata?.plan || 'starter';
   
   // Respect Stripe's actual status — don't override trialing with active
-  const stripeStatus = subscription.status; // 'trialing', 'active', etc.
+  const stripeStatus = subscription.status;
   
   await supabase
     .from('agencies')
@@ -359,13 +443,12 @@ async function handleAgencySubscriptionUpdated(subscription) {
   let status = subscription.status;
   let agencyStatus = agency.status;
   
-  // Map Stripe status to our status
   if (status === 'active') {
     agencyStatus = 'active';
   } else if (status === 'trialing') {
     agencyStatus = 'trial';
   } else if (status === 'past_due') {
-    agencyStatus = 'active'; // Keep active but flag past_due
+    agencyStatus = 'active';
   } else if (status === 'canceled' || status === 'unpaid') {
     agencyStatus = 'suspended';
   }
@@ -398,28 +481,18 @@ async function handleAgencySubscriptionDeleted(subscription) {
     })
     .eq('id', agency.id);
   
-  // TODO: Disable all agency's client assistants
-  
-  // Send SMS notification
   await sendAgencySubscriptionCanceledSMS(agency);
 }
 
 async function handleAgencyPaymentSucceeded(invoice) {
-  console.log('✅ Agency payment succeeded:', invoice.id, `Amount: $${(invoice.amount_paid / 100).toFixed(2)}`);
+  console.log('✅ Agency payment succeeded:', invoice.id, `Amount: ${(invoice.currency || 'usd').toUpperCase()} ${(invoice.amount_paid / 100).toFixed(2)}`);
   
   const agency = await getAgencyByStripeCustomerId(invoice.customer);
   if (!agency) return;
   
-  // =========================================================================
-  // FIX: Don't override trialing status for $0 trial invoices
-  // When Stripe starts a trial, it creates a $0 invoice and fires
-  // invoice.payment_succeeded. Previously this blindly set status to 'active',
-  // overwriting the correct 'trialing' status from checkout.session.completed.
-  // =========================================================================
   if (invoice.amount_paid === 0) {
     console.log(`ℹ️ $0 invoice (trial) for ${agency.name} — skipping status update, keeping: ${agency.subscription_status}`);
     
-    // Still log the event but don't change status (non-critical, ignore errors)
     try {
       await supabase.from('agency_subscription_events').insert({
         agency_id: agency.id,
@@ -428,14 +501,13 @@ async function handleAgencyPaymentSucceeded(invoice) {
         metadata: { amount: 0, note: 'Trial $0 invoice — status preserved' }
       });
     } catch (e) {
-      // Non-critical — don't let event logging break the webhook
+      // Non-critical
     }
     
     return;
   }
   
-  // Real payment ($1+) — this is a genuine paid invoice, activate the agency
-  console.log(`💰 Real payment received for ${agency.name}: $${(invoice.amount_paid / 100).toFixed(2)}`);
+  console.log(`💰 Real payment received for ${agency.name}: ${(invoice.currency || 'usd').toUpperCase()} ${(invoice.amount_paid / 100).toFixed(2)}`);
   
   await supabase
     .from('agencies')
@@ -451,7 +523,6 @@ async function handleAgencyPaymentSucceeded(invoice) {
   // =========================================================================
   if (agency.referred_by) {
     try {
-      // Find the referrer by their referral code
       const { data: referrer, error: referrerError } = await supabase
         .from('agencies')
         .select('id, name, referral_earnings_cents, referral_balance_cents, stripe_account_id')
@@ -461,7 +532,6 @@ async function handleAgencyPaymentSucceeded(invoice) {
       if (referrerError || !referrer) {
         console.warn(`⚠️ Referrer not found for code: ${agency.referred_by}`);
       } else {
-        // Check for duplicate (same invoice already processed)
         const { data: existingCommission } = await supabase
           .from('referral_commissions')
           .select('id')
@@ -471,11 +541,9 @@ async function handleAgencyPaymentSucceeded(invoice) {
         if (existingCommission) {
           console.log(`ℹ️ Commission already processed for invoice: ${invoice.id}`);
         } else {
-          // Calculate commission (40% of payment)
-          const paymentAmount = invoice.amount_paid; // in cents
+          const paymentAmount = invoice.amount_paid;
           const commissionAmount = Math.round(paymentAmount * COMMISSION_RATE);
 
-          // Create commission record
           const { error: insertError } = await supabase
             .from('referral_commissions')
             .insert({
@@ -491,7 +559,6 @@ async function handleAgencyPaymentSucceeded(invoice) {
           if (insertError) {
             console.error('❌ Error inserting commission:', insertError);
           } else {
-            // Update referrer's earnings and balance
             await supabase
               .from('agencies')
               .update({
@@ -506,10 +573,8 @@ async function handleAgencyPaymentSucceeded(invoice) {
       }
     } catch (commissionError) {
       console.error('❌ Error processing referral commission:', commissionError);
-      // Don't throw - payment succeeded, commission is secondary
     }
   }
-  // =========================================================================
 }
 
 async function handleAgencyPaymentFailed(invoice) {
@@ -518,7 +583,6 @@ async function handleAgencyPaymentFailed(invoice) {
   const agency = await getAgencyByStripeCustomerId(invoice.customer);
   if (!agency) return;
   
-  // Don't mark as past_due for $0 trial invoices that fail (edge case)
   if (invoice.amount_due === 0) {
     console.log(`ℹ️ $0 invoice failure for ${agency.name} — skipping status update`);
     return;
@@ -531,7 +595,6 @@ async function handleAgencyPaymentFailed(invoice) {
     })
     .eq('id', agency.id);
   
-  // Send SMS notification
   await sendAgencyPaymentFailedSMS(agency);
 }
 
@@ -544,7 +607,6 @@ async function handleAgencyTrialEnding(subscription) {
   const trialEnd = new Date(subscription.trial_end * 1000);
   const daysLeft = Math.ceil((trialEnd - new Date()) / (1000 * 60 * 60 * 24));
   
-  // Send SMS notification
   await sendAgencyTrialEndingSMS(agency, daysLeft);
 }
 
@@ -557,6 +619,9 @@ module.exports = {
   handlePlatformStripeWebhook,
   getClientLimitForPlan,
   canAgencyAddClient,
-  PLATFORM_PRICES,
-  PLAN_DETAILS
+  PLAN_DETAILS,
+  // Export currency helpers for other modules
+  convertToStripeAmount,
+  getCurrencyCode,
+  COUNTRY_CURRENCY_MAP
 };
