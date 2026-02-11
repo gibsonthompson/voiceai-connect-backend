@@ -191,10 +191,9 @@ async function canAgencyAddClient(agencyId) {
   }
 
   // During trial, grant enterprise-level access (unlimited clients)
-const isTrialing = ['active', 'trialing', 'trial'].includes(agency.subscription_status) 
-  && ['trialing', 'trial'].includes(agency.subscription_status);
-const effectivePlan = isTrialing ? 'enterprise' : agency.plan_type;
-const clientLimit = getClientLimitForPlan(effectivePlan);
+  const isTrialing = ['trialing', 'trial'].includes(agency.subscription_status);
+  const effectivePlan = isTrialing ? 'enterprise' : agency.plan_type;
+  const clientLimit = getClientLimitForPlan(effectivePlan);
   
   // -1 means unlimited
   if (clientLimit === -1) {
@@ -336,14 +335,19 @@ async function handleAgencySubscriptionCreated(subscription) {
   // Frontend sends 'plan_type', backend checkout sends 'plan' — check both
   const plan = subscription.metadata?.plan_type || subscription.metadata?.plan || 'starter';
   
+  // Respect Stripe's actual status — don't override trialing with active
+  const stripeStatus = subscription.status; // 'trialing', 'active', etc.
+  
   await supabase
     .from('agencies')
     .update({
       stripe_subscription_id: subscription.id,
-      subscription_status: subscription.status,
+      subscription_status: stripeStatus,
       plan_type: plan
     })
     .eq('id', agency.id);
+  
+  console.log(`   Status: ${stripeStatus}, Plan: ${plan}`);
 }
 
 async function handleAgencySubscriptionUpdated(subscription) {
@@ -358,6 +362,8 @@ async function handleAgencySubscriptionUpdated(subscription) {
   // Map Stripe status to our status
   if (status === 'active') {
     agencyStatus = 'active';
+  } else if (status === 'trialing') {
+    agencyStatus = 'trial';
   } else if (status === 'past_due') {
     agencyStatus = 'active'; // Keep active but flag past_due
   } else if (status === 'canceled' || status === 'unpaid') {
@@ -374,6 +380,8 @@ async function handleAgencySubscriptionUpdated(subscription) {
         : null
     })
     .eq('id', agency.id);
+  
+  console.log(`   Stripe status: ${status} → agency status: ${agencyStatus}`);
 }
 
 async function handleAgencySubscriptionDeleted(subscription) {
@@ -397,16 +405,40 @@ async function handleAgencySubscriptionDeleted(subscription) {
 }
 
 async function handleAgencyPaymentSucceeded(invoice) {
-  console.log('✅ Agency payment succeeded:', invoice.id);
+  console.log('✅ Agency payment succeeded:', invoice.id, `Amount: $${(invoice.amount_paid / 100).toFixed(2)}`);
   
   const agency = await getAgencyByStripeCustomerId(invoice.customer);
   if (!agency) return;
+  
+  // =========================================================================
+  // FIX: Don't override trialing status for $0 trial invoices
+  // When Stripe starts a trial, it creates a $0 invoice and fires
+  // invoice.payment_succeeded. Previously this blindly set status to 'active',
+  // overwriting the correct 'trialing' status from checkout.session.completed.
+  // =========================================================================
+  if (invoice.amount_paid === 0) {
+    console.log(`ℹ️ $0 invoice (trial) for ${agency.name} — skipping status update, keeping: ${agency.subscription_status}`);
+    
+    // Still log the event but don't change status
+    await supabase.from('agency_subscription_events').insert({
+      agency_id: agency.id,
+      event_type: 'trial_invoice_paid',
+      stripe_event_id: invoice.id,
+      metadata: { amount: 0, note: 'Trial $0 invoice — status preserved' }
+    }).catch(() => {}); // Non-critical
+    
+    return;
+  }
+  
+  // Real payment ($1+) — this is a genuine paid invoice, activate the agency
+  console.log(`💰 Real payment received for ${agency.name}: $${(invoice.amount_paid / 100).toFixed(2)}`);
   
   await supabase
     .from('agencies')
     .update({
       subscription_status: 'active',
-      status: 'active'
+      status: 'active',
+      updated_at: new Date().toISOString()
     })
     .eq('id', agency.id);
 
@@ -481,6 +513,12 @@ async function handleAgencyPaymentFailed(invoice) {
   
   const agency = await getAgencyByStripeCustomerId(invoice.customer);
   if (!agency) return;
+  
+  // Don't mark as past_due for $0 trial invoices that fail (edge case)
+  if (invoice.amount_due === 0) {
+    console.log(`ℹ️ $0 invoice failure for ${agency.name} — skipping status update`);
+    return;
+  }
   
   await supabase
     .from('agencies')
