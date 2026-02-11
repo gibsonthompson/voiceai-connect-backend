@@ -171,8 +171,12 @@ const {
   verifyToken,
   setPassword,
   changePassword,
-  requestPasswordReset
+  authMiddleware,
+  generateToken
 } = require('./routes/auth');
+
+// Password Reset (SMS-based)
+const passwordResetRoutes = require('./routes/password-reset');
 
 // Google OAuth
 const { googleAuth, googleCallback } = require('./routes/google-auth');
@@ -850,7 +854,9 @@ app.post('/api/auth/client/login', clientLogin);
 app.post('/api/auth/verify', verifyToken);
 app.post('/api/auth/set-password', setPassword);
 app.post('/api/auth/change-password', changePassword);
-app.post('/api/auth/reset-password', requestPasswordReset);
+
+// SMS-based password reset (forgot-password + reset-password)
+app.use('/api/auth', passwordResetRoutes);
 
 // Google OAuth
 app.get('/api/auth/google', googleAuth);
