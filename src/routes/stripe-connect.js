@@ -20,6 +20,30 @@ const { enableAssistant, disableAssistant } = require('../lib/vapi');
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 // ============================================================================
+// COUNTRY → CURRENCY MAPPING
+// ============================================================================
+const countryCurrencyMap = {
+  US: 'usd', CA: 'cad', GB: 'gbp', MX: 'mxn', BR: 'brl',
+  // Eurozone
+  AT: 'eur', BE: 'eur', CY: 'eur', EE: 'eur', FI: 'eur', FR: 'eur',
+  DE: 'eur', GR: 'eur', IE: 'eur', IT: 'eur', LV: 'eur', LT: 'eur',
+  LU: 'eur', MT: 'eur', NL: 'eur', PT: 'eur', SK: 'eur', SI: 'eur',
+  ES: 'eur', HR: 'eur',
+  // Europe non-Euro
+  BG: 'bgn', CZ: 'czk', DK: 'dkk', HU: 'huf', NO: 'nok',
+  PL: 'pln', RO: 'ron', SE: 'sek', CH: 'chf',
+  // Asia-Pacific
+  AU: 'aud', NZ: 'nzd', JP: 'jpy', SG: 'sgd', HK: 'hkd',
+  MY: 'myr', TH: 'thb', IN: 'inr',
+  // Middle East
+  AE: 'aed',
+};
+
+function getCurrencyForCountry(countryCode) {
+  return countryCurrencyMap[countryCode] || 'usd';
+}
+
+// ============================================================================
 // CREATE CONNECT ACCOUNT LINK (Agency onboards to Stripe Connect)
 // ============================================================================
 async function createConnectAccountLink(req, res) {
@@ -40,15 +64,16 @@ async function createConnectAccountLink(req, res) {
       return res.status(404).json({ error: 'Agency not found' });
     }
 
-    console.log('🔗 Creating Stripe Connect account for:', agency.name);
+    console.log('🔗 Creating Stripe Connect account for:', agency.name, '| Country:', agency.country || 'US');
 
     // Create or get Connect account
     let accountId = agency.stripe_account_id;
 
     if (!accountId) {
-      // Create Express account
+      // Create Express account with agency's country
       const account = await stripe.accounts.create({
         type: 'express',
+        country: agency.country || 'US',
         email: agency.email,
         metadata: {
           agency_id: agency_id
@@ -67,7 +92,7 @@ async function createConnectAccountLink(req, res) {
         .update({ stripe_account_id: accountId })
         .eq('id', agency_id);
 
-      console.log('✅ Connect account created:', accountId);
+      console.log('✅ Connect account created:', accountId, '| Country:', agency.country || 'US');
     }
 
     // Create account link for onboarding
@@ -211,7 +236,7 @@ async function disconnectConnectAccount(req, res) {
 
 // ============================================================================
 // CREATE CLIENT CHECKOUT (Client subscribes via agency's Connect account)
-// Updated: Gets agency from client record, no agency_id required
+// Updated: Uses agency's currency based on their country
 // ============================================================================
 async function createClientCheckout(req, res) {
   try {
@@ -270,6 +295,9 @@ async function createClientCheckout(req, res) {
       return res.status(400).json({ error: 'Invalid plan' });
     }
 
+    // Use agency's currency based on their country
+    const currency = getCurrencyForCountry(agency.country || 'US');
+
     // Create customer on connected account (if not exists)
     let connectedCustomerId = client.stripe_connected_customer_id;
 
@@ -301,11 +329,11 @@ async function createClientCheckout(req, res) {
       stripeAccount: agency.stripe_account_id
     });
 
-    // Create price on connected account
+    // Create price on connected account using agency's currency
     const price = await stripe.prices.create({
       product: product.id,
       unit_amount: priceAmount,
-      currency: 'usd',
+      currency: currency,
       recurring: { interval: 'month' }
     }, {
       stripeAccount: agency.stripe_account_id
@@ -346,7 +374,7 @@ async function createClientCheckout(req, res) {
       stripeAccount: agency.stripe_account_id
     });
 
-    console.log('✅ Client checkout created:', session.id);
+    console.log('✅ Client checkout created:', session.id, '| Currency:', currency);
 
     res.json({
       success: true,
@@ -627,7 +655,7 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
         paid_out: false
       });
     
-    console.log(`💰 Payment recorded: $${(session.amount_total / 100).toFixed(2)}`);
+    console.log(`💰 Payment recorded: ${session.currency?.toUpperCase() || 'USD'} ${(session.amount_total / 100).toFixed(2)}`);
   }
 
   // Send SMS notification
@@ -746,7 +774,7 @@ async function handleClientPaymentSucceeded(invoice, stripeAccountId) {
       paid_out: false
     });
 
-  console.log(`💰 Payment recorded: $${((invoice.amount_paid || 0) / 100).toFixed(2)}`);
+  console.log(`💰 Payment recorded: ${(invoice.currency || 'usd').toUpperCase()} ${((invoice.amount_paid || 0) / 100).toFixed(2)}`);
 }
 
 async function handleClientPaymentFailed(invoice, stripeAccountId) {

@@ -67,6 +67,24 @@ async function createPasswordToken(userId, email) {
 }
 
 // ============================================================================
+// COUNTRY → CURRENCY MAPPING
+// ============================================================================
+const COUNTRY_CURRENCY_MAP = {
+  US: 'USD', CA: 'CAD', MX: 'MXN', GB: 'GBP',
+  AT: 'EUR', BE: 'EUR', BG: 'BGN', HR: 'EUR', CY: 'EUR', CZ: 'CZK',
+  DK: 'DKK', EE: 'EUR', FI: 'EUR', FR: 'EUR', DE: 'EUR', GR: 'EUR',
+  HU: 'HUF', IE: 'EUR', IT: 'EUR', LV: 'EUR', LT: 'EUR', LU: 'EUR',
+  MT: 'EUR', NL: 'EUR', NO: 'NOK', PL: 'PLN', PT: 'EUR', RO: 'RON',
+  SK: 'EUR', SI: 'EUR', ES: 'EUR', SE: 'SEK', CH: 'CHF',
+  AU: 'AUD', NZ: 'NZD', JP: 'JPY', SG: 'SGD', HK: 'HKD',
+  MY: 'MYR', TH: 'THB', IN: 'INR', AE: 'AED', BR: 'BRL',
+};
+
+function getCurrencyForCountry(countryCode) {
+  return COUNTRY_CURRENCY_MAP[countryCode] || 'USD';
+}
+
+// ============================================================================
 // VALIDATE AGENCY SIGNUP
 // ============================================================================
 function validateAgencySignup(body) {
@@ -165,7 +183,8 @@ async function handleAgencySignup(req, res) {
       lastName, 
       referralCode,
       name: agencyName,
-      phone 
+      phone,
+      country
     } = req.body;
     
     // Check for duplicate email
@@ -186,7 +205,11 @@ async function handleAgencySignup(req, res) {
     const baseSlug = generateSlug(tempName);
     const slug = await ensureUniqueSlug(baseSlug);
     
-    console.log(`🏢 Creating agency for: ${firstName} ${lastName || ''} (${email})`);
+    // Resolve country and currency
+    const resolvedCountry = country || 'US';
+    const resolvedCurrency = getCurrencyForCountry(resolvedCountry);
+    
+    console.log(`🏢 Creating agency for: ${firstName} ${lastName || ''} (${email}) [${resolvedCountry}/${resolvedCurrency}]`);
     
     // Create agency record
     const { data: agency, error: agencyError } = await supabase
@@ -196,6 +219,8 @@ async function handleAgencySignup(req, res) {
         slug: slug,
         email: email.toLowerCase(),
         phone: phone || null,
+        country: resolvedCountry,
+        currency: resolvedCurrency,
         status: 'pending_payment',
         subscription_status: 'pending',
         plan_type: 'starter',
@@ -425,5 +450,6 @@ module.exports = {
   handleAgencyOnboarding,
   attributeReferral,
   createPasswordToken,
-  getReferralSourceLabel
+  getReferralSourceLabel,
+  getCurrencyForCountry
 };

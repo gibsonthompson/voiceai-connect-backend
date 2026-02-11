@@ -419,13 +419,17 @@ async function handleAgencyPaymentSucceeded(invoice) {
   if (invoice.amount_paid === 0) {
     console.log(`ℹ️ $0 invoice (trial) for ${agency.name} — skipping status update, keeping: ${agency.subscription_status}`);
     
-    // Still log the event but don't change status
-    await supabase.from('agency_subscription_events').insert({
-      agency_id: agency.id,
-      event_type: 'trial_invoice_paid',
-      stripe_event_id: invoice.id,
-      metadata: { amount: 0, note: 'Trial $0 invoice — status preserved' }
-    }).catch(() => {}); // Non-critical
+    // Still log the event but don't change status (non-critical, ignore errors)
+    try {
+      await supabase.from('agency_subscription_events').insert({
+        agency_id: agency.id,
+        event_type: 'trial_invoice_paid',
+        stripe_event_id: invoice.id,
+        metadata: { amount: 0, note: 'Trial $0 invoice — status preserved' }
+      });
+    } catch (e) {
+      // Non-critical — don't let event logging break the webhook
+    }
     
     return;
   }

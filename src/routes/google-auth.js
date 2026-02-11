@@ -5,7 +5,7 @@
 const { OAuth2Client } = require('google-auth-library');
 const { supabase } = require('../lib/supabase');
 const { generateToken } = require('./auth');
-const { createPasswordToken } = require('./agency-signup');
+const { createPasswordToken, getCurrencyForCountry } = require('./agency-signup');
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
@@ -64,14 +64,16 @@ function isAgencyPastOnboarding(agency) {
 // GET /api/auth/google
 async function googleAuth(req, res) {
   try {
+    // Parse all query params - ref and country come from frontend
     const referralCode = req.query.ref || null;
+    const country = req.query.country || null;
     
     const scopes = [
       'https://www.googleapis.com/auth/userinfo.email',
       'https://www.googleapis.com/auth/userinfo.profile',
     ];
 
-    const state = JSON.stringify({ ref: referralCode });
+    const state = JSON.stringify({ ref: referralCode, country: country });
 
     const authUrl = oauth2Client.generateAuthUrl({
       access_type: 'offline',
@@ -97,9 +99,11 @@ async function googleCallback(req, res) {
     }
 
     let referralCode = null;
+    let country = null;
     try {
       const stateData = JSON.parse(state || '{}');
       referralCode = stateData.ref;
+      country = stateData.country;
     } catch {}
 
     const { tokens } = await oauth2Client.getToken(code);
@@ -120,7 +124,7 @@ async function googleCallback(req, res) {
       return res.redirect(`${FRONTEND_URL}/signup?error=no_email`);
     }
 
-    console.log(`🔐 Google auth for: ${email}`);
+    console.log(`🔐 Google auth for: ${email} [country: ${country || 'not set'}]`);
 
     // Check if user exists
     const { data: existingUser } = await supabase
@@ -173,6 +177,10 @@ async function googleCallback(req, res) {
     const baseSlug = generateSlug(tempAgencyName);
     const slug = await ensureUniqueSlug(baseSlug);
 
+    // Resolve country and currency
+    const resolvedCountry = country || 'US';
+    const resolvedCurrency = getCurrencyForCountry(resolvedCountry);
+
     let referredByAgencyId = null;
     if (referralCode) {
       const { data: referrer } = await supabase
@@ -193,6 +201,8 @@ async function googleCallback(req, res) {
         name: tempAgencyName,
         slug: slug,
         email: email.toLowerCase(),
+        country: resolvedCountry,
+        currency: resolvedCurrency,
         status: 'pending_payment',
         subscription_status: 'pending',
         plan_type: 'starter',
@@ -216,6 +226,8 @@ async function googleCallback(req, res) {
       console.error('❌ Agency creation error:', agencyError);
       return res.redirect(`${FRONTEND_URL}/signup?error=signup_failed`);
     }
+
+    console.log(`🏢 Agency created via Google: ${agency.id} [${resolvedCountry}/${resolvedCurrency}]`);
 
     const { data: user, error: userError } = await supabase
       .from('users')
