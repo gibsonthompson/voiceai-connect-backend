@@ -38,6 +38,7 @@ const TEMPLATE_VARIABLES = {
 // ============================================================================
 // GET /api/agency/:agencyId/templates
 // List all templates for an agency
+// Auto-seeds defaults if agency has zero templates (handles pre-existing accounts)
 // ============================================================================
 router.get('/:agencyId/templates', async (req, res) => {
   try {
@@ -58,11 +59,44 @@ router.get('/:agencyId/templates', async (req, res) => {
       query = query.eq('sequence_name', sequenceName);
     }
 
-    const { data: templates, error } = await query;
+    let { data: templates, error } = await query;
 
     if (error) {
       console.error('Error fetching templates:', error);
       return res.status(400).json({ error: error.message });
+    }
+
+    // Auto-seed if agency has zero templates (catches pre-existing accounts)
+    if (!templates || templates.length === 0) {
+      console.log(`📋 No templates for agency ${agencyId}, auto-seeding...`);
+      try {
+        const { seedDefaultTemplatesIfNeeded } = require('../lib/default-templates');
+        const seedResult = await seedDefaultTemplatesIfNeeded(agencyId);
+
+        if (seedResult.success && !seedResult.skipped) {
+          console.log(`✅ Auto-seeded ${seedResult.count} templates for ${agencyId}`);
+
+          // Re-fetch after seeding
+          let refetchQuery = supabase
+            .from('outreach_templates')
+            .select('*')
+            .eq('agency_id', agencyId)
+            .order('sequence_order', { ascending: true, nullsFirst: false })
+            .order('created_at', { ascending: false });
+
+          if (type) {
+            refetchQuery = refetchQuery.eq('type', type);
+          }
+          if (sequenceName) {
+            refetchQuery = refetchQuery.eq('sequence_name', sequenceName);
+          }
+
+          const { data: seededTemplates } = await refetchQuery;
+          templates = seededTemplates || [];
+        }
+      } catch (seedError) {
+        console.error('Auto-seed failed (non-blocking):', seedError);
+      }
     }
 
     // Get unique sequence names
