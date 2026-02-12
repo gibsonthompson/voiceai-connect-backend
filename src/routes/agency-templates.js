@@ -1,6 +1,7 @@
 // ============================================================================
 // AGENCY PROMPT TEMPLATES ROUTES
 // Enterprise Feature - Custom AI Receptionist Prompts per Industry
+// Routes: /api/agency/:agencyId/ai-templates/*
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -660,11 +661,10 @@ async function requireEnterprisePlan(req, res, next) {
 }
 
 // ============================================================================
-// GET /api/agency/:agencyId/templates/check
+// GET /api/agency/:agencyId/ai-templates/check
 // Check if agency has enterprise plan (for frontend gating)
-// IMPORTANT: This MUST be before /:industry routes or "check" gets matched as industry
 // ============================================================================
-router.get('/:agencyId/templates/check', async (req, res) => {
+router.get('/:agencyId/ai-templates/check', async (req, res) => {
   const { agencyId } = req.params;
   
   try {
@@ -691,10 +691,10 @@ router.get('/:agencyId/templates/check', async (req, res) => {
 });
 
 // ============================================================================
-// GET /api/agency/:agencyId/templates/industries
+// GET /api/agency/:agencyId/ai-templates/industries
 // Get list of all industries with their config
 // ============================================================================
-router.get('/:agencyId/templates/industries', requireEnterprisePlan, async (req, res) => {
+router.get('/:agencyId/ai-templates/industries', requireEnterprisePlan, async (req, res) => {
   const { agencyId } = req.params;
   
   try {
@@ -735,10 +735,10 @@ router.get('/:agencyId/templates/industries', requireEnterprisePlan, async (req,
 });
 
 // ============================================================================
-// GET /api/agency/:agencyId/templates/voices
+// GET /api/agency/:agencyId/ai-templates/voices
 // Get available ElevenLabs voices
 // ============================================================================
-router.get('/:agencyId/templates/voices', requireEnterprisePlan, (req, res) => {
+router.get('/:agencyId/ai-templates/voices', requireEnterprisePlan, (req, res) => {
   res.json({ 
     voices: ELEVENLABS_VOICES,
     provider: 'ElevenLabs',
@@ -747,10 +747,10 @@ router.get('/:agencyId/templates/voices', requireEnterprisePlan, (req, res) => {
 });
 
 // ============================================================================
-// GET /api/agency/:agencyId/templates/:industry
+// GET /api/agency/:agencyId/ai-templates/:industry
 // Get template for specific industry (custom or default)
 // ============================================================================
-router.get('/:agencyId/templates/:industry', requireEnterprisePlan, async (req, res) => {
+router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (req, res) => {
   const { agencyId, industry } = req.params;
   
   // Map frontend key to backend key
@@ -815,10 +815,10 @@ router.get('/:agencyId/templates/:industry', requireEnterprisePlan, async (req, 
 });
 
 // ============================================================================
-// PUT /api/agency/:agencyId/templates/:industry
+// PUT /api/agency/:agencyId/ai-templates/:industry
 // Create or update template for an industry
 // ============================================================================
-router.put('/:agencyId/templates/:industry', requireEnterprisePlan, async (req, res) => {
+router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (req, res) => {
   const { agencyId, industry } = req.params;
   const { system_prompt, first_message, voice_id, temperature, is_active } = req.body;
   
@@ -876,10 +876,10 @@ router.put('/:agencyId/templates/:industry', requireEnterprisePlan, async (req, 
 });
 
 // ============================================================================
-// DELETE /api/agency/:agencyId/templates/:industry
+// DELETE /api/agency/:agencyId/ai-templates/:industry
 // Reset template to defaults (delete custom template)
 // ============================================================================
-router.delete('/:agencyId/templates/:industry', requireEnterprisePlan, async (req, res) => {
+router.delete('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (req, res) => {
   const { agencyId, industry } = req.params;
   
   // Map frontend key to backend key
