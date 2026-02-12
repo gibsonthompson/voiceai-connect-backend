@@ -26,7 +26,7 @@ Best,
 {agency_owner_name}
 {agency_name}
 {agency_phone}`,
-    is_default: false, // Will be owned by agency, not global
+    is_default: false,
     is_follow_up: false,
     sequence_name: 'initial_sequence',
     sequence_order: 1,
@@ -272,37 +272,49 @@ Worth a quick 10-minute call?
 ];
 
 /**
- * Seed default templates for an agency if they don't have any
+ * Seed default templates for an agency if they don't have the full set
+ * FIXED: Checks for minimum count instead of "any exist" to handle partial seeds
  * @param {string} agencyId - The agency ID to seed templates for
  * @returns {Promise<{success: boolean, count?: number, skipped?: boolean, error?: string}>}
  */
 async function seedDefaultTemplatesIfNeeded(agencyId) {
   try {
-    // Check if agency already has templates
+    // Check how many templates agency currently has
     const { data: existingTemplates, error: checkError } = await supabase
       .from('outreach_templates')
-      .select('id')
-      .eq('agency_id', agencyId)
-      .limit(1);
+      .select('id, name')
+      .eq('agency_id', agencyId);
 
     if (checkError) {
       console.error('Error checking existing templates:', checkError);
       return { success: false, error: checkError.message };
     }
 
-    // If templates exist, skip seeding
-    if (existingTemplates && existingTemplates.length > 0) {
-      console.log(`⏭️ Agency ${agencyId} already has templates, skipping seed`);
+    const existingCount = existingTemplates ? existingTemplates.length : 0;
+    const expectedCount = DEFAULT_TEMPLATES.length;
+
+    // Only skip if agency already has the full set (or more from custom templates)
+    if (existingCount >= expectedCount) {
+      console.log(`⏭️ Agency ${agencyId} has ${existingCount} templates (expected ${expectedCount}), skipping seed`);
       return { success: true, skipped: true };
     }
 
-    // Add agency_id to each template
-    const templatesToInsert = DEFAULT_TEMPLATES.map(template => ({
+    // Find which default templates are missing by name
+    const existingNames = new Set((existingTemplates || []).map(t => t.name));
+    const missingTemplates = DEFAULT_TEMPLATES.filter(t => !existingNames.has(t.name));
+
+    if (missingTemplates.length === 0) {
+      console.log(`⏭️ Agency ${agencyId} has all default templates by name, skipping seed`);
+      return { success: true, skipped: true };
+    }
+
+    // Add agency_id to each missing template
+    const templatesToInsert = missingTemplates.map(template => ({
       ...template,
       agency_id: agencyId
     }));
 
-    // Insert templates
+    // Insert only missing templates
     const { data: insertedTemplates, error: insertError } = await supabase
       .from('outreach_templates')
       .insert(templatesToInsert)
@@ -313,7 +325,7 @@ async function seedDefaultTemplatesIfNeeded(agencyId) {
       return { success: false, error: insertError.message };
     }
 
-    console.log(`✅ Seeded ${insertedTemplates.length} default templates for agency ${agencyId}`);
+    console.log(`✅ Seeded ${insertedTemplates.length} missing templates for agency ${agencyId} (had ${existingCount}, now ${existingCount + insertedTemplates.length})`);
     return { success: true, count: insertedTemplates.length };
   } catch (error) {
     console.error('Error seeding templates:', error);
