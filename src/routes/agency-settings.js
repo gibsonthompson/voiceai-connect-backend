@@ -77,6 +77,9 @@ async function getAgencyByHost(req, res) {
         limit_pro: agency.limit_pro,
         limit_growth: agency.limit_growth,
         
+        // Client plan features (for dynamic plan cards on signup)
+        plan_features: agency.plan_features || null,
+        
         // Demo phone (auto-provisioned per agency via VAPI)
         demo_phone_number: agency.demo_phone_number || null,
         // Legacy manual override field
@@ -176,6 +179,9 @@ async function getAgencySettings(req, res) {
         limit_pro: agency.limit_pro,
         limit_growth: agency.limit_growth,
         
+        // Client plan feature gating
+        plan_features: agency.plan_features || null,
+        
         // Demo phone (auto-provisioned per agency via VAPI)
         demo_phone_number: agency.demo_phone_number || null,
         demo_assistant_id: agency.demo_assistant_id || null,
@@ -238,13 +244,45 @@ async function updateAgencySettings(req, res) {
       'marketing_config',
       // Theme settings
       'website_theme',
-      'logo_background_color'
+      'logo_background_color',
+      // Client plan feature gating
+      'plan_features'
     ];
     
     const sanitizedUpdates = {};
     for (const key of allowedFields) {
       if (updates[key] !== undefined) {
         sanitizedUpdates[key] = updates[key];
+      }
+    }
+    
+    // Validate plan_features structure if provided
+    if (sanitizedUpdates.plan_features) {
+      const pf = sanitizedUpdates.plan_features;
+      const validPlans = ['starter', 'pro', 'growth'];
+      const validFeatures = [
+        'sms_notifications', 'email_summaries', 'custom_greeting',
+        'custom_voice', 'knowledge_base', 'business_hours',
+        'advanced_analytics', 'priority_support'
+      ];
+      
+      let isValid = true;
+      for (const plan of validPlans) {
+        if (!pf[plan] || typeof pf[plan] !== 'object') {
+          isValid = false;
+          break;
+        }
+        for (const feature of validFeatures) {
+          if (typeof pf[plan][feature] !== 'boolean') {
+            isValid = false;
+            break;
+          }
+        }
+        if (!isValid) break;
+      }
+      
+      if (!isValid) {
+        return res.status(400).json({ error: 'Invalid plan_features structure' });
       }
     }
     
