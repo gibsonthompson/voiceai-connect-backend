@@ -136,7 +136,7 @@ router.post('/:agencyId/byot/credentials', requireScalePlan, async (req, res) =>
     res.json({
       success: true,
       message: 'Twilio credentials verified and saved successfully.',
-      twilio_account_name: twilioAccount.friendly_name,
+      twilio_account_sid: twilio_account_sid,
       byot_enabled: true,
       verified_at: new Date().toISOString()
     });
