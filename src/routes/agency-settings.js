@@ -1,5 +1,7 @@
 // ============================================================================
 // AGENCY SETTINGS
+// WITH BYOT STATUS IN SETTINGS RESPONSE
+// Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
 const { supabase, getAgencyBySlug, getAgencyByDomain, getAgencyById } = require('../lib/supabase');
@@ -62,7 +64,7 @@ async function getAgencyByHost(req, res) {
         website_theme: agency.website_theme,
         logo_background_color: agency.logo_background_color,
         
-        // Plan type (for feature gating - e.g., marketing site access)
+        // Plan type (for feature gating)
         plan_type: agency.plan_type,
         
         // Pricing (for client signup + marketing website)
@@ -192,6 +194,13 @@ async function getAgencySettings(req, res) {
         support_phone: agency.support_phone,
         timezone: agency.timezone,
         
+        // International / BYOT
+        country: agency.country || 'US',
+        currency: agency.currency || 'USD',
+        byot_enabled: agency.byot_enabled || false,
+        byot_verified_at: agency.byot_verified_at || null,
+        twilio_account_sid: agency.twilio_account_sid || null,
+        
         // Timestamps
         created_at: agency.created_at,
         updated_at: agency.updated_at
@@ -286,7 +295,6 @@ async function verifyAgencyDomain(req, res) {
   try {
     const { agencyId } = req.params;
     
-    // Get agency's custom domain
     const { data: agency, error } = await supabase
       .from('agencies')
       .select('marketing_domain')
@@ -307,11 +315,9 @@ async function verifyAgencyDomain(req, res) {
     console.log(`🔍 Verifying domain: ${domain}, expecting CNAME to: ${expectedCname}`);
     
     try {
-      // Look up CNAME records
       const records = await dns.resolveCname(domain);
       console.log(`📋 CNAME records found:`, records);
       
-      // Check if any CNAME points to our expected value
       const verified = records.some(record => 
         record.toLowerCase() === expectedCname.toLowerCase() ||
         record.toLowerCase().endsWith(`.${platformDomain.toLowerCase()}`) ||
@@ -319,7 +325,6 @@ async function verifyAgencyDomain(req, res) {
       );
       
       if (verified) {
-        // Update database to mark as verified
         await supabase
           .from('agencies')
           .update({ domain_verified: true, updated_at: new Date().toISOString() })
@@ -341,15 +346,12 @@ async function verifyAgencyDomain(req, res) {
         });
       }
     } catch (dnsError) {
-      // CNAME not found or DNS error
       console.log(`⚠️ DNS lookup error for ${domain}:`, dnsError.code);
       
-      // Try A record as fallback (some setups use A records)
       try {
         const aRecords = await dns.resolve4(domain);
         console.log(`📋 A records found:`, aRecords);
         
-        // Vercel IP ranges (approximate)
         const vercelIps = ['76.76.21.21', '76.76.21.22', '76.76.21.93'];
         const hasVercelIp = aRecords.some(ip => vercelIps.includes(ip) || ip.startsWith('76.76.'));
         

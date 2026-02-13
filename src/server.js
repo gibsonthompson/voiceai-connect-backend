@@ -143,6 +143,9 @@ const outreachRoutes = require('./routes/outreach');
 // Agency Templates Routes (Enterprise Feature - Custom AI Prompts)
 const agencyTemplatesRoutes = require('./routes/agency-templates');
 
+// BYOT Routes (Bring Your Own Twilio - International provisioning) // BYOT ADDITION
+const byotRoutes = require('./routes/byot'); // BYOT ADDITION
+
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 
@@ -201,7 +204,8 @@ app.get('/health', (req, res) => {
       automatedDomains: true,
       referralProgram: true,
       googleOAuth: true,
-      aiTemplates: true
+      aiTemplates: true,
+      byot: true // BYOT ADDITION
     }
   });
 });
@@ -663,6 +667,12 @@ app.use('/api/agency', demoPhoneRoutes);
 // ============================================================================
 
 app.use('/api/agency', agencyTemplatesRoutes);
+
+// ============================================================================
+// BYOT ROUTES (Bring Your Own Twilio - International provisioning)        
+// ============================================================================
+
+app.use('/api/agency', byotRoutes); // BYOT ADDITION
 
 // ============================================================================
 // LEADS & OUTREACH ROUTES (Agency CRM)
