@@ -36,6 +36,7 @@ const STEP_THRESHOLDS = {
 function getAbandonedCartMessage(step, agency) {
   const name = agency.name || 'there';
   const platformUrl = 'https://myvoiceaiconnect.com';
+  const loginUrl = `${platformUrl}/agency/login`;
 
   switch (step) {
     case 1:
@@ -45,7 +46,7 @@ function getAbandonedCartMessage(step, agency) {
         `Looks like you didn't finish setting up your VoiceAI Connect account. ` +
         `Your white-label AI receptionist platform is waiting for you.\n\n` +
         `Pick up where you left off:\n` +
-        `${platformUrl}/signup\n\n` +
+        `${loginUrl}\n\n` +
         `Takes less than 5 minutes to finish!`
       );
 
@@ -59,7 +60,7 @@ function getAbandonedCartMessage(step, agency) {
         `✅ Resell to unlimited businesses\n` +
         `✅ Clients pay YOU directly via Stripe\n` +
         `✅ 14-day free trial, no risk\n\n` +
-        `Finish setup: ${platformUrl}/signup`
+        `Finish setup: ${loginUrl}`
       );
 
     case 3:
@@ -70,7 +71,7 @@ function getAbandonedCartMessage(step, agency) {
         `Every day without your AI receptionist platform is missed revenue from businesses ` +
         `that need 24/7 phone coverage.\n\n` +
         `Your 14-day free trial is ready:\n` +
-        `${platformUrl}/signup\n\n` +
+        `${loginUrl}\n\n` +
         `No credit card needed to start.`
       );
 
@@ -80,7 +81,7 @@ function getAbandonedCartMessage(step, agency) {
         `${name}, quick question — was there something holding you back from finishing your VoiceAI Connect setup?\n\n` +
         `If you ran into any issues, reply to this text and we'll help you get set up personally.\n\n` +
         `Your account is still waiting:\n` +
-        `${platformUrl}/signup`
+        `${loginUrl}`
       );
 
     case 5:
@@ -90,7 +91,7 @@ function getAbandonedCartMessage(step, agency) {
         `This is our last reminder about your VoiceAI Connect account.\n\n` +
         `If now isn't the right time, no worries at all. Your account will be here whenever you're ready.\n\n` +
         `When you're ready to launch your AI receptionist agency:\n` +
-        `${platformUrl}/signup\n\n` +
+        `${loginUrl}\n\n` +
         `We're here if you have any questions. 🙏`
       );
 
