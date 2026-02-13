@@ -146,6 +146,9 @@ const agencyTemplatesRoutes = require('./routes/agency-templates');
 // BYOT Routes (Bring Your Own Twilio - International provisioning) // BYOT ADDITION
 const byotRoutes = require('./routes/byot'); // BYOT ADDITION
 
+// Abandoned Cart SMS (cron-driven nudge sequence for agencies who didn't subscribe)
+const abandonedCartRoutes = require('./routes/abandoned-cart');
+
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 
@@ -206,6 +209,10 @@ app.get('/health', (req, res) => {
       googleOAuth: true,
       aiTemplates: true,
       byot: true // BYOT ADDITION
+    },
+    cron: {
+      expireTrials: true,
+      abandonedCart: true
     }
   });
 });
@@ -899,6 +906,9 @@ app.post('/api/cron/expire-trials', async (req, res) => {
     res.status(500).json({ error: 'Failed to run trial expiration' });
   }
 });
+
+// Abandoned cart SMS nudges (called by cron-job.org every 30 min)
+app.use('/api/cron', abandonedCartRoutes);
 
 // ============================================================================
 // WEBHOOK ROUTES
