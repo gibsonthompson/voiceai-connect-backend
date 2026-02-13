@@ -1,10 +1,11 @@
 // ============================================================================
 // VAPI WEBHOOK HANDLER - Multi-Tenant Aware
 // UPDATED: Demo call detection + agency follow-up SMS
+// UPDATED: Email summaries for international agencies
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
-const { sendCallNotificationSMS, sendDemoCallFollowUpSMS } = require('../lib/notifications');
+const { sendCallNotificationSMS, sendDemoCallFollowUpSMS, sendCallSummaryEmail, isInternationalAgency } = require('../lib/notifications');
 
 // ============================================================================
 // AI SUMMARY GENERATION (via Claude)
@@ -118,10 +119,6 @@ async function getAgencyByDemoPhone(phoneNumber) {
 
 // ============================================================================
 // HANDLE DEMO CALL
-// When a call comes in on an agency's demo line:
-// 1. Log it (optional - no DB record needed for demo calls)
-// 2. Send follow-up SMS with signup link to the caller
-// 3. Notify the agency owner that someone tried their demo
 // ============================================================================
 async function handleDemoCall(agency, message) {
   const call = message.call;
@@ -133,7 +130,6 @@ async function handleDemoCall(agency, message) {
   console.log(`   Caller: ${callerPhone || 'Unknown'}`);
   console.log(`   Duration: ${durationSeconds ? `${durationSeconds}s` : 'Unknown'}`);
 
-  // 1. Send follow-up SMS to the caller with signup link
   if (callerPhone && callerPhone !== 'Unknown') {
     try {
       await sendDemoCallFollowUpSMS(callerPhone, agency);
@@ -143,7 +139,6 @@ async function handleDemoCall(agency, message) {
     }
   }
 
-  // 2. Notify agency owner that someone tried their demo
   if (agency.phone) {
     const { formatPhoneDisplay } = require('../lib/notifications');
     const callerDisplay = callerPhone ? formatPhoneDisplay(callerPhone) : 'Unknown number';
@@ -164,9 +159,6 @@ async function handleDemoCall(agency, message) {
     }
   }
 
-  // 3. Optionally save to a demo_calls table for analytics
-  // (skipping for now — can add later if agencies want demo call tracking)
-
   return {
     type: 'demo',
     agency: agency.name,
@@ -178,7 +170,6 @@ async function handleDemoCall(agency, message) {
 
 // ============================================================================
 // MAIN WEBHOOK HANDLER
-// UPDATED: Checks for demo calls when no client is found
 // ============================================================================
 async function handleVapiWebhook(req, res) {
   try {
@@ -412,13 +403,34 @@ async function handleVapiWebhook(req, res) {
     }
     
     // ============================================
-    // SEND SMS NOTIFICATION
+    // SEND NOTIFICATIONS (SMS for US, Email for international)
     // ============================================
     let smsSent = false;
+    let emailSent = false;
     
-    if (client.owner_phone) {
-      console.log('📱 Sending SMS notification...');
-      smsSent = await sendCallNotificationSMS(client, agency, aiData);
+    const isInternational = isInternationalAgency(agency);
+    
+    if (isInternational) {
+      // International agency — send email summary instead of SMS
+      console.log('📧 International agency — sending email summary...');
+      const emailResult = await sendCallSummaryEmail(client, agency, aiData, {
+        duration_seconds: durationSeconds,
+        transcript: transcript,
+        created_at: insertedCall[0]?.created_at || new Date().toISOString(),
+      });
+      emailSent = emailResult?.success || false;
+      
+      if (emailSent) {
+        console.log('✅ Call summary email sent');
+      } else {
+        console.warn('⚠️ Call summary email failed:', emailResult?.error);
+      }
+    } else {
+      // US agency — send SMS notification
+      if (client.owner_phone) {
+        console.log('📱 Sending SMS notification...');
+        smsSent = await sendCallNotificationSMS(client, agency, aiData);
+      }
     }
     
     // ============================================
@@ -429,6 +441,7 @@ async function handleVapiWebhook(req, res) {
       saved: true,
       callId: insertedCall[0]?.id,
       smsSent: smsSent,
+      emailSent: emailSent,
       firstCall: isFirstCall,
       agency: agency?.name || null,
       duration: durationSeconds

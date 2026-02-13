@@ -2,6 +2,7 @@
 // NOTIFICATIONS - SMS (Telnyx) & Email (Resend)
 // Multi-tenant aware with agency branding
 // WITH DEMO CALL FOLLOW-UP SMS
+// WITH CALL SUMMARY EMAIL (international)
 // ============================================================================
 const fetch = require('node-fetch');
 
@@ -68,6 +69,15 @@ function formatPhoneDisplay(phone) {
 }
 
 // ============================================================================
+// HELPER - Determine if agency is international (non-US)
+// ============================================================================
+function isInternationalAgency(agency) {
+  if (!agency?.country) return false;
+  const usVariants = ['US', 'USA', 'United States', 'us', 'usa'];
+  return !usVariants.includes(agency.country);
+}
+
+// ============================================================================
 // SMS VIA TELNYX
 // ============================================================================
 async function sendTelnyxSMS(toPhone, message) {
@@ -126,18 +136,15 @@ async function sendPlatformNotificationSMS(message) {
 
 // New agency signed up - notify platform owner (Gibson)
 async function sendAgencySignupNotificationSMS(agency) {
-  // Build message with referral source if available
   let message = `🎉 New Agency Signup!\n` +
     `Name: ${agency.name}\n` +
     `Email: ${agency.email}`;
   
-  // Add referral source if available
   const referralLabel = getReferralSourceLabel(agency.referral_source);
   if (referralLabel) {
     message += `\nSource: ${referralLabel}`;
   }
   
-  // Add plan type
   message += `\nPlan: ${agency.plan_type || 'Starter'}`;
   
   return sendPlatformNotificationSMS(message);
@@ -145,7 +152,6 @@ async function sendAgencySignupNotificationSMS(agency) {
 
 // New client signed up - notify AGENCY OWNER (not platform owner)
 async function sendClientSignupNotificationSMS(client, agency) {
-  // Send to agency owner's phone, not platform owner
   if (!agency?.phone) {
     console.log(`⚠️ Agency ${agency?.name || 'Unknown'} has no phone number - skipping client signup SMS`);
     return false;
@@ -221,8 +227,6 @@ async function sendAgencyPaymentSucceededSMS(agency) {
 
 // ============================================================================
 // DEMO CALL FOLLOW-UP SMS
-// Sent to the caller after they try an agency's demo line.
-// Includes the agency's signup URL so they can start a free trial.
 // ============================================================================
 async function sendDemoCallFollowUpSMS(callerPhone, agency) {
   if (!callerPhone || callerPhone === 'Unknown') {
@@ -232,7 +236,6 @@ async function sendDemoCallFollowUpSMS(callerPhone, agency) {
 
   const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
 
-  // Build signup URL — prioritize custom domain, fallback to subdomain
   let signupUrl;
   if (agency.marketing_domain && agency.domain_verified) {
     signupUrl = `https://${agency.marketing_domain}/signup`;
@@ -262,7 +265,6 @@ async function sendDemoCallFollowUpSMS(callerPhone, agency) {
 async function sendCallNotificationSMS(client, agency, callData) {
   const { customerName, customerPhone, urgency, summary } = callData;
   
-  // Use agency name if available, otherwise platform name
   const brandName = agency?.name || 'VoiceAI Connect';
   
   let smsMessage = `🔔 New Call - ${client.business_name}\n`;
@@ -279,11 +281,10 @@ async function sendCallNotificationSMS(client, agency, callData) {
   return sendTelnyxSMS(client.owner_phone, smsMessage);
 }
 
-// Welcome SMS (simple confirmation - no password link)
+// Welcome SMS (simple confirmation)
 async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency = null) {
   const brandName = agency?.name || 'VoiceAI Connect';
   
-  // Simple, compact message - no link needed
   const message = `🎉 Welcome to ${brandName}!\n` +
     `Your AI receptionist for ${businessName} is ready!\n` +
     `📞 Your AI Phone: ${formatPhoneDisplay(aiPhoneNumber)}`;
@@ -295,7 +296,6 @@ async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency = null)
 async function sendClientTrialExpiredSMS(client, agency) {
   const brandName = agency?.name || 'AI Receptionist';
   
-  // Build upgrade URL
   let upgradeUrl;
   if (agency?.marketing_domain && agency?.domain_verified) {
     upgradeUrl = `${agency.marketing_domain}/client/upgrade`;
@@ -378,6 +378,168 @@ async function sendEmail(emailData) {
 }
 
 // ============================================================================
+// CALL SUMMARY EMAIL (for international clients where SMS doesn't work)
+// ============================================================================
+async function sendCallSummaryEmail(client, agency, callData, callRecord) {
+  if (!client.email) {
+    console.log('⚠️ No client email for call summary — skipping');
+    return { success: false, reason: 'no_email' };
+  }
+
+  const agencyName = agency?.name || 'Your AI Receptionist';
+  const agencyLogo = agency?.logo_url || null;
+  const primaryColor = agency?.primary_color || '#2563eb';
+  const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
+
+  let baseUrl;
+  if (agency?.marketing_domain && agency?.domain_verified) {
+    baseUrl = `https://${agency.marketing_domain}`;
+  } else if (agency?.slug) {
+    baseUrl = `https://${agency.slug}.${platformDomain}`;
+  } else {
+    baseUrl = `https://${platformDomain}`;
+  }
+
+  const { customerName, customerPhone, customerEmail, urgency, summary } = callData;
+
+  const duration = callRecord?.duration_seconds;
+  const durationDisplay = duration
+    ? `${Math.floor(duration / 60)}m ${duration % 60}s`
+    : 'N/A';
+
+  const urgencyColors = {
+    emergency: { bg: '#fef2f2', text: '#dc2626', border: '#fecaca', label: '🚨 Emergency' },
+    high:      { bg: '#fef2f2', text: '#dc2626', border: '#fecaca', label: '⚠️ High' },
+    medium:    { bg: '#fffbeb', text: '#d97706', border: '#fde68a', label: 'Medium' },
+    routine:   { bg: '#f0fdf4', text: '#16a34a', border: '#bbf7d0', label: 'Routine' },
+  };
+  const urg = urgencyColors[urgency] || urgencyColors.routine;
+
+  const transcript = callRecord?.transcript || '';
+  const transcriptPreview = transcript.length > 500
+    ? transcript.substring(0, 500) + '...'
+    : transcript;
+
+  const fromEmail = agency?.support_email
+    ? `${agencyName} <${agency.support_email}>`
+    : `${agencyName} <notifications@voiceaiconnect.com>`;
+
+  const callTime = callRecord?.created_at
+    ? new Date(callRecord.created_at).toLocaleString('en-US', {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+      })
+    : new Date().toLocaleString('en-US');
+
+  return sendEmail({
+    from: fromEmail,
+    to: client.email,
+    subject: `New Call${urgency === 'high' || urgency === 'emergency' ? ' ⚠️ URGENT' : ''} — ${customerName || 'Unknown Caller'} | ${client.business_name}`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      </head>
+      <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f4f4f5;">
+        <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+          
+          <!-- Header -->
+          <div style="background-color: #ffffff; border-radius: 12px 12px 0 0; padding: 24px; text-align: center; border-bottom: 3px solid ${primaryColor};">
+            ${agencyLogo ? `<img src="${agencyLogo}" alt="${agencyName}" style="max-height: 40px; margin-bottom: 12px;">` : ''}
+            <h2 style="margin: 0; font-size: 18px; color: #111;">New Call Summary</h2>
+            <p style="margin: 4px 0 0; font-size: 13px; color: #666;">${callTime}</p>
+          </div>
+
+          <!-- Main Content -->
+          <div style="background-color: #ffffff; padding: 24px;">
+            
+            ${(urgency === 'high' || urgency === 'emergency') ? `
+            <div style="background-color: ${urg.bg}; border: 1px solid ${urg.border}; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px;">
+              <p style="margin: 0; font-size: 14px; font-weight: 600; color: ${urg.text};">${urg.label} Priority — Follow up immediately</p>
+            </div>
+            ` : ''}
+
+            <!-- Caller Info -->
+            <div style="background-color: #f9fafb; border-radius: 8px; padding: 16px; margin-bottom: 20px;">
+              <table style="width: 100%; border-collapse: collapse;">
+                <tr>
+                  <td style="padding: 6px 0; font-size: 13px; color: #666; width: 100px;">Caller</td>
+                  <td style="padding: 6px 0; font-size: 14px; font-weight: 600; color: #111;">${customerName || 'Unknown'}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 6px 0; font-size: 13px; color: #666;">Phone</td>
+                  <td style="padding: 6px 0; font-size: 14px; color: #111;">
+                    <a href="tel:${customerPhone}" style="color: ${primaryColor}; text-decoration: none;">${formatPhoneDisplay(customerPhone) || customerPhone || 'Unknown'}</a>
+                  </td>
+                </tr>
+                ${customerEmail ? `
+                <tr>
+                  <td style="padding: 6px 0; font-size: 13px; color: #666;">Email</td>
+                  <td style="padding: 6px 0; font-size: 14px; color: #111;">
+                    <a href="mailto:${customerEmail}" style="color: ${primaryColor}; text-decoration: none;">${customerEmail}</a>
+                  </td>
+                </tr>
+                ` : ''}
+                <tr>
+                  <td style="padding: 6px 0; font-size: 13px; color: #666;">Duration</td>
+                  <td style="padding: 6px 0; font-size: 14px; color: #111;">${durationDisplay}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 6px 0; font-size: 13px; color: #666;">Urgency</td>
+                  <td style="padding: 6px 0;">
+                    <span style="display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 12px; background-color: ${urg.bg}; color: ${urg.text}; border: 1px solid ${urg.border};">${urg.label}</span>
+                  </td>
+                </tr>
+              </table>
+            </div>
+
+            <!-- AI Summary -->
+            <div style="margin-bottom: 20px;">
+              <h3 style="font-size: 14px; color: #111; margin: 0 0 8px;">Summary</h3>
+              <p style="font-size: 14px; color: #444; margin: 0; line-height: 1.6;">${summary || 'No summary available.'}</p>
+            </div>
+
+            <!-- Transcript Preview -->
+            ${transcriptPreview ? `
+            <div style="margin-bottom: 20px;">
+              <h3 style="font-size: 14px; color: #111; margin: 0 0 8px;">Transcript Preview</h3>
+              <div style="background-color: #f9fafb; border-radius: 8px; padding: 14px; font-size: 13px; color: #555; line-height: 1.7; white-space: pre-wrap; word-wrap: break-word; max-height: 200px; overflow: hidden;">${transcriptPreview}</div>
+            </div>
+            ` : ''}
+
+            <!-- CTA Button -->
+            <div style="text-align: center; margin: 24px 0 8px;">
+              <a href="${baseUrl}/client/dashboard" 
+                 style="display: inline-block; background-color: ${primaryColor}; color: #ffffff; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 14px;">
+                View Full Call Details →
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <div style="background-color: #ffffff; border-radius: 0 0 12px 12px; padding: 16px 24px; border-top: 1px solid #e5e7eb; text-align: center;">
+            <p style="margin: 0; font-size: 12px; color: #999;">
+              ${client.business_name} — Powered by ${agencyName}
+            </p>
+            <p style="margin: 4px 0 0; font-size: 11px; color: #bbb;">
+              You're receiving this because a call was handled by your AI receptionist.
+            </p>
+          </div>
+
+        </div>
+      </body>
+      </html>
+    `
+  });
+}
+
+// ============================================================================
 // CLIENT WELCOME EMAIL (Multi-tenant)
 // ============================================================================
 async function sendClientWelcomeEmail(client, agency, tempPassword, passwordToken) {
@@ -386,7 +548,6 @@ async function sendClientWelcomeEmail(client, agency, tempPassword, passwordToke
   const primaryColor = agency?.primary_color || '#2563eb';
   const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
   
-  // Build the URL based on agency's domain
   let baseUrl;
   if (agency?.marketing_domain && agency?.domain_verified) {
     baseUrl = `https://${agency.marketing_domain}`;
@@ -526,6 +687,9 @@ module.exports = {
   formatPhoneE164,
   formatPhoneDisplay,
   
+  // International detection
+  isInternationalAgency,
+  
   // Base SMS
   sendTelnyxSMS,
   
@@ -554,6 +718,7 @@ module.exports = {
   
   // Email
   sendEmail,
+  sendCallSummaryEmail,
   sendClientWelcomeEmail,
   sendAgencyWelcomeEmail,
   
