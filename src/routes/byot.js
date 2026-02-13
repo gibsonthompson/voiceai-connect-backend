@@ -2,6 +2,7 @@
 // BYOT (Bring Your Own Twilio) ROUTES
 // Enterprise/Scale plan feature — agencies use their own Twilio account
 // for international number provisioning
+// Destination: src/routes/byot.js
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -51,7 +52,7 @@ router.get('/:agencyId/byot/status', requireScalePlan, async (req, res) => {
   res.json({
     byot_enabled: agency.byot_enabled || false,
     has_credentials: !!(agency.twilio_account_sid && agency.twilio_api_key_encrypted),
-    twilio_account_sid: agency.twilio_account_sid || null, // SID is not secret
+    twilio_account_sid: agency.twilio_account_sid || null,
     verified_at: agency.byot_verified_at || null,
   });
 });
@@ -86,8 +87,11 @@ router.post('/:agencyId/byot/credentials', requireScalePlan, async (req, res) =>
     console.log(`🔑 Validating Twilio credentials for agency ${agencyId}...`);
 
     const twilioAuthHeader = Buffer.from(`${twilio_api_key}:${twilio_api_secret}`).toString('base64');
+    // Use IncomingPhoneNumbers endpoint for validation — Standard API keys
+    // cannot access /Accounts/{SID}.json (requires Main key), but can access
+    // sub-resource endpoints like IncomingPhoneNumbers
     const twilioResponse = await fetch(
-      `https://api.twilio.com/2010-04-01/Accounts/${twilio_account_sid}.json`,
+      `https://api.twilio.com/2010-04-01/Accounts/${twilio_account_sid}/IncomingPhoneNumbers.json?PageSize=1`,
       {
         headers: { 'Authorization': `Basic ${twilioAuthHeader}` }
       }
@@ -102,15 +106,7 @@ router.post('/:agencyId/byot/credentials', requireScalePlan, async (req, res) =>
       });
     }
 
-    const twilioAccount = await twilioResponse.json();
-    console.log(`✅ Twilio account verified: ${twilioAccount.friendly_name} (${twilioAccount.status})`);
-
-    if (twilioAccount.status !== 'active') {
-      return res.status(400).json({
-        error: 'Twilio account is not active',
-        detail: `Account status: ${twilioAccount.status}. Please ensure your Twilio account is active.`
-      });
-    }
+    console.log(`✅ Twilio credentials verified for account ${twilio_account_sid}`);
 
     // ============================================
     // STEP 2: Encrypt and store credentials
@@ -157,7 +153,7 @@ router.post('/:agencyId/byot/credentials', requireScalePlan, async (req, res) =>
 // ============================================================================
 router.post('/:agencyId/byot/test', requireScalePlan, async (req, res) => {
   const { agency } = req;
-  const { country_code = 'CA' } = req.body; // Default to Canada for testing
+  const { country_code = 'CA' } = req.body;
 
   if (!agency.twilio_account_sid || !agency.twilio_api_key_encrypted) {
     return res.status(400).json({ error: 'No Twilio credentials configured. Save credentials first.' });
@@ -168,7 +164,6 @@ router.post('/:agencyId/byot/test', requireScalePlan, async (req, res) => {
     const apiSecret = decrypt(agency.twilio_api_secret_encrypted);
     const authHeader = Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
 
-    // Search for available numbers in the specified country
     const searchUrl = `https://api.twilio.com/2010-04-01/Accounts/${agency.twilio_account_sid}/AvailablePhoneNumbers/${country_code}/Local.json?Limit=3`;
 
     const searchResponse = await fetch(searchUrl, {
@@ -178,7 +173,6 @@ router.post('/:agencyId/byot/test', requireScalePlan, async (req, res) => {
     if (!searchResponse.ok) {
       const errorData = await searchResponse.json().catch(() => ({}));
 
-      // Check for regulatory bundle requirement (error 21649)
       if (errorData.code === 21649) {
         return res.json({
           success: false,
@@ -254,48 +248,12 @@ router.delete('/:agencyId/byot/credentials', requireScalePlan, async (req, res) 
 });
 
 // ============================================================================
-// POST /api/agency/:agencyId/byot/provision-number
-// Buy a number on the agency's Twilio and import into VAPI
-// Called internally by client-signup.js — not directly by frontend
-// ============================================================================
-router.post('/:agencyId/byot/provision-number', requireScalePlan, async (req, res) => {
-  const { agency } = req;
-  const { country_code, area_code, assistant_id, business_name } = req.body;
-
-  if (!assistant_id || !business_name) {
-    return res.status(400).json({ error: 'assistant_id and business_name are required' });
-  }
-
-  try {
-    const result = await provisionBYOTNumber(agency, {
-      countryCode: country_code || 'CA',
-      areaCode: area_code,
-      assistantId: assistant_id,
-      businessName: business_name
-    });
-
-    res.json({ success: true, ...result });
-  } catch (error) {
-    console.error('❌ BYOT provision error:', error);
-    res.status(500).json({ error: error.message || 'Failed to provision number' });
-  }
-});
-
-// ============================================================================
 // BYOT PROVISIONING LOGIC (exported for use in client-signup.js)
 // ============================================================================
 
 /**
  * Provision a phone number using agency's Twilio credentials,
  * then import it into VAPI attached to the given assistant.
- *
- * @param {Object} agency - Agency record with twilio_* columns
- * @param {Object} options
- * @param {string} options.countryCode - ISO country code (CA, GB, AU, etc.)
- * @param {string} [options.areaCode] - Preferred area code (optional)
- * @param {string} options.assistantId - VAPI assistant ID to attach
- * @param {string} options.businessName - For naming the phone number
- * @returns {Object} { number, vapiPhoneId, twilioSid }
  */
 async function provisionBYOTNumber(agency, options) {
   const { countryCode, areaCode, assistantId, businessName } = options;
@@ -311,9 +269,7 @@ async function provisionBYOTNumber(agency, options) {
 
   console.log(`📞 BYOT: Provisioning ${countryCode} number for ${businessName} via agency's Twilio`);
 
-  // ============================================
   // STEP 1: Search for available numbers
-  // ============================================
   let searchUrl = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/AvailablePhoneNumbers/${countryCode}/Local.json?Limit=5`;
   if (areaCode) {
     searchUrl += `&AreaCode=${areaCode}`;
@@ -341,9 +297,7 @@ async function provisionBYOTNumber(agency, options) {
   const selectedNumber = availableNumbers[0].phone_number;
   console.log(`   Found ${availableNumbers.length} numbers, selected: ${selectedNumber}`);
 
-  // ============================================
   // STEP 2: Buy the number on agency's Twilio
-  // ============================================
   const buyResponse = await fetch(
     `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers.json`,
     {
@@ -367,11 +321,7 @@ async function provisionBYOTNumber(agency, options) {
   const purchasedNumber = await buyResponse.json();
   console.log(`   ✅ Purchased: ${purchasedNumber.phone_number} (SID: ${purchasedNumber.sid})`);
 
-  // ============================================
   // STEP 3: Import into VAPI using agency's Twilio credentials
-  // Uses the newer POST /phone-number endpoint with provider: "twilio"
-  // Requires API Key + Secret (not Auth Token) per April 2025 VAPI changelog
-  // ============================================
   const vapiResponse = await fetch('https://api.vapi.ai/phone-number', {
     method: 'POST',
     headers: {
@@ -393,14 +343,12 @@ async function provisionBYOTNumber(agency, options) {
   if (!vapiResponse.ok) {
     const vapiError = await vapiResponse.text();
     console.error(`❌ VAPI import failed: ${vapiError}`);
-    // Number was purchased but VAPI import failed — log for manual cleanup
     console.error(`⚠️ CLEANUP NEEDED: Number ${purchasedNumber.phone_number} (SID: ${purchasedNumber.sid}) purchased on Twilio but not imported to VAPI`);
     throw new Error(`VAPI import failed for ${purchasedNumber.phone_number}: ${vapiError}`);
   }
 
   const vapiPhone = await vapiResponse.json();
   console.log(`   ✅ Imported to VAPI: ${vapiPhone.id}`);
-
   console.log(`🎉 BYOT provisioning complete: ${purchasedNumber.phone_number}`);
 
   return {
@@ -411,28 +359,8 @@ async function provisionBYOTNumber(agency, options) {
   };
 }
 
-/**
- * Get decrypted Twilio credentials for an agency
- * Used by client-signup.js to check if BYOT is available
- */
-function getDecryptedTwilioCreds(agency) {
-  if (!agency.byot_enabled || !agency.twilio_api_key_encrypted) return null;
-
-  try {
-    return {
-      accountSid: agency.twilio_account_sid,
-      apiKey: decrypt(agency.twilio_api_key_encrypted),
-      apiSecret: decrypt(agency.twilio_api_secret_encrypted)
-    };
-  } catch (error) {
-    console.error('❌ Failed to decrypt Twilio credentials:', error);
-    return null;
-  }
-}
-
 // ============================================================================
 // EXPORTS
 // ============================================================================
 module.exports = router;
 module.exports.provisionBYOTNumber = provisionBYOTNumber;
-module.exports.getDecryptedTwilioCreds = getDecryptedTwilioCreds;
