@@ -170,7 +170,7 @@ const VOICE_OPTIONS = [
 
 // ============================================================================
 // GET /api/client/:id - Full client data with agency
-// UPDATED: Added pricing fields to agency select
+// UPDATED: Added plan_features to agency select for client-side feature gating
 // ============================================================================
 router.get('/:id', async (req, res) => {
   try {
@@ -186,7 +186,8 @@ router.get('/:id', async (req, res) => {
           logo_url, support_email, support_phone,
           website_theme,
           price_starter, price_pro, price_growth,
-          limit_starter, limit_pro, limit_growth
+          limit_starter, limit_pro, limit_growth,
+          plan_features
         )
       `)
       .eq('id', id)
