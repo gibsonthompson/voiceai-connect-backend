@@ -1,5 +1,5 @@
 // ============================================================================
-// NOTIFICATIONS - SMS (Telnyx) & Email (Resend)
+// NOTIFICATIONS - SMS (Telnyx) & Email (Brevo)
 // Multi-tenant aware with agency branding
 // WITH DEMO CALL FOLLOW-UP SMS
 // WITH CALL SUMMARY EMAIL (international)
@@ -75,6 +75,15 @@ function isInternationalAgency(agency) {
   if (!agency?.country) return false;
   const usVariants = ['US', 'USA', 'United States', 'us', 'usa'];
   return !usVariants.includes(agency.country);
+}
+
+// ============================================================================
+// HELPER - Parse "Name <email>" format into Brevo sender object
+// ============================================================================
+function parseSender(fromString) {
+  const match = fromString.match(/^(.+?)\s*<(.+?)>$/);
+  if (match) return { name: match[1].trim(), email: match[2].trim() };
+  return { email: fromString };
 }
 
 // ============================================================================
@@ -337,28 +346,31 @@ async function sendClientSubscriptionActivatedSMS(client, agency, plan) {
 }
 
 // ============================================================================
-// EMAIL VIA RESEND
+// EMAIL VIA BREVO
 // ============================================================================
 async function sendEmail(emailData) {
   try {
-    if (!process.env.RESEND_API_KEY) {
-      console.log('⚠️ RESEND_API_KEY not configured');
+    if (!process.env.BREVO_API_KEY) {
+      console.log('⚠️ BREVO_API_KEY not configured');
       return { success: false };
     }
     
     console.log(`📧 Sending email to ${emailData.to}...`);
     
-    const response = await fetch('https://api.resend.com/emails', {
+    const sender = parseSender(emailData.from || 'VoiceAI Connect <notifications@myvoiceaiconnect.com>');
+    const recipients = (Array.isArray(emailData.to) ? emailData.to : [emailData.to]).map(email => ({ email }));
+    
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`
+        'api-key': process.env.BREVO_API_KEY
       },
       body: JSON.stringify({
-        from: emailData.from || 'VoiceAI Connect <notifications@voiceaiconnect.com>',
-        to: Array.isArray(emailData.to) ? emailData.to : [emailData.to],
+        sender,
+        to: recipients,
         subject: emailData.subject,
-        html: emailData.html
+        htmlContent: emailData.html
       })
     });
 
@@ -369,7 +381,7 @@ async function sendEmail(emailData) {
     }
 
     const result = await response.json();
-    console.log('✅ Email sent:', result.id);
+    console.log('✅ Email sent:', result.messageId);
     return { success: true, data: result };
   } catch (error) {
     console.error('❌ Email error:', error);
@@ -422,7 +434,7 @@ async function sendCallSummaryEmail(client, agency, callData, callRecord) {
 
   const fromEmail = agency?.support_email
     ? `${agencyName} <${agency.support_email}>`
-    : `${agencyName} <notifications@voiceaiconnect.com>`;
+    : `${agencyName} <notifications@myvoiceaiconnect.com>`;
 
   const callTime = callRecord?.created_at
     ? new Date(callRecord.created_at).toLocaleString('en-US', {
@@ -559,7 +571,7 @@ async function sendClientWelcomeEmail(client, agency, tempPassword, passwordToke
   
   const fromEmail = agency?.support_email 
     ? `${agencyName} <${agency.support_email}>`
-    : `${agencyName} <onboarding@voiceaiconnect.com>`;
+    : `${agencyName} <onboarding@myvoiceaiconnect.com>`;
   
   return sendEmail({
     from: fromEmail,
@@ -607,7 +619,7 @@ async function sendClientWelcomeEmail(client, agency, tempPassword, passwordToke
           <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
           
           <p style="color: #666; font-size: 14px;">
-            Questions? Reply to this email or contact us at ${agency?.support_email || 'support@voiceaiconnect.com'}
+            Questions? Reply to this email or contact us at ${agency?.support_email || 'support@myvoiceaiconnect.com'}
           </p>
           
           <p style="color: #999; font-size: 12px;">
@@ -627,7 +639,7 @@ async function sendAgencyWelcomeEmail(agency, passwordToken) {
   const dashboardUrl = process.env.FRONTEND_URL || 'https://myvoiceaiconnect.com';
   
   return sendEmail({
-    from: 'VoiceAI Connect <onboarding@voiceaiconnect.com>',
+    from: 'VoiceAI Connect <onboarding@myvoiceaiconnect.com>',
     to: agency.email,
     subject: 'Welcome to VoiceAI Connect - Start Your AI Agency!',
     html: `
