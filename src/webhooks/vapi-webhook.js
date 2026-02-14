@@ -1,11 +1,66 @@
 // ============================================================================
 // VAPI WEBHOOK HANDLER - Multi-Tenant Aware
 // UPDATED: Demo call detection + agency follow-up SMS
-// UPDATED: Email summaries for international agencies
+// UPDATED: Email summaries gated by plan_features (Phase 5)
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
-const { sendCallNotificationSMS, sendDemoCallFollowUpSMS, sendCallSummaryEmail, isInternationalAgency } = require('../lib/notifications');
+const { sendCallNotificationSMS, sendDemoCallFollowUpSMS, sendCallSummaryEmail } = require('../lib/notifications');
+
+// ============================================================================
+// PLAN FEATURE CHECK HELPER
+// ============================================================================
+// Default plan features — used when agency hasn't configured plan_features yet
+const DEFAULT_PLAN_FEATURES = {
+  starter: {
+    sms_notifications: true,
+    email_summaries: false,
+    custom_greeting: false,
+    custom_voice: false,
+    knowledge_base: false,
+    business_hours: false,
+    advanced_analytics: false,
+    priority_support: false,
+  },
+  pro: {
+    sms_notifications: true,
+    email_summaries: true,
+    custom_greeting: true,
+    custom_voice: false,
+    knowledge_base: true,
+    business_hours: true,
+    advanced_analytics: true,
+    priority_support: false,
+  },
+  growth: {
+    sms_notifications: true,
+    email_summaries: true,
+    custom_greeting: true,
+    custom_voice: true,
+    knowledge_base: true,
+    business_hours: true,
+    advanced_analytics: true,
+    priority_support: true,
+  },
+};
+
+/**
+ * Check if a feature is enabled for a client based on their plan and agency config.
+ * Fails open (returns true) if data is missing — better to send a notification
+ * than to silently drop it due to a config issue.
+ */
+function isFeatureEnabled(client, agency, featureKey) {
+  const planType = client.plan_type || 'starter';
+  const agencyFeatures = agency?.plan_features;
+
+  // Use agency's custom config if available, otherwise defaults
+  const planConfig = agencyFeatures?.[planType] || DEFAULT_PLAN_FEATURES[planType];
+
+  if (!planConfig) return true; // Fail open if plan not found
+
+  // Fail open if feature key not defined in config
+  return planConfig[featureKey] !== false;
+}
 
 // ============================================================================
 // AI SUMMARY GENERATION (via Claude)
@@ -194,7 +249,7 @@ async function handleVapiWebhook(req, res) {
     
     console.log('📱 Phone number:', phoneNumber);
     
-    // Find client by VAPI phone number (includes agency data)
+    // Find client by VAPI phone number (includes agency data with plan_features)
     const client = await getClientByVapiPhoneNumber(phoneNumber);
     
     // ============================================
@@ -403,34 +458,44 @@ async function handleVapiWebhook(req, res) {
     }
     
     // ============================================
-    // SEND NOTIFICATIONS (SMS for US, Email for international)
+    // SEND NOTIFICATIONS
+    // Phase 5: SMS for all plans, email gated by plan_features
     // ============================================
     let smsSent = false;
     let emailSent = false;
     
-    const isInternational = isInternationalAgency(agency);
-    
-    if (isInternational) {
-      // International agency — send email summary instead of SMS
-      console.log('📧 International agency — sending email summary...');
-      const emailResult = await sendCallSummaryEmail(client, agency, aiData, {
-        duration_seconds: durationSeconds,
-        transcript: transcript,
-        created_at: insertedCall[0]?.created_at || new Date().toISOString(),
-      });
-      emailSent = emailResult?.success || false;
-      
-      if (emailSent) {
-        console.log('✅ Call summary email sent');
+    // 1. SMS — all plans get this (if client has an owner phone number)
+    if (client.owner_phone) {
+      console.log('📱 Sending SMS notification...');
+      smsSent = await sendCallNotificationSMS(client, agency, aiData);
+      if (smsSent) {
+        console.log('✅ SMS notification sent');
       } else {
-        console.warn('⚠️ Call summary email failed:', emailResult?.error);
+        console.warn('⚠️ SMS notification failed');
+      }
+    }
+    
+    // 2. Email — only if enabled for this client's plan
+    if (isFeatureEnabled(client, agency, 'email_summaries')) {
+      if (client.email) {
+        console.log('📧 Email summaries enabled for plan — sending email...');
+        const emailResult = await sendCallSummaryEmail(client, agency, aiData, {
+          duration_seconds: durationSeconds,
+          transcript: transcript,
+          created_at: insertedCall[0]?.created_at || new Date().toISOString(),
+        });
+        emailSent = emailResult?.success || false;
+        
+        if (emailSent) {
+          console.log('✅ Call summary email sent');
+        } else {
+          console.warn('⚠️ Call summary email failed:', emailResult?.error);
+        }
+      } else {
+        console.log('📧 Email summaries enabled but client has no email on file');
       }
     } else {
-      // US agency — send SMS notification
-      if (client.owner_phone) {
-        console.log('📱 Sending SMS notification...');
-        smsSent = await sendCallNotificationSMS(client, agency, aiData);
-      }
+      console.log('📧 Email summaries not enabled for this plan — skipping');
     }
     
     // ============================================
