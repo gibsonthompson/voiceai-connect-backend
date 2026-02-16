@@ -85,6 +85,10 @@ async function getAgencyByHost(req, res) {
         // Legacy manual override field
         demo_phone: agency.demo_phone || null,
         
+        // Currency (for marketing page pricing display)
+        currency: agency.currency || 'USD',
+        display_currency: agency.display_currency || null,
+        
         // Stripe (needed for checkout)
         stripe_account_id: agency.stripe_account_id,
         stripe_charges_enabled: agency.stripe_charges_enabled
@@ -203,6 +207,7 @@ async function getAgencySettings(req, res) {
         // International / BYOT
         country: agency.country || 'US',
         currency: agency.currency || 'USD',
+        display_currency: agency.display_currency || null,
         byot_enabled: agency.byot_enabled || false,
         byot_verified_at: agency.byot_verified_at || null,
         twilio_account_sid: agency.twilio_account_sid || null,
@@ -246,13 +251,27 @@ async function updateAgencySettings(req, res) {
       'website_theme',
       'logo_background_color',
       // Client plan feature gating
-      'plan_features'
+      'plan_features',
+      // Marketing page currency override
+      'display_currency'
     ];
     
     const sanitizedUpdates = {};
     for (const key of allowedFields) {
       if (updates[key] !== undefined) {
         sanitizedUpdates[key] = updates[key];
+      }
+    }
+    
+    // Validate display_currency if provided
+    if (sanitizedUpdates.display_currency !== undefined) {
+      const validCurrencies = [
+        null, 'USD', 'GBP', 'EUR', 'CAD', 'AUD', 'NZD', 'JPY', 'CHF',
+        'SGD', 'HKD', 'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'HUF', 'RON',
+        'BGN', 'BRL', 'MXN', 'INR', 'THB', 'MYR', 'AED'
+      ];
+      if (sanitizedUpdates.display_currency !== null && !validCurrencies.includes(sanitizedUpdates.display_currency)) {
+        return res.status(400).json({ error: 'Invalid display_currency value' });
       }
     }
     
