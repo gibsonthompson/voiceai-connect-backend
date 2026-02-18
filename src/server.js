@@ -721,6 +721,7 @@ app.get('/api/client/:clientId/details', async (req, res) => {
           secondary_color,
           accent_color,
           support_email,
+          branding_overrides,
           price_starter,
           price_pro,
           price_growth,

@@ -2,6 +2,7 @@
 // CLIENT ROUTES - Dashboard Settings & AI Agent Configuration
 // VoiceAI Connect Multi-Tenant
 // UPDATED: Fixed response formats to match frontend expectations
+// UPDATED: Added branding_overrides to agency select for theme customization
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -170,7 +171,7 @@ const VOICE_OPTIONS = [
 
 // ============================================================================
 // GET /api/client/:id - Full client data with agency
-// UPDATED: Added plan_features to agency select for client-side feature gating
+// UPDATED: Added plan_features + branding_overrides to agency select
 // ============================================================================
 router.get('/:id', async (req, res) => {
   try {
@@ -185,6 +186,7 @@ router.get('/:id', async (req, res) => {
           primary_color, secondary_color, accent_color,
           logo_url, support_email, support_phone,
           website_theme,
+          branding_overrides,
           price_starter, price_pro, price_growth,
           limit_starter, limit_pro, limit_growth,
           plan_features

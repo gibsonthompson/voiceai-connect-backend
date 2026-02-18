@@ -1,6 +1,7 @@
 // ============================================================================
 // AGENCY SETTINGS
 // WITH BYOT STATUS IN SETTINGS RESPONSE
+// UPDATED: Added branding_overrides support for UI theme customization
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
@@ -63,6 +64,9 @@ async function getAgencyByHost(req, res) {
         // Theme settings
         website_theme: agency.website_theme,
         logo_background_color: agency.logo_background_color,
+        
+        // Dashboard branding overrides (nav, bg, card, button colors)
+        branding_overrides: agency.branding_overrides || null,
         
         // Plan type (for feature gating)
         plan_type: agency.plan_type,
@@ -171,6 +175,9 @@ async function getAgencySettings(req, res) {
         website_theme: agency.website_theme,
         logo_background_color: agency.logo_background_color,
         
+        // Dashboard branding overrides (nav, bg, card, button colors)
+        branding_overrides: agency.branding_overrides || null,
+        
         // Domain
         marketing_domain: agency.marketing_domain,
         domain_verified: agency.domain_verified,
@@ -250,6 +257,8 @@ async function updateAgencySettings(req, res) {
       // Theme settings
       'website_theme',
       'logo_background_color',
+      // Dashboard branding overrides (nav, bg, card, button colors)
+      'branding_overrides',
       // Client plan feature gating
       'plan_features',
       // Marketing page currency override
@@ -260,6 +269,33 @@ async function updateAgencySettings(req, res) {
     for (const key of allowedFields) {
       if (updates[key] !== undefined) {
         sanitizedUpdates[key] = updates[key];
+      }
+    }
+    
+    // Validate branding_overrides structure if provided
+    if (sanitizedUpdates.branding_overrides !== undefined) {
+      const bo = sanitizedUpdates.branding_overrides;
+      // Allow null (reset to defaults)
+      if (bo !== null) {
+        if (typeof bo !== 'object' || Array.isArray(bo)) {
+          return res.status(400).json({ error: 'branding_overrides must be an object or null' });
+        }
+        const validKeys = [
+          'nav_bg', 'nav_text', 'page_bg', 'card_bg', 'card_border',
+          'button_text', 'text_primary', 'text_muted'
+        ];
+        // Strip any invalid keys
+        const cleaned = {};
+        for (const key of validKeys) {
+          if (bo[key] !== undefined && bo[key] !== null) {
+            // Validate hex color format
+            if (typeof bo[key] === 'string' && /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(bo[key])) {
+              cleaned[key] = bo[key];
+            }
+          }
+        }
+        // If all values were stripped, store null instead of empty object
+        sanitizedUpdates.branding_overrides = Object.keys(cleaned).length > 0 ? cleaned : null;
       }
     }
     
