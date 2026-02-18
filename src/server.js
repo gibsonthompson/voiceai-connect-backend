@@ -751,7 +751,7 @@ app.get('/api/client/:clientId/details', async (req, res) => {
 // ============================================================================
 
 app.get('/api/voices', (req, res) => {
-  const { VOICE_OPTIONS } = require('./routes/client-routes');
+  const { VOICE_OPTIONS } = require('./routes/client');
 
   const sortVoices = (voices) => {
     return voices.sort((a, b) => {
