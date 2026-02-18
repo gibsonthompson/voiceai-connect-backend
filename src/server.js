@@ -747,97 +747,12 @@ app.get('/api/client/:clientId/details', async (req, res) => {
 });
 
 // ============================================================================
-// VOICES ENDPOINT (Public) - UPDATED with complete metadata & correct format
+// VOICES ENDPOINT (Public) - Single source of truth from client-routes
 // ============================================================================
 
 app.get('/api/voices', (req, res) => {
-  const VOICE_OPTIONS = [
-    // Female voices
-    { 
-      id: '21m00Tcm4TlvDq8ikWAM', 
-      name: 'Rachel', 
-      gender: 'female', 
-      accent: 'American',
-      style: 'Calm',
-      description: 'Warm and professional. Perfect all-purpose receptionist voice.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/21m00Tcm4TlvDq8ikWAM/df6788f9-5c96-470d-8312-aab3b3d8f50a.mp3',
-      recommended: true
-    },
-    { 
-      id: 'EXAVITQu4vr4xnSDxMaL', 
-      name: 'Sarah', 
-      gender: 'female', 
-      accent: 'American',
-      style: 'Soft',
-      description: 'Gentle and reassuring. Great for medical and professional services.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/EXAVITQu4vr4xnSDxMaL/6851ec91-9950-471f-8586-357c52539069.mp3',
-      recommended: true
-    },
-    { 
-      id: 'pMsXgVXv3BLzUgSXRplE', 
-      name: 'Serena', 
-      gender: 'female', 
-      accent: 'American',
-      style: 'Pleasant',
-      description: 'Engaging and interactive. Built for back-and-forth conversations.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/pMsXgVXv3BLzUgSXRplE/d61f18ed-e5b0-4d0b-a33c-5c6e7e33b053.mp3',
-      recommended: true
-    },
-    { 
-      id: 'XrExE9yKIg1WjnnlVkGX', 
-      name: 'Matilda', 
-      gender: 'female', 
-      accent: 'American',
-      style: 'Warm',
-      description: 'Friendly and approachable. Perfect for retail and hospitality.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/XrExE9yKIg1WjnnlVkGX/b930e18d-6b4d-466e-bab2-0ae97c6d8535.mp3',
-      recommended: false
-    },
-    
-    // Male voices
-    { 
-      id: 'iP95p4xoKVk53GoZ742B', 
-      name: 'Chris', 
-      gender: 'male', 
-      accent: 'American',
-      style: 'Casual',
-      description: 'Natural and easygoing. Officially tagged for conversational AI.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/iP95p4xoKVk53GoZ742B/c1bda571-7123-418e-a796-a2b464b373b4.mp3',
-      recommended: true
-    },
-    { 
-      id: 'nPczCjzI2devNBz1zQrb', 
-      name: 'Brian', 
-      gender: 'male', 
-      accent: 'American',
-      style: 'Deep',
-      description: 'Deep and trustworthy. Great for professional and corporate.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/nPczCjzI2devNBz1zQrb/f4dbda0c-aff0-45c0-93fa-f5d5ec95a2eb.mp3',
-      recommended: true
-    },
-    { 
-      id: 'TxGEqnHWrfWFTfGW9XjX', 
-      name: 'Josh', 
-      gender: 'male', 
-      accent: 'American',
-      style: 'Deep',
-      description: 'Younger professional voice. Great for tech and modern businesses.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/TxGEqnHWrfWFTfGW9XjX/3ae2fc71-d5f9-4769-bb71-2a43633cd186.mp3',
-      recommended: false
-    },
-    { 
-      id: 'TX3LPaxmHKxFdv7VOQHJ', 
-      name: 'Liam', 
-      gender: 'male', 
-      accent: 'American',
-      style: 'Young',
-      description: 'Energetic younger voice. Perfect for trendy businesses.',
-      previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/TX3LPaxmHKxFdv7VOQHJ/63148076-6363-42db-aea8-31424308b92c.mp3',
-      recommended: false
-    },
-  ];
+  const { VOICE_OPTIONS } = require('./routes/client-routes');
 
-  // Sort: recommended first, then alphabetically
   const sortVoices = (voices) => {
     return voices.sort((a, b) => {
       if (a.recommended && !b.recommended) return -1;
@@ -846,11 +761,9 @@ app.get('/api/voices', (req, res) => {
     });
   };
 
-  // Group by gender
   const femaleVoices = sortVoices(VOICE_OPTIONS.filter(v => v.gender === 'female'));
   const maleVoices = sortVoices(VOICE_OPTIONS.filter(v => v.gender === 'male'));
 
-  // Return in format frontend expects
   res.json({
     success: true,
     total: VOICE_OPTIONS.length,
