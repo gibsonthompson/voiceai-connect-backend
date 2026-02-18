@@ -61,7 +61,7 @@ const VOICE_OPTIONS = [
     accent: 'British',
     style: 'Raspy',
     description: 'Sophisticated British accent. Great for upscale businesses.',
-    previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/pFZP5JQG7iQjIQuC4Bku/d10f7534-11f6-41fe-a012-2de1e482d336.mp3'
+    previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/pFZP5JQG7iQjIQuC4Bku/89b68b35-b3dd-4348-a84a-a3c13a3c2b30.mp3'
   },
   { 
     id: 'Xb7hH8MSUJpSbSDYk0k2', 
@@ -70,7 +70,7 @@ const VOICE_OPTIONS = [
     accent: 'British',
     style: 'Confident',
     description: 'Clear and authoritative. Great for corporate environments.',
-    previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/Xb7hH8MSUJpSbSDYk0k2/42a5afce-c06c-4a26-b1ea-50d4c423a8f8.mp3'
+    previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/Xb7hH8MSUJpSbSDYk0k2/d10f7534-11f6-41fe-a012-2de1e482d336.mp3'
   },
   { 
     id: 'LcfcDJNUP1GQjkzn1xUU', 
