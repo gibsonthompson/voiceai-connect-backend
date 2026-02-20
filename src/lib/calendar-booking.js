@@ -1,30 +1,28 @@
-// ============================================================================
-// GOOGLE CALENDAR BOOKING - Core Logic
-// Ported from CallBird, adapted for VoiceAI Connect multi-tenant
-// ============================================================================
+// ====================================================================
+// GOOGLE CALENDAR BOOKING - VAPI Tool Handler
+// Matched to CallBird working implementation
+// ====================================================================
 const { supabase } = require('./supabase');
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CALENDAR_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CALENDAR_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
 
-// ============================================================================
-// REFRESH ACCESS TOKEN IF EXPIRED
-// ============================================================================
+// Refresh access token if expired
 async function refreshAccessToken(client) {
   if (!client.google_refresh_token) {
-    console.error('❌ No refresh token available');
+    console.error('No refresh token available');
     return null;
   }
 
   const expiresAt = new Date(client.google_token_expires_at);
   const now = new Date();
-  const bufferMs = 5 * 60 * 1000; // 5 min buffer
+  const bufferMs = 5 * 60 * 1000;
 
   if (expiresAt.getTime() - now.getTime() > bufferMs) {
     return client.google_access_token;
   }
 
-  console.log(`🔄 Refreshing Google access token for client: ${client.id}`);
+  console.log('🔄 Refreshing Google access token...');
 
   try {
     const response = await fetch('https://oauth2.googleapis.com/token', {
@@ -39,20 +37,7 @@ async function refreshAccessToken(client) {
     });
 
     if (!response.ok) {
-      const errText = await response.text();
-      console.error('❌ Token refresh failed:', errText);
-      
-      // Mark calendar as disconnected if refresh token is revoked
-      if (response.status === 400 || response.status === 401) {
-        await supabase
-          .from('clients')
-          .update({
-            google_calendar_connected: false,
-            google_access_token: null,
-            google_token_expires_at: null,
-          })
-          .eq('id', client.id);
-      }
+      console.error('Token refresh failed:', await response.text());
       return null;
     }
 
@@ -67,17 +52,14 @@ async function refreshAccessToken(client) {
       })
       .eq('id', client.id);
 
-    console.log(`✅ Token refreshed for client: ${client.id}`);
     return tokens.access_token;
   } catch (err) {
-    console.error('❌ Token refresh error:', err);
+    console.error('Token refresh error:', err);
     return null;
   }
 }
 
-// ============================================================================
-// PARSE TIME STRING TO 24HR FORMAT
-// ============================================================================
+// Parse time string to 24hr format
 function parseTimeTo24Hr(timeStr) {
   const normalized = timeStr.trim().toLowerCase();
   
@@ -95,15 +77,11 @@ function parseTimeTo24Hr(timeStr) {
   
   if (period === 'pm' && hours !== 12) hours += 12;
   if (period === 'am' && hours === 12) hours = 0;
-  // If no am/pm and hour <= 7, assume PM (business hours heuristic)
-  if (!period && hours >= 1 && hours <= 7) hours += 12;
   
   return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
 }
 
-// ============================================================================
-// GET AVAILABLE TIME SLOTS
-// ============================================================================
+// Get available time slots
 async function getAvailableSlots(clientId, date) {
   try {
     const { data: client, error } = await supabase
@@ -113,15 +91,14 @@ async function getAvailableSlots(clientId, date) {
       .single();
 
     if (error || !client || !client.google_calendar_connected) {
-      return { success: false, error: 'Calendar not connected. Let me take your preferred time and someone will call to confirm.' };
+      return { success: false, error: 'Calendar not connected' };
     }
 
     const accessToken = await refreshAccessToken(client);
     if (!accessToken) {
-      return { success: false, error: 'Calendar authentication failed. Let me take your info and someone will call to schedule.' };
+      return { success: false, error: 'Calendar authentication failed' };
     }
 
-    // Business hours - use client's configured hours or defaults
     const businessHours = client.business_hours || {
       monday: { open: '09:00', close: '17:00' },
       tuesday: { open: '09:00', close: '17:00' },
@@ -137,11 +114,13 @@ async function getAvailableSlots(clientId, date) {
     const hours = businessHours[dayOfWeek];
 
     if (!hours || !hours.open || !hours.close) {
-      return { success: true, slots: [], message: `We're closed on ${dayOfWeek}s.` };
+      return { success: true, slots: [], message: 'Closed on this day' };
     }
 
-    // Get existing events from Google Calendar
+    // Get existing events
     const calendarId = client.google_calendar_id || 'primary';
+    const timezone = client.timezone || 'America/New_York';
+    
     const timeMin = new Date(`${date}T00:00:00`).toISOString();
     const timeMax = new Date(`${date}T23:59:59`).toISOString();
 
@@ -156,26 +135,20 @@ async function getAvailableSlots(clientId, date) {
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
 
-    if (!eventsResponse.ok) {
-      const errText = await eventsResponse.text();
-      console.error('❌ Calendar API error:', errText);
-      return { success: false, error: 'Having trouble checking the calendar.' };
-    }
-
     const eventsData = await eventsResponse.json();
     
-    // Extract busy time ranges in minutes from midnight
-    const busyRanges = (eventsData.items || [])
-      .filter(event => event.status !== 'cancelled')
-      .map(event => {
-        const start = new Date(event.start.dateTime || event.start.date);
-        const end = new Date(event.end.dateTime || event.end.date);
-        const startMinutes = start.getHours() * 60 + start.getMinutes();
-        const endMinutes = end.getHours() * 60 + end.getMinutes();
-        return { startMinutes, endMinutes };
-      });
+    const busyRanges = (eventsData.items || []).map(event => {
+      const start = new Date(event.start.dateTime || event.start.date);
+      const end = new Date(event.end.dateTime || event.end.date);
+      
+      const startMinutes = start.getHours() * 60 + start.getMinutes();
+      const endMinutes = end.getHours() * 60 + end.getMinutes();
+      
+      console.log(`📅 Busy: ${start.toLocaleTimeString()} - ${end.toLocaleTimeString()} (${startMinutes}-${endMinutes} mins)`);
+      
+      return { startMinutes, endMinutes };
+    });
 
-    // Generate available slots
     const duration = client.appointment_duration || 30;
     const slots = [];
     
@@ -188,7 +161,6 @@ async function getAvailableSlots(clientId, date) {
     while (currentMinutes + duration <= closeMinutes) {
       const slotEndMinutes = currentMinutes + duration;
       
-      // Check for conflicts
       const hasConflict = busyRanges.some(busy =>
         (currentMinutes >= busy.startMinutes && currentMinutes < busy.endMinutes) ||
         (slotEndMinutes > busy.startMinutes && slotEndMinutes <= busy.endMinutes) ||
@@ -204,20 +176,18 @@ async function getAvailableSlots(clientId, date) {
         slots.push(`${hour12}${minStr} ${ampm}`);
       }
 
-      currentMinutes += 30; // 30-minute increments
+      currentMinutes += 30;
     }
 
     console.log(`📅 Available slots for ${date}: ${slots.length} slots`);
     return { success: true, slots, date };
   } catch (err) {
-    console.error('❌ Get slots error:', err);
+    console.error('Get slots error:', err);
     return { success: false, error: 'Failed to get availability' };
   }
 }
 
-// ============================================================================
-// BOOK AN APPOINTMENT
-// ============================================================================
+// Book an appointment
 async function bookAppointment(clientId, customerName, customerPhone, date, time, serviceType, notes) {
   try {
     console.log('📅 Booking appointment:', { clientId, customerName, date, time, serviceType });
@@ -233,15 +203,14 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     }
 
     if (!client.google_calendar_connected) {
-      return { success: false, error: 'Calendar not connected — appointment request noted for callback.' };
+      return { success: false, error: 'Calendar not connected - appointment request noted for callback' };
     }
 
     const accessToken = await refreshAccessToken(client);
     if (!accessToken) {
-      return { success: false, error: 'Calendar authentication failed. Your appointment request has been noted.' };
+      return { success: false, error: 'Calendar authentication failed' };
     }
 
-    // Parse time to 24hr format
     const time24 = parseTimeTo24Hr(time);
     if (!time24) {
       console.error('Failed to parse time:', time);
@@ -253,7 +222,6 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     const duration = client.appointment_duration || 30;
     const timezone = client.timezone || 'America/New_York';
 
-    // Build start/end datetimes
     const startDateTime = `${date}T${time24}:00`;
     const [hr, min] = time24.split(':').map(Number);
     const totalMinutes = hr * 60 + min + duration;
@@ -265,13 +233,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
 
     const event = {
       summary: `${serviceType || 'Appointment'} - ${customerName}`,
-      description: [
-        `Customer: ${customerName}`,
-        `Phone: ${customerPhone}`,
-        notes ? `Notes: ${notes}` : '',
-        '',
-        `Booked by AI Receptionist`
-      ].filter(Boolean).join('\n'),
+      description: `Customer: ${customerName}\nPhone: ${customerPhone}\n${notes ? `Notes: ${notes}` : ''}\n\nBooked via AI Receptionist`,
       start: {
         dateTime: startDateTime,
         timeZone: timezone,
@@ -304,35 +266,33 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('❌ Failed to create event:', errorText);
+      console.error('Failed to create event:', errorText);
       return { success: false, error: 'Failed to create appointment' };
     }
 
     const createdEvent = await response.json();
     console.log('✅ Appointment booked:', createdEvent.id);
 
-    // Save to appointments table (if it exists)
-    try {
-      await supabase.from('appointments').insert({
-        client_id: clientId,
-        google_event_id: createdEvent.id,
-        customer_name: customerName,
-        customer_phone: customerPhone,
-        appointment_time: new Date(startDateTime).toISOString(),
-        duration,
-        service_type: serviceType,
-        notes,
-        status: 'confirmed',
-      });
-    } catch (dbErr) {
-      console.warn('⚠️ Could not save to appointments table (non-blocking):', dbErr.message);
-    }
+    // Save to our database
+    await supabase.from('appointments').insert({
+      client_id: clientId,
+      google_event_id: createdEvent.id,
+      customer_name: customerName,
+      customer_phone: customerPhone,
+      appointment_time: new Date(startDateTime).toISOString(),
+      duration,
+      service_type: serviceType,
+      notes,
+      status: 'confirmed',
+    });
 
-    // Format confirmation
     const dateObj = new Date(date + 'T12:00:00');
     const formattedDate = dateObj.toLocaleDateString('en-US', {
-      weekday: 'long', month: 'long', day: 'numeric'
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric'
     });
+
     const hr12 = hr > 12 ? hr - 12 : (hr === 0 ? 12 : hr);
     const ampm = hr >= 12 ? 'PM' : 'AM';
     const formattedTime = min === 0 ? `${hr12} ${ampm}` : `${hr12}:${min.toString().padStart(2, '0')} ${ampm}`;
@@ -340,11 +300,15 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     return {
       success: true,
       message: `Appointment confirmed for ${customerName} on ${formattedDate} at ${formattedTime}`,
-      appointment: { date: formattedDate, time: formattedTime, service: serviceType }
+      appointment: {
+        date: formattedDate,
+        time: formattedTime,
+        service: serviceType
+      }
     };
 
   } catch (err) {
-    console.error('❌ Booking error:', err);
+    console.error('Booking error:', err);
     return { success: false, error: 'Server error while booking' };
   }
 }
@@ -352,6 +316,5 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
 module.exports = {
   getAvailableSlots,
   bookAppointment,
-  refreshAccessToken,
-  parseTimeTo24Hr
+  refreshAccessToken
 };

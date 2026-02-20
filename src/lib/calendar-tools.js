@@ -1,41 +1,17 @@
-// ============================================================================
-// CALENDAR TOOLS - VAPI Assistant Integration
-// Creates/removes Google Calendar tools from VAPI assistants dynamically
-// Called when a client connects or disconnects Google Calendar
-// Ported from CallBird, adapted for VoiceAI Connect multi-tenant
-// ============================================================================
 const fetch = require('node-fetch');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
 
-// Calendar instructions appended to system prompt when enabled
-// Today's date is injected in every tool response at runtime, not here
-const CALENDAR_INSTRUCTIONS = `
-
-## APPOINTMENT BOOKING
-You can book appointments directly to the business calendar.
-1. When a customer wants to book, ask for their preferred date
-2. Use check_availability — pass the date EXACTLY as the customer said it (e.g. "the 3rd", "next Tuesday", "tomorrow"). Do NOT try to convert it to a specific format. The server handles date resolution.
-3. Suggest a few good times rather than listing all available slots
-4. Collect: name, phone number, service type
-5. Use book_appointment to confirm — again pass the date as-is
-6. Confirm the full date and time back to the caller using the date from the tool response
-
-If no slots are available, offer alternative dates or take their info for a callback.`;
-
-// ============================================================================
-// UPDATE ASSISTANT WITH CALENDAR TOOLS
-// enabled=true: Creates tools in VAPI, attaches to assistant, adds prompt
-// enabled=false: Removes tools from assistant, removes prompt
-// ============================================================================
 async function updateAssistantCalendar(assistantId, clientId, enabled) {
   try {
     console.log(`📅 ${enabled ? 'Enabling' : 'Disabling'} calendar for assistant: ${assistantId}`);
     
-    // Get current assistant config from VAPI
+    // Get current assistant config
     const getResponse = await fetch(`https://api.vapi.ai/assistant/${assistantId}`, {
-      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
+      headers: {
+        'Authorization': `Bearer ${VAPI_API_KEY}`
+      }
     });
 
     if (!getResponse.ok) {
@@ -44,22 +20,21 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
 
     const assistant = await getResponse.json();
     
-    // Preserve existing toolIds and inline tools (like transferCall)
+    // Get existing toolIds - filter out any old calendar tools by checking tool names
     let existingToolIds = assistant.model?.toolIds || [];
+    
+    // Preserve existing inline tools (like transferCall)
     const existingInlineTools = assistant.model?.tools || [];
     console.log(`📋 Existing toolIds: ${existingToolIds.length}, inline tools: ${existingInlineTools.length}`);
     
     if (enabled) {
-      // ================================================================
-      // ENABLING — Create tools, attach to assistant, add prompt
-      // ================================================================
-      
-      // Check if calendar tools already exist for this client (avoid duplicates)
+      // Check if calendar tools already exist to avoid duplicates
       const toolsListRes = await fetch('https://api.vapi.ai/tool', {
         headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
       });
       const allTools = await toolsListRes.json();
       
+      // Find existing calendar tools for this client
       const existingAvailabilityTool = allTools.find(t => 
         t.function?.name === 'check_availability' && 
         t.server?.url?.includes(clientId)
@@ -71,35 +46,11 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
       
       let availabilityToolId, bookingToolId;
       
-      // Create or UPDATE check_availability tool
       if (existingAvailabilityTool) {
-        console.log(`📋 Updating existing check_availability tool: ${existingAvailabilityTool.id}`);
+        console.log(`📋 Using existing check_availability tool: ${existingAvailabilityTool.id}`);
         availabilityToolId = existingAvailabilityTool.id;
-        // Patch the description to ensure it has the latest
-        await fetch(`https://api.vapi.ai/tool/${availabilityToolId}`, {
-          method: 'PATCH',
-          headers: {
-            'Authorization': `Bearer ${VAPI_API_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            function: {
-              name: 'check_availability',
-              description: 'Check available appointment times for a specific date. Use this when a customer wants to book an appointment.',
-              parameters: {
-                type: 'object',
-                properties: {
-                  date: { 
-                    type: 'string', 
-                    description: 'The date the customer wants. Pass exactly what they said — e.g. "tomorrow", "next Tuesday", "the 3rd", "March 5th", or "2026-02-25". The server will resolve it.'
-                  }
-                },
-                required: ['date']
-              }
-            }
-          })
-        });
       } else {
+        // Create check_availability tool
         console.log('🔧 Creating check_availability tool...');
         const availabilityToolRes = await fetch('https://api.vapi.ai/tool', {
           method: 'POST',
@@ -117,7 +68,7 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
                 properties: {
                   date: { 
                     type: 'string', 
-                    description: 'The date the customer wants. Pass exactly what they said — e.g. "tomorrow", "next Tuesday", "the 3rd", "March 5th", or "2026-02-25". The server will resolve it.'
+                    description: 'Date to check in YYYY-MM-DD format (e.g., 2026-01-15)' 
                   }
                 },
                 required: ['date']
@@ -137,37 +88,11 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
         console.log(`✅ check_availability tool created: ${availabilityToolId}`);
       }
 
-      // Create or UPDATE book_appointment tool
       if (existingBookingTool) {
-        console.log(`📋 Updating existing book_appointment tool: ${existingBookingTool.id}`);
+        console.log(`📋 Using existing book_appointment tool: ${existingBookingTool.id}`);
         bookingToolId = existingBookingTool.id;
-        // Patch the description to ensure it has the latest
-        await fetch(`https://api.vapi.ai/tool/${bookingToolId}`, {
-          method: 'PATCH',
-          headers: {
-            'Authorization': `Bearer ${VAPI_API_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            function: {
-              name: 'book_appointment',
-              description: 'Book an appointment after confirming availability and collecting customer details.',
-              parameters: {
-                type: 'object',
-                properties: {
-                  customer_name: { type: 'string', description: 'Full name of the customer' },
-                  customer_phone: { type: 'string', description: 'Customer phone number' },
-                  date: { type: 'string', description: 'Appointment date — pass exactly what was discussed, e.g. "the 3rd", "next Tuesday", "March 5th", or "2026-02-25". The server will resolve it.' },
-                  time: { type: 'string', description: 'Appointment time (e.g., 2:00 PM)' },
-                  service_type: { type: 'string', description: 'Type of service or reason for appointment' },
-                  notes: { type: 'string', description: 'Any special requests or notes' }
-                },
-                required: ['customer_name', 'customer_phone', 'date', 'time']
-              }
-            }
-          })
-        });
       } else {
+        // Create book_appointment tool
         console.log('🔧 Creating book_appointment tool...');
         const bookingToolRes = await fetch('https://api.vapi.ai/tool', {
           method: 'POST',
@@ -185,7 +110,7 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
                 properties: {
                   customer_name: { type: 'string', description: 'Full name of the customer' },
                   customer_phone: { type: 'string', description: 'Customer phone number' },
-                  date: { type: 'string', description: 'Appointment date — pass exactly what was discussed, e.g. "the 3rd", "next Tuesday", "March 5th", or "2026-02-25". The server will resolve it.' },
+                  date: { type: 'string', description: 'Appointment date in YYYY-MM-DD format' },
                   time: { type: 'string', description: 'Appointment time (e.g., 2:00 PM)' },
                   service_type: { type: 'string', description: 'Type of service or reason for appointment' },
                   notes: { type: 'string', description: 'Any special requests or notes' }
@@ -207,7 +132,7 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
         console.log(`✅ book_appointment tool created: ${bookingToolId}`);
       }
 
-      // Build new toolIds — remove old calendar tools, add new ones
+      // Build new toolIds - remove any old calendar tools, add new ones
       const calendarToolIds = [availabilityToolId, bookingToolId];
       const filteredToolIds = existingToolIds.filter(id => 
         !allTools.some(t => 
@@ -221,11 +146,24 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
       
       // Update system prompt with calendar instructions
       let systemPrompt = assistant.model?.messages?.[0]?.content || '';
+      const calendarInstructions = `
+
+## APPOINTMENT BOOKING
+You can book appointments directly to the business calendar.
+1. When a customer wants to book, ask for their preferred date
+2. Use check_availability to see available times for that date
+3. Suggest a few good times rather than listing all available slots
+4. Collect: name, phone number, service type
+5. Use book_appointment to confirm the booking
+6. Confirm the details back to them
+
+If no slots are available, offer alternative dates or take their info for a callback.`;
+
       if (!systemPrompt.includes('APPOINTMENT BOOKING')) {
-        systemPrompt += CALENDAR_INSTRUCTIONS;
+        systemPrompt += calendarInstructions;
       }
 
-      // PATCH assistant — preserve inline tools (transferCall etc.)
+      // Build update payload - preserve inline tools
       const updatePayload = {
         model: {
           provider: assistant.model?.provider || 'openai',
@@ -255,13 +193,22 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
       return { success: true, toolIds: [availabilityToolId, bookingToolId] };
 
     } else {
-      // ================================================================
-      // DISABLING — Remove calendar instructions, toolIds stay
-      // (VAPI tools are reusable, just remove prompt so AI stops using them)
-      // ================================================================
-      
+      // Disabling - remove calendar instructions, keep inline tools
       let systemPrompt = assistant.model?.messages?.[0]?.content || '';
-      systemPrompt = systemPrompt.replace(CALENDAR_INSTRUCTIONS, '');
+      const calendarInstructions = `
+
+## APPOINTMENT BOOKING
+You can book appointments directly to the business calendar.
+1. When a customer wants to book, ask for their preferred date
+2. Use check_availability to see available times for that date
+3. Suggest a few good times rather than listing all available slots
+4. Collect: name, phone number, service type
+5. Use book_appointment to confirm the booking
+6. Confirm the details back to them
+
+If no slots are available, offer alternative dates or take their info for a callback.`;
+
+      systemPrompt = systemPrompt.replace(calendarInstructions, '');
 
       const updateResponse = await fetch(`https://api.vapi.ai/assistant/${assistantId}`, {
         method: 'PATCH',
@@ -273,7 +220,6 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
           model: {
             provider: assistant.model?.provider || 'openai',
             model: assistant.model?.model || 'gpt-4o-mini',
-            temperature: assistant.model?.temperature,
             tools: existingInlineTools,
             messages: [{ role: 'system', content: systemPrompt }]
           }
