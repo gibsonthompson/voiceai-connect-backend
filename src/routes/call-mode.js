@@ -1,6 +1,16 @@
 // ============================================================================
 // CALL MODE ROUTES - Primary vs Fallback AI Receptionist
 // Mount as: app.use('/api/client', require('./routes/call-mode'));
+//
+// PRIMARY MODE:  AI answers every call immediately (default)
+// FALLBACK MODE: AI says "connecting you", transfers to owner's phone.
+//                If owner doesn't pick up, AI takes back over seamlessly.
+//
+// FIX: Uses firstMessageMode='assistant-speaks-first-with-model-generated-message'
+//      so the model can invoke transferCall on its first turn (static firstMessage
+//      causes a deadlock where both sides wait for each other to speak).
+// FIX: Uses transferPlan with warm-transfer-experimental + fallbackPlan so the
+//      call returns to the AI if the owner doesn't answer (instead of dropping).
 // ============================================================================
 var express = require('express');
 var router = express.Router();
@@ -12,13 +22,15 @@ var VAPI_API_KEY = process.env.VAPI_API_KEY;
 // Fallback instructions that get prepended to the system prompt
 var FALLBACK_MARKER = '## CALL ROUTING - FALLBACK MODE';
 var FALLBACK_INSTRUCTIONS = FALLBACK_MARKER + '\n' +
-  'CRITICAL: Before doing ANYTHING else, you MUST transfer this call to the business owner.\n' +
-  'Say ONLY: "One moment while I connect you."\n' +
-  'Then IMMEDIATELY use the transferCall tool.\n' +
-  'Do NOT ask any questions first. Do NOT introduce yourself. Just transfer.\n' +
-  'If the transfer fails or is not answered, THEN say:\n' +
-  '"I wasn\'t able to reach anyone directly, but I\'d be happy to help you."\n' +
-  'After that, proceed with your normal receptionist duties as described below.\n\n';
+  'CRITICAL: This call should be connected to the business owner first.\n' +
+  'Your FIRST message must be EXACTLY: "One moment while I connect you."\n' +
+  'Immediately after speaking, use the transferCall tool to transfer the call.\n' +
+  'Do NOT ask any questions. Do NOT introduce yourself. Do NOT say anything else first.\n' +
+  'Just say the connection message and transfer.\n\n' +
+  'If the transfer fails or the owner does not answer, you will hear a fallback message.\n' +
+  'After that, switch to your normal receptionist role and say:\n' +
+  '"Sorry about that — I wasn\'t able to reach anyone directly, but I\'d be happy to help you myself. How can I assist you today?"\n' +
+  'Then proceed with your normal receptionist duties as described below.\n\n';
 
 // ============================================================================
 // GET /api/client/:id/call-mode - Get current call mode
@@ -111,7 +123,8 @@ router.put('/:id/call-mode', async function(req, res) {
         callMode,
         client.owner_phone,
         client.greeting_message,
-        client.business_name
+        client.business_name,
+        ringTimeout || 20
       );
 
       if (!vapiUpdated) {
@@ -128,11 +141,11 @@ router.put('/:id/call-mode', async function(req, res) {
 });
 
 // ============================================================================
-// Update VAPI assistant system prompt based on call mode
+// Update VAPI assistant based on call mode
 // ============================================================================
-async function updateAssistantCallMode(assistantId, callMode, ownerPhone, greetingMessage, businessName) {
+async function updateAssistantCallMode(assistantId, callMode, ownerPhone, greetingMessage, businessName, ringTimeout) {
   try {
-    // Fetch current assistant
+    // Fetch current assistant config
     var getResponse = await fetch('https://api.vapi.ai/assistant/' + assistantId, {
       headers: { 'Authorization': 'Bearer ' + VAPI_API_KEY }
     });
@@ -147,55 +160,94 @@ async function updateAssistantCallMode(assistantId, callMode, ownerPhone, greeti
     var existingInlineTools = assistant.model?.tools || [];
     var existingToolIds = assistant.model?.toolIds || [];
 
-    // Remove any existing fallback instructions
+    // ---- Strip existing fallback instructions from system prompt ----
     var fallbackIdx = systemPrompt.indexOf(FALLBACK_MARKER);
     if (fallbackIdx >= 0) {
-      // Find where fallback section ends (next ## or the original content)
+      // Find where fallback section ends (next ## heading or original content)
       var afterFallback = systemPrompt.indexOf('\n## ', fallbackIdx + FALLBACK_MARKER.length);
       if (afterFallback === -1) {
-        // Fallback was at the end — just remove it
         systemPrompt = systemPrompt.substring(0, fallbackIdx).trimEnd();
       } else {
         systemPrompt = systemPrompt.substring(0, fallbackIdx) + systemPrompt.substring(afterFallback + 1);
       }
     }
+    // Clean up any leading whitespace left behind
+    systemPrompt = systemPrompt.replace(/^\n+/, '');
 
-    // Build update payload
+    // ---- Build VAPI PATCH payload ----
     var updatePayload = {};
 
     if (callMode === 'fallback') {
-      // Prepend fallback instructions
+      // == FALLBACK MODE ==
+      // 1. Prepend fallback instructions to system prompt
       systemPrompt = FALLBACK_INSTRUCTIONS + systemPrompt;
 
-      // Ensure transferCall tool exists with owner phone
-      var hasTransfer = existingInlineTools.some(function(t) {
-        return t.type === 'transferCall';
-      });
+      // 2. Use model-generated first message so the model can invoke transferCall
+      //    on its very first turn (static firstMessage causes a deadlock).
+      updatePayload.firstMessage = null;
+      updatePayload.firstMessageMode = 'assistant-speaks-first-with-model-generated-message';
 
-      if (!hasTransfer && ownerPhone) {
-        var formattedPhone = formatPhoneE164(ownerPhone);
-        if (formattedPhone) {
-          existingInlineTools.push({
-            type: 'transferCall',
-            destinations: [{
-              type: 'number',
-              number: formattedPhone,
-              description: 'Transfer to business owner',
-              message: 'One moment, let me connect you.'
-            }]
-          });
-          console.log('📞 Added transferCall tool for fallback mode');
-        }
+      // 3. Ensure transferCall tool exists with owner phone + warm transfer fallback
+      var formattedPhone = formatPhoneE164(ownerPhone);
+      if (formattedPhone) {
+        // Remove any existing transferCall tools (we'll add the correct one)
+        existingInlineTools = existingInlineTools.filter(function(t) {
+          return t.type !== 'transferCall';
+        });
+
+        // Add transferCall with warm-transfer-experimental + fallbackPlan
+        // so the AI picks back up if the owner doesn't answer.
+        existingInlineTools.push({
+          type: 'transferCall',
+          destinations: [{
+            type: 'number',
+            number: formattedPhone,
+            description: 'Transfer to business owner. Use this immediately when the call starts.',
+            message: ''  // Silent — AI already said the connection message
+          }],
+          transferPlan: {
+            mode: 'warm-transfer-experimental',
+            fallbackPlan: {
+              // This plays to the caller if the owner doesn't pick up,
+              // then endCallAfterSpokenEnabled: false means the AI takes back over.
+              message: 'It looks like no one is available to take your call right now. Let me help you instead.',
+              endCallAfterSpokenEnabled: false
+            },
+            // Voicemail detection so we don't connect to the owner's voicemail
+            voicemailDetectionType: 'audio'
+          }
+        });
+
+        console.log('📞 Configured transferCall with warm-transfer fallback for: ' + formattedPhone);
       }
-
-      // Change first message to just transfer
-      updatePayload.firstMessage = 'One moment while I connect you.';
     } else {
-      // Primary mode — restore original greeting
+      // == PRIMARY MODE ==
+      // 1. Restore original static greeting
       var defaultGreeting = 'Hi, you\'ve reached ' + (businessName || 'our office') + '. This call may be recorded. How can I help you today?';
       updatePayload.firstMessage = greetingMessage || defaultGreeting;
+      updatePayload.firstMessageMode = 'assistant-speaks-first';
+
+      // 2. Restore a normal transferCall tool (owner can still request transfers)
+      var formattedPhonePrimary = formatPhoneE164(ownerPhone);
+      if (formattedPhonePrimary) {
+        existingInlineTools = existingInlineTools.filter(function(t) {
+          return t.type !== 'transferCall';
+        });
+
+        existingInlineTools.push({
+          type: 'transferCall',
+          destinations: [{
+            type: 'number',
+            number: formattedPhonePrimary,
+            description: 'Transfer to business owner for urgent matters, complex issues, or when caller requests to speak with a person.',
+            message: 'One moment, let me connect you.'
+          }]
+          // No transferPlan needed for on-demand transfers in primary mode
+        });
+      }
     }
 
+    // Build model payload preserving existing config
     updatePayload.model = {
       provider: assistant.model?.provider || 'openai',
       model: assistant.model?.model || 'gpt-4o-mini',
@@ -205,6 +257,7 @@ async function updateAssistantCallMode(assistantId, callMode, ownerPhone, greeti
       messages: [{ role: 'system', content: systemPrompt }]
     };
 
+    // Send PATCH to VAPI
     var updateResponse = await fetch('https://api.vapi.ai/assistant/' + assistantId, {
       method: 'PATCH',
       headers: {
@@ -215,7 +268,8 @@ async function updateAssistantCallMode(assistantId, callMode, ownerPhone, greeti
     });
 
     if (!updateResponse.ok) {
-      console.error('Failed to update assistant call mode:', await updateResponse.text());
+      var errText = await updateResponse.text();
+      console.error('Failed to update assistant call mode:', errText);
       return false;
     }
 
