@@ -187,6 +187,11 @@ const passwordResetRoutes = require('./routes/password-reset');
 // Google OAuth
 const { googleAuth, googleCallback } = require('./routes/google-auth');
 
+// Google Calendar Integration
+const calendarRoutes = require('./routes/calendar');
+const googleCalendarAuthRoutes = require('./routes/google-calendar-auth');
+const { updateAssistantCalendar } = require('./lib/calendar-tools');
+
 // Platform Admin Routes
 const adminRoutes = require('./routes/admin');
 
@@ -207,6 +212,7 @@ app.get('/health', (req, res) => {
       automatedDomains: true,
       referralProgram: true,
       googleOAuth: true,
+      googleCalendar: true,
       aiTemplates: true,
       byot: true // BYOT ADDITION
     },
@@ -853,17 +859,38 @@ app.post('/api/knowledge-base/update', async (req, res) => {
 });
 
 // ============================================================================
-// CALENDAR ROUTES (for VAPI tool calls)
+// GOOGLE CALENDAR INTEGRATION
+// OAuth connect/disconnect/callback (client-level)
+// VAPI tool endpoints (availability check + booking)
+// Manual assistant update trigger
 // ============================================================================
 
-app.post('/api/calendar/availability/:clientId', async (req, res) => {
-  // Handle calendar availability check from VAPI
-  res.json({ available_times: ['9:00 AM', '10:00 AM', '2:00 PM', '3:00 PM'] });
-});
+// OAuth connect/disconnect/callback
+app.use('/api/auth/google-calendar', googleCalendarAuthRoutes);
 
-app.post('/api/calendar/book/:clientId', async (req, res) => {
-  // Handle booking from VAPI
-  res.json({ success: true, message: 'Appointment booked' });
+// VAPI tool endpoints (called by VAPI during live calls)
+app.use('/api/calendar', calendarRoutes);
+
+// Manual trigger: update VAPI assistant calendar tools
+app.post('/api/assistant/update-calendar', async (req, res) => {
+  try {
+    const { assistantId, clientId, enabled } = req.body;
+    
+    if (!assistantId || !clientId) {
+      return res.status(400).json({ error: 'Missing assistantId or clientId' });
+    }
+
+    const result = await updateAssistantCalendar(assistantId, clientId, enabled);
+    
+    if (result.success) {
+      res.json({ success: true, message: `Calendar ${enabled ? 'enabled' : 'disabled'}` });
+    } else {
+      res.status(500).json({ error: result.error || 'Failed to update assistant' });
+    }
+  } catch (error) {
+    console.error('Update calendar error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 // ============================================================================

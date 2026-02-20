@@ -2,6 +2,7 @@
 // AGENCY SETTINGS
 // WITH BYOT STATUS IN SETTINGS RESPONSE
 // UPDATED: Added branding_overrides support for UI theme customization
+// UPDATED: Added calendar_enabled_plans for Google Calendar plan gating
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
@@ -193,6 +194,9 @@ async function getAgencySettings(req, res) {
         // Client plan feature gating
         plan_features: agency.plan_features || null,
         
+        // Calendar plan gating (which client plans can use Google Calendar)
+        calendar_enabled_plans: agency.calendar_enabled_plans || ['pro', 'growth'],
+        
         // Demo phone (auto-provisioned per agency via VAPI)
         demo_phone_number: agency.demo_phone_number || null,
         demo_assistant_id: agency.demo_assistant_id || null,
@@ -261,6 +265,8 @@ async function updateAgencySettings(req, res) {
       'branding_overrides',
       // Client plan feature gating
       'plan_features',
+      // Calendar plan gating (which client plans can connect Google Calendar)
+      'calendar_enabled_plans',
       // Marketing page currency override
       'display_currency'
     ];
@@ -318,6 +324,7 @@ async function updateAgencySettings(req, res) {
       const validFeatures = [
         'sms_notifications', 'email_summaries', 'custom_greeting',
         'custom_voice', 'knowledge_base', 'business_hours',
+        'google_calendar',
         'advanced_analytics', 'priority_support'
       ];
       
@@ -327,7 +334,8 @@ async function updateAgencySettings(req, res) {
           isValid = false;
           break;
         }
-        for (const feature of validFeatures) {
+        // Only validate known features, allow extra keys to be flexible
+        for (const feature of Object.keys(pf[plan])) {
           if (typeof pf[plan][feature] !== 'boolean') {
             isValid = false;
             break;
@@ -338,6 +346,19 @@ async function updateAgencySettings(req, res) {
       
       if (!isValid) {
         return res.status(400).json({ error: 'Invalid plan_features structure' });
+      }
+    }
+    
+    // Validate calendar_enabled_plans if provided
+    if (sanitizedUpdates.calendar_enabled_plans !== undefined) {
+      const cep = sanitizedUpdates.calendar_enabled_plans;
+      if (!Array.isArray(cep)) {
+        return res.status(400).json({ error: 'calendar_enabled_plans must be an array' });
+      }
+      const validPlans = ['starter', 'pro', 'growth'];
+      const allValid = cep.every(plan => validPlans.includes(plan));
+      if (!allValid) {
+        return res.status(400).json({ error: 'calendar_enabled_plans contains invalid plan names' });
       }
     }
     
