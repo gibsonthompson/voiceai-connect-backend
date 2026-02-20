@@ -149,6 +149,9 @@ const byotRoutes = require('./routes/byot'); // BYOT ADDITION
 // Abandoned Cart SMS (cron-driven nudge sequence for agencies who didn't subscribe)
 const abandonedCartRoutes = require('./routes/abandoned-cart');
 
+// Agency Feedback
+const feedbackRoutes = require('./routes/feedback');
+
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 
@@ -686,6 +689,12 @@ app.use('/api/agency', agencyTemplatesRoutes);
 // ============================================================================
 
 app.use('/api/agency', byotRoutes); // BYOT ADDITION
+
+// ============================================================================
+// AGENCY FEEDBACK ROUTES
+// ============================================================================
+
+app.use('/api/agency', feedbackRoutes);
 
 // ============================================================================
 // LEADS & OUTREACH ROUTES (Agency CRM)
