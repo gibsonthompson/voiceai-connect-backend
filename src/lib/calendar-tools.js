@@ -10,16 +10,18 @@ const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
 
 // Calendar instructions appended to system prompt when enabled
+// Today's date is injected in every tool response at runtime, not here
 const CALENDAR_INSTRUCTIONS = `
 
 ## APPOINTMENT BOOKING
 You can book appointments directly to the business calendar.
 1. When a customer wants to book, ask for their preferred date
-2. Use check_availability to see available times for that date
-3. Suggest a few good times rather than listing all available slots
-4. Collect: name, phone number, service type
-5. Use book_appointment to confirm the booking
-6. Confirm the details back to them
+2. Use check_availability to see available times (pass date as YYYY-MM-DD)
+3. IMPORTANT: Each tool response includes today's date. Always use it to resolve relative dates like "tomorrow", "next Tuesday", or "the 3rd". Never guess the month or year — never book past dates.
+4. Suggest a few good times rather than listing all available slots
+5. Collect: name, phone number, service type
+6. Use book_appointment to confirm the booking
+7. Confirm the full date and time back to the caller
 
 If no slots are available, offer alternative dates or take their info for a callback.`;
 
