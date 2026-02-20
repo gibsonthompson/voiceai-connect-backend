@@ -704,7 +704,7 @@ app.post('/api/client/signup', handleClientSignup);
 
 // Client dashboard routes (settings, voice, greeting, knowledge base)
 app.use('/api/client', clientRoutes);
-
+app.use('/api/client', require('./routes/call-mode'));
 // Client billing (pays agency via Connect)
 app.post('/api/client/checkout', createClientCheckout);
 app.post('/api/client/portal', createClientPortal);
