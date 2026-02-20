@@ -3,6 +3,7 @@
 // WITH BYOT STATUS IN SETTINGS RESPONSE
 // UPDATED: Added branding_overrides support for UI theme customization
 // UPDATED: Added calendar_enabled_plans for Google Calendar plan gating
+// UPDATED: Added analytics tracking (GTM, GA4, FB Pixel) + OG meta fields
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
@@ -96,7 +97,19 @@ async function getAgencyByHost(req, res) {
         
         // Stripe (needed for checkout)
         stripe_account_id: agency.stripe_account_id,
-        stripe_charges_enabled: agency.stripe_charges_enabled
+        stripe_charges_enabled: agency.stripe_charges_enabled,
+
+        // Analytics & Tracking (for marketing site script injection)
+        gtm_id: agency.gtm_id || null,
+        fb_pixel_id: agency.fb_pixel_id || null,
+        google_analytics_id: agency.google_analytics_id || null,
+        custom_head_scripts: agency.custom_head_scripts || null,
+        custom_body_scripts: agency.custom_body_scripts || null,
+
+        // OG / Social meta (for marketing site social sharing)
+        og_title: agency.og_title || null,
+        og_description: agency.og_description || null,
+        og_image_url: agency.og_image_url || null
       }
     });
     
@@ -222,6 +235,18 @@ async function getAgencySettings(req, res) {
         byot_enabled: agency.byot_enabled || false,
         byot_verified_at: agency.byot_verified_at || null,
         twilio_account_sid: agency.twilio_account_sid || null,
+
+        // Analytics & Tracking
+        gtm_id: agency.gtm_id || null,
+        fb_pixel_id: agency.fb_pixel_id || null,
+        google_analytics_id: agency.google_analytics_id || null,
+        custom_head_scripts: agency.custom_head_scripts || null,
+        custom_body_scripts: agency.custom_body_scripts || null,
+
+        // OG / Social meta
+        og_title: agency.og_title || null,
+        og_description: agency.og_description || null,
+        og_image_url: agency.og_image_url || null,
         
         // Timestamps
         created_at: agency.created_at,
@@ -268,7 +293,17 @@ async function updateAgencySettings(req, res) {
       // Calendar plan gating (which client plans can connect Google Calendar)
       'calendar_enabled_plans',
       // Marketing page currency override
-      'display_currency'
+      'display_currency',
+      // Analytics & Tracking
+      'gtm_id',
+      'fb_pixel_id',
+      'google_analytics_id',
+      'custom_head_scripts',
+      'custom_body_scripts',
+      // OG / Social meta
+      'og_title',
+      'og_description',
+      'og_image_url'
     ];
     
     const sanitizedUpdates = {};
@@ -359,6 +394,48 @@ async function updateAgencySettings(req, res) {
       const allValid = cep.every(plan => validPlans.includes(plan));
       if (!allValid) {
         return res.status(400).json({ error: 'calendar_enabled_plans contains invalid plan names' });
+      }
+    }
+
+    // Validate GTM ID format if provided
+    if (sanitizedUpdates.gtm_id !== undefined && sanitizedUpdates.gtm_id !== null && sanitizedUpdates.gtm_id !== '') {
+      if (!/^GTM-[A-Z0-9]+$/i.test(sanitizedUpdates.gtm_id)) {
+        return res.status(400).json({ error: 'Invalid GTM ID format. Expected GTM-XXXXXXX' });
+      }
+    }
+
+    // Validate GA4 Measurement ID format if provided
+    if (sanitizedUpdates.google_analytics_id !== undefined && sanitizedUpdates.google_analytics_id !== null && sanitizedUpdates.google_analytics_id !== '') {
+      if (!/^G-[A-Z0-9]+$/i.test(sanitizedUpdates.google_analytics_id)) {
+        return res.status(400).json({ error: 'Invalid GA4 Measurement ID format. Expected G-XXXXXXXXXX' });
+      }
+    }
+
+    // Validate FB Pixel ID format if provided (numeric string)
+    if (sanitizedUpdates.fb_pixel_id !== undefined && sanitizedUpdates.fb_pixel_id !== null && sanitizedUpdates.fb_pixel_id !== '') {
+      if (!/^\d+$/.test(sanitizedUpdates.fb_pixel_id)) {
+        return res.status(400).json({ error: 'Invalid Facebook Pixel ID format. Expected numeric ID.' });
+      }
+    }
+
+    // Validate OG image URL if provided
+    if (sanitizedUpdates.og_image_url !== undefined && sanitizedUpdates.og_image_url !== null && sanitizedUpdates.og_image_url !== '') {
+      try {
+        new URL(sanitizedUpdates.og_image_url);
+      } catch {
+        return res.status(400).json({ error: 'Invalid OG image URL format.' });
+      }
+    }
+
+    // Sanitize custom scripts — basic length check (prevent abuse)
+    if (sanitizedUpdates.custom_head_scripts !== undefined && sanitizedUpdates.custom_head_scripts !== null) {
+      if (sanitizedUpdates.custom_head_scripts.length > 10000) {
+        return res.status(400).json({ error: 'Custom head scripts too long (max 10,000 characters)' });
+      }
+    }
+    if (sanitizedUpdates.custom_body_scripts !== undefined && sanitizedUpdates.custom_body_scripts !== null) {
+      if (sanitizedUpdates.custom_body_scripts.length > 10000) {
+        return res.status(400).json({ error: 'Custom body scripts too long (max 10,000 characters)' });
       }
     }
     
