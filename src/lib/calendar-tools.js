@@ -16,12 +16,11 @@ const CALENDAR_INSTRUCTIONS = `
 ## APPOINTMENT BOOKING
 You can book appointments directly to the business calendar.
 1. When a customer wants to book, ask for their preferred date
-2. Use check_availability to see available times (pass date as YYYY-MM-DD)
-3. IMPORTANT: Each tool response includes today's date. Always use it to resolve relative dates like "tomorrow", "next Tuesday", or "the 3rd". Never guess the month or year — never book past dates.
-4. Suggest a few good times rather than listing all available slots
-5. Collect: name, phone number, service type
-6. Use book_appointment to confirm the booking
-7. Confirm the full date and time back to the caller
+2. Use check_availability — pass the date EXACTLY as the customer said it (e.g. "the 3rd", "next Tuesday", "tomorrow"). Do NOT try to convert it to a specific format. The server handles date resolution.
+3. Suggest a few good times rather than listing all available slots
+4. Collect: name, phone number, service type
+5. Use book_appointment to confirm — again pass the date as-is
+6. Confirm the full date and time back to the caller using the date from the tool response
 
 If no slots are available, offer alternative dates or take their info for a callback.`;
 
@@ -72,10 +71,34 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
       
       let availabilityToolId, bookingToolId;
       
-      // Create or reuse check_availability tool
+      // Create or UPDATE check_availability tool
       if (existingAvailabilityTool) {
-        console.log(`📋 Reusing existing check_availability tool: ${existingAvailabilityTool.id}`);
+        console.log(`📋 Updating existing check_availability tool: ${existingAvailabilityTool.id}`);
         availabilityToolId = existingAvailabilityTool.id;
+        // Patch the description to ensure it has the latest
+        await fetch(`https://api.vapi.ai/tool/${availabilityToolId}`, {
+          method: 'PATCH',
+          headers: {
+            'Authorization': `Bearer ${VAPI_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            function: {
+              name: 'check_availability',
+              description: 'Check available appointment times for a specific date. Use this when a customer wants to book an appointment.',
+              parameters: {
+                type: 'object',
+                properties: {
+                  date: { 
+                    type: 'string', 
+                    description: 'The date the customer wants. Pass exactly what they said — e.g. "tomorrow", "next Tuesday", "the 3rd", "March 5th", or "2026-02-25". The server will resolve it.'
+                  }
+                },
+                required: ['date']
+              }
+            }
+          })
+        });
       } else {
         console.log('🔧 Creating check_availability tool...');
         const availabilityToolRes = await fetch('https://api.vapi.ai/tool', {
@@ -94,7 +117,7 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
                 properties: {
                   date: { 
                     type: 'string', 
-                    description: 'Date to check in YYYY-MM-DD format (e.g., 2026-02-20)' 
+                    description: 'The date the customer wants. Pass exactly what they said — e.g. "tomorrow", "next Tuesday", "the 3rd", "March 5th", or "2026-02-25". The server will resolve it.'
                   }
                 },
                 required: ['date']
@@ -114,10 +137,36 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
         console.log(`✅ check_availability tool created: ${availabilityToolId}`);
       }
 
-      // Create or reuse book_appointment tool
+      // Create or UPDATE book_appointment tool
       if (existingBookingTool) {
-        console.log(`📋 Reusing existing book_appointment tool: ${existingBookingTool.id}`);
+        console.log(`📋 Updating existing book_appointment tool: ${existingBookingTool.id}`);
         bookingToolId = existingBookingTool.id;
+        // Patch the description to ensure it has the latest
+        await fetch(`https://api.vapi.ai/tool/${bookingToolId}`, {
+          method: 'PATCH',
+          headers: {
+            'Authorization': `Bearer ${VAPI_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            function: {
+              name: 'book_appointment',
+              description: 'Book an appointment after confirming availability and collecting customer details.',
+              parameters: {
+                type: 'object',
+                properties: {
+                  customer_name: { type: 'string', description: 'Full name of the customer' },
+                  customer_phone: { type: 'string', description: 'Customer phone number' },
+                  date: { type: 'string', description: 'Appointment date — pass exactly what was discussed, e.g. "the 3rd", "next Tuesday", "March 5th", or "2026-02-25". The server will resolve it.' },
+                  time: { type: 'string', description: 'Appointment time (e.g., 2:00 PM)' },
+                  service_type: { type: 'string', description: 'Type of service or reason for appointment' },
+                  notes: { type: 'string', description: 'Any special requests or notes' }
+                },
+                required: ['customer_name', 'customer_phone', 'date', 'time']
+              }
+            }
+          })
+        });
       } else {
         console.log('🔧 Creating book_appointment tool...');
         const bookingToolRes = await fetch('https://api.vapi.ai/tool', {
@@ -136,7 +185,7 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
                 properties: {
                   customer_name: { type: 'string', description: 'Full name of the customer' },
                   customer_phone: { type: 'string', description: 'Customer phone number' },
-                  date: { type: 'string', description: 'Appointment date in YYYY-MM-DD format' },
+                  date: { type: 'string', description: 'Appointment date — pass exactly what was discussed, e.g. "the 3rd", "next Tuesday", "March 5th", or "2026-02-25". The server will resolve it.' },
                   time: { type: 'string', description: 'Appointment time (e.g., 2:00 PM)' },
                   service_type: { type: 'string', description: 'Type of service or reason for appointment' },
                   notes: { type: 'string', description: 'Any special requests or notes' }
