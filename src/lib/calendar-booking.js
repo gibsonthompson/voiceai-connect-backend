@@ -1,6 +1,7 @@
 // ====================================================================
 // GOOGLE CALENDAR BOOKING - VAPI Tool Handler
 // Matched to CallBird working implementation
+// UPDATED: Added double-booking prevention guard
 // ====================================================================
 const { supabase } = require('./supabase');
 
@@ -79,6 +80,14 @@ function parseTimeTo24Hr(timeStr) {
   if (period === 'am' && hours === 12) hours = 0;
   
   return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+}
+
+// Helper: format a slot label to match what getAvailableSlots produces
+function formatSlotLabel(hr, min) {
+  var hour12 = hr > 12 ? hr - 12 : (hr === 0 ? 12 : hr);
+  var ampm = hr >= 12 ? 'PM' : 'AM';
+  var minStr = min === 0 ? '' : ':' + min.toString().padStart(2, '0');
+  return hour12 + minStr + ' ' + ampm;
 }
 
 // Get available time slots
@@ -221,6 +230,36 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
 
     const duration = client.appointment_duration || 30;
     const timezone = client.timezone || 'America/New_York';
+
+    // ====================================================================
+    // DOUBLE-BOOKING PREVENTION: Re-check availability before booking
+    // ====================================================================
+    const [checkHr, checkMin] = time24.split(':').map(Number);
+    const availResult = await getAvailableSlots(clientId, date);
+    if (availResult.success) {
+      const requestedLabel = formatSlotLabel(checkHr, checkMin);
+      const isAvailable = availResult.slots.some(function(slot) {
+        return slot.replace(/\s+/g, ' ').trim().toLowerCase() === requestedLabel.replace(/\s+/g, ' ').trim().toLowerCase();
+      });
+
+      if (!isAvailable) {
+        console.log('⚠️ Double-booking prevented: ' + date + ' at ' + time + ' is not available');
+        console.log('   Available slots:', availResult.slots.join(', '));
+        
+        if (availResult.slots.length > 0) {
+          var suggested = availResult.slots.slice(0, 3).join(', ');
+          return {
+            success: false,
+            error: 'That time slot is no longer available. Available times on this date are: ' + suggested + '. Would the caller like one of those instead?'
+          };
+        } else {
+          return {
+            success: false,
+            error: 'There are no available time slots on this date. Would the caller like to try a different day?'
+          };
+        }
+      }
+    }
 
     const startDateTime = `${date}T${time24}:00`;
     const [hr, min] = time24.split(':').map(Number);
