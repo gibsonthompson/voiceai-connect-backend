@@ -28,7 +28,7 @@ function resolveDate(input) {
 
   // --- "next available" / "next opening" / "soonest" ---
   if (raw.includes('next available') || raw.includes('next opening') || raw.includes('soonest') || raw.includes('earliest')) {
-    return formatISO(today); // Caller will check today, then we check consecutive days
+    return formatISO(today);
   }
 
   // --- Day names: "monday", "tuesday", "next friday", "this wednesday" ---
@@ -73,20 +73,19 @@ function resolveDate(input) {
     const month = monthNames[monthDayMatch[1].toLowerCase()];
     const day = parseInt(monthDayMatch[2]);
     if (month !== undefined && day >= 1 && day <= 31) {
-      let d = new Date(now.getFullYear(), month, day);
+      var d = new Date(now.getFullYear(), month, day);
       if (d < today) d = new Date(now.getFullYear() + 1, month, day);
       return formatISO(d);
     }
   }
 
-  // --- Already YYYY-MM-DD: extract just the day, find next occurrence ---
+  // --- Already YYYY-MM-DD: if future trust it, if past extract day and find next occurrence ---
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
     const parsed = new Date(raw + 'T12:00:00');
-    if (parsed >= today) return raw; // Already in the future, trust it
+    if (parsed >= today) return raw;
     
-    // Past date — AI guessed wrong. Take the day number, find next occurrence.
-    const dayOfMonth = parsed.getDate();
-    let corrected = new Date(now.getFullYear(), now.getMonth(), dayOfMonth);
+    var dayOfMonth = parsed.getDate();
+    var corrected = new Date(now.getFullYear(), now.getMonth(), dayOfMonth);
     if (corrected < today) {
       corrected = new Date(now.getFullYear(), now.getMonth() + 1, dayOfMonth);
     }
@@ -98,9 +97,9 @@ function resolveDate(input) {
   if (bareNumberMatch) {
     const dayNum = parseInt(bareNumberMatch[1]);
     if (dayNum >= 1 && dayNum <= 31) {
-      let d = new Date(now.getFullYear(), now.getMonth(), dayNum);
-      if (d < today) d = new Date(now.getFullYear(), now.getMonth() + 1, dayNum);
-      return formatISO(d);
+      var d2 = new Date(now.getFullYear(), now.getMonth(), dayNum);
+      if (d2 < today) d2 = new Date(now.getFullYear(), now.getMonth() + 1, dayNum);
+      return formatISO(d2);
     }
   }
 
@@ -108,13 +107,12 @@ function resolveDate(input) {
   const lastResort = new Date(raw);
   if (!isNaN(lastResort.getTime())) {
     if (lastResort >= today) return formatISO(lastResort);
-    // Past — extract day, find next occurrence
-    const dayOfMonth = lastResort.getDate();
-    let corrected = new Date(now.getFullYear(), now.getMonth(), dayOfMonth);
-    if (corrected < today) {
-      corrected = new Date(now.getFullYear(), now.getMonth() + 1, dayOfMonth);
+    var dayOfMonth2 = lastResort.getDate();
+    var corrected2 = new Date(now.getFullYear(), now.getMonth(), dayOfMonth2);
+    if (corrected2 < today) {
+      corrected2 = new Date(now.getFullYear(), now.getMonth() + 1, dayOfMonth2);
     }
-    return formatISO(corrected);
+    return formatISO(corrected2);
   }
 
   return null;
@@ -122,6 +120,16 @@ function resolveDate(input) {
 
 function formatISO(d) {
   return d.toISOString().split('T')[0];
+}
+
+function friendlyDate(isoDate) {
+  var d = new Date(isoDate + 'T12:00:00');
+  return d.toLocaleDateString('en-US', {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric'
+  });
 }
 
 // ============================================================================
@@ -136,7 +144,7 @@ router.post('/availability/:clientId', async (req, res) => {
     const toolCallId = toolCall?.id;
     const args = toolCall?.arguments || toolCall?.function?.arguments;
     
-    let dateInput;
+    var dateInput;
     if (args) {
       const parsed = typeof args === 'string' ? JSON.parse(args) : args;
       dateInput = parsed.date;
@@ -150,10 +158,10 @@ router.post('/availability/:clientId', async (req, res) => {
 
     // Resolve whatever the AI sent to a correct YYYY-MM-DD
     const date = resolveDate(dateInput);
-    console.log(`📅 Date resolver: "${dateInput}" → ${date}`);
+    console.log('📅 Date resolver: "' + dateInput + '" → ' + date);
 
     if (!date) {
-      console.log(`❌ Could not resolve date: "${dateInput}"`);
+      console.log('❌ Could not resolve date: "' + dateInput + '"');
       return res.json({ 
         results: [{ toolCallId, result: 'I couldn\'t determine the date. Could you tell me the specific date you\'d like?' }] 
       });
@@ -162,26 +170,23 @@ router.post('/availability/:clientId', async (req, res) => {
     // Check if caller wants "next available" — search multiple days
     const raw = dateInput.toString().trim().toLowerCase();
     if (raw.includes('next available') || raw.includes('next opening') || raw.includes('soonest') || raw.includes('earliest')) {
-      // Check today + next 7 days
-      for (let i = 0; i < 7; i++) {
-        const checkDate = new Date();
+      for (var i = 0; i < 7; i++) {
+        var checkDate = new Date();
         checkDate.setDate(checkDate.getDate() + i);
-        const checkStr = formatISO(checkDate);
+        var checkStr = formatISO(checkDate);
         
-        console.log(`📅 Checking next available: ${checkStr}`);
-        const result = await getAvailableSlots(clientId, checkStr);
+        console.log('📅 Checking next available: ' + checkStr);
+        var result = await getAvailableSlots(clientId, checkStr);
         
         if (result.success && result.slots.length > 0) {
-          const slots = result.slots;
-          let suggested = slots.length <= 4 ? slots : [slots[0], slots[Math.floor(slots.length / 2)], slots[Math.floor(slots.length * 0.75)]];
-          
-          const dateObj = new Date(checkStr + 'T12:00:00');
-          const friendlyDate = dateObj.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+          var slots = result.slots;
+          var suggested = slots.length <= 4 ? slots : [slots[0], slots[Math.floor(slots.length / 2)], slots[Math.floor(slots.length * 0.75)]];
+          var dateLabel = friendlyDate(checkStr);
           
           return res.json({ 
             results: [{ 
               toolCallId,
-              result: `The next available date is ${friendlyDate}. I have openings at ${suggested.join(', ')}. Which works best for you?`
+              result: 'The next available date is ' + dateLabel + '. I have openings at ' + suggested.join(', ') + '. Which works best for you?'
             }] 
           });
         }
@@ -192,39 +197,41 @@ router.post('/availability/:clientId', async (req, res) => {
       });
     }
 
-    console.log(`📅 Checking availability for client ${clientId} on ${date}`);
-    const result = await getAvailableSlots(clientId, date);
+    console.log('📅 Checking availability for client ' + clientId + ' on ' + date);
+    var result2 = await getAvailableSlots(clientId, date);
     
-    if (!result.success) {
+    if (!result2.success) {
       return res.json({ 
-        results: [{ toolCallId, result: result.error }] 
+        results: [{ toolCallId, result: result2.error }] 
       });
     }
 
-    if (result.slots.length === 0) {
+    var dateLabel2 = friendlyDate(date);
+
+    if (result2.slots.length === 0) {
       return res.json({ 
-        results: [{ toolCallId, result: `No availability on ${date}. Would you like to try another date?` }] 
+        results: [{ toolCallId, result: 'No availability on ' + dateLabel2 + '. Would you like to try another date?' }] 
       });
     }
 
-    const slots = result.slots;
-    let suggested = [];
+    var slots2 = result2.slots;
+    var suggested2 = [];
     
-    if (slots.length <= 4) {
-      suggested = slots;
+    if (slots2.length <= 4) {
+      suggested2 = slots2;
     } else {
-      suggested.push(slots[0]);
-      suggested.push(slots[Math.floor(slots.length / 2)]);
-      suggested.push(slots[Math.floor(slots.length * 0.75)]);
-      if (slots.length > 10) {
-        suggested.push(slots[slots.length - 2]);
+      suggested2.push(slots2[0]);
+      suggested2.push(slots2[Math.floor(slots2.length / 2)]);
+      suggested2.push(slots2[Math.floor(slots2.length * 0.75)]);
+      if (slots2.length > 10) {
+        suggested2.push(slots2[slots2.length - 2]);
       }
     }
 
     return res.json({ 
       results: [{ 
         toolCallId,
-        result: `I have openings at ${suggested.join(', ')}. Which works best for you? I also have other times if none of those work.`
+        result: 'Availability for ' + dateLabel2 + ': ' + suggested2.join(', ') + '. Which works best for you? I also have other times if none of those work.'
       }] 
     });
 
@@ -255,22 +262,27 @@ router.post('/book/:clientId', async (req, res) => {
     }
 
     const parsed = typeof args === 'string' ? JSON.parse(args) : args;
-    const { customer_name, customer_phone, date: dateInput, time, service_type, notes } = parsed;
+    const customerName = parsed.customer_name;
+    const customerPhone = parsed.customer_phone;
+    const dateInput = parsed.date;
+    const time = parsed.time;
+    const serviceType = parsed.service_type;
+    const notes = parsed.notes;
 
-    if (!customer_name || !customer_phone || !dateInput || !time) {
-      const missing = [];
-      if (!customer_name) missing.push('your name');
-      if (!customer_phone) missing.push('your phone number');
+    if (!customerName || !customerPhone || !dateInput || !time) {
+      var missing = [];
+      if (!customerName) missing.push('your name');
+      if (!customerPhone) missing.push('your phone number');
       if (!dateInput) missing.push('the date');
       if (!time) missing.push('the time');
       return res.json({ 
-        results: [{ toolCallId, result: `I still need ${missing.join(' and ')} to complete the booking.` }] 
+        results: [{ toolCallId, result: 'I still need ' + missing.join(' and ') + ' to complete the booking.' }] 
       });
     }
 
     // Resolve whatever the AI sent to a correct YYYY-MM-DD
     const date = resolveDate(dateInput);
-    console.log(`📅 Booking date resolver: "${dateInput}" → ${date}`);
+    console.log('📅 Booking date resolver: "' + dateInput + '" → ' + date);
 
     if (!date) {
       return res.json({ 
@@ -278,8 +290,8 @@ router.post('/book/:clientId', async (req, res) => {
       });
     }
 
-    console.log(`📅 Booking for client ${clientId}: ${customer_name} on ${date} at ${time}`);
-    const result = await bookAppointment(clientId, customer_name, customer_phone, date, time, service_type, notes);
+    console.log('📅 Booking for client ' + clientId + ': ' + customerName + ' on ' + date + ' at ' + time);
+    var result = await bookAppointment(clientId, customerName, customerPhone, date, time, serviceType, notes);
 
     return res.json({ 
       results: [{ toolCallId, result: result.success ? result.message : result.error }] 
