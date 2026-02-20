@@ -74,15 +74,17 @@ function resolveDate(input) {
     }
   }
 
-  // YYYY-MM-DD — if future trust it, if past extract day number and find next occurrence
+  // YYYY-MM-DD — if future trust it, if past find next occurrence of that weekday
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
     var parsed = new Date(raw + 'T12:00:00');
     if (parsed >= today) return raw;
-    var dayOfMonth = parsed.getDate();
-    var corrected = new Date(now.getFullYear(), now.getMonth(), dayOfMonth);
-    if (corrected < today) {
-      corrected = new Date(now.getFullYear(), now.getMonth() + 1, dayOfMonth);
-    }
+    // Past date — find the next occurrence of the same weekday
+    var targetDow = parsed.getDay();
+    var currentDow = today.getDay();
+    var ahead = targetDow - currentDow;
+    if (ahead <= 0) ahead += 7;
+    var corrected = new Date(today);
+    corrected.setDate(corrected.getDate() + ahead);
     return formatISO(corrected);
   }
 
@@ -101,11 +103,13 @@ function resolveDate(input) {
   var lastResort = new Date(raw);
   if (!isNaN(lastResort.getTime())) {
     if (lastResort >= today) return formatISO(lastResort);
-    var dayOfMonth2 = lastResort.getDate();
-    var corrected2 = new Date(now.getFullYear(), now.getMonth(), dayOfMonth2);
-    if (corrected2 < today) {
-      corrected2 = new Date(now.getFullYear(), now.getMonth() + 1, dayOfMonth2);
-    }
+    // Past — find next occurrence of same weekday
+    var targetDow2 = lastResort.getDay();
+    var currentDow2 = today.getDay();
+    var ahead2 = targetDow2 - currentDow2;
+    if (ahead2 <= 0) ahead2 += 7;
+    var corrected2 = new Date(today);
+    corrected2.setDate(corrected2.getDate() + ahead2);
     return formatISO(corrected2);
   }
 
