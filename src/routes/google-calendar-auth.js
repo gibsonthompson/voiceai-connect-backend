@@ -86,7 +86,7 @@ router.get('/connect', async (req, res) => {
     const planCheck = await checkPlanAccess(clientId);
     if (!planCheck.allowed) {
       console.log(`🚫 Calendar access denied for client ${clientId}: ${planCheck.reason}`);
-      return res.redirect(`${FRONTEND_URL}/dashboard/settings?error=plan_upgrade_required`);
+      return res.redirect(`${FRONTEND_URL}/client/settings?error=plan_upgrade_required`);
     }
 
     // Store clientId in state param so we get it back in callback
@@ -122,11 +122,11 @@ router.get('/callback', async (req, res) => {
 
     if (oauthError) {
       console.error('❌ OAuth error from Google:', oauthError);
-      return res.redirect(`${redirectBase}/dashboard/settings?error=calendar_denied`);
+      return res.redirect(`${redirectBase}/client/settings?error=calendar_denied`);
     }
 
     if (!code || !state) {
-      return res.redirect(`${redirectBase}/dashboard/settings?error=calendar_failed`);
+      return res.redirect(`${redirectBase}/client/settings?error=calendar_failed`);
     }
 
     // Decode state to get clientId
@@ -136,11 +136,11 @@ router.get('/callback', async (req, res) => {
       clientId = stateDecoded.clientId;
     } catch (e) {
       console.error('❌ Failed to decode state:', e);
-      return res.redirect(`${redirectBase}/dashboard/settings?error=calendar_failed`);
+      return res.redirect(`${redirectBase}/client/settings?error=calendar_failed`);
     }
 
     if (!clientId) {
-      return res.redirect(`${redirectBase}/dashboard/settings?error=calendar_failed`);
+      return res.redirect(`${redirectBase}/client/settings?error=calendar_failed`);
     }
 
     // Exchange code for tokens
@@ -159,7 +159,7 @@ router.get('/callback', async (req, res) => {
     if (!tokenResponse.ok) {
       const errText = await tokenResponse.text();
       console.error('❌ Token exchange failed:', errText);
-      return res.redirect(`${redirectBase}/dashboard/settings?error=calendar_token_failed`);
+      return res.redirect(`${redirectBase}/client/settings?error=calendar_token_failed`);
     }
 
     const tokens = await tokenResponse.json();
@@ -182,7 +182,7 @@ router.get('/callback', async (req, res) => {
 
     if (updateError) {
       console.error('❌ Database update error:', updateError);
-      return res.redirect(`${redirectBase}/dashboard/settings?error=calendar_db_error`);
+      return res.redirect(`${redirectBase}/client/settings?error=calendar_db_error`);
     }
 
     // Get client's VAPI assistant ID to add calendar tools
@@ -213,10 +213,10 @@ router.get('/callback', async (req, res) => {
     }
 
     console.log(`✅ Google Calendar connected for client: ${clientId}`);
-    res.redirect(`${redirectBase}/dashboard/settings?success=calendar_connected`);
+    res.redirect(`${redirectBase}/client/settings?success=calendar_connected`);
   } catch (error) {
     console.error('❌ Calendar callback error:', error);
-    res.redirect(`${FRONTEND_URL}/dashboard/settings?error=calendar_unknown`);
+    res.redirect(`${FRONTEND_URL}/client/settings?error=calendar_unknown`);
   }
 });
 
