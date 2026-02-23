@@ -3,6 +3,7 @@
 // Multi-tenant aware with agency branding
 // WITH DEMO CALL FOLLOW-UP SMS
 // WITH CALL SUMMARY EMAIL (international)
+// WITH INTERNATIONAL PHONE FORMATTING
 // ============================================================================
 const fetch = require('node-fetch');
 
@@ -30,41 +31,110 @@ function getReferralSourceLabel(source) {
 }
 
 // ============================================================================
-// PHONE FORMATTING
+// COUNTRY CALLING CODES (ISO 3166-1 alpha-2 → ITU calling code)
 // ============================================================================
-function formatPhoneE164(phone) {
+const COUNTRY_CALLING_CODES = {
+  US: '1', CA: '1', GB: '44', AU: '61', NZ: '64',
+  DE: '49', FR: '33', NL: '31', IT: '39', ES: '34',
+  PT: '351', IE: '353', AT: '43', BE: '32', CH: '41',
+  SE: '46', NO: '47', DK: '45', FI: '358', PL: '48',
+  CZ: '420', HU: '36', RO: '40', BG: '359', HR: '385',
+  SK: '421', SI: '386', EE: '372', LV: '371', LT: '370',
+  CY: '357', MT: '356', LU: '352', GR: '30',
+  JP: '81', SG: '65', HK: '852', MY: '60', TH: '66', IN: '91',
+  AE: '971', BR: '55', MX: '52',
+};
+
+// ============================================================================
+// PHONE FORMATTING (International)
+// ============================================================================
+
+/**
+ * Format a phone number to E.164 international format.
+ * @param {string} phone - Raw phone input (digits, possibly with formatting)
+ * @param {string} countryCode - ISO 3166-1 alpha-2 country code (default: 'US')
+ * @returns {string|null} E.164 formatted phone or null if invalid
+ */
+function formatPhoneE164(phone, countryCode = 'US') {
   if (!phone) return null;
-  
+
   const digits = phone.replace(/\D/g, '');
-  
-  if (digits.length === 11 && digits.startsWith('1')) {
+
+  // If already in E.164 format (starts with +), clean and return
+  if (phone.startsWith('+') && digits.length >= 7) {
+    return '+' + digits;
+  }
+
+  const country = (countryCode || 'US').toUpperCase();
+  const callingCode = COUNTRY_CALLING_CODES[country] || '1';
+
+  // US/CA: if 11 digits starting with 1, already includes country code
+  if ((country === 'US' || country === 'CA') && digits.length === 11 && digits.startsWith('1')) {
     return `+${digits}`;
   }
-  if (digits.length === 10) {
+
+  // US/CA: standard 10-digit
+  if ((country === 'US' || country === 'CA') && digits.length === 10) {
     return `+1${digits}`;
   }
-  
-  if (phone.startsWith('+') && phone.replace(/\D/g, '').length >= 10) {
-    return phone.replace(/[^\d+]/g, '');
+
+  // UK: strip leading 0 (local format) before adding +44
+  if (country === 'GB' && digits.startsWith('0')) {
+    return `+${callingCode}${digits.substring(1)}`;
   }
-  
+
+  // AU: strip leading 0 before adding +61
+  if (country === 'AU' && digits.startsWith('0')) {
+    return `+${callingCode}${digits.substring(1)}`;
+  }
+
+  // NZ: strip leading 0 before adding +64
+  if (country === 'NZ' && digits.startsWith('0')) {
+    return `+${callingCode}${digits.substring(1)}`;
+  }
+
+  // General international: if we have enough digits, prepend calling code
+  if (digits.length >= 7 && digits.length <= 15) {
+    return `+${callingCode}${digits}`;
+  }
+
+  // Fallback: if nothing matched but we have 10+ digits, try with calling code
+  if (digits.length >= 10) {
+    return `+${callingCode}${digits}`;
+  }
+
   return null;
 }
 
+/**
+ * Format a phone number for display.
+ * US/CA numbers get (XXX) XXX-XXXX format. International numbers
+ * get a simple spaced format with their country code.
+ * @param {string} phone - Phone number (E.164 or raw)
+ * @returns {string|null} Display-formatted phone
+ */
 function formatPhoneDisplay(phone) {
   if (!phone) return null;
-  
+
   const cleaned = phone.replace(/\D/g, '');
-  
+
+  // US/CA: 10 digits → (XXX) XXX-XXXX
   if (cleaned.length === 10) {
-    return `(${cleaned.substring(0,3)}) ${cleaned.substring(3,6)}-${cleaned.substring(6)}`;
+    return `(${cleaned.substring(0, 3)}) ${cleaned.substring(3, 6)}-${cleaned.substring(6)}`;
   }
-  
+
+  // US/CA: 11 digits starting with 1 → (XXX) XXX-XXXX
   if (cleaned.length === 11 && cleaned.startsWith('1')) {
     const without1 = cleaned.substring(1);
-    return `(${without1.substring(0,3)}) ${without1.substring(3,6)}-${without1.substring(6)}`;
+    return `(${without1.substring(0, 3)}) ${without1.substring(3, 6)}-${without1.substring(6)}`;
   }
-  
+
+  // International: if starts with +, return as-is (already formatted)
+  if (phone.startsWith('+')) {
+    return phone;
+  }
+
+  // Fallback: return original
   return phone;
 }
 
@@ -95,15 +165,16 @@ async function sendTelnyxSMS(toPhone, message) {
       console.log('⚠️ TELNYX_API_KEY not configured');
       return false;
     }
-    
-    const formattedPhone = formatPhoneE164(toPhone);
+
+    // Accept already-formatted E.164 or try to format as US
+    const formattedPhone = toPhone?.startsWith('+') ? toPhone : formatPhoneE164(toPhone, 'US');
     if (!formattedPhone) {
       console.log(`⚠️ Invalid phone: ${toPhone}`);
       return false;
     }
-    
+
     console.log('📱 Sending SMS via Telnyx to:', formattedPhone);
-    
+
     const response = await fetch('https://api.telnyx.com/v2/messages', {
       method: 'POST',
       headers: {
@@ -117,13 +188,13 @@ async function sendTelnyxSMS(toPhone, message) {
         messaging_profile_id: process.env.TELNYX_MESSAGING_PROFILE_ID
       })
     });
-    
+
     if (!response.ok) {
       const error = await response.json();
       console.error('❌ Telnyx error:', error);
       return false;
     }
-    
+
     console.log('✅ SMS sent successfully');
     return true;
   } catch (error) {
@@ -148,14 +219,18 @@ async function sendAgencySignupNotificationSMS(agency) {
   let message = `🎉 New Agency Signup!\n` +
     `Name: ${agency.name}\n` +
     `Email: ${agency.email}`;
-  
+
   const referralLabel = getReferralSourceLabel(agency.referral_source);
   if (referralLabel) {
     message += `\nSource: ${referralLabel}`;
   }
-  
+
   message += `\nPlan: ${agency.plan_type || 'Starter'}`;
-  
+
+  if (agency.country && agency.country !== 'US') {
+    message += `\n🌍 Country: ${agency.country}`;
+  }
+
   return sendPlatformNotificationSMS(message);
 }
 
@@ -165,12 +240,13 @@ async function sendClientSignupNotificationSMS(client, agency) {
     console.log(`⚠️ Agency ${agency?.name || 'Unknown'} has no phone number - skipping client signup SMS`);
     return false;
   }
-  
+
   const message = `🔔 ${agency.name}\n` +
     `👤 New Client Signup!\n` +
     `Business: ${client.business_name}\n` +
-    `Phone: ${formatPhoneDisplay(client.owner_phone || client.vapi_phone_number)}`;
-  
+    `Phone: ${formatPhoneDisplay(client.owner_phone || client.vapi_phone_number)}` +
+    (client.country && client.country !== 'US' ? `\n🌍 ${client.country}` : '');
+
   console.log(`📱 Notifying agency owner (${agency.name}) of new client: ${client.business_name}`);
   return sendTelnyxSMS(agency.phone, message);
 }
@@ -181,12 +257,12 @@ async function sendAgencyTrialEndingSMS(agency, daysLeft) {
     console.log(`⚠️ Agency ${agency.name} has no phone number`);
     return false;
   }
-  
+
   const message = `⏰ VoiceAI Connect Trial Ending\n\n` +
     `Hi ${agency.name}, your trial ends in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}.\n\n` +
     `Your card will be charged automatically. Update payment at:\n` +
     `myvoiceaiconnect.com/agency/settings/billing`;
-  
+
   return sendTelnyxSMS(agency.phone, message);
 }
 
@@ -196,12 +272,12 @@ async function sendAgencyPaymentFailedSMS(agency) {
     console.log(`⚠️ Agency ${agency.name} has no phone number`);
     return false;
   }
-  
+
   const message = `🚨 Payment Failed - VoiceAI Connect\n\n` +
     `Hi ${agency.name}, your payment failed.\n\n` +
     `Update your payment method to avoid service interruption:\n` +
     `myvoiceaiconnect.com/agency/settings/billing`;
-  
+
   return sendTelnyxSMS(agency.phone, message);
 }
 
@@ -211,12 +287,12 @@ async function sendAgencySubscriptionCanceledSMS(agency) {
     console.log(`⚠️ Agency ${agency.name} has no phone number`);
     return false;
   }
-  
+
   const message = `❌ Subscription Canceled - VoiceAI Connect\n\n` +
     `Hi ${agency.name}, your subscription has been canceled.\n\n` +
     `Your agency and all client AI assistants are now suspended.\n\n` +
     `Reactivate at: myvoiceaiconnect.com/agency/settings/billing`;
-  
+
   return sendTelnyxSMS(agency.phone, message);
 }
 
@@ -226,11 +302,11 @@ async function sendAgencyPaymentSucceededSMS(agency) {
     console.log(`⚠️ Agency ${agency.name} has no phone number`);
     return false;
   }
-  
+
   const message = `✅ Payment Successful - VoiceAI Connect\n\n` +
     `Hi ${agency.name}, your payment was processed successfully!\n\n` +
     `Your agency is now active. Thank you!`;
-  
+
   return sendTelnyxSMS(agency.phone, message);
 }
 
@@ -273,38 +349,38 @@ async function sendDemoCallFollowUpSMS(callerPhone, agency) {
 // Call notification SMS (Multi-tenant)
 async function sendCallNotificationSMS(client, agency, callData) {
   const { customerName, customerPhone, urgency, summary } = callData;
-  
+
   const brandName = agency?.name || 'VoiceAI Connect';
-  
+
   let smsMessage = `🔔 New Call - ${client.business_name}\n`;
   smsMessage += `Customer: ${customerName}\n`;
   smsMessage += `Phone: ${customerPhone}\n`;
-  
+
   if (urgency === 'high' || urgency === 'emergency') {
     smsMessage += `⚠️ Urgency: HIGH\n`;
   }
-  
+
   smsMessage += `Summary: ${summary}\n`;
   smsMessage += `Powered by ${brandName}`;
-  
+
   return sendTelnyxSMS(client.owner_phone, smsMessage);
 }
 
 // Welcome SMS (simple confirmation)
 async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency = null) {
   const brandName = agency?.name || 'VoiceAI Connect';
-  
+
   const message = `🎉 Welcome to ${brandName}!\n` +
     `Your AI receptionist for ${businessName} is ready!\n` +
     `📞 Your AI Phone: ${formatPhoneDisplay(aiPhoneNumber)}`;
-  
+
   return sendTelnyxSMS(phone, message);
 }
 
 // Client trial expired - notify client
 async function sendClientTrialExpiredSMS(client, agency) {
   const brandName = agency?.name || 'AI Receptionist';
-  
+
   let upgradeUrl;
   if (agency?.marketing_domain && agency?.domain_verified) {
     upgradeUrl = `${agency.marketing_domain}/client/upgrade`;
@@ -313,35 +389,35 @@ async function sendClientTrialExpiredSMS(client, agency) {
   } else {
     upgradeUrl = `myvoiceaiconnect.com/client/upgrade`;
   }
-  
+
   const message = `⚠️ ${brandName} Trial Ended\n\n` +
     `Hi ${client.owner_name || client.business_name}, your 7-day trial has ended.\n\n` +
     `Your AI receptionist is no longer answering calls.\n\n` +
     `Reactivate now: ${upgradeUrl}`;
-  
+
   return sendTelnyxSMS(client.owner_phone, message);
 }
 
 // Client payment failed - notify client
 async function sendClientPaymentFailedSMS(client, agency) {
   const brandName = agency?.name || 'AI Receptionist';
-  
+
   const message = `🚨 ${brandName} Payment Failed\n\n` +
     `Hi ${client.owner_name || client.business_name}, your payment failed.\n\n` +
     `Update your payment method to keep your AI receptionist active.`;
-  
+
   return sendTelnyxSMS(client.owner_phone, message);
 }
 
 // Client subscription activated - notify client
 async function sendClientSubscriptionActivatedSMS(client, agency, plan) {
   const brandName = agency?.name || 'AI Receptionist';
-  
+
   const message = `✅ ${brandName} Subscription Active!\n\n` +
     `Hi ${client.owner_name || client.business_name}, your ${plan || 'Starter'} plan is now active!\n\n` +
     `Your AI receptionist is answering calls 24/7 at:\n` +
     `📞 ${formatPhoneDisplay(client.vapi_phone_number)}`;
-  
+
   return sendTelnyxSMS(client.owner_phone, message);
 }
 
@@ -354,12 +430,12 @@ async function sendEmail(emailData) {
       console.log('⚠️ BREVO_API_KEY not configured');
       return { success: false };
     }
-    
+
     console.log(`📧 Sending email to ${emailData.to}...`);
-    
+
     const sender = parseSender(emailData.from || 'VoiceAI Connect <notifications@myvoiceaiconnect.com>');
     const recipients = (Array.isArray(emailData.to) ? emailData.to : [emailData.to]).map(email => ({ email }));
-    
+
     const response = await fetch('https://api.brevo.com/v3/smtp/email', {
       method: 'POST',
       headers: {
@@ -559,7 +635,7 @@ async function sendClientWelcomeEmail(client, agency, tempPassword, passwordToke
   const agencyLogo = agency?.logo_url || 'https://voiceaiconnect.com/logo.png';
   const primaryColor = agency?.primary_color || '#2563eb';
   const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
-  
+
   let baseUrl;
   if (agency?.marketing_domain && agency?.domain_verified) {
     baseUrl = `https://${agency.marketing_domain}`;
@@ -568,11 +644,11 @@ async function sendClientWelcomeEmail(client, agency, tempPassword, passwordToke
   } else {
     baseUrl = `https://${platformDomain}`;
   }
-  
+
   const fromEmail = agency?.support_email 
     ? `${agencyName} <${agency.support_email}>`
     : `${agencyName} <onboarding@myvoiceaiconnect.com>`;
-  
+
   return sendEmail({
     from: fromEmail,
     to: client.email,
@@ -637,7 +713,7 @@ async function sendClientWelcomeEmail(client, agency, tempPassword, passwordToke
 // ============================================================================
 async function sendAgencyWelcomeEmail(agency, passwordToken) {
   const dashboardUrl = process.env.FRONTEND_URL || 'https://myvoiceaiconnect.com';
-  
+
   return sendEmail({
     from: 'VoiceAI Connect <onboarding@myvoiceaiconnect.com>',
     to: agency.email,
@@ -698,42 +774,45 @@ module.exports = {
   // Phone formatting
   formatPhoneE164,
   formatPhoneDisplay,
-  
+
+  // Country codes (exported so other modules can use them)
+  COUNTRY_CALLING_CODES,
+
   // International detection
   isInternationalAgency,
-  
+
   // Base SMS
   sendTelnyxSMS,
-  
+
   // Platform notifications (to Gibson)
   sendPlatformNotificationSMS,
   sendAgencySignupNotificationSMS,
-  
+
   // Agency owner notifications
   sendClientSignupNotificationSMS,
-  
+
   // Agency SMS
   sendAgencyTrialEndingSMS,
   sendAgencyPaymentFailedSMS,
   sendAgencySubscriptionCanceledSMS,
   sendAgencyPaymentSucceededSMS,
-  
+
   // Demo call follow-up
   sendDemoCallFollowUpSMS,
-  
+
   // Client SMS
   sendCallNotificationSMS,
   sendWelcomeSMS,
   sendClientTrialExpiredSMS,
   sendClientPaymentFailedSMS,
   sendClientSubscriptionActivatedSMS,
-  
+
   // Email
   sendEmail,
   sendCallSummaryEmail,
   sendClientWelcomeEmail,
   sendAgencyWelcomeEmail,
-  
+
   // Helpers
   getReferralSourceLabel
 };

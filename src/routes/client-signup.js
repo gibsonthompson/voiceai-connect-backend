@@ -1,6 +1,7 @@
 // ============================================================================
 // CLIENT SIGNUP & PROVISIONING - Multi-Tenant
 // WITH BYOT (Bring Your Own Twilio) SUPPORT
+// WITH INTERNATIONAL CLIENT SUPPORT
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -12,7 +13,7 @@ const {
   createKnowledgeBaseFromWebsite 
 } = require('../lib/vapi');
 const { 
-  formatPhoneE164, 
+  formatPhoneE164,
   sendClientWelcomeEmail,
   sendWelcomeSMS,
   sendClientSignupNotificationSMS
@@ -47,8 +48,10 @@ function validateSignupRequest(body) {
   if (!body.email || !body.email.includes('@')) {
     errors.push('Valid email is required');
   }
-  if (!body.phone || body.phone.replace(/\D/g, '').length < 10) {
-    errors.push('Valid phone number is required');
+  // International phone validation: 7-15 digits
+  const phoneDigits = (body.phone || '').replace(/\D/g, '');
+  if (phoneDigits.length < 7 || phoneDigits.length > 15) {
+    errors.push('Valid phone number is required (7-15 digits)');
   }
   if (!body.businessName || body.businessName.trim().length < 2) {
     errors.push('Business name is required');
@@ -56,8 +59,8 @@ function validateSignupRequest(body) {
   if (!body.businessCity || body.businessCity.trim().length < 2) {
     errors.push('City is required');
   }
-  if (!body.businessState || body.businessState.trim().length < 2) {
-    errors.push('State is required');
+  if (!body.businessState || body.businessState.trim().length < 1) {
+    errors.push('State / region is required');
   }
   if (!body.industry) {
     errors.push('Industry is required');
@@ -210,6 +213,7 @@ async function handleClientSignup(req, res) {
       industry,
       businessCity,
       businessState,
+      businessCountry,
       websiteUrl: rawWebsiteUrl,
       agencyId
     } = req.body;
@@ -224,6 +228,9 @@ async function handleClientSignup(req, res) {
       return res.status(403).json({ error: 'Agency is not active' });
     }
 
+    // Resolve client country: provided → agency country → US
+    const clientCountry = (businessCountry || agency.country || 'US').toUpperCase();
+
     // Check client limit
     const limitCheck = await canAgencyAddClient(agencyId);
     if (!limitCheck.allowed) {
@@ -237,7 +244,7 @@ async function handleClientSignup(req, res) {
     }
     
     console.log(`✅ Client limit check passed: ${limitCheck.current}/${limitCheck.limit === -1 ? 'unlimited' : limitCheck.limit}`);
-    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'})`);
+    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Client country: ${clientCountry}`);
 
     // Normalize website URL
     let websiteUrl = rawWebsiteUrl;
@@ -246,9 +253,9 @@ async function handleClientSignup(req, res) {
     }
 
     const ownerName = lastName ? `${firstName} ${lastName}`.trim() : firstName;
-    const formattedOwnerPhone = formatPhoneE164(phone);
+    const formattedOwnerPhone = formatPhoneE164(phone, clientCountry);
 
-    console.log(`📋 Creating client: ${businessName} for agency: ${agency.name}`);
+    console.log(`📋 Creating client: ${businessName} (${clientCountry}) for agency: ${agency.name}`);
 
     // Check for duplicate within this agency
     const existingClient = await getClientByEmail(email.toLowerCase(), agencyId);
@@ -317,6 +324,7 @@ async function handleClientSignup(req, res) {
         business_name: businessName,
         business_city: businessCity,
         business_state: businessState,
+        country: clientCountry,
         phone_number: phoneResult.number,
         phone_area_code: phoneResult.number.length >= 5 ? phoneResult.number.substring(2, 5) : null,
         owner_name: ownerName,
@@ -344,7 +352,7 @@ async function handleClientSignup(req, res) {
       throw clientError;
     }
 
-    console.log(`🎉 Client created: ${newClient.business_name} (${phoneResult.provisioningMethod})`);
+    console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult.provisioningMethod})`);
 
     // ============================================
     // STEP 5: CREATE USER RECORD (no password - will be set later)
@@ -405,6 +413,7 @@ async function handleClientSignup(req, res) {
         id: newClient.id,
         business_name: newClient.business_name,
         phone_number: phoneResult.number,
+        country: clientCountry,
         location: `${businessCity}, ${businessState}`,
         trial_ends_at: newClient.trial_ends_at,
         subscription_status: 'trial',
@@ -441,6 +450,7 @@ async function handleAgencyAddClient(req, res) {
       industry,
       businessCity,
       businessState,
+      businessCountry,
       websiteUrl: rawWebsiteUrl,
       planType = 'starter',
       tempPassword
@@ -449,10 +459,16 @@ async function handleAgencyAddClient(req, res) {
     const errors = [];
     if (!firstName || firstName.trim().length < 1) errors.push('First name is required');
     if (!email || !email.includes('@')) errors.push('Valid email is required');
-    if (!phone || phone.replace(/\D/g, '').length < 10) errors.push('Valid phone number is required');
+
+    // International phone validation: 7-15 digits
+    const phoneDigits = (phone || '').replace(/\D/g, '');
+    if (phoneDigits.length < 7 || phoneDigits.length > 15) {
+      errors.push('Valid phone number is required (7-15 digits)');
+    }
+
     if (!businessName || businessName.trim().length < 2) errors.push('Business name is required');
     if (!businessCity || businessCity.trim().length < 2) errors.push('City is required');
-    if (!businessState || businessState.trim().length < 2) errors.push('State is required');
+    if (!businessState || businessState.trim().length < 1) errors.push('State / region is required');
     if (!industry) errors.push('Industry is required');
     if (!tempPassword || tempPassword.length < 6) errors.push('Temporary password is required (min 6 characters)');
 
@@ -469,6 +485,9 @@ async function handleAgencyAddClient(req, res) {
       return res.status(403).json({ error: 'Agency is not active' });
     }
 
+    // Resolve client country: provided → agency country → US
+    const clientCountry = (businessCountry || agency.country || 'US').toUpperCase();
+
     // Check client limit
     const limitCheck = await canAgencyAddClient(agencyId);
     if (!limitCheck.allowed) {
@@ -482,7 +501,7 @@ async function handleAgencyAddClient(req, res) {
     }
 
     console.log(`✅ Limit check passed: ${limitCheck.current}/${limitCheck.limit === -1 ? 'unlimited' : limitCheck.limit}`);
-    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Adding: ${businessName}`);
+    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Adding: ${businessName} (${clientCountry})`);
 
     // Normalize inputs
     let websiteUrl = rawWebsiteUrl;
@@ -490,7 +509,7 @@ async function handleAgencyAddClient(req, res) {
       websiteUrl = `https://${websiteUrl}`;
     }
     const ownerName = lastName ? `${firstName} ${lastName}`.trim() : firstName;
-    const formattedOwnerPhone = formatPhoneE164(phone);
+    const formattedOwnerPhone = formatPhoneE164(phone, clientCountry);
 
     // Check duplicate
     const existingClient = await getClientByEmail(email.toLowerCase(), agencyId);
@@ -553,6 +572,7 @@ async function handleAgencyAddClient(req, res) {
         business_name: businessName,
         business_city: businessCity,
         business_state: businessState,
+        country: clientCountry,
         phone_number: phoneResult.number,
         phone_area_code: phoneResult.number.length >= 5 ? phoneResult.number.substring(2, 5) : null,
         owner_name: ownerName,
@@ -579,7 +599,7 @@ async function handleAgencyAddClient(req, res) {
       console.error('❌ Database error:', clientError);
       throw clientError;
     }
-    console.log(`🎉 Client created: ${newClient.business_name} (${phoneResult.provisioningMethod})`);
+    console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult.provisioningMethod})`);
 
     // === STEP 5: Create User Record WITH password ===
     const { data: newUser, error: userError } = await supabase
@@ -621,6 +641,7 @@ async function handleAgencyAddClient(req, res) {
         email: newClient.email,
         owner_name: ownerName,
         industry: newClient.industry,
+        country: clientCountry,
         location: `${businessCity}, ${businessState}`,
         trial_ends_at: newClient.trial_ends_at,
         subscription_status: 'trial',
