@@ -2,6 +2,7 @@
 // VAPI WEBHOOK HANDLER - Multi-Tenant Aware
 // UPDATED: Demo call detection + agency follow-up SMS
 // UPDATED: Email summaries gated by plan_features (Phase 5)
+// UPDATED: Unlimited calls support (-1 = no limit)
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -343,12 +344,12 @@ async function handleVapiWebhook(req, res) {
     }
     
     // ============================================
-    // CHECK CALL LIMITS
+    // CHECK CALL LIMITS (-1 = unlimited)
     // ============================================
     const currentCallCount = client.calls_this_month || 0;
-    const callLimit = client.monthly_call_limit || 50;
+    const callLimit = client.monthly_call_limit ?? 50;
     
-    if (currentCallCount >= callLimit) {
+    if (callLimit !== -1 && currentCallCount >= callLimit) {
       console.log(`🚫 CALL BLOCKED: ${client.business_name} reached limit`);
       
       if (currentCallCount === callLimit) {
@@ -360,6 +361,12 @@ async function handleVapiWebhook(req, res) {
         blocked: true,
         reason: 'Monthly call limit reached'
       });
+    }
+    
+    if (callLimit === -1) {
+      console.log(`♾️ Unlimited plan — no call cap`);
+    } else {
+      console.log(`📊 Usage: ${currentCallCount}/${callLimit} calls`);
     }
     
     // ============================================
@@ -441,19 +448,21 @@ async function handleVapiWebhook(req, res) {
       .eq('id', client.id);
     
     // ============================================
-    // CHECK USAGE THRESHOLDS
+    // CHECK USAGE THRESHOLDS (skip for unlimited)
     // ============================================
-    const usagePercent = (newCallCount / callLimit) * 100;
-    
-    if (usagePercent >= 80 && usagePercent < 100) {
-      if (newCallCount === Math.floor(callLimit * 0.8)) {
-        await sendUsageWarningEmail(client, agency, newCallCount, callLimit);
+    if (callLimit !== -1) {
+      const usagePercent = (newCallCount / callLimit) * 100;
+      
+      if (usagePercent >= 80 && usagePercent < 100) {
+        if (newCallCount === Math.floor(callLimit * 0.8)) {
+          await sendUsageWarningEmail(client, agency, newCallCount, callLimit);
+        }
       }
-    }
-    
-    if (newCallCount >= callLimit) {
-      if (newCallCount === callLimit) {
-        await sendLimitReachedEmail(client, agency, callLimit);
+      
+      if (newCallCount >= callLimit) {
+        if (newCallCount === callLimit) {
+          await sendLimitReachedEmail(client, agency, callLimit);
+        }
       }
     }
     
