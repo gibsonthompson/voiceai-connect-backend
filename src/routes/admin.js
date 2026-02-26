@@ -855,4 +855,413 @@ router.get('/leads-stats', requireAdmin, async (req, res) => {
   }
 });
 
+// ============================================================================
+// ADMIN OUTREACH ROUTES — Platform-level templates, compose, and logging
+// Templates and history stored with agency_id = NULL
+// ============================================================================
+
+const ADMIN_TEMPLATE_VARIABLES = {
+  lead: [
+    { key: '{lead_business_name}', label: 'Business Name', description: 'Prospect company name' },
+    { key: '{lead_contact_name}', label: 'Contact Full Name', description: 'Full name of contact' },
+    { key: '{lead_contact_first_name}', label: 'Contact First Name', description: 'First name only' },
+    { key: '{lead_industry}', label: 'Industry', description: 'Business industry' },
+    { key: '{lead_email}', label: 'Email', description: 'Contact email address' },
+    { key: '{lead_phone}', label: 'Phone', description: 'Contact phone number' },
+    { key: '{lead_website}', label: 'Website', description: 'Business website' },
+    { key: '{lead_source}', label: 'Source', description: 'How you found them' },
+  ],
+  sender: [
+    { key: '{your_name}', label: 'Your Name', description: 'Your name (Gibson)' },
+    { key: '{your_email}', label: 'Your Email', description: 'Your email address' },
+    { key: '{platform_name}', label: 'Platform Name', description: 'VoiceAI Connect' },
+    { key: '{platform_url}', label: 'Platform URL', description: 'Platform website' },
+    { key: '{demo_link}', label: 'Demo Link', description: 'Demo booking / signup link' },
+  ],
+  dynamic: [
+    { key: '{today_date}', label: "Today's Date", description: 'Current date' },
+  ]
+};
+
+// GET /api/admin/templates - List platform templates
+router.get('/templates', requireAdmin, async (req, res) => {
+  try {
+    const { type } = req.query;
+
+    let query = supabase
+      .from('outreach_templates')
+      .select('*')
+      .is('agency_id', null)
+      .order('sequence_order', { ascending: true, nullsFirst: false })
+      .order('created_at', { ascending: false });
+
+    if (type) query = query.eq('type', type);
+
+    const { data: templates, error } = await query;
+    if (error) throw error;
+
+    const sequences = [...new Set(
+      (templates || []).filter(t => t.sequence_name).map(t => t.sequence_name)
+    )];
+
+    res.json({ templates: templates || [], sequences, variables: ADMIN_TEMPLATE_VARIABLES });
+  } catch (error) {
+    console.error('Admin templates error:', error);
+    res.status(500).json({ error: 'Failed to load templates' });
+  }
+});
+
+// POST /api/admin/templates - Create platform template
+router.post('/templates', requireAdmin, async (req, res) => {
+  try {
+    const { name, description, type = 'email', subject, body, is_follow_up, sequence_name, sequence_order, delay_days } = req.body;
+
+    if (!name || !body) return res.status(400).json({ error: 'Name and body are required' });
+    if (type === 'email' && !subject) return res.status(400).json({ error: 'Subject is required for email templates' });
+
+    const { data: template, error } = await supabase
+      .from('outreach_templates')
+      .insert({
+        agency_id: null,
+        name, description, type, subject, body,
+        is_follow_up: is_follow_up || false,
+        sequence_name: sequence_name || null,
+        sequence_order: sequence_order ? parseInt(sequence_order) : null,
+        delay_days: delay_days ? parseInt(delay_days) : null,
+        is_default: false,
+      })
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    console.log(`✅ Admin template created: ${name}`);
+    res.status(201).json({ success: true, template });
+  } catch (error) {
+    console.error('Admin create template error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/admin/templates/:templateId - Get single template
+router.get('/templates/:templateId', requireAdmin, async (req, res) => {
+  try {
+    const { templateId } = req.params;
+
+    const { data: template, error } = await supabase
+      .from('outreach_templates')
+      .select('*')
+      .eq('id', templateId)
+      .is('agency_id', null)
+      .single();
+
+    if (error || !template) return res.status(404).json({ error: 'Template not found' });
+
+    res.json({ template, variables: ADMIN_TEMPLATE_VARIABLES });
+  } catch (error) {
+    console.error('Admin get template error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT /api/admin/templates/:templateId - Update template
+router.put('/templates/:templateId', requireAdmin, async (req, res) => {
+  try {
+    const { templateId } = req.params;
+    const updates = { ...req.body };
+
+    delete updates.id;
+    delete updates.agency_id;
+    delete updates.created_at;
+
+    if (updates.sequence_order) updates.sequence_order = parseInt(updates.sequence_order);
+    if (updates.delay_days) updates.delay_days = parseInt(updates.delay_days);
+
+    const { data: template, error } = await supabase
+      .from('outreach_templates')
+      .update(updates)
+      .eq('id', templateId)
+      .is('agency_id', null)
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+    if (!template) return res.status(404).json({ error: 'Template not found' });
+
+    res.json({ success: true, template });
+  } catch (error) {
+    console.error('Admin update template error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// DELETE /api/admin/templates/:templateId
+router.delete('/templates/:templateId', requireAdmin, async (req, res) => {
+  try {
+    const { templateId } = req.params;
+
+    const { error } = await supabase
+      .from('outreach_templates')
+      .delete()
+      .eq('id', templateId)
+      .is('agency_id', null);
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Admin delete template error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/admin/templates/:templateId/duplicate
+router.post('/templates/:templateId/duplicate', requireAdmin, async (req, res) => {
+  try {
+    const { templateId } = req.params;
+    const { name } = req.body;
+
+    const { data: original, error: fetchError } = await supabase
+      .from('outreach_templates')
+      .select('*')
+      .eq('id', templateId)
+      .single();
+
+    if (fetchError || !original) return res.status(404).json({ error: 'Template not found' });
+
+    const { data: template, error } = await supabase
+      .from('outreach_templates')
+      .insert({
+        agency_id: null,
+        name: name || `${original.name} (Copy)`,
+        description: original.description,
+        type: original.type,
+        subject: original.subject,
+        body: original.body,
+        is_follow_up: original.is_follow_up,
+        sequence_name: null,
+        sequence_order: null,
+        delay_days: original.delay_days,
+        is_default: false,
+      })
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    res.status(201).json({ success: true, template });
+  } catch (error) {
+    console.error('Admin duplicate template error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/admin/outreach/variables
+router.get('/outreach/variables', requireAdmin, (req, res) => {
+  res.json({ variables: ADMIN_TEMPLATE_VARIABLES });
+});
+
+// POST /api/admin/outreach/compose - Variable substitution
+router.post('/outreach/compose', requireAdmin, async (req, res) => {
+  try {
+    const { templateId, leadId, customSubject, customBody } = req.body;
+
+    let lead = null;
+    if (leadId) {
+      const { data } = await supabase
+        .from('leads')
+        .select('*')
+        .eq('id', leadId)
+        .is('agency_id', null)
+        .single();
+      lead = data;
+    }
+
+    let subject = customSubject || '';
+    let body = customBody || '';
+
+    if (templateId) {
+      const { data: template } = await supabase
+        .from('outreach_templates')
+        .select('*')
+        .eq('id', templateId)
+        .single();
+
+      if (template) {
+        subject = customSubject || template.subject || '';
+        body = customBody || template.body || '';
+      }
+    }
+
+    const replacements = {
+      '{lead_business_name}': lead?.business_name || '[Business Name]',
+      '{lead_contact_name}': lead?.contact_name || '[Contact Name]',
+      '{lead_contact_first_name}': lead?.contact_name?.split(' ')[0] || '[First Name]',
+      '{lead_industry}': lead?.industry || '[Industry]',
+      '{lead_email}': lead?.email || '[Email]',
+      '{lead_phone}': lead?.phone || '[Phone]',
+      '{lead_website}': lead?.website || '[Website]',
+      '{lead_source}': lead?.source || '[Source]',
+      '{your_name}': 'Gibson Thompson',
+      '{your_email}': 'gibson@myvoiceaiconnect.com',
+      '{platform_name}': 'VoiceAI Connect',
+      '{platform_url}': 'https://myvoiceaiconnect.com',
+      '{demo_link}': 'https://myvoiceaiconnect.com/demo',
+      '{today_date}': new Date().toLocaleDateString('en-US', {
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+      }),
+    };
+
+    let composedSubject = subject;
+    let composedBody = body;
+
+    for (const [variable, value] of Object.entries(replacements)) {
+      composedSubject = composedSubject.replace(new RegExp(variable.replace(/[{}]/g, '\\$&'), 'g'), value);
+      composedBody = composedBody.replace(new RegExp(variable.replace(/[{}]/g, '\\$&'), 'g'), value);
+    }
+
+    res.json({
+      subject: composedSubject,
+      body: composedBody,
+      toAddress: lead?.email || '',
+      toPhone: lead?.phone || '',
+      variables: replacements
+    });
+  } catch (error) {
+    console.error('Admin compose error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/admin/outreach/log - Log outreach sent
+router.post('/outreach/log', requireAdmin, async (req, res) => {
+  try {
+    const { leadId, templateId, type, toAddress, toPhone, subject, body } = req.body;
+
+    if (!type || !body) return res.status(400).json({ error: 'type and body are required' });
+
+    const { data: outreach, error } = await supabase
+      .from('outreach_history')
+      .insert({
+        agency_id: null,
+        lead_id: leadId || null,
+        template_id: templateId || null,
+        type,
+        recipient_email: toAddress || null,
+        recipient_phone: toPhone || null,
+        subject: subject || null,
+        body,
+        status: 'sent',
+        sent_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    // Update lead status to contacted if still new
+    if (leadId) {
+      const { data: lead } = await supabase
+        .from('leads')
+        .select('status')
+        .eq('id', leadId)
+        .single();
+
+      if (lead && lead.status === 'new') {
+        await supabase
+          .from('leads')
+          .update({ status: 'contacted' })
+          .eq('id', leadId);
+      }
+    }
+
+    // Update template use count
+    if (templateId) {
+      const { data: template } = await supabase
+        .from('outreach_templates')
+        .select('use_count')
+        .eq('id', templateId)
+        .single();
+
+      if (template) {
+        await supabase
+          .from('outreach_templates')
+          .update({ use_count: (template.use_count || 0) + 1 })
+          .eq('id', templateId);
+      }
+    }
+
+    console.log(`✅ Admin outreach logged: ${type} to ${toAddress || toPhone}`);
+    res.status(201).json({ success: true, outreach });
+  } catch (error) {
+    console.error('Admin log outreach error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/admin/outreach/history - Platform outreach history
+router.get('/outreach/history', requireAdmin, async (req, res) => {
+  try {
+    const { leadId, type, limit = 50, offset = 0 } = req.query;
+
+    let query = supabase
+      .from('outreach_history')
+      .select(`
+        *,
+        lead:leads (id, business_name, contact_name),
+        template:outreach_templates (id, name)
+      `, { count: 'exact' })
+      .is('agency_id', null)
+      .order('sent_at', { ascending: false });
+
+    if (leadId) query = query.eq('lead_id', leadId);
+    if (type) query = query.eq('type', type);
+    query = query.range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
+
+    const { data: history, error, count } = await query;
+    if (error) throw error;
+
+    res.json({ history: history || [], total: count });
+  } catch (error) {
+    console.error('Admin outreach history error:', error);
+    res.status(500).json({ error: 'Failed to load history' });
+  }
+});
+
+// GET /api/admin/leads/:leadId/outreach - Outreach stats for a platform lead
+router.get('/leads/:leadId/outreach', requireAdmin, async (req, res) => {
+  try {
+    const { leadId } = req.params;
+
+    const { data: history, error } = await supabase
+      .from('outreach_history')
+      .select('id, type, sent_at, subject, template_id')
+      .is('agency_id', null)
+      .eq('lead_id', leadId)
+      .order('sent_at', { ascending: true });
+
+    if (error) throw error;
+
+    const emails = (history || []).filter(h => h.type === 'email');
+    const sms = (history || []).filter(h => h.type === 'sms');
+
+    res.json({
+      outreach: {
+        email_count: emails.length,
+        sms_count: sms.length,
+        total_count: (history || []).length,
+        last_email: emails.length > 0 ? emails[emails.length - 1] : null,
+        last_sms: sms.length > 0 ? sms[sms.length - 1] : null,
+        last_outreach: history && history.length > 0 ? history[history.length - 1] : null,
+        next_email_number: emails.length + 1,
+        next_sms_number: sms.length + 1,
+        history: history || [],
+      }
+    });
+  } catch (error) {
+    console.error('Admin lead outreach error:', error);
+    res.status(500).json({ error: 'Failed to load outreach stats' });
+  }
+});
+
 module.exports = router;
