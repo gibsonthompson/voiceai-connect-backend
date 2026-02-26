@@ -179,22 +179,17 @@ router.get('/dashboard', requireAdmin, async (req, res) => {
 });
 
 // ============================================================================
-// LIST ALL AGENCIES
+// LIST ALL AGENCIES — Enriched with aggregate counts from all tables
 // ============================================================================
 router.get('/agencies', requireAdmin, async (req, res) => {
   try {
-    const { status, plan, search, limit = 50, offset = 0 } = req.query;
+    const { status, plan, search, limit = 100, offset = 0 } = req.query;
 
     let query = supabase
       .from('agencies')
-      .select(`
-        id, name, email, slug, phone,
-        plan_type, subscription_status, status,
-        stripe_account_id, stripe_charges_enabled,
-        created_at, trial_ends_at, updated_at
-      `)
+      .select('*')
       .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1);
+      .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
 
     if (status) {
       query = query.eq('subscription_status', status);
@@ -206,35 +201,107 @@ router.get('/agencies', requireAdmin, async (req, res) => {
       query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%,slug.ilike.%${search}%`);
     }
 
-    const { data: agencies, error, count } = await query;
+    const { data: agencies, error } = await query;
 
     if (error) throw error;
 
-    const agencyIds = agencies?.map(a => a.id) || [];
-    
-    let clientCounts = {};
-    if (agencyIds.length > 0) {
-      const { data: clients } = await supabase
-        .from('clients')
-        .select('agency_id')
-        .in('agency_id', agencyIds);
+    // Fetch aggregate counts for all agencies in parallel
+    const agencyIds = (agencies || []).map(a => a.id);
 
-      clients?.forEach(c => {
-        clientCounts[c.agency_id] = (clientCounts[c.agency_id] || 0) + 1;
+    // Client counts per agency + build client→agency map for call counting
+    const { data: clientRows } = await supabase
+      .from('clients')
+      .select('agency_id, id')
+      .in('agency_id', agencyIds);
+
+    const clientCounts = {};
+    const clientIdToAgency = {};
+    (clientRows || []).forEach(c => {
+      clientCounts[c.agency_id] = (clientCounts[c.agency_id] || 0) + 1;
+      clientIdToAgency[c.id] = c.agency_id;
+    });
+
+    // Call counts per agency (calls are linked to clients, not agencies directly)
+    let callCounts = {};
+    const allClientIds = Object.keys(clientIdToAgency);
+    if (allClientIds.length > 0) {
+      const { data: callRows } = await supabase
+        .from('calls')
+        .select('client_id')
+        .in('client_id', allClientIds);
+
+      (callRows || []).forEach(c => {
+        const agId = clientIdToAgency[c.client_id];
+        if (agId) callCounts[agId] = (callCounts[agId] || 0) + 1;
       });
     }
 
-    const agenciesWithCounts = agencies?.map(a => ({
-      ...a,
-      client_count: clientCounts[a.id] || 0
-    })) || [];
+    // Lead counts per agency
+    const { data: leadRows } = await supabase
+      .from('leads')
+      .select('agency_id')
+      .in('agency_id', agencyIds);
 
-    console.log(`📋 Admin fetched ${agenciesWithCounts.length} agencies`);
-
-    res.json({ 
-      agencies: agenciesWithCounts,
-      total: count || agenciesWithCounts.length
+    const leadCounts = {};
+    (leadRows || []).forEach(l => {
+      leadCounts[l.agency_id] = (leadCounts[l.agency_id] || 0) + 1;
     });
+
+    // Revenue per agency (succeeded payments only)
+    const { data: paymentRows } = await supabase
+      .from('payments')
+      .select('agency_id, amount, status')
+      .in('agency_id', agencyIds)
+      .eq('status', 'succeeded');
+
+    const revenueTotals = {};
+    const paymentCounts = {};
+    (paymentRows || []).forEach(p => {
+      revenueTotals[p.agency_id] = (revenueTotals[p.agency_id] || 0) + (p.amount || 0);
+      paymentCounts[p.agency_id] = (paymentCounts[p.agency_id] || 0) + 1;
+    });
+
+    // User counts per agency
+    const { data: userRows } = await supabase
+      .from('users')
+      .select('agency_id')
+      .in('agency_id', agencyIds);
+
+    const userCounts = {};
+    (userRows || []).forEach(u => {
+      if (u.agency_id) userCounts[u.agency_id] = (userCounts[u.agency_id] || 0) + 1;
+    });
+
+    // Enrich each agency
+    const enriched = (agencies || []).map(a => ({
+      ...a,
+      client_count: clientCounts[a.id] || 0,
+      call_count: callCounts[a.id] || 0,
+      lead_count: leadCounts[a.id] || 0,
+      total_revenue: revenueTotals[a.id] || 0,
+      payment_count: paymentCounts[a.id] || 0,
+      user_count: userCounts[a.id] || 0,
+    }));
+
+    // Platform-wide summary
+    const sumValues = (obj) => Object.values(obj).reduce((s, c) => s + c, 0);
+    const summary = {
+      total_agencies: enriched.length,
+      active: enriched.filter(a => a.subscription_status === 'active').length,
+      trialing: enriched.filter(a => ['trialing', 'trial'].includes(a.subscription_status)).length,
+      past_due: enriched.filter(a => a.subscription_status === 'past_due').length,
+      canceled: enriched.filter(a => ['canceled', 'suspended'].includes(a.subscription_status || a.status)).length,
+      pending: enriched.filter(a => a.subscription_status === 'pending' || a.status === 'pending_payment').length,
+      total_clients: sumValues(clientCounts),
+      total_calls: sumValues(callCounts),
+      total_leads: sumValues(leadCounts),
+      total_revenue: sumValues(revenueTotals),
+      stripe_connected: enriched.filter(a => a.stripe_charges_enabled).length,
+    };
+
+    console.log(`📋 Admin fetched ${enriched.length} agencies (enriched)`);
+
+    res.json({ agencies: enriched, summary });
 
   } catch (error) {
     console.error('Admin agencies error:', error);
