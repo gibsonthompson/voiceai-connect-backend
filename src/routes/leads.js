@@ -1,7 +1,7 @@
 // ============================================================================
 // LEADS ROUTES - Agency Lead Management (Mini CRM)
 // VoiceAI Connect Multi-Tenant
-// WITH ACTIVITY LOGGING, OUTREACH TRACKING, AND CSV IMPORT
+// WITH ACTIVITY LOGGING, OUTREACH TRACKING, CSV IMPORT, AND FOLLOW-UP QUEUE
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -65,6 +65,68 @@ async function getLeadOutreachStats(agencyId, leadId) {
     console.error('Error in getLeadOutreachStats:', err);
     return null;
   }
+}
+
+// ============================================================================
+// HELPER: Calculate next step in an outreach sequence for a lead
+// Returns null if sequence is complete, not started, or not due yet
+// ============================================================================
+function calculateNextStep(history, sequenceTemplates, now) {
+  if (!sequenceTemplates || sequenceTemplates.length === 0) return null;
+
+  const sentCount = history.length;
+
+  // No outreach sent yet — they haven't started the sequence
+  if (sentCount === 0) return null;
+
+  // Find the next template in sequence
+  const nextOrder = sentCount + 1;
+  const nextTemplate = sequenceTemplates.find(t => t.sequence_order === nextOrder);
+
+  // Sequence is complete — all templates sent
+  if (!nextTemplate) return null;
+
+  // Calculate due date: last sent + delay_days
+  const lastSent = history[history.length - 1];
+  const lastSentDate = new Date(lastSent.sent_at);
+  const delayDays = nextTemplate.delay_days || 0;
+
+  const dueDate = new Date(lastSentDate);
+  dueDate.setDate(dueDate.getDate() + delayDays);
+
+  // Set times to midnight for day comparison
+  const dueDateDay = new Date(dueDate);
+  dueDateDay.setHours(0, 0, 0, 0);
+  const todayDay = new Date(now);
+  todayDay.setHours(0, 0, 0, 0);
+
+  const diffMs = dueDateDay.getTime() - todayDay.getTime();
+  const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+
+  let urgency;
+  if (diffDays < 0) {
+    urgency = 'overdue';
+  } else if (diffDays === 0) {
+    urgency = 'due_today';
+  } else if (diffDays <= 2) {
+    urgency = 'upcoming';
+  } else {
+    // More than 2 days out — don't surface yet
+    return null;
+  }
+
+  return {
+    type: nextTemplate.type,
+    template_name: nextTemplate.name,
+    template_id: nextTemplate.id,
+    sequence_order: nextTemplate.sequence_order,
+    due_date: dueDate.toISOString(),
+    urgency,
+    days_overdue: urgency === 'overdue' ? Math.abs(diffDays) : 0,
+    last_sent_at: lastSent.sent_at,
+    last_type: lastSent.type,
+    delay_days: delayDays,
+  };
 }
 
 // ============================================================================
@@ -426,6 +488,142 @@ router.post('/:agencyId/leads/import', async (req, res) => {
   } catch (error) {
     console.error('Error importing leads:', error);
     res.status(500).json({ error: 'Server error during import' });
+  }
+});
+
+// ============================================================================
+// GET /api/agency/:agencyId/leads/follow-up-queue
+// Returns leads due for their next outreach sequence step.
+// Calculates: last_outreach.sent_at + next_template.delay_days = due_date
+// ⚠️  MUST be before /:agencyId/leads/:leadId (parameterized route)
+// ============================================================================
+router.get('/:agencyId/leads/follow-up-queue', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const now = new Date();
+
+    // 1. Get all active leads (not won/lost)
+    const { data: leads, error: leadsError } = await supabase
+      .from('leads')
+      .select('id, business_name, contact_name, email, phone, status, estimated_value, industry')
+      .eq('agency_id', agencyId)
+      .not('status', 'in', '("won","lost")');
+
+    if (leadsError) {
+      console.error('Error fetching leads for follow-up queue:', leadsError);
+      return res.status(400).json({ error: leadsError.message });
+    }
+
+    if (!leads || leads.length === 0) {
+      return res.json({ queue: [], summary: { overdue: 0, due_today: 0, upcoming: 0, total: 0 } });
+    }
+
+    // 2. Get all outreach history for these leads
+    const leadIds = leads.map(l => l.id);
+    const { data: allHistory, error: historyError } = await supabase
+      .from('outreach_history')
+      .select('lead_id, type, sent_at, template_id')
+      .eq('agency_id', agencyId)
+      .in('lead_id', leadIds)
+      .order('sent_at', { ascending: true });
+
+    if (historyError) {
+      console.error('Error fetching outreach history:', historyError);
+      return res.status(400).json({ error: historyError.message });
+    }
+
+    // 3. Get all sequence templates for this agency
+    const { data: templates, error: templatesError } = await supabase
+      .from('outreach_templates')
+      .select('id, name, type, sequence_name, sequence_order, delay_days, is_follow_up')
+      .eq('agency_id', agencyId)
+      .not('sequence_order', 'is', null)
+      .order('type', { ascending: true })
+      .order('sequence_order', { ascending: true });
+
+    if (templatesError) {
+      console.error('Error fetching templates:', templatesError);
+      return res.status(400).json({ error: templatesError.message });
+    }
+
+    if (!templates || templates.length === 0) {
+      return res.json({ queue: [], summary: { overdue: 0, due_today: 0, upcoming: 0, total: 0 } });
+    }
+
+    // Group templates by type
+    const emailTemplates = templates.filter(t => t.type === 'email').sort((a, b) => a.sequence_order - b.sequence_order);
+    const smsTemplates = templates.filter(t => t.type === 'sms').sort((a, b) => a.sequence_order - b.sequence_order);
+
+    // Group history by lead
+    const historyByLead = {};
+    (allHistory || []).forEach(h => {
+      if (!historyByLead[h.lead_id]) historyByLead[h.lead_id] = [];
+      historyByLead[h.lead_id].push(h);
+    });
+
+    // 4. For each lead, calculate follow-up status
+    const queue = [];
+
+    for (const lead of leads) {
+      const history = historyByLead[lead.id] || [];
+      const emailHistory = history.filter(h => h.type === 'email');
+      const smsHistory = history.filter(h => h.type === 'sms');
+
+      // Check email and SMS sequences
+      const emailResult = calculateNextStep(emailHistory, emailTemplates, now);
+      const smsResult = calculateNextStep(smsHistory, smsTemplates, now);
+
+      const results = [emailResult, smsResult].filter(Boolean);
+      if (results.length === 0) continue;
+
+      // Use the most urgent result
+      const mostUrgent = results.sort((a, b) => {
+        const urgencyOrder = { overdue: 0, due_today: 1, upcoming: 2 };
+        const diff = (urgencyOrder[a.urgency] ?? 3) - (urgencyOrder[b.urgency] ?? 3);
+        if (diff !== 0) return diff;
+        return new Date(a.due_date).getTime() - new Date(b.due_date).getTime();
+      })[0];
+
+      queue.push({
+        lead_id: lead.id,
+        business_name: lead.business_name,
+        contact_name: lead.contact_name,
+        email: lead.email,
+        phone: lead.phone,
+        status: lead.status,
+        estimated_value: lead.estimated_value,
+        industry: lead.industry,
+        next_type: mostUrgent.type,
+        next_template_name: mostUrgent.template_name,
+        next_sequence_order: mostUrgent.sequence_order,
+        due_date: mostUrgent.due_date,
+        urgency: mostUrgent.urgency,
+        days_overdue: mostUrgent.days_overdue,
+        last_outreach_at: mostUrgent.last_sent_at,
+        last_outreach_type: mostUrgent.last_type,
+        pending_steps: results,
+      });
+    }
+
+    // Sort: overdue first, then due_today, then upcoming
+    queue.sort((a, b) => {
+      const urgencyOrder = { overdue: 0, due_today: 1, upcoming: 2 };
+      const diff = (urgencyOrder[a.urgency] ?? 3) - (urgencyOrder[b.urgency] ?? 3);
+      if (diff !== 0) return diff;
+      return new Date(a.due_date).getTime() - new Date(b.due_date).getTime();
+    });
+
+    const summary = {
+      overdue: queue.filter(q => q.urgency === 'overdue').length,
+      due_today: queue.filter(q => q.urgency === 'due_today').length,
+      upcoming: queue.filter(q => q.urgency === 'upcoming').length,
+      total: queue.length,
+    };
+
+    res.json({ queue, summary });
+  } catch (error) {
+    console.error('Error fetching follow-up queue:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
