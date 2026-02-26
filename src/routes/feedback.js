@@ -5,7 +5,14 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
-const { sendPlatformNotificationSMS } = require('../notifications');
+
+let sendPlatformNotificationSMS;
+try {
+  ({ sendPlatformNotificationSMS } = require('../notifications'));
+} catch (err) {
+  console.warn('⚠️ notifications module not found — feedback SMS disabled');
+  sendPlatformNotificationSMS = async () => {};
+}
 
 // POST /api/agency/:agencyId/feedback
 router.post('/:agencyId/feedback', async (req, res) => {
