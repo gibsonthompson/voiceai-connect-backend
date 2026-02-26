@@ -534,65 +534,36 @@ router.post('/agencies/:agencyId/impersonate', requireAdmin, async (req, res) =>
 });
 
 // ============================================================================
-// ADMIN LEADS ROUTES - Platform-level lead management
+// ADMIN LEADS ROUTES — Platform-level sales pipeline
+// These are YOUR leads (prospective agencies to sell to).
+// Stored with agency_id = NULL to keep them separate from agency CRM leads.
 // ============================================================================
 
 // ============================================================================
-// GET /api/admin/leads - List leads across all agencies (or for a specific one)
+// GET /api/admin/leads - List platform leads (agency_id IS NULL)
 // ============================================================================
 router.get('/leads', requireAdmin, async (req, res) => {
   try {
-    const { agency_id, status, source, search, limit = 50, offset = 0 } = req.query;
+    const { status, source, search, limit = 200, offset = 0 } = req.query;
 
     let query = supabase
       .from('leads')
-      .select(`
-        *,
-        agencies (id, name, slug)
-      `, { count: 'exact' })
+      .select('*', { count: 'exact' })
+      .is('agency_id', null)
       .order('created_at', { ascending: false })
       .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
 
-    if (agency_id) query = query.eq('agency_id', agency_id);
     if (status) query = query.eq('status', status);
     if (source) query = query.eq('source', source);
     if (search) {
-      query = query.or(`business_name.ilike.%${search}%,contact_name.ilike.%${search}%,email.ilike.%${search}%`);
+      query = query.or(`business_name.ilike.%${search}%,contact_name.ilike.%${search}%,email.ilike.%${search}%,industry.ilike.%${search}%`);
     }
 
     const { data: leads, error, count } = await query;
 
     if (error) throw error;
 
-    // Get outreach counts
-    const leadIds = (leads || []).map(l => l.id);
-    let outreachCounts = {};
-
-    if (leadIds.length > 0) {
-      const { data: outreachData } = await supabase
-        .from('outreach_history')
-        .select('lead_id, type, sent_at')
-        .in('lead_id', leadIds);
-
-      (outreachData || []).forEach(o => {
-        if (!outreachCounts[o.lead_id]) {
-          outreachCounts[o.lead_id] = { email_count: 0, sms_count: 0, last_contacted: null };
-        }
-        if (o.type === 'email') outreachCounts[o.lead_id].email_count++;
-        if (o.type === 'sms') outreachCounts[o.lead_id].sms_count++;
-        if (!outreachCounts[o.lead_id].last_contacted ||
-            new Date(o.sent_at) > new Date(outreachCounts[o.lead_id].last_contacted)) {
-          outreachCounts[o.lead_id].last_contacted = o.sent_at;
-        }
-      });
-    }
-
-    const leadsWithOutreach = (leads || []).map(lead => ({
-      ...lead,
-      outreach: outreachCounts[lead.id] || { email_count: 0, sms_count: 0, last_contacted: null }
-    }));
-
-    res.json({ leads: leadsWithOutreach, total: count || leadsWithOutreach.length });
+    res.json({ leads: leads || [], total: count || (leads || []).length });
   } catch (error) {
     console.error('Admin leads error:', error);
     res.status(500).json({ error: 'Failed to load leads' });
@@ -600,28 +571,29 @@ router.get('/leads', requireAdmin, async (req, res) => {
 });
 
 // ============================================================================
-// POST /api/admin/leads - Create single lead at admin level
+// POST /api/admin/leads - Create a platform lead (no agency)
 // ============================================================================
 router.post('/leads', requireAdmin, async (req, res) => {
   try {
-    const { agencyId, business_name, contact_name, email, phone, website, industry, source, notes, estimated_value } = req.body;
+    const { business_name, contact_name, email, phone, website, industry, source, notes, estimated_value } = req.body;
 
-    if (!agencyId) return res.status(400).json({ error: 'agencyId is required' });
-    if (!business_name) return res.status(400).json({ error: 'Business name is required' });
+    if (!business_name && !contact_name) {
+      return res.status(400).json({ error: 'Business name or contact name is required' });
+    }
 
     const { data: lead, error } = await supabase
       .from('leads')
       .insert({
-        agency_id: agencyId,
-        business_name,
-        contact_name,
-        email,
-        phone,
-        website,
-        industry,
+        agency_id: null,
+        business_name: business_name || null,
+        contact_name: contact_name || null,
+        email: email ? email.toLowerCase().trim() : null,
+        phone: phone || null,
+        website: website || null,
+        industry: industry || null,
         source: source || 'other',
         status: 'new',
-        notes,
+        notes: notes || null,
         estimated_value: estimated_value ? parseInt(estimated_value) : null,
       })
       .select()
@@ -629,7 +601,7 @@ router.post('/leads', requireAdmin, async (req, res) => {
 
     if (error) return res.status(400).json({ error: error.message });
 
-    console.log(`✅ Admin created lead: ${business_name} for agency ${agencyId}`);
+    console.log(`✅ Admin created platform lead: ${business_name || contact_name}`);
     res.status(201).json({ success: true, lead });
   } catch (error) {
     console.error('Admin create lead error:', error);
@@ -638,16 +610,55 @@ router.post('/leads', requireAdmin, async (req, res) => {
 });
 
 // ============================================================================
-// POST /api/admin/leads/import - Bulk CSV import at admin level
-// Requires agencyId in body to specify which agency
+// PUT /api/admin/leads/:leadId - Update a platform lead
+// ============================================================================
+router.put('/leads/:leadId', requireAdmin, async (req, res) => {
+  try {
+    const { leadId } = req.params;
+    const {
+      business_name, contact_name, email, phone, website,
+      industry, source, status, notes, estimated_value, next_follow_up
+    } = req.body;
+
+    const updates = {};
+    if (business_name !== undefined) updates.business_name = business_name;
+    if (contact_name !== undefined) updates.contact_name = contact_name;
+    if (email !== undefined) updates.email = email ? email.toLowerCase().trim() : null;
+    if (phone !== undefined) updates.phone = phone;
+    if (website !== undefined) updates.website = website;
+    if (industry !== undefined) updates.industry = industry;
+    if (source !== undefined) updates.source = source;
+    if (status !== undefined) updates.status = status;
+    if (notes !== undefined) updates.notes = notes;
+    if (estimated_value !== undefined) updates.estimated_value = estimated_value ? parseInt(estimated_value) : null;
+    if (next_follow_up !== undefined) updates.next_follow_up = next_follow_up || null;
+
+    const { data: lead, error } = await supabase
+      .from('leads')
+      .update(updates)
+      .eq('id', leadId)
+      .is('agency_id', null)
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+
+    console.log(`✅ Admin updated platform lead: ${lead.business_name}`);
+    res.json({ success: true, lead });
+  } catch (error) {
+    console.error('Admin update lead error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// POST /api/admin/leads/import - Bulk CSV import as platform leads
+// No agency needed — these are YOUR prospective agency leads
 // ============================================================================
 router.post('/leads/import', requireAdmin, async (req, res) => {
   try {
-    const { agencyId, leads: importLeads, columnMapping, defaultSource } = req.body;
-
-    if (!agencyId) {
-      return res.status(400).json({ error: 'agencyId is required for admin imports' });
-    }
+    const { leads: importLeads, columnMapping, defaultSource } = req.body;
 
     if (!importLeads || !Array.isArray(importLeads) || importLeads.length === 0) {
       return res.status(400).json({ error: 'No leads provided' });
@@ -655,17 +666,6 @@ router.post('/leads/import', requireAdmin, async (req, res) => {
 
     if (importLeads.length > 500) {
       return res.status(400).json({ error: 'Maximum 500 leads per import' });
-    }
-
-    // Verify agency exists
-    const { data: agency } = await supabase
-      .from('agencies')
-      .select('id, name')
-      .eq('id', agencyId)
-      .single();
-
-    if (!agency) {
-      return res.status(404).json({ error: 'Agency not found' });
     }
 
     // Map CSV rows to lead objects
@@ -709,7 +709,7 @@ router.post('/leads/import', requireAdmin, async (req, res) => {
       if (website && !website.startsWith('http')) website = 'https://' + website;
 
       leadsToInsert.push({
-        agency_id: agencyId,
+        agency_id: null,
         business_name: mapped.business_name || null,
         contact_name: mapped.contact_name || null,
         email: email ? email.toLowerCase() : null,
@@ -728,7 +728,7 @@ router.post('/leads/import', requireAdmin, async (req, res) => {
       return res.status(400).json({ error: 'No valid leads to import', errors });
     }
 
-    // Deduplicate by email
+    // Deduplicate by email within import
     const emailSet = new Set();
     const deduped = leadsToInsert.filter(lead => {
       if (!lead.email) return true;
@@ -737,14 +737,14 @@ router.post('/leads/import', requireAdmin, async (req, res) => {
       return true;
     });
 
-    // Check existing in DB
+    // Check existing platform leads by email (agency_id IS NULL)
     const emailsToCheck = deduped.map(l => l.email).filter(Boolean);
     let existingEmails = new Set();
     if (emailsToCheck.length > 0) {
       const { data: existing } = await supabase
         .from('leads')
         .select('email')
-        .eq('agency_id', agencyId)
+        .is('agency_id', null)
         .in('email', emailsToCheck);
       existingEmails = new Set((existing || []).map(e => e.email));
     }
@@ -774,14 +774,14 @@ router.post('/leads/import', requireAdmin, async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
 
-    console.log(`✅ Admin CSV Import: ${inserted.length} leads for agency ${agency.name} (${agencyId})`);
+    console.log(`✅ Admin CSV Import: ${inserted.length} platform leads`);
 
     res.status(201).json({
       success: true,
       imported: inserted.length,
       duplicates: errors.filter(e => e.error.includes('Already exists')).length,
       errors: errors.length > 0 ? errors : [],
-      message: `Imported ${inserted.length} leads into ${agency.name}`
+      message: `Imported ${inserted.length} lead${inserted.length !== 1 ? 's' : ''}`
     });
   } catch (error) {
     console.error('Error admin importing leads:', error);
@@ -790,7 +790,7 @@ router.post('/leads/import', requireAdmin, async (req, res) => {
 });
 
 // ============================================================================
-// DELETE /api/admin/leads/:leadId - Delete a lead at admin level
+// DELETE /api/admin/leads/:leadId - Delete a platform lead
 // ============================================================================
 router.delete('/leads/:leadId', requireAdmin, async (req, res) => {
   try {
@@ -799,11 +799,12 @@ router.delete('/leads/:leadId', requireAdmin, async (req, res) => {
     const { error } = await supabase
       .from('leads')
       .delete()
-      .eq('id', leadId);
+      .eq('id', leadId)
+      .is('agency_id', null);
 
     if (error) return res.status(400).json({ error: error.message });
 
-    console.log(`✅ Admin deleted lead: ${leadId}`);
+    console.log(`✅ Admin deleted platform lead: ${leadId}`);
     res.json({ success: true });
   } catch (error) {
     console.error('Admin delete lead error:', error);
@@ -812,19 +813,15 @@ router.delete('/leads/:leadId', requireAdmin, async (req, res) => {
 });
 
 // ============================================================================
-// GET /api/admin/leads-stats - Lead stats across all agencies
+// GET /api/admin/leads-stats - Platform lead stats
 // ============================================================================
 router.get('/leads-stats', requireAdmin, async (req, res) => {
   try {
-    const { agency_id } = req.query;
-
-    let query = supabase
+    const { data: leads, error } = await supabase
       .from('leads')
-      .select('status, source, agency_id, created_at');
+      .select('status, source, estimated_value, created_at')
+      .is('agency_id', null);
 
-    if (agency_id) query = query.eq('agency_id', agency_id);
-
-    const { data: leads, error } = await query;
     if (error) throw error;
 
     const allLeads = leads || [];
@@ -845,6 +842,9 @@ router.get('/leads-stats', requireAdmin, async (req, res) => {
         acc[l.source || 'unknown'] = (acc[l.source || 'unknown'] || 0) + 1;
         return acc;
       }, {}),
+      totalValue: allLeads
+        .filter(l => !['won', 'lost'].includes(l.status))
+        .reduce((sum, l) => sum + (l.estimated_value || 0), 0),
       recentlyAdded: allLeads.filter(l => new Date(l.created_at) > weekAgo).length,
     };
 
