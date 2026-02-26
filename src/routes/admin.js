@@ -1,6 +1,7 @@
 // ============================================================================
 // PLATFORM ADMIN ROUTES
 // Only accessible by whitelisted platform owners
+// WITH LEADS MANAGEMENT + CSV IMPORT
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -28,7 +29,6 @@ function requireAdmin(req, res, next) {
     const token = authHeader.split(' ')[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    // Check if role is platform_admin (from PIN login)
     if (decoded.role !== 'platform_admin') {
       return res.status(403).json({ error: 'Not authorized as platform admin' });
     }
@@ -52,7 +52,6 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid PIN' });
     }
 
-    // Generate admin JWT
     const token = jwt.sign(
       { 
         id: 'platform-admin',
@@ -95,21 +94,18 @@ router.get('/verify', requireAdmin, (req, res) => {
 // ============================================================================
 router.get('/dashboard', requireAdmin, async (req, res) => {
   try {
-    // Get all agencies
     const { data: agencies, error: agencyError } = await supabase
       .from('agencies')
       .select('id, name, email, plan_type, subscription_status, status, created_at, trial_ends_at');
 
     if (agencyError) throw agencyError;
 
-    // Get all clients
     const { data: clients, error: clientError } = await supabase
       .from('clients')
       .select('id, agency_id, subscription_status, plan_type, calls_this_month, created_at');
 
     if (clientError) throw clientError;
 
-    // Get total calls this month
     const startOfMonth = new Date();
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
@@ -119,7 +115,6 @@ router.get('/dashboard', requireAdmin, async (req, res) => {
       .select('id', { count: 'exact', head: true })
       .gte('created_at', startOfMonth.toISOString());
 
-    // Calculate stats
     const totalAgencies = agencies?.length || 0;
     const activeAgencies = agencies?.filter(a => 
       a.subscription_status === 'active' || a.subscription_status === 'trialing'
@@ -133,11 +128,10 @@ router.get('/dashboard', requireAdmin, async (req, res) => {
       c.subscription_status === 'active' || c.subscription_status === 'trial'
     ).length || 0;
 
-    // Calculate platform MRR (what agencies pay us)
     const PLATFORM_PRICES = {
-      starter: 9900,      // $99
-      professional: 19900, // $199
-      enterprise: 49900    // $499
+      starter: 9900,
+      professional: 19900,
+      enterprise: 49900
     };
 
     let platformMRR = 0;
@@ -148,7 +142,6 @@ router.get('/dashboard', requireAdmin, async (req, res) => {
       }
     });
 
-    // Recent signups (last 7 days)
     const weekAgo = new Date();
     weekAgo.setDate(weekAgo.getDate() - 7);
 
@@ -174,7 +167,6 @@ router.get('/dashboard', requireAdmin, async (req, res) => {
         recentAgencies,
         recentClients,
       },
-      // Recent 5 agencies for quick view
       recentAgencyList: agencies
         ?.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
         .slice(0, 5) || [],
@@ -204,7 +196,6 @@ router.get('/agencies', requireAdmin, async (req, res) => {
       .order('created_at', { ascending: false })
       .range(offset, offset + limit - 1);
 
-    // Apply filters
     if (status) {
       query = query.eq('subscription_status', status);
     }
@@ -219,7 +210,6 @@ router.get('/agencies', requireAdmin, async (req, res) => {
 
     if (error) throw error;
 
-    // Get client counts for each agency
     const agencyIds = agencies?.map(a => a.id) || [];
     
     let clientCounts = {};
@@ -234,7 +224,6 @@ router.get('/agencies', requireAdmin, async (req, res) => {
       });
     }
 
-    // Attach client counts
     const agenciesWithCounts = agencies?.map(a => ({
       ...a,
       client_count: clientCounts[a.id] || 0
@@ -270,7 +259,6 @@ router.get('/agencies/:agencyId', requireAdmin, async (req, res) => {
       return res.status(404).json({ error: 'Agency not found' });
     }
 
-    // Get agency's clients
     const { data: clients } = await supabase
       .from('clients')
       .select('id, business_name, email, subscription_status, plan_type, calls_this_month, created_at')
@@ -306,7 +294,6 @@ router.get('/clients', requireAdmin, async (req, res) => {
       .order('created_at', { ascending: false })
       .range(offset, offset + limit - 1);
 
-    // Apply filters
     if (status) {
       query = query.eq('subscription_status', status);
     }
@@ -354,7 +341,6 @@ router.get('/clients/:clientId', requireAdmin, async (req, res) => {
       return res.status(404).json({ error: 'Client not found' });
     }
 
-    // Get recent calls
     const { data: calls } = await supabase
       .from('calls')
       .select('*')
@@ -449,7 +435,6 @@ router.post('/agencies/:agencyId/impersonate', requireAdmin, async (req, res) =>
       return res.status(404).json({ error: 'Agency not found' });
     }
 
-    // Generate a token for this agency
     const token = jwt.sign(
       { 
         id: agency.id,
@@ -478,6 +463,328 @@ router.post('/agencies/:agencyId/impersonate', requireAdmin, async (req, res) =>
   } catch (error) {
     console.error('Admin impersonate error:', error);
     res.status(500).json({ error: 'Failed to impersonate' });
+  }
+});
+
+// ============================================================================
+// ADMIN LEADS ROUTES - Platform-level lead management
+// ============================================================================
+
+// ============================================================================
+// GET /api/admin/leads - List leads across all agencies (or for a specific one)
+// ============================================================================
+router.get('/leads', requireAdmin, async (req, res) => {
+  try {
+    const { agency_id, status, source, search, limit = 50, offset = 0 } = req.query;
+
+    let query = supabase
+      .from('leads')
+      .select(`
+        *,
+        agencies (id, name, slug)
+      `, { count: 'exact' })
+      .order('created_at', { ascending: false })
+      .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
+
+    if (agency_id) query = query.eq('agency_id', agency_id);
+    if (status) query = query.eq('status', status);
+    if (source) query = query.eq('source', source);
+    if (search) {
+      query = query.or(`business_name.ilike.%${search}%,contact_name.ilike.%${search}%,email.ilike.%${search}%`);
+    }
+
+    const { data: leads, error, count } = await query;
+
+    if (error) throw error;
+
+    // Get outreach counts
+    const leadIds = (leads || []).map(l => l.id);
+    let outreachCounts = {};
+
+    if (leadIds.length > 0) {
+      const { data: outreachData } = await supabase
+        .from('outreach_history')
+        .select('lead_id, type, sent_at')
+        .in('lead_id', leadIds);
+
+      (outreachData || []).forEach(o => {
+        if (!outreachCounts[o.lead_id]) {
+          outreachCounts[o.lead_id] = { email_count: 0, sms_count: 0, last_contacted: null };
+        }
+        if (o.type === 'email') outreachCounts[o.lead_id].email_count++;
+        if (o.type === 'sms') outreachCounts[o.lead_id].sms_count++;
+        if (!outreachCounts[o.lead_id].last_contacted ||
+            new Date(o.sent_at) > new Date(outreachCounts[o.lead_id].last_contacted)) {
+          outreachCounts[o.lead_id].last_contacted = o.sent_at;
+        }
+      });
+    }
+
+    const leadsWithOutreach = (leads || []).map(lead => ({
+      ...lead,
+      outreach: outreachCounts[lead.id] || { email_count: 0, sms_count: 0, last_contacted: null }
+    }));
+
+    res.json({ leads: leadsWithOutreach, total: count || leadsWithOutreach.length });
+  } catch (error) {
+    console.error('Admin leads error:', error);
+    res.status(500).json({ error: 'Failed to load leads' });
+  }
+});
+
+// ============================================================================
+// POST /api/admin/leads - Create single lead at admin level
+// ============================================================================
+router.post('/leads', requireAdmin, async (req, res) => {
+  try {
+    const { agencyId, business_name, contact_name, email, phone, website, industry, source, notes, estimated_value } = req.body;
+
+    if (!agencyId) return res.status(400).json({ error: 'agencyId is required' });
+    if (!business_name) return res.status(400).json({ error: 'Business name is required' });
+
+    const { data: lead, error } = await supabase
+      .from('leads')
+      .insert({
+        agency_id: agencyId,
+        business_name,
+        contact_name,
+        email,
+        phone,
+        website,
+        industry,
+        source: source || 'other',
+        status: 'new',
+        notes,
+        estimated_value: estimated_value ? parseInt(estimated_value) : null,
+      })
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    console.log(`✅ Admin created lead: ${business_name} for agency ${agencyId}`);
+    res.status(201).json({ success: true, lead });
+  } catch (error) {
+    console.error('Admin create lead error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// POST /api/admin/leads/import - Bulk CSV import at admin level
+// Requires agencyId in body to specify which agency
+// ============================================================================
+router.post('/leads/import', requireAdmin, async (req, res) => {
+  try {
+    const { agencyId, leads: importLeads, columnMapping, defaultSource } = req.body;
+
+    if (!agencyId) {
+      return res.status(400).json({ error: 'agencyId is required for admin imports' });
+    }
+
+    if (!importLeads || !Array.isArray(importLeads) || importLeads.length === 0) {
+      return res.status(400).json({ error: 'No leads provided' });
+    }
+
+    if (importLeads.length > 500) {
+      return res.status(400).json({ error: 'Maximum 500 leads per import' });
+    }
+
+    // Verify agency exists
+    const { data: agency } = await supabase
+      .from('agencies')
+      .select('id, name')
+      .eq('id', agencyId)
+      .single();
+
+    if (!agency) {
+      return res.status(404).json({ error: 'Agency not found' });
+    }
+
+    // Map CSV rows to lead objects
+    const leadsToInsert = [];
+    const errors = [];
+
+    importLeads.forEach((row, index) => {
+      const mapped = {};
+      for (const [dbField, csvColumn] of Object.entries(columnMapping)) {
+        if (csvColumn && row[csvColumn] !== undefined && row[csvColumn] !== null) {
+          mapped[dbField] = String(row[csvColumn]).trim();
+        }
+      }
+
+      if (!mapped.business_name && !mapped.contact_name) {
+        errors.push({ row: index + 1, error: 'Missing business name and contact name' });
+        return;
+      }
+
+      let estimatedValue = null;
+      if (mapped.estimated_value) {
+        const cleaned = mapped.estimated_value.replace(/[$,\s]/g, '');
+        const parsed = parseFloat(cleaned);
+        if (!isNaN(parsed)) {
+          estimatedValue = parsed < 1000 ? Math.round(parsed * 100) : Math.round(parsed);
+        }
+      }
+
+      let phone = mapped.phone || null;
+      if (phone) {
+        phone = phone.replace(/[^\d+]/g, '');
+        if (phone.length > 0 && !phone.startsWith('+') && phone.length === 10) {
+          phone = '+1' + phone;
+        }
+      }
+
+      let email = mapped.email || null;
+      if (email && !email.includes('@')) email = null;
+
+      let website = mapped.website || null;
+      if (website && !website.startsWith('http')) website = 'https://' + website;
+
+      leadsToInsert.push({
+        agency_id: agencyId,
+        business_name: mapped.business_name || null,
+        contact_name: mapped.contact_name || null,
+        email: email ? email.toLowerCase() : null,
+        phone,
+        website,
+        industry: mapped.industry || null,
+        source: defaultSource || 'csv_import',
+        status: 'new',
+        notes: mapped.notes || null,
+        estimated_value: estimatedValue,
+        company_size: mapped.company_size || null,
+      });
+    });
+
+    if (leadsToInsert.length === 0) {
+      return res.status(400).json({ error: 'No valid leads to import', errors });
+    }
+
+    // Deduplicate by email
+    const emailSet = new Set();
+    const deduped = leadsToInsert.filter(lead => {
+      if (!lead.email) return true;
+      if (emailSet.has(lead.email)) return false;
+      emailSet.add(lead.email);
+      return true;
+    });
+
+    // Check existing in DB
+    const emailsToCheck = deduped.map(l => l.email).filter(Boolean);
+    let existingEmails = new Set();
+    if (emailsToCheck.length > 0) {
+      const { data: existing } = await supabase
+        .from('leads')
+        .select('email')
+        .eq('agency_id', agencyId)
+        .in('email', emailsToCheck);
+      existingEmails = new Set((existing || []).map(e => e.email));
+    }
+
+    const newLeads = deduped.filter(lead => {
+      if (lead.email && existingEmails.has(lead.email)) {
+        errors.push({ row: deduped.indexOf(lead) + 1, error: `Already exists: ${lead.email}` });
+        return false;
+      }
+      return true;
+    });
+
+    if (newLeads.length === 0) {
+      return res.status(200).json({
+        success: true, imported: 0, duplicates: errors.length, errors,
+        message: 'All leads already exist'
+      });
+    }
+
+    const { data: inserted, error } = await supabase
+      .from('leads')
+      .insert(newLeads)
+      .select();
+
+    if (error) {
+      console.error('Error bulk inserting leads:', error);
+      return res.status(400).json({ error: error.message });
+    }
+
+    console.log(`✅ Admin CSV Import: ${inserted.length} leads for agency ${agency.name} (${agencyId})`);
+
+    res.status(201).json({
+      success: true,
+      imported: inserted.length,
+      duplicates: errors.filter(e => e.error.includes('Already exists')).length,
+      errors: errors.length > 0 ? errors : [],
+      message: `Imported ${inserted.length} leads into ${agency.name}`
+    });
+  } catch (error) {
+    console.error('Error admin importing leads:', error);
+    res.status(500).json({ error: 'Server error during import' });
+  }
+});
+
+// ============================================================================
+// DELETE /api/admin/leads/:leadId - Delete a lead at admin level
+// ============================================================================
+router.delete('/leads/:leadId', requireAdmin, async (req, res) => {
+  try {
+    const { leadId } = req.params;
+
+    const { error } = await supabase
+      .from('leads')
+      .delete()
+      .eq('id', leadId);
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    console.log(`✅ Admin deleted lead: ${leadId}`);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Admin delete lead error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// GET /api/admin/leads-stats - Lead stats across all agencies
+// ============================================================================
+router.get('/leads-stats', requireAdmin, async (req, res) => {
+  try {
+    const { agency_id } = req.query;
+
+    let query = supabase
+      .from('leads')
+      .select('status, source, agency_id, created_at');
+
+    if (agency_id) query = query.eq('agency_id', agency_id);
+
+    const { data: leads, error } = await query;
+    if (error) throw error;
+
+    const allLeads = leads || [];
+    const weekAgo = new Date();
+    weekAgo.setDate(weekAgo.getDate() - 7);
+
+    const stats = {
+      total: allLeads.length,
+      byStatus: {
+        new: allLeads.filter(l => l.status === 'new').length,
+        contacted: allLeads.filter(l => l.status === 'contacted').length,
+        qualified: allLeads.filter(l => l.status === 'qualified').length,
+        proposal: allLeads.filter(l => l.status === 'proposal').length,
+        won: allLeads.filter(l => l.status === 'won').length,
+        lost: allLeads.filter(l => l.status === 'lost').length,
+      },
+      bySource: allLeads.reduce((acc, l) => {
+        acc[l.source || 'unknown'] = (acc[l.source || 'unknown'] || 0) + 1;
+        return acc;
+      }, {}),
+      recentlyAdded: allLeads.filter(l => new Date(l.created_at) > weekAgo).length,
+    };
+
+    res.json({ stats });
+  } catch (error) {
+    console.error('Admin leads stats error:', error);
+    res.status(500).json({ error: 'Failed to load stats' });
   }
 });
 

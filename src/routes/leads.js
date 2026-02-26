@@ -1,7 +1,7 @@
 // ============================================================================
 // LEADS ROUTES - Agency Lead Management (Mini CRM)
 // VoiceAI Connect Multi-Tenant
-// WITH ACTIVITY LOGGING AND OUTREACH TRACKING
+// WITH ACTIVITY LOGGING, OUTREACH TRACKING, AND CSV IMPORT
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -23,6 +23,7 @@ const LEAD_STATUSES = [
 const LEAD_SOURCES = [
   { value: 'referral', label: 'Referral' },
   { value: 'cold_outreach', label: 'Cold Outreach' },
+  { value: 'csv_import', label: 'CSV Import' },
   { value: 'website', label: 'Website' },
   { value: 'social_media', label: 'Social Media' },
   { value: 'event', label: 'Event/Trade Show' },
@@ -56,10 +57,8 @@ async function getLeadOutreachStats(agencyId, leadId) {
       last_email: emails.length > 0 ? emails[emails.length - 1] : null,
       last_sms: sms.length > 0 ? sms[sms.length - 1] : null,
       last_outreach: history && history.length > 0 ? history[history.length - 1] : null,
-      // Next suggested outreach numbers
       next_email_number: emails.length + 1,
       next_sms_number: sms.length + 1,
-      // Full history for timeline
       history: history || []
     };
   } catch (err) {
@@ -81,7 +80,6 @@ router.get('/:agencyId/leads', async (req, res) => {
       .select('*')
       .eq('agency_id', agencyId);
 
-    // Apply filters
     if (status) {
       query = query.eq('status', status);
     }
@@ -92,7 +90,6 @@ router.get('/:agencyId/leads', async (req, res) => {
       query = query.or(`business_name.ilike.%${search}%,contact_name.ilike.%${search}%,email.ilike.%${search}%`);
     }
 
-    // Apply sorting
     query = query.order(sort, { ascending: order === 'asc' });
 
     const { data: leads, error } = await query;
@@ -102,7 +99,6 @@ router.get('/:agencyId/leads', async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
 
-    // Get outreach counts for all leads in one query
     const leadIds = (leads || []).map(l => l.id);
     let outreachCounts = {};
     
@@ -113,7 +109,6 @@ router.get('/:agencyId/leads', async (req, res) => {
         .eq('agency_id', agencyId)
         .in('lead_id', leadIds);
 
-      // Aggregate counts per lead
       (outreachData || []).forEach(o => {
         if (!outreachCounts[o.lead_id]) {
           outreachCounts[o.lead_id] = { 
@@ -125,7 +120,6 @@ router.get('/:agencyId/leads', async (req, res) => {
         if (o.type === 'email') outreachCounts[o.lead_id].email_count++;
         if (o.type === 'sms') outreachCounts[o.lead_id].sms_count++;
         
-        // Track most recent outreach
         if (!outreachCounts[o.lead_id].last_contacted || 
             new Date(o.sent_at) > new Date(outreachCounts[o.lead_id].last_contacted)) {
           outreachCounts[o.lead_id].last_contacted = o.sent_at;
@@ -133,13 +127,11 @@ router.get('/:agencyId/leads', async (req, res) => {
       });
     }
 
-    // Attach outreach counts to leads
     const leadsWithOutreach = (leads || []).map(lead => ({
       ...lead,
       outreach: outreachCounts[lead.id] || { email_count: 0, sms_count: 0, last_contacted: null }
     }));
 
-    // Calculate stats
     const allLeads = leadsWithOutreach;
     const stats = {
       total: allLeads.length,
@@ -190,7 +182,7 @@ router.post('/:agencyId/leads', async (req, res) => {
       notes,
       estimated_value,
       next_follow_up,
-      userId  // For activity logging
+      userId
     } = req.body;
 
     if (!business_name) {
@@ -221,7 +213,6 @@ router.post('/:agencyId/leads', async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
 
-    // Log activity
     await logActivity(
       agencyId,
       'lead',
@@ -235,7 +226,6 @@ router.post('/:agencyId/leads', async (req, res) => {
       userId
     );
 
-    // Log initial note if provided
     if (notes) {
       await logActivity(
         agencyId,
@@ -252,6 +242,190 @@ router.post('/:agencyId/leads', async (req, res) => {
   } catch (error) {
     console.error('Error creating lead:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// POST /api/agency/:agencyId/leads/import - Bulk import leads from CSV
+// ⚠️  MUST be before /:agencyId/leads/:leadId or Express treats "import" as :leadId
+// ============================================================================
+router.post('/:agencyId/leads/import', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const { leads: importLeads, columnMapping, defaultSource, userId } = req.body;
+
+    if (!importLeads || !Array.isArray(importLeads) || importLeads.length === 0) {
+      return res.status(400).json({ error: 'No leads provided' });
+    }
+
+    if (importLeads.length > 500) {
+      return res.status(400).json({ error: 'Maximum 500 leads per import. Please split your file.' });
+    }
+
+    // Map CSV rows to lead objects using the column mapping
+    const leadsToInsert = [];
+    const errors = [];
+
+    importLeads.forEach((row, index) => {
+      const mapped = {};
+      for (const [dbField, csvColumn] of Object.entries(columnMapping)) {
+        if (csvColumn && row[csvColumn] !== undefined && row[csvColumn] !== null) {
+          mapped[dbField] = String(row[csvColumn]).trim();
+        }
+      }
+
+      // Require at least business_name or contact_name
+      if (!mapped.business_name && !mapped.contact_name) {
+        errors.push({ row: index + 1, error: 'Missing business name and contact name' });
+        return;
+      }
+
+      // Clean estimated_value (handle $, commas)
+      let estimatedValue = null;
+      if (mapped.estimated_value) {
+        const cleaned = mapped.estimated_value.replace(/[$,\s]/g, '');
+        const parsed = parseFloat(cleaned);
+        if (!isNaN(parsed)) {
+          estimatedValue = parsed < 1000 ? Math.round(parsed * 100) : Math.round(parsed);
+        }
+      }
+
+      // Clean phone
+      let phone = mapped.phone || null;
+      if (phone) {
+        phone = phone.replace(/[^\d+]/g, '');
+        if (phone.length > 0 && !phone.startsWith('+') && phone.length === 10) {
+          phone = '+1' + phone;
+        }
+      }
+
+      // Clean email
+      let email = mapped.email || null;
+      if (email && !email.includes('@')) {
+        email = null;
+      }
+
+      // Clean website
+      let website = mapped.website || null;
+      if (website && !website.startsWith('http')) {
+        website = 'https://' + website;
+      }
+
+      leadsToInsert.push({
+        agency_id: agencyId,
+        business_name: mapped.business_name || null,
+        contact_name: mapped.contact_name || null,
+        email: email ? email.toLowerCase() : null,
+        phone,
+        website,
+        industry: mapped.industry || null,
+        source: defaultSource || 'csv_import',
+        status: 'new',
+        notes: mapped.notes || null,
+        estimated_value: estimatedValue,
+        company_size: mapped.company_size || null,
+      });
+    });
+
+    if (leadsToInsert.length === 0) {
+      return res.status(400).json({ 
+        error: 'No valid leads to import', 
+        errors 
+      });
+    }
+
+    // Deduplicate emails within this import
+    const emailSet = new Set();
+    const deduped = leadsToInsert.filter(lead => {
+      if (!lead.email) return true;
+      if (emailSet.has(lead.email)) {
+        errors.push({ 
+          row: leadsToInsert.indexOf(lead) + 1, 
+          error: `Duplicate email in file: ${lead.email}` 
+        });
+        return false;
+      }
+      emailSet.add(lead.email);
+      return true;
+    });
+
+    // Check for existing leads by email in this agency
+    const emailsToCheck = deduped
+      .map(l => l.email)
+      .filter(Boolean);
+
+    let existingEmails = new Set();
+    if (emailsToCheck.length > 0) {
+      const { data: existing } = await supabase
+        .from('leads')
+        .select('email')
+        .eq('agency_id', agencyId)
+        .in('email', emailsToCheck);
+
+      existingEmails = new Set((existing || []).map(e => e.email));
+    }
+
+    const newLeads = deduped.filter(lead => {
+      if (lead.email && existingEmails.has(lead.email)) {
+        errors.push({ 
+          row: deduped.indexOf(lead) + 1, 
+          error: `Already exists: ${lead.email}` 
+        });
+        return false;
+      }
+      return true;
+    });
+
+    if (newLeads.length === 0) {
+      return res.status(200).json({
+        success: true,
+        imported: 0,
+        duplicates: errors.filter(e => e.error.includes('Already exists')).length,
+        errors,
+        message: 'All leads already exist in your CRM'
+      });
+    }
+
+    // Bulk insert
+    const { data: inserted, error } = await supabase
+      .from('leads')
+      .insert(newLeads)
+      .select();
+
+    if (error) {
+      console.error('Error bulk inserting leads:', error);
+      return res.status(400).json({ error: error.message });
+    }
+
+    // Log single activity for the import
+    await logActivity(
+      agencyId,
+      'lead',
+      inserted[0]?.id || 'bulk-import',
+      ACTION_TYPES.CREATED,
+      {
+        type: 'csv_import',
+        count: inserted.length,
+        source: defaultSource || 'csv_import',
+        duplicates_skipped: errors.filter(e => e.error.includes('Already exists')).length,
+      },
+      userId
+    );
+
+    console.log(`✅ CSV Import: ${inserted.length} leads imported for agency ${agencyId}`);
+
+    res.status(201).json({
+      success: true,
+      imported: inserted.length,
+      duplicates: errors.filter(e => e.error.includes('Already exists')).length,
+      errors: errors.length > 0 ? errors : [],
+      leads: inserted,
+      message: `Successfully imported ${inserted.length} lead${inserted.length !== 1 ? 's' : ''}`
+    });
+
+  } catch (error) {
+    console.error('Error importing leads:', error);
+    res.status(500).json({ error: 'Server error during import' });
   }
 });
 
@@ -273,7 +447,6 @@ router.get('/:agencyId/leads/:leadId', async (req, res) => {
       return res.status(404).json({ error: 'Lead not found' });
     }
 
-    // Get outreach stats for this lead
     const outreachStats = await getLeadOutreachStats(agencyId, leadId);
 
     res.json({ 
@@ -306,10 +479,9 @@ router.put('/:agencyId/leads/:leadId', async (req, res) => {
       notes,
       estimated_value,
       next_follow_up,
-      userId  // For activity logging
+      userId
     } = req.body;
 
-    // Get current lead for comparison
     const { data: currentLead } = await supabase
       .from('leads')
       .select('*')
@@ -321,7 +493,6 @@ router.put('/:agencyId/leads/:leadId', async (req, res) => {
       return res.status(404).json({ error: 'Lead not found' });
     }
 
-    // Build update object with only provided fields
     const updates = {};
     if (business_name !== undefined) updates.business_name = business_name;
     if (contact_name !== undefined) updates.contact_name = contact_name;
@@ -352,22 +523,17 @@ router.put('/:agencyId/leads/:leadId', async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
 
-    // Log status change if changed
     if (status !== undefined && status !== currentLead.status) {
       await logActivity(
         agencyId,
         'lead',
         leadId,
         ACTION_TYPES.STATUS_CHANGE,
-        { 
-          from: currentLead.status,
-          to: status
-        },
+        { from: currentLead.status, to: status },
         userId
       );
     }
 
-    // Log note change if changed
     if (notes !== undefined && notes !== currentLead.notes) {
       await logActivity(
         agencyId,
@@ -379,7 +545,6 @@ router.put('/:agencyId/leads/:leadId', async (req, res) => {
       );
     }
 
-    // Log follow-up change if changed
     if (next_follow_up !== undefined && next_follow_up !== currentLead.next_follow_up) {
       await logActivity(
         agencyId,
@@ -391,7 +556,6 @@ router.put('/:agencyId/leads/:leadId', async (req, res) => {
       );
     }
 
-    // Get updated outreach stats
     const outreachStats = await getLeadOutreachStats(agencyId, leadId);
 
     console.log(`✅ Lead updated: ${lead.business_name}`);
@@ -445,7 +609,6 @@ router.patch('/:agencyId/leads/:leadId/status', async (req, res) => {
       return res.status(400).json({ error: 'Invalid status' });
     }
 
-    // Get current status
     const { data: currentLead } = await supabase
       .from('leads')
       .select('status')
@@ -465,17 +628,13 @@ router.patch('/:agencyId/leads/:leadId/status', async (req, res) => {
       return res.status(404).json({ error: 'Lead not found' });
     }
 
-    // Log activity
     if (currentLead && currentLead.status !== status) {
       await logActivity(
         agencyId,
         'lead',
         leadId,
         ACTION_TYPES.STATUS_CHANGE,
-        { 
-          from: currentLead.status,
-          to: status
-        },
+        { from: currentLead.status, to: status },
         userId
       );
     }
@@ -489,7 +648,6 @@ router.patch('/:agencyId/leads/:leadId/status', async (req, res) => {
 
 // ============================================================================
 // POST /api/agency/:agencyId/leads/:leadId/log-call
-// Log a phone call activity
 // ============================================================================
 router.post('/:agencyId/leads/:leadId/log-call', async (req, res) => {
   try {
@@ -513,7 +671,7 @@ router.post('/:agencyId/leads/:leadId/log-call', async (req, res) => {
 });
 
 // ============================================================================
-// GET /api/agency/:agencyId/leads/:leadId/outreach - Get lead's outreach history
+// GET /api/agency/:agencyId/leads/:leadId/outreach
 // ============================================================================
 router.get('/:agencyId/leads/:leadId/outreach', async (req, res) => {
   try {
@@ -533,7 +691,7 @@ router.get('/:agencyId/leads/:leadId/outreach', async (req, res) => {
 });
 
 // ============================================================================
-// GET /api/agency/:agencyId/leads-stats - Get lead pipeline stats
+// GET /api/agency/:agencyId/leads-stats
 // ============================================================================
 router.get('/:agencyId/leads-stats', async (req, res) => {
   try {
