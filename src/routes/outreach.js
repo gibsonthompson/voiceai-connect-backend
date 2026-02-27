@@ -24,13 +24,18 @@ const TEMPLATE_VARIABLES = {
   agency: [
     { key: '{agency_name}', label: 'Agency Name', description: 'Your agency name' },
     { key: '{agency_owner_name}', label: 'Your Name', description: 'Agency owner name' },
+    { key: '{agency_caller_name}', label: 'Caller Name', description: 'Your name (for call scripts)' },
     { key: '{agency_email}', label: 'Agency Email', description: 'Your email address' },
     { key: '{agency_phone}', label: 'Agency Phone', description: 'Your phone number' },
     { key: '{agency_website}', label: 'Agency Website', description: 'Your website' },
     { key: '{signup_link}', label: 'Signup Link', description: 'Client signup URL' },
+    { key: '{agency_starter_price}', label: 'Starter Price', description: 'Starter plan monthly price' },
+    { key: '{agency_pro_price}', label: 'Pro Price', description: 'Pro plan monthly price' },
+    { key: '{agency_growth_price}', label: 'Growth Price', description: 'Growth plan monthly price' },
   ],
   dynamic: [
     { key: '{today_date}', label: 'Today\'s Date', description: 'Current date' },
+    { key: '{current_time}', label: 'Current Time', description: 'Current time' },
     { key: '{personalized_line}', label: 'AI Personalized Line', description: 'AI-generated opener based on their website' },
   ]
 };
@@ -394,6 +399,14 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
       ? `https://${agency.marketing_domain}/signup`
       : `https://${agency?.slug}.${platformDomain}/signup`;
 
+    const ownerFullName = owner ? `${owner.first_name} ${owner.last_name}`.trim() : '[Your Name]';
+
+    // Format prices from cents
+    const formatPrice = (cents) => {
+      if (!cents) return '[Price]';
+      return '$' + (cents / 100).toFixed(0);
+    };
+
     const replacements = {
       // Lead variables
       '{lead_business_name}': lead?.business_name || '[Business Name]',
@@ -407,11 +420,15 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
       
       // Agency variables
       '{agency_name}': agency?.name || '[Agency Name]',
-      '{agency_owner_name}': owner ? `${owner.first_name} ${owner.last_name}`.trim() : '[Your Name]',
+      '{agency_owner_name}': ownerFullName,
+      '{agency_caller_name}': ownerFullName,
       '{agency_email}': agency?.email || owner?.email || '[Email]',
       '{agency_phone}': agency?.phone || '[Phone]',
       '{agency_website}': agency?.marketing_domain || `${agency?.slug}.${platformDomain}`,
       '{signup_link}': signupLink,
+      '{agency_starter_price}': formatPrice(agency?.price_starter) + '/mo',
+      '{agency_pro_price}': formatPrice(agency?.price_pro) + '/mo',
+      '{agency_growth_price}': formatPrice(agency?.price_growth) + '/mo',
       
       // Dynamic variables
       '{today_date}': new Date().toLocaleDateString('en-US', { 
@@ -419,6 +436,16 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
         year: 'numeric', 
         month: 'long', 
         day: 'numeric' 
+      }),
+      '{current_date}': new Date().toLocaleDateString('en-US', { 
+        weekday: 'long', 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric' 
+      }),
+      '{current_time}': new Date().toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
       }),
       '{personalized_line}': '[Personalized line - generate with AI]',
     };
@@ -448,33 +475,38 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
 // ============================================================================
 // POST /api/agency/:agencyId/outreach/log
 // Log that an outreach was sent (copy-to-clipboard flow)
-// FIXED: Uses outreach_history table with correct column names
+// Supports email, sms, AND call types with call_outcome / call_notes
 // ============================================================================
 router.post('/:agencyId/outreach/log', async (req, res) => {
   try {
     const { agencyId } = req.params;
-    const { leadId, templateId, type, toAddress, toPhone, subject, body, userId } = req.body;
+    const {
+      leadId, templateId, type, toAddress, toPhone, subject, body, userId,
+      // Call-specific fields
+      call_outcome, call_notes, updateLeadStatus
+    } = req.body;
 
     if (!type || !body) {
       return res.status(400).json({ error: 'type and body are required' });
     }
 
-    // Log to outreach_history (NOT outreach_emails)
-    // Use correct column names: recipient_email, recipient_phone (NOT to_address)
+    // Build the outreach history record
+    const insertData = {
+      agency_id: agencyId,
+      lead_id: leadId || null,
+      template_id: templateId || null,
+      type,
+      recipient_email: toAddress || null,
+      recipient_phone: toPhone || null,
+      subject: subject || null,
+      body,
+      status: 'sent',
+      sent_at: new Date().toISOString()
+    };
+
     const { data: outreach, error } = await supabase
       .from('outreach_history')
-      .insert({
-        agency_id: agencyId,
-        lead_id: leadId || null,
-        template_id: templateId || null,
-        type,
-        recipient_email: toAddress || null,
-        recipient_phone: toPhone || null,
-        subject: subject || null,
-        body,
-        status: 'sent',
-        sent_at: new Date().toISOString()
-      })
+      .insert(insertData)
       .select()
       .single();
 
@@ -485,18 +517,65 @@ router.post('/:agencyId/outreach/log', async (req, res) => {
 
     // Log activity
     if (leadId) {
+      let actionType;
+      let activityMeta;
+
+      if (type === 'call') {
+        actionType = ACTION_TYPES.CALL_LOGGED;
+        activityMeta = {
+          call_outcome: call_outcome || null,
+          call_notes: call_notes || null,
+          subject,
+          outreach_id: outreach.id
+        };
+      } else {
+        actionType = type === 'email' ? ACTION_TYPES.EMAIL_SENT : ACTION_TYPES.SMS_SENT;
+        activityMeta = {
+          subject,
+          recipient: toAddress || toPhone,
+          outreach_id: outreach.id
+        };
+      }
+
       await logActivity(
         agencyId,
         'lead',
         leadId,
-        type === 'email' ? ACTION_TYPES.EMAIL_SENT : ACTION_TYPES.SMS_SENT,
-        { 
-          subject, 
-          recipient: toAddress || toPhone,
-          outreach_id: outreach.id 
-        },
+        actionType,
+        activityMeta,
         userId
       );
+
+      // Update lead status if requested (from call outcomes)
+      if (updateLeadStatus && leadId) {
+        const validStatuses = ['new', 'contacted', 'qualified', 'proposal', 'won', 'lost'];
+        if (validStatuses.includes(updateLeadStatus)) {
+          const { data: currentLead } = await supabase
+            .from('leads')
+            .select('status')
+            .eq('id', leadId)
+            .eq('agency_id', agencyId)
+            .single();
+
+          // Only update if status is actually changing
+          if (currentLead && currentLead.status !== updateLeadStatus) {
+            await supabase
+              .from('leads')
+              .update({ status: updateLeadStatus })
+              .eq('id', leadId)
+              .eq('agency_id', agencyId);
+
+            await logActivity(
+              agencyId,
+              'lead',
+              leadId,
+              ACTION_TYPES.STATUS_CHANGE,
+              { from: currentLead.status, to: updateLeadStatus, reason: `Call outcome: ${call_outcome}` },
+              userId
+            );
+          }
+        }
+      }
     }
 
     // Update template use count
@@ -525,7 +604,6 @@ router.post('/:agencyId/outreach/log', async (req, res) => {
 // ============================================================================
 // GET /api/agency/:agencyId/outreach/history
 // Get outreach history
-// FIXED: Uses outreach_history table (NOT outreach_emails)
 // ============================================================================
 router.get('/:agencyId/outreach/history', async (req, res) => {
   try {

@@ -49,13 +49,16 @@ async function getLeadOutreachStats(agencyId, leadId) {
 
     const emails = history?.filter(h => h.type === 'email') || [];
     const sms = history?.filter(h => h.type === 'sms') || [];
+    const calls = history?.filter(h => h.type === 'call') || [];
 
     return {
       email_count: emails.length,
       sms_count: sms.length,
+      call_count: calls.length,
       total_count: (history || []).length,
       last_email: emails.length > 0 ? emails[emails.length - 1] : null,
       last_sms: sms.length > 0 ? sms[sms.length - 1] : null,
+      last_call: calls.length > 0 ? calls[calls.length - 1] : null,
       last_outreach: history && history.length > 0 ? history[history.length - 1] : null,
       next_email_number: emails.length + 1,
       next_sms_number: sms.length + 1,
@@ -176,11 +179,13 @@ router.get('/:agencyId/leads', async (req, res) => {
           outreachCounts[o.lead_id] = { 
             email_count: 0, 
             sms_count: 0, 
+            call_count: 0,
             last_contacted: null 
           };
         }
         if (o.type === 'email') outreachCounts[o.lead_id].email_count++;
         if (o.type === 'sms') outreachCounts[o.lead_id].sms_count++;
+        if (o.type === 'call') outreachCounts[o.lead_id].call_count++;
         
         if (!outreachCounts[o.lead_id].last_contacted || 
             new Date(o.sent_at) > new Date(outreachCounts[o.lead_id].last_contacted)) {
@@ -191,7 +196,7 @@ router.get('/:agencyId/leads', async (req, res) => {
 
     const leadsWithOutreach = (leads || []).map(lead => ({
       ...lead,
-      outreach: outreachCounts[lead.id] || { email_count: 0, sms_count: 0, last_contacted: null }
+      outreach: outreachCounts[lead.id] || { email_count: 0, sms_count: 0, call_count: 0, last_contacted: null }
     }));
 
     const allLeads = leadsWithOutreach;
