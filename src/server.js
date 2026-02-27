@@ -135,6 +135,9 @@ const { handleClientSignup, provisionClient, handleAgencyAddClient } = require('
 // Client Dashboard Routes
 const clientRoutes = require('./routes/client');
 
+// Client Contacts Routes (Lead Capture)
+const clientContactsRoutes = require('./routes/client-contacts');
+
 // Leads & Outreach Routes
 const leadRoutes = require('./routes/leads');
 const activityRoutes = require('./routes/activity');
@@ -714,6 +717,10 @@ app.post('/api/client/signup', handleClientSignup);
 // Client dashboard routes (settings, voice, greeting, knowledge base)
 app.use('/api/client', clientRoutes);
 app.use('/api/client', require('./routes/call-mode'));
+
+// Client contacts routes (lead capture / mini-CRM)
+app.use('/api/client', clientContactsRoutes);
+
 // Client billing (pays agency via Connect)
 app.post('/api/client/checkout', createClientCheckout);
 app.post('/api/client/portal', createClientPortal);

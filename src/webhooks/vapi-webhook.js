@@ -3,10 +3,12 @@
 // UPDATED: Demo call detection + agency follow-up SMS
 // UPDATED: Email summaries gated by plan_features (Phase 5)
 // UPDATED: Unlimited calls support (-1 = no limit)
+// UPDATED: Contact upsert (Lead Capture) after call save
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
 const { sendCallNotificationSMS, sendDemoCallFollowUpSMS, sendCallSummaryEmail } = require('../lib/notifications');
+const { upsertContactFromCall } = require('../lib/contact-upsert');
 
 // ============================================================================
 // PLAN FEATURE CHECK HELPER
@@ -428,6 +430,31 @@ async function handleVapiWebhook(req, res) {
     }
     
     console.log('✅ Call saved successfully');
+    
+    // ============================================
+    // UPSERT CONTACT (Lead Capture)
+    // ============================================
+    try {
+      const { contact, isNew } = await upsertContactFromCall({
+        clientId: client.id,
+        agencyId: agency?.id,
+        callId: insertedCall[0]?.id,
+        customerPhone: customerPhone,
+        customerName: customerName,
+        customerEmail: customerEmail,
+        customerAddress: call.customer?.address || null,
+        aiSummary: aiSummary,
+        urgency: urgency,
+        serviceRequested: call.customer?.serviceRequested || null,
+      });
+      
+      if (contact) {
+        console.log(`📇 Contact ${isNew ? 'created' : 'updated'}: ${contact.name} (${contact.phone})`);
+      }
+    } catch (contactErr) {
+      // Non-fatal — don't fail the webhook if contact upsert fails
+      console.warn('⚠️ Contact upsert failed (non-fatal):', contactErr.message);
+    }
     
     // ============================================
     // UPDATE CALL COUNT
