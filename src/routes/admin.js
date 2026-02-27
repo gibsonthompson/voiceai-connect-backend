@@ -1,7 +1,7 @@
 // ============================================================================
 // PLATFORM ADMIN ROUTES
 // Only accessible by whitelisted platform owners
-// WITH LEADS MANAGEMENT + CSV IMPORT
+// WITH LEADS MANAGEMENT + CSV IMPORT + PIPELINE QUEUE
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -540,7 +540,110 @@ router.post('/agencies/:agencyId/impersonate', requireAdmin, async (req, res) =>
 // ============================================================================
 
 // ============================================================================
+// GET /api/admin/leads/pipeline - Follow-up queue + pipeline data
+// IMPORTANT: This must be BEFORE /leads/:leadId routes
+// ============================================================================
+router.get('/leads/pipeline', requireAdmin, async (req, res) => {
+  try {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+    const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString();
+    const weekFromNow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 7).toISOString();
+
+    const pipelineSelect = 'id, business_name, contact_name, email, phone, status, next_follow_up, last_outreach_at, last_outreach_type, estimated_value, industry, created_at';
+
+    // Overdue follow-ups (follow-up date < today, not won/lost)
+    const { data: overdue } = await supabase
+      .from('leads')
+      .select(pipelineSelect)
+      .is('agency_id', null)
+      .lt('next_follow_up', todayStart)
+      .not('status', 'in', '("won","lost")')
+      .order('next_follow_up', { ascending: true })
+      .limit(20);
+
+    // Due today
+    const { data: today } = await supabase
+      .from('leads')
+      .select(pipelineSelect)
+      .is('agency_id', null)
+      .gte('next_follow_up', todayStart)
+      .lt('next_follow_up', todayEnd)
+      .not('status', 'in', '("won","lost")')
+      .order('next_follow_up', { ascending: true })
+      .limit(20);
+
+    // Upcoming (next 7 days, excluding today)
+    const { data: upcoming } = await supabase
+      .from('leads')
+      .select(pipelineSelect)
+      .is('agency_id', null)
+      .gte('next_follow_up', todayEnd)
+      .lt('next_follow_up', weekFromNow)
+      .not('status', 'in', '("won","lost")')
+      .order('next_follow_up', { ascending: true })
+      .limit(20);
+
+    // Untouched (status=new, never contacted)
+    const { data: untouched } = await supabase
+      .from('leads')
+      .select(pipelineSelect)
+      .is('agency_id', null)
+      .eq('status', 'new')
+      .is('last_outreach_at', null)
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    // Gone cold — contacted but no outreach in 7+ days, no follow-up set, not won/lost/new
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: cold } = await supabase
+      .from('leads')
+      .select(pipelineSelect)
+      .is('agency_id', null)
+      .not('status', 'in', '("new","won","lost")')
+      .lt('last_outreach_at', sevenDaysAgo)
+      .is('next_follow_up', null)
+      .order('last_outreach_at', { ascending: true })
+      .limit(20);
+
+    // Tab counts
+    const { count: activeCount } = await supabase
+      .from('leads')
+      .select('id', { count: 'exact', head: true })
+      .is('agency_id', null)
+      .in('status', ['contacted', 'qualified', 'proposal']);
+
+    const { count: closedCount } = await supabase
+      .from('leads')
+      .select('id', { count: 'exact', head: true })
+      .is('agency_id', null)
+      .in('status', ['won', 'lost']);
+
+    const actionCount = (overdue?.length || 0) + (today?.length || 0) + (untouched?.length || 0) + (cold?.length || 0);
+
+    res.json({
+      queue: {
+        overdue: overdue || [],
+        today: today || [],
+        upcoming: upcoming || [],
+        untouched: untouched || [],
+        cold: cold || [],
+      },
+      counts: {
+        action: actionCount,
+        active: activeCount || 0,
+        closed: closedCount || 0,
+      }
+    });
+  } catch (error) {
+    console.error('Admin pipeline error:', error);
+    res.status(500).json({ error: 'Failed to load pipeline' });
+  }
+});
+
+// ============================================================================
 // GET /api/admin/leads - List platform leads (agency_id IS NULL)
+// Updated: supports multi-status params from tab filtering
 // ============================================================================
 router.get('/leads', requireAdmin, async (req, res) => {
   try {
@@ -553,7 +656,15 @@ router.get('/leads', requireAdmin, async (req, res) => {
       .order('created_at', { ascending: false })
       .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
 
-    if (status) query = query.eq('status', status);
+    // Handle single or multiple status values
+    // Frontend sends ?status=contacted&status=qualified for tab filtering
+    if (status) {
+      if (Array.isArray(status)) {
+        query = query.in('status', status);
+      } else {
+        query = query.eq('status', status);
+      }
+    }
     if (source) query = query.eq('source', source);
     if (search) {
       query = query.or(`business_name.ilike.%${search}%,contact_name.ilike.%${search}%,email.ilike.%${search}%,industry.ilike.%${search}%`);
@@ -567,6 +678,49 @@ router.get('/leads', requireAdmin, async (req, res) => {
   } catch (error) {
     console.error('Admin leads error:', error);
     res.status(500).json({ error: 'Failed to load leads' });
+  }
+});
+
+// ============================================================================
+// GET /api/admin/leads-stats - Platform lead stats
+// ============================================================================
+router.get('/leads-stats', requireAdmin, async (req, res) => {
+  try {
+    const { data: leads, error } = await supabase
+      .from('leads')
+      .select('status, source, estimated_value, created_at')
+      .is('agency_id', null);
+
+    if (error) throw error;
+
+    const allLeads = leads || [];
+    const weekAgo = new Date();
+    weekAgo.setDate(weekAgo.getDate() - 7);
+
+    const stats = {
+      total: allLeads.length,
+      byStatus: {
+        new: allLeads.filter(l => l.status === 'new').length,
+        contacted: allLeads.filter(l => l.status === 'contacted').length,
+        qualified: allLeads.filter(l => l.status === 'qualified').length,
+        proposal: allLeads.filter(l => l.status === 'proposal').length,
+        won: allLeads.filter(l => l.status === 'won').length,
+        lost: allLeads.filter(l => l.status === 'lost').length,
+      },
+      bySource: allLeads.reduce((acc, l) => {
+        acc[l.source || 'unknown'] = (acc[l.source || 'unknown'] || 0) + 1;
+        return acc;
+      }, {}),
+      totalValue: allLeads
+        .filter(l => !['won', 'lost'].includes(l.status))
+        .reduce((sum, l) => sum + (l.estimated_value || 0), 0),
+      recentlyAdded: allLeads.filter(l => new Date(l.created_at) > weekAgo).length,
+    };
+
+    res.json({ stats });
+  } catch (error) {
+    console.error('Admin leads stats error:', error);
+    res.status(500).json({ error: 'Failed to load stats' });
   }
 });
 
@@ -605,49 +759,6 @@ router.post('/leads', requireAdmin, async (req, res) => {
     res.status(201).json({ success: true, lead });
   } catch (error) {
     console.error('Admin create lead error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// ============================================================================
-// PUT /api/admin/leads/:leadId - Update a platform lead
-// ============================================================================
-router.put('/leads/:leadId', requireAdmin, async (req, res) => {
-  try {
-    const { leadId } = req.params;
-    const {
-      business_name, contact_name, email, phone, website,
-      industry, source, status, notes, estimated_value, next_follow_up
-    } = req.body;
-
-    const updates = {};
-    if (business_name !== undefined) updates.business_name = business_name;
-    if (contact_name !== undefined) updates.contact_name = contact_name;
-    if (email !== undefined) updates.email = email ? email.toLowerCase().trim() : null;
-    if (phone !== undefined) updates.phone = phone;
-    if (website !== undefined) updates.website = website;
-    if (industry !== undefined) updates.industry = industry;
-    if (source !== undefined) updates.source = source;
-    if (status !== undefined) updates.status = status;
-    if (notes !== undefined) updates.notes = notes;
-    if (estimated_value !== undefined) updates.estimated_value = estimated_value ? parseInt(estimated_value) : null;
-    if (next_follow_up !== undefined) updates.next_follow_up = next_follow_up || null;
-
-    const { data: lead, error } = await supabase
-      .from('leads')
-      .update(updates)
-      .eq('id', leadId)
-      .is('agency_id', null)
-      .select()
-      .single();
-
-    if (error) return res.status(400).json({ error: error.message });
-    if (!lead) return res.status(404).json({ error: 'Lead not found' });
-
-    console.log(`✅ Admin updated platform lead: ${lead.business_name}`);
-    res.json({ success: true, lead });
-  } catch (error) {
-    console.error('Admin update lead error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -790,6 +901,79 @@ router.post('/leads/import', requireAdmin, async (req, res) => {
 });
 
 // ============================================================================
+// PUT /api/admin/leads/:leadId - Update a platform lead
+// ============================================================================
+router.put('/leads/:leadId', requireAdmin, async (req, res) => {
+  try {
+    const { leadId } = req.params;
+    const {
+      business_name, contact_name, email, phone, website,
+      industry, source, status, notes, estimated_value, next_follow_up
+    } = req.body;
+
+    const updates = {};
+    if (business_name !== undefined) updates.business_name = business_name;
+    if (contact_name !== undefined) updates.contact_name = contact_name;
+    if (email !== undefined) updates.email = email ? email.toLowerCase().trim() : null;
+    if (phone !== undefined) updates.phone = phone;
+    if (website !== undefined) updates.website = website;
+    if (industry !== undefined) updates.industry = industry;
+    if (source !== undefined) updates.source = source;
+    if (status !== undefined) updates.status = status;
+    if (notes !== undefined) updates.notes = notes;
+    if (estimated_value !== undefined) updates.estimated_value = estimated_value ? parseInt(estimated_value) : null;
+    if (next_follow_up !== undefined) updates.next_follow_up = next_follow_up || null;
+
+    const { data: lead, error } = await supabase
+      .from('leads')
+      .update(updates)
+      .eq('id', leadId)
+      .is('agency_id', null)
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+
+    console.log(`✅ Admin updated platform lead: ${lead.business_name}`);
+    res.json({ success: true, lead });
+  } catch (error) {
+    console.error('Admin update lead error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// POST /api/admin/leads/:leadId/follow-up - Set/clear follow-up date
+// ============================================================================
+router.post('/leads/:leadId/follow-up', requireAdmin, async (req, res) => {
+  try {
+    const { leadId } = req.params;
+    const { next_follow_up } = req.body;
+
+    const { data: lead, error } = await supabase
+      .from('leads')
+      .update({ 
+        next_follow_up: next_follow_up || null,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', leadId)
+      .is('agency_id', null)
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+
+    console.log(`📅 Follow-up ${next_follow_up ? 'set' : 'cleared'} for lead: ${lead.business_name}`);
+    res.json({ success: true, lead });
+  } catch (error) {
+    console.error('Admin follow-up error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
 // DELETE /api/admin/leads/:leadId - Delete a platform lead
 // ============================================================================
 router.delete('/leads/:leadId', requireAdmin, async (req, res) => {
@@ -809,49 +993,6 @@ router.delete('/leads/:leadId', requireAdmin, async (req, res) => {
   } catch (error) {
     console.error('Admin delete lead error:', error);
     res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// ============================================================================
-// GET /api/admin/leads-stats - Platform lead stats
-// ============================================================================
-router.get('/leads-stats', requireAdmin, async (req, res) => {
-  try {
-    const { data: leads, error } = await supabase
-      .from('leads')
-      .select('status, source, estimated_value, created_at')
-      .is('agency_id', null);
-
-    if (error) throw error;
-
-    const allLeads = leads || [];
-    const weekAgo = new Date();
-    weekAgo.setDate(weekAgo.getDate() - 7);
-
-    const stats = {
-      total: allLeads.length,
-      byStatus: {
-        new: allLeads.filter(l => l.status === 'new').length,
-        contacted: allLeads.filter(l => l.status === 'contacted').length,
-        qualified: allLeads.filter(l => l.status === 'qualified').length,
-        proposal: allLeads.filter(l => l.status === 'proposal').length,
-        won: allLeads.filter(l => l.status === 'won').length,
-        lost: allLeads.filter(l => l.status === 'lost').length,
-      },
-      bySource: allLeads.reduce((acc, l) => {
-        acc[l.source || 'unknown'] = (acc[l.source || 'unknown'] || 0) + 1;
-        return acc;
-      }, {}),
-      totalValue: allLeads
-        .filter(l => !['won', 'lost'].includes(l.status))
-        .reduce((sum, l) => sum + (l.estimated_value || 0), 0),
-      recentlyAdded: allLeads.filter(l => new Date(l.created_at) > weekAgo).length,
-    };
-
-    res.json({ stats });
-  } catch (error) {
-    console.error('Admin leads stats error:', error);
-    res.status(500).json({ error: 'Failed to load stats' });
   }
 });
 
@@ -1190,6 +1331,9 @@ router.post('/outreach/log', requireAdmin, async (req, res) => {
           .eq('id', templateId);
       }
     }
+
+    // NOTE: last_outreach_at and last_outreach_type are updated automatically
+    // by the database trigger (trg_update_lead_last_outreach) on outreach_history INSERT
 
     console.log(`✅ Admin outreach logged: ${type} to ${toAddress || toPhone}`);
     res.status(201).json({ success: true, outreach });
