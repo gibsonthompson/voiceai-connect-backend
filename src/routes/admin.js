@@ -550,7 +550,7 @@ router.get('/leads/pipeline', requireAdmin, async (req, res) => {
     const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString();
     const weekFromNow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 7).toISOString();
 
-    const pipelineSelect = 'id, business_name, contact_name, email, phone, status, next_follow_up, last_outreach_at, last_outreach_type, estimated_value, industry, created_at';
+    const pipelineSelect = 'id, business_name, contact_name, email, phone, website, status, next_follow_up, last_outreach_at, last_outreach_type, estimated_value, industry, created_at';
 
     // Overdue follow-ups (follow-up date < today, not won/lost)
     const { data: overdue } = await supabase
