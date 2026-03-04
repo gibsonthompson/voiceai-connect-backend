@@ -93,7 +93,7 @@ Listen to customers' problems, collect their information, and let them know when
 7. Ask: "Is there anything else I can help you with?"
 
 ## KNOWLEDGE BASE
-Use 'search_knowledge_base' for services, pricing, hours, service areas.
+When asked about services, pricing, hours, or service areas, use the 'search_knowledge_base' tool to find accurate information before answering.
 
 ## BOUNDARIES
 - Never quote exact prices
@@ -129,7 +129,7 @@ Determine patient needs, collect basic HIPAA-compliant information, and ensure f
 - NEVER repeat back specific medical information
 
 ## KNOWLEDGE BASE
-Use for office hours, location, insurance accepted, services offered.
+When asked about office hours, location, insurance accepted, or services offered, use the 'search_knowledge_base' tool to find accurate information before answering.
 
 ## CRITICAL RULE
 You do NOT have the ability to end calls.`,
@@ -151,7 +151,7 @@ Greet callers professionally, understand needs, collect contact info, ensure fol
 4. Ask: "Is there anything else I can help you with?"
 
 ## KNOWLEDGE BASE
-Use for services, team members, company background, general pricing.
+When asked about services, team members, company background, or general pricing, use the 'search_knowledge_base' tool to find accurate information before answering.
 
 ## BOUNDARIES
 - Never make promises about outcomes
@@ -184,7 +184,7 @@ Handle reservations, takeout orders, and inquiries. Be friendly and upbeat.
 - "Someone will call back to confirm and take payment."
 
 ### QUESTIONS:
-Use knowledge base for menu, hours, dietary options.
+When asked about menu items, hours, or dietary options, use the 'search_knowledge_base' tool to find accurate information before answering.
 
 ## BOUNDARIES
 - Don't guarantee availability
@@ -212,7 +212,7 @@ Help clients book appointments and answer questions. Be warm and welcoming.
 - "Someone will call back to confirm availability."
 
 ### QUESTIONS:
-Use knowledge base for services, pricing, products.
+When asked about services, pricing, or products, use the 'search_knowledge_base' tool to find accurate information before answering.
 
 ## UPSELLING (Natural)
 - "Would you like to add a conditioning treatment?"
@@ -238,7 +238,7 @@ Answer product questions, check availability, help with orders/returns.
 1. Ask: "Are you looking for a product, checking on an order, or have a question?"
 
 ### PRODUCTS:
-- Use knowledge base for info
+- Use the 'search_knowledge_base' tool for info
 - "Would you like me to have someone hold it for you?"
 
 ### ORDERS/RETURNS:
@@ -246,7 +246,7 @@ Answer product questions, check availability, help with orders/returns.
 - "Someone will call you back with an update."
 
 ## KNOWLEDGE BASE
-Use for product info, hours, return policy, shipping.
+When asked about products, hours, return policy, or shipping, use the 'search_knowledge_base' tool to find accurate information before answering.
 
 ## CRITICAL RULE
 You do NOT have the ability to end calls.`,
@@ -270,7 +270,7 @@ Help with membership inquiries, class info, and questions. Be energetic and moti
 - "Someone will call to discuss options and schedule a tour."
 
 ### CURRENT MEMBERS:
-- Class schedules: Use knowledge base
+- Class schedules: Use the 'search_knowledge_base' tool
 - Account questions: "Let me have a team member call you."
 - Personal training: "I can have a trainer reach out."
 
@@ -278,6 +278,9 @@ Help with membership inquiries, class info, and questions. Be energetic and moti
 - Encouraging: "That's a great goal!"
 - Inclusive: "We have options for all fitness levels"
 - Motivating: "You'll love it here"
+
+## KNOWLEDGE BASE
+When asked about classes, schedules, membership options, or facilities, use the 'search_knowledge_base' tool to find accurate information before answering.
 
 ## BOUNDARIES
 - Never give health/medical advice
@@ -321,7 +324,7 @@ Conduct professional intake, determine general matter type, ensure attorney foll
 - "Everything you share is kept strictly confidential."
 
 ## KNOWLEDGE BASE
-Use ONLY for: hours, location, practice areas, attorney bios.
+When asked about hours, location, practice areas, or attorney bios, use the 'search_knowledge_base' tool to find accurate information before answering. ONLY use for factual business information — never for legal advice.
 
 ## CRITICAL RULE
 You do NOT have the ability to end calls.`,
@@ -356,7 +359,7 @@ Handle buyer, seller, and renter inquiries. Collect info and ensure agent follow
 - "An agent will call with details."
 
 ## KNOWLEDGE BASE
-Use for listings, agent bios, service areas.
+When asked about listings, agents, or service areas, use the 'search_knowledge_base' tool to find accurate information before answering.
 
 ## BOUNDARIES
 - Don't quote property values
@@ -404,7 +407,7 @@ Handle inquiries professionally, determine service needs, ensure advisor follow-
 - "Everything you share is kept strictly confidential."
 
 ## KNOWLEDGE BASE
-Use for services, team bios, hours.
+When asked about services, team members, or hours, use the 'search_knowledge_base' tool to find accurate information before answering.
 
 ## CRITICAL RULE
 You do NOT have the ability to end calls.`,
@@ -441,7 +444,7 @@ Help with service appointments, repair inquiries, and questions. Be friendly and
 - Normal wear: "We can schedule at your convenience."
 
 ## KNOWLEDGE BASE
-Use for services, hours, location, payment methods.
+When asked about services, hours, location, or payment methods, use the 'search_knowledge_base' tool to find accurate information before answering.
 
 ## BOUNDARIES
 - Don't diagnose problems
@@ -569,8 +572,9 @@ async function createQueryTool(fileId, businessName) {
 // ============================================================================
 // CREATE INDUSTRY KNOWLEDGE BASE
 // Generates an industry-specific KB doc, optionally merges with website
-// content, uploads to VAPI, and creates a knowledge base + query tool.
-// Called by createIndustryAssistant — ensures EVERY client gets a KB.
+// content, uploads to VAPI as a file.
+// The query tool (created separately) references this file via fileIds.
+// No standalone KB object needed — the query tool handles KB internally.
 // ============================================================================
 async function createIndustryKnowledgeBase(businessName, industryKey, websiteKnowledgeBase = null) {
   try {
@@ -609,28 +613,9 @@ async function createIndustryKnowledgeBase(businessName, industryKey, websiteKno
     const uploadData = await uploadResponse.json();
     console.log(`✅ KB file uploaded: ${uploadData.id}`);
 
-    // Create VAPI knowledge base
-    const kbResponse = await fetch('https://api.vapi.ai/knowledge-base', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${VAPI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ provider: 'canonical', fileIds: [uploadData.id] }),
-    });
-
-    if (!kbResponse.ok) {
-      const errText = await kbResponse.text();
-      console.error('❌ KB creation failed:', errText);
-      return null;
-    }
-
-    const kbData = await kbResponse.json();
-    console.log(`✅ Knowledge base created: ${kbData.id}`);
-
     return {
-      knowledgeBaseId: kbData.id,
       fileId: uploadData.id,
+      content: fullContent,
       websiteContent: websiteKnowledgeBase?.websiteContent || null,
     };
   } catch (error) {
