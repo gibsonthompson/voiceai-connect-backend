@@ -140,6 +140,7 @@ const clientContactsRoutes = require('./routes/client-contacts');
 
 // Client Prompt Editing (Agency edits individual client AI prompts)
 const clientPromptRoutes = require('./routes/client-prompt');
+const clientKnowledgeBaseRoutes = require('./routes/client-knowledge-base');
 
 // Leads & Outreach Routes
 const leadRoutes = require('./routes/leads');
@@ -427,6 +428,7 @@ app.post('/api/agency/:agencyId/clients/add', handleAgencyAddClient);
 
 // Client prompt editing (agency-level) — MUST be before :clientId catch-all
 app.use('/api/agency', clientPromptRoutes);
+app.use('/api/agency', clientKnowledgeBaseRoutes);
 
 // GET /api/agency/:agencyId/clients/:clientId - Get single client
 app.get('/api/agency/:agencyId/clients/:clientId', async (req, res) => {
