@@ -2,6 +2,7 @@
 // VAPI INTEGRATION - Multi-Tenant Voice AI Platform
 // WITH AGENCY TEMPLATE OVERRIDE SUPPORT (Enterprise Feature)
 // WITH DEMO ASSISTANT PROVISIONING (Agency-level)
+// WITH INDUSTRY KNOWLEDGE BASES (Pre-loaded for every AI receptionist)
 // ALL 11 INDUSTRIES WITH UNIQUE KEYS
 // ============================================================================
 const fetch = require('node-fetch');
@@ -14,6 +15,8 @@ try {
 } catch (err) {
   console.warn('⚠️ Supabase not available for template lookups');
 }
+
+const { INDUSTRY_KNOWLEDGE_BASES } = require('./industry-knowledge-bases');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
@@ -564,7 +567,81 @@ async function createQueryTool(fileId, businessName) {
 }
 
 // ============================================================================
+// CREATE INDUSTRY KNOWLEDGE BASE
+// Generates an industry-specific KB doc, optionally merges with website
+// content, uploads to VAPI, and creates a knowledge base + query tool.
+// Called by createIndustryAssistant — ensures EVERY client gets a KB.
+// ============================================================================
+async function createIndustryKnowledgeBase(businessName, industryKey, websiteKnowledgeBase = null) {
+  try {
+    // Get the industry-specific knowledge base document
+    const kbGenerator = INDUSTRY_KNOWLEDGE_BASES[industryKey] || INDUSTRY_KNOWLEDGE_BASES['professional_services'];
+    const industryDoc = kbGenerator(businessName);
+
+    // Combine: industry doc + website content (if available)
+    let fullContent = industryDoc;
+
+    if (websiteKnowledgeBase?.websiteContent) {
+      fullContent += `\n\n# ${businessName} — Website Information\n\n${websiteKnowledgeBase.websiteContent}`;
+    }
+
+    console.log(`📚 Uploading knowledge base for ${businessName} (${industryKey}): ${fullContent.length} chars`);
+
+    // Upload as a file to VAPI
+    const form = new FormData();
+    form.append('file', Buffer.from(fullContent, 'utf-8'), {
+      filename: `${businessName.replace(/\s+/g, '_')}_knowledge.txt`,
+      contentType: 'text/plain',
+    });
+
+    const uploadResponse = await fetch('https://api.vapi.ai/file', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, ...form.getHeaders() },
+      body: form,
+    });
+
+    if (!uploadResponse.ok) {
+      const errText = await uploadResponse.text();
+      console.error('❌ KB file upload failed:', errText);
+      return null;
+    }
+
+    const uploadData = await uploadResponse.json();
+    console.log(`✅ KB file uploaded: ${uploadData.id}`);
+
+    // Create VAPI knowledge base
+    const kbResponse = await fetch('https://api.vapi.ai/knowledge-base', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${VAPI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ provider: 'canonical', fileIds: [uploadData.id] }),
+    });
+
+    if (!kbResponse.ok) {
+      const errText = await kbResponse.text();
+      console.error('❌ KB creation failed:', errText);
+      return null;
+    }
+
+    const kbData = await kbResponse.json();
+    console.log(`✅ Knowledge base created: ${kbData.id}`);
+
+    return {
+      knowledgeBaseId: kbData.id,
+      fileId: uploadData.id,
+      websiteContent: websiteKnowledgeBase?.websiteContent || null,
+    };
+  } catch (error) {
+    console.error('❌ Industry knowledge base creation failed:', error.message);
+    return null;
+  }
+}
+
+// ============================================================================
 // CREATE INDUSTRY ASSISTANT (Client-level)
+// UPDATED: Always creates a knowledge base (industry doc + optional website)
 // ============================================================================
 async function createIndustryAssistant(businessName, industry, knowledgeBaseData = null, ownerPhone = null, clientId = null, agencyId = null) {
   try {
@@ -595,9 +672,26 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       temperature = config.temperature;
     }
 
+    // ══════════════════════════════════════════════════════════════════════
+    // KNOWLEDGE BASE — Always create one (industry doc + optional website)
+    // Previously: KB only created if knowledgeBaseData was provided (website)
+    // Now: KB always created with industry doc, website content merged if available
+    // ══════════════════════════════════════════════════════════════════════
+    let finalKnowledgeBase = knowledgeBaseData;
+
+    if (!finalKnowledgeBase) {
+      // No website was scraped — create KB from industry doc alone
+      console.log(`📚 Creating industry-only knowledge base (no website provided)`);
+      finalKnowledgeBase = await createIndustryKnowledgeBase(businessName, industryKey);
+    } else if (finalKnowledgeBase.fileId) {
+      // Website was scraped and uploaded — create combined KB (industry doc + website)
+      console.log(`📚 Creating combined knowledge base (industry doc + website)`);
+      finalKnowledgeBase = await createIndustryKnowledgeBase(businessName, industryKey, knowledgeBaseData);
+    }
+
     let queryToolId = null;
-    if (knowledgeBaseData?.fileId) {
-      queryToolId = await createQueryTool(knowledgeBaseData.fileId, businessName);
+    if (finalKnowledgeBase?.fileId) {
+      queryToolId = await createQueryTool(finalKnowledgeBase.fileId, businessName);
     }
 
     const tools = [];
@@ -984,7 +1078,7 @@ async function provisionLocalPhone(city, state, assistantId, businessName, owner
 }
 
 // ============================================================================
-// KNOWLEDGE BASE
+// KNOWLEDGE BASE (Website scraping — called before createIndustryAssistant)
 // ============================================================================
 async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
   try {
@@ -1076,6 +1170,7 @@ module.exports = {
   replacePlaceholders,
   getAgencyTemplate,
   createQueryTool,
+  createIndustryKnowledgeBase,
   createIndustryAssistant,
   provisionPhoneNumber,
   provisionLocalPhone,
