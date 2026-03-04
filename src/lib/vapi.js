@@ -1034,29 +1034,28 @@ async function provisionLocalPhone(city, state, assistantId, businessName, owner
   console.log(`📞 Provisioning phone for ${businessName} in ${city}, ${state}`);
   
   // Build area code priority list:
-  // 1. Client's own area code (from their phone number)
-  // 2. State-specific area codes
+  // 1. State-specific area codes (business location — most important)
+  // 2. Client's own area code (fallback if state codes exhausted)
   // 3. Fallback to 404 (Atlanta)
   const areaCodesToTry = [];
   
-  // Try client's own area code first — most likely to get a local number
+  // Business location area codes first — the number should match where the business is
+  const stateCodes = STATE_AREA_CODES[state.toUpperCase()] || [];
+  for (const code of stateCodes) {
+    areaCodesToTry.push(code);
+  }
+  console.log(`   📍 Trying ${stateCodes.length} area codes for ${state}`);
+  
+  // Owner's area code as fallback (only if not already in the list)
   if (ownerPhone) {
     const digits = ownerPhone.replace(/\D/g, '');
     let clientAreaCode = null;
     if (digits.length === 10) clientAreaCode = digits.substring(0, 3);
     else if (digits.length === 11 && digits.startsWith('1')) clientAreaCode = digits.substring(1, 4);
     
-    if (clientAreaCode && /^\d{3}$/.test(clientAreaCode)) {
+    if (clientAreaCode && /^\d{3}$/.test(clientAreaCode) && !areaCodesToTry.includes(clientAreaCode)) {
       areaCodesToTry.push(clientAreaCode);
-      console.log(`   📱 Trying client's area code first: ${clientAreaCode}`);
-    }
-  }
-  
-  // Add state-specific area codes (skip any already in the list)
-  const stateCodes = STATE_AREA_CODES[state.toUpperCase()] || [];
-  for (const code of stateCodes) {
-    if (!areaCodesToTry.includes(code)) {
-      areaCodesToTry.push(code);
+      console.log(`   📱 Owner area code ${clientAreaCode} added as fallback`);
     }
   }
   
