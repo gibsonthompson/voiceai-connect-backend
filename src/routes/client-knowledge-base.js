@@ -15,6 +15,7 @@
 const express = require('express');
 const router = express.Router();
 const FormData = require('form-data');
+const fetch = require('node-fetch');
 const { supabase } = require('../lib/supabase');
 const { INDUSTRY_MAPPING } = require('../lib/vapi');
 
