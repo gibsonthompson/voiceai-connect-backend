@@ -1411,17 +1411,21 @@ router.get('/leads/:leadId/outreach', requireAdmin, async (req, res) => {
 
     const emails = (history || []).filter(h => h.type === 'email');
     const sms = (history || []).filter(h => h.type === 'sms');
+    const linkedin = (history || []).filter(h => h.type === 'linkedin');
 
     res.json({
       outreach: {
         email_count: emails.length,
         sms_count: sms.length,
+        linkedin_count: linkedin.length,
         total_count: (history || []).length,
         last_email: emails.length > 0 ? emails[emails.length - 1] : null,
         last_sms: sms.length > 0 ? sms[sms.length - 1] : null,
+        last_linkedin: linkedin.length > 0 ? linkedin[linkedin.length - 1] : null,
         last_outreach: history && history.length > 0 ? history[history.length - 1] : null,
         next_email_number: emails.length + 1,
         next_sms_number: sms.length + 1,
+        next_linkedin_number: linkedin.length + 1,
         history: history || [],
       }
     });
