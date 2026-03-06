@@ -550,7 +550,7 @@ router.get('/leads/pipeline', requireAdmin, async (req, res) => {
     const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString();
     const weekFromNow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 7).toISOString();
 
-    const pipelineSelect = 'id, business_name, contact_name, email, phone, website, status, next_follow_up, last_outreach_at, last_outreach_type, estimated_value, industry, created_at';
+    const pipelineSelect = 'id, business_name, contact_name, email, phone, website, linkedin_url, status, next_follow_up, last_outreach_at, last_outreach_type, estimated_value, industry, created_at';
 
     // Overdue follow-ups (follow-up date < today, not won/lost)
     const { data: overdue } = await supabase
@@ -729,10 +729,16 @@ router.get('/leads-stats', requireAdmin, async (req, res) => {
 // ============================================================================
 router.post('/leads', requireAdmin, async (req, res) => {
   try {
-    const { business_name, contact_name, email, phone, website, industry, source, notes, estimated_value } = req.body;
+    const { business_name, contact_name, email, phone, website, linkedin_url, industry, source, notes, estimated_value } = req.body;
 
     if (!business_name && !contact_name) {
       return res.status(400).json({ error: 'Business name or contact name is required' });
+    }
+
+    // Normalize LinkedIn URL
+    let cleanLinkedin = linkedin_url || null;
+    if (cleanLinkedin && !cleanLinkedin.startsWith('http')) {
+      cleanLinkedin = 'https://' + cleanLinkedin;
     }
 
     const { data: lead, error } = await supabase
@@ -744,6 +750,7 @@ router.post('/leads', requireAdmin, async (req, res) => {
         email: email ? email.toLowerCase().trim() : null,
         phone: phone || null,
         website: website || null,
+        linkedin_url: cleanLinkedin,
         industry: industry || null,
         source: source || 'other',
         status: 'new',
@@ -819,6 +826,12 @@ router.post('/leads/import', requireAdmin, async (req, res) => {
       let website = mapped.website || null;
       if (website && !website.startsWith('http')) website = 'https://' + website;
 
+      // Normalize LinkedIn URL
+      let linkedinUrl = mapped.linkedin_url || null;
+      if (linkedinUrl && !linkedinUrl.startsWith('http')) {
+        linkedinUrl = 'https://' + linkedinUrl;
+      }
+
       leadsToInsert.push({
         agency_id: null,
         business_name: mapped.business_name || null,
@@ -826,6 +839,7 @@ router.post('/leads/import', requireAdmin, async (req, res) => {
         email: email ? email.toLowerCase() : null,
         phone,
         website,
+        linkedin_url: linkedinUrl,
         industry: mapped.industry || null,
         source: defaultSource || 'csv_import',
         status: 'new',
@@ -907,7 +921,7 @@ router.put('/leads/:leadId', requireAdmin, async (req, res) => {
   try {
     const { leadId } = req.params;
     const {
-      business_name, contact_name, email, phone, website,
+      business_name, contact_name, email, phone, website, linkedin_url,
       industry, source, status, notes, estimated_value, next_follow_up
     } = req.body;
 
@@ -917,6 +931,13 @@ router.put('/leads/:leadId', requireAdmin, async (req, res) => {
     if (email !== undefined) updates.email = email ? email.toLowerCase().trim() : null;
     if (phone !== undefined) updates.phone = phone;
     if (website !== undefined) updates.website = website;
+    if (linkedin_url !== undefined) {
+      let cleanLinkedin = linkedin_url || null;
+      if (cleanLinkedin && !cleanLinkedin.startsWith('http')) {
+        cleanLinkedin = 'https://' + cleanLinkedin;
+      }
+      updates.linkedin_url = cleanLinkedin;
+    }
     if (industry !== undefined) updates.industry = industry;
     if (source !== undefined) updates.source = source;
     if (status !== undefined) updates.status = status;
@@ -1010,6 +1031,7 @@ const ADMIN_TEMPLATE_VARIABLES = {
     { key: '{lead_email}', label: 'Email', description: 'Contact email address' },
     { key: '{lead_phone}', label: 'Phone', description: 'Contact phone number' },
     { key: '{lead_website}', label: 'Website', description: 'Business website' },
+    { key: '{lead_linkedin_url}', label: 'LinkedIn URL', description: 'LinkedIn profile URL' },
     { key: '{lead_source}', label: 'Source', description: 'How you found them' },
   ],
   sender: [
@@ -1242,6 +1264,7 @@ router.post('/outreach/compose', requireAdmin, async (req, res) => {
       '{lead_email}': lead?.email || '[Email]',
       '{lead_phone}': lead?.phone || '[Phone]',
       '{lead_website}': lead?.website || '[Website]',
+      '{lead_linkedin_url}': lead?.linkedin_url || '[LinkedIn URL]',
       '{lead_source}': lead?.source || '[Source]',
       '{your_name}': 'Gibson Thompson',
       '{your_email}': 'gibson@myvoiceaiconnect.com',
