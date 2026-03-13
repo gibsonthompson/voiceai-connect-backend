@@ -8,7 +8,7 @@ const { supabase } = require('../lib/supabase');
 
 let sendPlatformNotificationSMS;
 try {
-  ({ sendPlatformNotificationSMS } = require('../notifications'));
+  ({ sendPlatformNotificationSMS } = require('../lib/notifications'));
 } catch (err) {
   console.warn('⚠️ notifications module not found — feedback SMS disabled');
   sendPlatformNotificationSMS = async () => {};
