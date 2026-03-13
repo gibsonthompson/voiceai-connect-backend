@@ -300,13 +300,13 @@ async function setPassword(req, res) {
     const user = await getUserById(tokenRecord.user_id);
     
     // If this is an agency owner, mark onboarding as completed
-    // This is the password step (step 6) — the last required onboarding step
+    // Step 6 = final step in the current 6-step onboarding flow
     if (user && user.agency_id && (user.role === 'agency_owner' || user.role === 'agency_staff')) {
       const { error: onboardingError } = await supabase
         .from('agencies')
         .update({ 
           onboarding_completed: true, 
-          onboarding_step: 7,
+          onboarding_step: 6,
           updated_at: new Date().toISOString()
         })
         .eq('id', user.agency_id);

@@ -328,6 +328,14 @@ async function handleAgencySignup(req, res) {
 // ============================================================================
 // AGENCY ONBOARDING HANDLER
 // ============================================================================
+// STEP MAP (aligned with frontend onboarding page):
+//   1 = Agency Details (name, phone, referral source)
+//   2 = Pricing (prices + call limits)
+//   3 = Logo upload (base64 data URL saved directly to logo_url)
+//   4 = Brand colors (primary, secondary, accent)
+//   5 = Password (handled client-side via /auth/set-password, not this handler)
+//   6 = Complete
+// ============================================================================
 async function handleAgencyOnboarding(req, res) {
   try {
     const { agency_id, step, data } = req.body;
@@ -374,19 +382,7 @@ async function handleAgencyOnboarding(req, res) {
         }
         break;
         
-      case 2: // Logo upload
-        if (data.logo_url !== undefined) {
-          updateData.logo_url = data.logo_url || null;
-        }
-        break;
-        
-      case 3: // Brand colors
-        if (data.primary_color) updateData.primary_color = data.primary_color;
-        if (data.secondary_color) updateData.secondary_color = data.secondary_color;
-        if (data.accent_color) updateData.accent_color = data.accent_color;
-        break;
-        
-      case 4: // Pricing
+      case 2: // Pricing
         if (data.price_starter !== undefined) updateData.price_starter = data.price_starter;
         if (data.price_pro !== undefined) updateData.price_pro = data.price_pro;
         if (data.price_growth !== undefined) updateData.price_growth = data.price_growth;
@@ -395,14 +391,23 @@ async function handleAgencyOnboarding(req, res) {
         if (data.limit_growth !== undefined) updateData.limit_growth = data.limit_growth;
         break;
         
-      case 5: // Stripe Connect
+      case 3: // Logo upload
+        if (data.logo_url !== undefined) {
+          updateData.logo_url = data.logo_url || null;
+        }
         break;
         
-      case 6: // Password step
+      case 4: // Brand colors
+        if (data.primary_color) updateData.primary_color = data.primary_color;
+        if (data.secondary_color) updateData.secondary_color = data.secondary_color;
+        if (data.accent_color) updateData.accent_color = data.accent_color;
+        break;
+        
+      case 5: // Password step
         updateData.onboarding_completed = true;
         break;
         
-      case 7: // Complete
+      case 6: // Complete
         updateData.onboarding_completed = true;
         break;
     }
@@ -432,8 +437,8 @@ async function handleAgencyOnboarding(req, res) {
     res.json({
       success: true,
       step: step,
-      next_step: step < 7 ? step + 1 : null,
-      completed: step >= 7
+      next_step: step < 6 ? step + 1 : null,
+      completed: step >= 6
     });
     
   } catch (error) {
