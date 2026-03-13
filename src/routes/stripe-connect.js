@@ -13,7 +13,8 @@ const {
   sendEmail,
   sendClientTrialExpiredSMS,
   sendClientPaymentFailedSMS,
-  sendClientSubscriptionActivatedSMS
+  sendClientSubscriptionActivatedSMS,
+  sendPlatformNotificationSMS
 } = require('../lib/notifications');
 const { enableAssistant, disableAssistant } = require('../lib/vapi');
 
@@ -64,7 +65,7 @@ async function createConnectAccountLink(req, res) {
       return res.status(404).json({ error: 'Agency not found' });
     }
 
-    console.log('🔗 Creating Stripe Connect account for:', agency.name, '| Country:', agency.country || 'US');
+    console.log('Creating Stripe Connect account for:', agency.name, '| Country:', agency.country || 'US');
 
     // Create or get Connect account
     let accountId = agency.stripe_account_id;
@@ -92,7 +93,7 @@ async function createConnectAccountLink(req, res) {
         .update({ stripe_account_id: accountId })
         .eq('id', agency_id);
 
-      console.log('✅ Connect account created:', accountId, '| Country:', agency.country || 'US');
+      console.log('Connect account created:', accountId, '| Country:', agency.country || 'US');
     }
 
     // Create account link for onboarding
@@ -103,7 +104,7 @@ async function createConnectAccountLink(req, res) {
       type: 'account_onboarding'
     });
 
-    console.log('✅ Connect onboarding link created');
+    console.log('Connect onboarding link created');
 
     res.json({
       success: true,
@@ -112,7 +113,7 @@ async function createConnectAccountLink(req, res) {
     });
 
   } catch (error) {
-    console.error('❌ Connect account error:', error);
+    console.error('Connect account error:', error);
     res.status(500).json({ error: 'Failed to create Connect account' });
   }
 }
@@ -171,7 +172,7 @@ async function getConnectStatus(req, res) {
     });
 
   } catch (error) {
-    console.error('❌ Connect status error:', error);
+    console.error('Connect status error:', error);
     res.status(500).json({ error: 'Failed to get Connect status' });
   }
 }
@@ -202,7 +203,7 @@ async function disconnectConnectAccount(req, res) {
       return res.status(400).json({ error: 'No Stripe account connected' });
     }
 
-    console.log('🔌 Disconnecting Stripe Connect for:', agency.name);
+    console.log('Disconnecting Stripe Connect for:', agency.name);
 
     // Clear the Connect account from database
     const { error: updateError } = await supabase
@@ -217,11 +218,11 @@ async function disconnectConnectAccount(req, res) {
       .eq('id', agencyId);
 
     if (updateError) {
-      console.error('❌ Failed to update agency:', updateError);
+      console.error('Failed to update agency:', updateError);
       return res.status(500).json({ error: 'Failed to disconnect account' });
     }
 
-    console.log('✅ Stripe Connect disconnected for:', agency.name);
+    console.log('Stripe Connect disconnected for:', agency.name);
 
     res.json({
       success: true,
@@ -229,14 +230,13 @@ async function disconnectConnectAccount(req, res) {
     });
 
   } catch (error) {
-    console.error('❌ Disconnect Connect error:', error);
+    console.error('Disconnect Connect error:', error);
     res.status(500).json({ error: 'Failed to disconnect Stripe account' });
   }
 }
 
 // ============================================================================
 // CREATE CLIENT CHECKOUT (Client subscribes via agency's Connect account)
-// Updated: Uses agency's currency based on their country
 // ============================================================================
 async function createClientCheckout(req, res) {
   try {
@@ -249,7 +249,6 @@ async function createClientCheckout(req, res) {
       });
     }
 
-    // Get client WITH agency (agency comes from client record)
     const { data: client, error: clientError } = await supabase
       .from('clients')
       .select(`
@@ -275,9 +274,8 @@ async function createClientCheckout(req, res) {
       });
     }
 
-    console.log('🛒 Creating client checkout for:', client.email, 'via agency:', agency.name);
+    console.log('Creating client checkout for:', client.email, 'via agency:', agency.name);
 
-    // Get price from agency's settings (prices stored in cents)
     const priceAmounts = {
       starter: agency.price_starter || 4900,
       pro: agency.price_pro || 9900,
@@ -295,10 +293,8 @@ async function createClientCheckout(req, res) {
       return res.status(400).json({ error: 'Invalid plan' });
     }
 
-    // Use agency's currency based on their country
     const currency = getCurrencyForCountry(agency.country || 'US');
 
-    // Create customer on connected account (if not exists)
     let connectedCustomerId = client.stripe_connected_customer_id;
 
     if (!connectedCustomerId) {
@@ -321,7 +317,6 @@ async function createClientCheckout(req, res) {
         .eq('id', client_id);
     }
 
-    // Create product on connected account
     const product = await stripe.products.create({
       name: `AI Receptionist - ${plan.charAt(0).toUpperCase() + plan.slice(1)}`,
       metadata: { client_id, plan }
@@ -329,7 +324,6 @@ async function createClientCheckout(req, res) {
       stripeAccount: agency.stripe_account_id
     });
 
-    // Create price on connected account using agency's currency
     const price = await stripe.prices.create({
       product: product.id,
       unit_amount: priceAmount,
@@ -339,13 +333,10 @@ async function createClientCheckout(req, res) {
       stripeAccount: agency.stripe_account_id
     });
 
-    // Build success/cancel URLs
     const agencyUrl = agency.marketing_domain && agency.domain_verified
       ? `https://${agency.marketing_domain}`
       : `https://${agency.slug}.myvoiceaiconnect.com`;
 
-    // Create checkout session on connected account
-    // NO trial period - this is for post-trial conversion
     const session = await stripe.checkout.sessions.create({
       customer: connectedCustomerId,
       mode: 'subscription',
@@ -374,7 +365,7 @@ async function createClientCheckout(req, res) {
       stripeAccount: agency.stripe_account_id
     });
 
-    console.log('✅ Client checkout created:', session.id, '| Currency:', currency);
+    console.log('Client checkout created:', session.id, '| Currency:', currency);
 
     res.json({
       success: true,
@@ -383,7 +374,7 @@ async function createClientCheckout(req, res) {
     });
 
   } catch (error) {
-    console.error('❌ Client checkout error:', error);
+    console.error('Client checkout error:', error);
     res.status(500).json({ error: 'Failed to create checkout session' });
   }
 }
@@ -431,7 +422,7 @@ async function createClientPortal(req, res) {
     });
 
   } catch (error) {
-    console.error('❌ Client portal error:', error);
+    console.error('Client portal error:', error);
     res.status(500).json({ error: 'Failed to create portal session' });
   }
 }
@@ -440,11 +431,10 @@ async function createClientPortal(req, res) {
 // EXPIRE TRIALS - Cron job to disable expired trials
 // ============================================================================
 async function expireTrials() {
-  console.log('🕐 Checking for expired trials...');
+  console.log('Checking for expired trials...');
 
   const now = new Date().toISOString();
 
-  // Find all clients with expired trials
   const { data: expiredClients, error } = await supabase
     .from('clients')
     .select('*, agencies(*)')
@@ -462,17 +452,15 @@ async function expireTrials() {
 
   for (const client of expiredClients || []) {
     try {
-      // Disable VAPI assistant
       if (client.vapi_assistant_id) {
         try {
           await disableAssistant(client.vapi_assistant_id);
-          console.log('🔇 VAPI assistant disabled:', client.vapi_assistant_id);
+          console.log('VAPI assistant disabled:', client.vapi_assistant_id);
         } catch (vapiError) {
           console.error('Failed to disable VAPI assistant:', vapiError);
         }
       }
 
-      // Update status
       await supabase
         .from('clients')
         .update({
@@ -481,11 +469,10 @@ async function expireTrials() {
         })
         .eq('id', client.id);
 
-      // Send trial expired SMS
       const agency = client.agencies;
       await sendClientTrialExpiredSMS(client, agency);
 
-      console.log('✅ Trial expired for:', client.business_name);
+      console.log('Trial expired for:', client.business_name);
       results.push({ id: client.id, business_name: client.business_name, success: true });
 
     } catch (err) {
@@ -511,20 +498,18 @@ async function handleConnectStripeWebhook(req, res) {
       process.env.STRIPE_CONNECT_WEBHOOK_SECRET
     );
   } catch (err) {
-    console.error('⚠️ Connect webhook signature failed:', err.message);
+    console.error('Connect webhook signature failed:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  console.log('📥 Connect webhook:', event.type, '| Account:', event.account);
+  console.log('Connect webhook:', event.type, '| Account:', event.account);
 
   try {
     switch (event.type) {
-      // Account events
       case 'account.updated':
         await handleAccountUpdated(event.data.object);
         break;
 
-      // Client subscription events (on connected account)
       case 'checkout.session.completed':
         await handleClientCheckoutCompleted(event.data.object, event.account);
         break;
@@ -548,7 +533,7 @@ async function handleConnectStripeWebhook(req, res) {
 
     res.json({ received: true });
   } catch (error) {
-    console.error('❌ Connect webhook error:', error);
+    console.error('Connect webhook error:', error);
     res.status(500).json({ error: 'Webhook processing failed' });
   }
 }
@@ -558,7 +543,7 @@ async function handleConnectStripeWebhook(req, res) {
 // ============================================================================
 
 async function handleAccountUpdated(account) {
-  console.log('🔄 Connect account updated:', account.id);
+  console.log('Connect account updated:', account.id);
 
   const agency = await getAgencyByStripeAccountId(account.id);
   if (!agency) return;
@@ -573,12 +558,21 @@ async function handleAccountUpdated(account) {
     .eq('id', agency.id);
 
   if (account.charges_enabled && !agency.stripe_charges_enabled) {
-    console.log('✅ Agency can now accept payments:', agency.name);
+    console.log('Agency can now accept payments:', agency.name);
+    
+    // Notify platform owner — key conversion milestone
+    sendPlatformNotificationSMS(
+      `Agency Connected Stripe\n` +
+      `Name: ${agency.name}\n` +
+      `Email: ${agency.email || 'N/A'}\n` +
+      `Plan: ${agency.plan_type || 'starter'}\n` +
+      `Ready to accept client payments`
+    ).catch(err => console.error('Failed to send Stripe connect notification:', err));
   }
 }
 
 async function handleClientCheckoutCompleted(session, stripeAccountId) {
-  console.log('🎉 Client checkout completed:', session.id);
+  console.log('Client checkout completed:', session.id);
 
   const clientId = session.metadata?.client_id;
   const plan = session.metadata?.plan || 'starter';
@@ -589,7 +583,6 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
     return;
   }
 
-  // Get client
   const { data: client, error } = await supabase
     .from('clients')
     .select('*, agencies(*)')
@@ -601,12 +594,10 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
     return;
   }
 
-  // Check if this is an upgrade (from expired trial)
   const isUpgrade = client.subscription_status === 'trial_expired' || 
                     client.subscription_status === 'canceled' ||
                     client.subscription_status === 'past_due';
 
-  // Update client subscription - ACTIVE (not trial)
   const { error: updateError } = await supabase
     .from('clients')
     .update({
@@ -625,19 +616,17 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
     return;
   }
 
-  console.log(`✅ Client ${isUpgrade ? 'upgraded' : 'activated'}:`, client.business_name);
+  console.log(`Client ${isUpgrade ? 'upgraded' : 'activated'}:`, client.business_name);
 
-  // Re-enable VAPI assistant if it was disabled
   if (client.vapi_assistant_id) {
     try {
       await enableAssistant(client.vapi_assistant_id);
-      console.log('✅ VAPI assistant re-enabled:', client.vapi_assistant_id);
+      console.log('VAPI assistant re-enabled:', client.vapi_assistant_id);
     } catch (vapiError) {
       console.error('Failed to re-enable VAPI assistant:', vapiError);
     }
   }
 
-  // Record payment
   if (session.amount_total > 0) {
     await supabase
       .from('payments')
@@ -655,16 +644,15 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
         paid_out: false
       });
     
-    console.log(`💰 Payment recorded: ${session.currency?.toUpperCase() || 'USD'} ${(session.amount_total / 100).toFixed(2)}`);
+    console.log(`Payment recorded: ${session.currency?.toUpperCase() || 'USD'} ${(session.amount_total / 100).toFixed(2)}`);
   }
 
-  // Send SMS notification
   const agency = client.agencies;
   await sendClientSubscriptionActivatedSMS(client, agency, plan);
 }
 
 async function handleClientSubscriptionUpdated(subscription, stripeAccountId) {
-  console.log('🔄 Client subscription updated:', subscription.id);
+  console.log('Client subscription updated:', subscription.id);
 
   const client = await getClientByStripeConnectedCustomerId(
     subscription.customer, 
@@ -700,7 +688,7 @@ async function handleClientSubscriptionUpdated(subscription, stripeAccountId) {
 }
 
 async function handleClientSubscriptionDeleted(subscription, stripeAccountId) {
-  console.log('❌ Client subscription deleted:', subscription.id);
+  console.log('Client subscription deleted:', subscription.id);
 
   const client = await getClientByStripeConnectedCustomerId(
     subscription.customer,
@@ -711,7 +699,7 @@ async function handleClientSubscriptionDeleted(subscription, stripeAccountId) {
   if (client.vapi_assistant_id) {
     try {
       await disableAssistant(client.vapi_assistant_id);
-      console.log('🔇 VAPI assistant disabled:', client.vapi_assistant_id);
+      console.log('VAPI assistant disabled:', client.vapi_assistant_id);
     } catch (vapiError) {
       console.error('Failed to disable VAPI assistant:', vapiError);
     }
@@ -727,7 +715,7 @@ async function handleClientSubscriptionDeleted(subscription, stripeAccountId) {
 }
 
 async function handleClientPaymentSucceeded(invoice, stripeAccountId) {
-  console.log('✅ Client payment succeeded:', invoice.id);
+  console.log('Client payment succeeded:', invoice.id);
 
   const client = await getClientByStripeConnectedCustomerId(
     invoice.customer,
@@ -774,11 +762,11 @@ async function handleClientPaymentSucceeded(invoice, stripeAccountId) {
       paid_out: false
     });
 
-  console.log(`💰 Payment recorded: ${(invoice.currency || 'usd').toUpperCase()} ${((invoice.amount_paid || 0) / 100).toFixed(2)}`);
+  console.log(`Payment recorded: ${(invoice.currency || 'usd').toUpperCase()} ${((invoice.amount_paid || 0) / 100).toFixed(2)}`);
 }
 
 async function handleClientPaymentFailed(invoice, stripeAccountId) {
-  console.log('❌ Client payment failed:', invoice.id);
+  console.log('Client payment failed:', invoice.id);
 
   const client = await getClientByStripeConnectedCustomerId(
     invoice.customer,
@@ -793,7 +781,6 @@ async function handleClientPaymentFailed(invoice, stripeAccountId) {
     })
     .eq('id', client.id);
 
-  // Send SMS notification
   const agency = client.agencies;
   await sendClientPaymentFailedSMS(client, agency, invoice.hosted_invoice_url);
 }

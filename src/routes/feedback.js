@@ -1,6 +1,5 @@
 // ============================================================================
 // AGENCY FEEDBACK ROUTES
-// Add to server.js with: app.use('/api/agency', feedbackRoutes);
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -10,7 +9,7 @@ let sendPlatformNotificationSMS;
 try {
   ({ sendPlatformNotificationSMS } = require('../lib/notifications'));
 } catch (err) {
-  console.warn('⚠️ notifications module not found — feedback SMS disabled');
+  console.warn('notifications module not found — feedback SMS disabled');
   sendPlatformNotificationSMS = async () => {};
 }
 

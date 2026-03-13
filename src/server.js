@@ -166,7 +166,8 @@ const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 const { 
   createAgencyCheckout, 
   createAgencyPortal,
-  handlePlatformStripeWebhook 
+  handlePlatformStripeWebhook,
+  warnExpiringAgencyTrials
 } = require('./routes/stripe-platform');
 
 // Stripe Connect (clients pay agencies)
@@ -848,6 +849,21 @@ app.post('/api/cron/expire-trials', async (req, res) => {
   } catch (error) {
     console.error('Cron error:', error);
     res.status(500).json({ error: 'Failed to run trial expiration' });
+  }
+});
+
+// Warn no-card agency trials expiring within 3 days (cron-job.org daily at 9am ET)
+app.post('/api/cron/warn-agency-trials', async (req, res) => {
+  const cronSecret = req.headers['x-cron-secret'];
+  if (process.env.CRON_SECRET && cronSecret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const result = await warnExpiringAgencyTrials();
+    res.json({ success: true, message: 'Agency trial warning check completed', ...result });
+  } catch (error) {
+    console.error('Cron error:', error);
+    res.status(500).json({ error: 'Failed to run agency trial warnings' });
   }
 });
 
