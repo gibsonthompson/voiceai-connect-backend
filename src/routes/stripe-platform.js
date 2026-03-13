@@ -482,7 +482,8 @@ async function handleAgencyTrialEnding(subscription) {
 
 // ============================================================================
 // WARN NO-CARD TRIAL AGENCIES (3 days before expiry)
-// Called by cron — sends SMS to agencies whose no-card trial is ending soon
+// Called by cron — sends escalating SMS to agencies whose no-card trial is
+// ending soon. Each day has a different message and tone.
 // ============================================================================
 async function warnExpiringAgencyTrials() {
   console.log('Checking for expiring agency trials (no-card)...');
@@ -510,22 +511,50 @@ async function warnExpiringAgencyTrials() {
   for (const agency of expiringAgencies || []) {
     try {
       const trialEnd = new Date(agency.trial_ends_at);
-      const daysLeft = Math.ceil((trialEnd.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+      const hoursLeft = (trialEnd.getTime() - now.getTime()) / (1000 * 60 * 60);
+      const daysLeft = Math.ceil(hoursLeft / 24);
 
-      // Send SMS to agency owner
-      if (agency.phone) {
-        const { sendTelnyxSMS } = require('../lib/notifications');
-        await sendTelnyxSMS(agency.phone,
-          `VoiceAI Connect — Trial Ending\n\n` +
-          `Hi ${agency.name}, your free trial ends in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}.\n\n` +
-          `Subscribe now to keep your agency and clients active:\n` +
+      let agencyMessage = null;
+
+      if (daysLeft >= 3) {
+        // ================================================================
+        // DAY 3 — Friendly check-in, remind them what's ready
+        // ================================================================
+        agencyMessage =
+          `Hey ${agency.name} — quick heads up, your VoiceAI Connect trial wraps up on ${trialEnd.toLocaleDateString()}.\n\n` +
+          `Your agency is fully set up — branding, pricing, signup page, all of it. You're ready to start bringing on clients whenever you want.\n\n` +
+          `If you'd like to keep everything as-is, you can subscribe here:\n` +
           `myvoiceaiconnect.com/agency/settings?tab=billing\n\n` +
-          `No action = access suspended on ${trialEnd.toLocaleDateString()}.`
-        );
-        console.log(`Trial warning sent to ${agency.name} (${daysLeft} days left)`);
+          `Any questions, just reply to this text.`;
+
+      } else if (daysLeft === 2) {
+        // ================================================================
+        // DAY 2 — Honest about what happens, still helpful
+        // ================================================================
+        agencyMessage =
+          `Hey ${agency.name} — just wanted to make sure this doesn't catch you off guard. Your VoiceAI Connect trial ends ${trialEnd.toLocaleDateString()}.\n\n` +
+          `After that, your dashboard and client signup page will go offline, and any active AI receptionists will stop taking calls.\n\n` +
+          `If you're planning to keep going, subscribing takes about 30 seconds:\n` +
+          `myvoiceaiconnect.com/agency/settings?tab=billing\n\n` +
+          `And if it's not the right time, no worries at all.`;
+
+      } else if (daysLeft <= 1) {
+        // ================================================================
+        // DAY 1 — Last day, short and direct
+        // ================================================================
+        agencyMessage =
+          `Hey ${agency.name} — your VoiceAI Connect trial ends tomorrow. After that your agency goes offline and any AI receptionists stop answering.\n\n` +
+          `If you want to keep things running:\n` +
+          `myvoiceaiconnect.com/agency/settings?tab=billing\n\n` +
+          `Takes less than a minute. Let me know if you need anything.`;
       }
 
-      // Also notify platform owner
+      if (agency.phone && agencyMessage) {
+        const { sendTelnyxSMS } = require('../lib/notifications');
+        await sendTelnyxSMS(agency.phone, agencyMessage);
+        console.log(`Trial warning (day ${daysLeft}) sent to ${agency.name}`);
+      }
+
       await sendPlatformNotificationSMS(
         `Agency Trial Expiring (${daysLeft}d)\n` +
         `Name: ${agency.name}\n` +
