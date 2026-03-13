@@ -332,7 +332,7 @@ async function handleAgencySignup(req, res) {
 //   1 = Agency Details (name, phone, referral source)
 //   2 = Pricing (prices + call limits)
 //   3 = Logo upload (base64 data URL saved directly to logo_url)
-//   4 = Brand colors (primary, secondary, accent)
+//   4 = Brand colors (primary, secondary, accent) + theme from logo bg detection
 //   5 = Password (handled client-side via /auth/set-password, not this handler)
 //   6 = Complete
 // ============================================================================
@@ -395,12 +395,25 @@ async function handleAgencyOnboarding(req, res) {
         if (data.logo_url !== undefined) {
           updateData.logo_url = data.logo_url || null;
         }
+        // Accept logo background color detected by frontend
+        if (data.logo_background_color !== undefined) {
+          updateData.logo_background_color = data.logo_background_color || null;
+        }
         break;
         
-      case 4: // Brand colors
+      case 4: // Brand colors + theme
         if (data.primary_color) updateData.primary_color = data.primary_color;
         if (data.secondary_color) updateData.secondary_color = data.secondary_color;
         if (data.accent_color) updateData.accent_color = data.accent_color;
+        // Accept website_theme auto-detected from logo background
+        if (data.website_theme && (data.website_theme === 'light' || data.website_theme === 'dark')) {
+          updateData.website_theme = data.website_theme;
+          console.log(`🎨 Theme set from logo: ${data.website_theme}`);
+        }
+        // Also accept logo_background_color here (in case sent with colors step)
+        if (data.logo_background_color !== undefined) {
+          updateData.logo_background_color = data.logo_background_color || null;
+        }
         break;
         
       case 5: // Password step
