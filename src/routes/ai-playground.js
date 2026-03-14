@@ -1,7 +1,6 @@
 // ============================================================================
-// AI PLAYGROUND - Test AI Receptionists in Real Time
-// Includes: Chat endpoint, Client AI details, SMS phone swap
-// Requires OPENAI_API_KEY for chat, VAPI for live calls
+// AI PLAYGROUND - Test & Configure AI Receptionists
+// Endpoints: client listing, AI config details (full prompt from VAPI), SMS swap
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -9,128 +8,8 @@ const { supabase } = require('../lib/supabase');
 const { formatPhoneE164, formatPhoneDisplay } = require('../lib/notifications');
 
 // ============================================================================
-// POST /:agencyId/ai-playground/chat
-// Chat with AI using a system prompt (from industry template or custom)
-// Returns response + detailed metadata for debug panel
-// ============================================================================
-router.post('/:agencyId/ai-playground/chat', async (req, res) => {
-  const requestStart = Date.now();
-
-  try {
-    const { agencyId } = req.params;
-    const { 
-      systemPrompt, 
-      messages, 
-      temperature = 0.7, 
-      model = 'gpt-4o-mini',
-      maxTokens = 500 
-    } = req.body;
-
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ 
-        error: 'OPENAI_API_KEY not configured',
-        message: 'Add OPENAI_API_KEY to your backend environment variables to use the AI Playground.',
-        metadata: { latency_ms: Date.now() - requestStart },
-      });
-    }
-
-    if (!systemPrompt || typeof systemPrompt !== 'string') {
-      return res.status(400).json({ error: 'systemPrompt is required' });
-    }
-
-    if (!messages || !Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({ error: 'messages array is required and must not be empty' });
-    }
-
-    const { data: agency, error: agencyError } = await supabase
-      .from('agencies')
-      .select('id, name, subscription_status')
-      .eq('id', agencyId)
-      .single();
-
-    if (agencyError || !agency) {
-      return res.status(404).json({ error: 'Agency not found' });
-    }
-
-    const openaiMessages = [
-      { role: 'system', content: systemPrompt },
-      ...messages.map(m => ({ role: m.role, content: m.content })),
-    ];
-
-    const apiStart = Date.now();
-
-    const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: openaiMessages,
-        temperature,
-        max_tokens: maxTokens,
-      }),
-    });
-
-    const apiLatency = Date.now() - apiStart;
-    const totalLatency = Date.now() - requestStart;
-    const data = await openaiResponse.json();
-
-    if (!openaiResponse.ok) {
-      console.error('AI Playground OpenAI error:', data.error);
-      return res.status(openaiResponse.status).json({
-        error: 'OpenAI API error',
-        message: data.error?.message || 'Unknown OpenAI error',
-        code: data.error?.code || null,
-        type: data.error?.type || null,
-        metadata: { 
-          api_latency_ms: apiLatency,
-          total_latency_ms: totalLatency,
-          model, 
-          temperature,
-          system_prompt_chars: systemPrompt.length,
-          message_count: messages.length,
-        },
-      });
-    }
-
-    const assistantMessage = data.choices?.[0]?.message?.content || '';
-    const finishReason = data.choices?.[0]?.finish_reason || 'unknown';
-
-    console.log(`🧪 Playground chat for ${agency.name}: ${apiLatency}ms, ${data.usage?.total_tokens || 0} tokens`);
-
-    res.json({
-      success: true,
-      message: assistantMessage,
-      metadata: {
-        api_latency_ms: apiLatency,
-        total_latency_ms: totalLatency,
-        prompt_tokens: data.usage?.prompt_tokens || 0,
-        completion_tokens: data.usage?.completion_tokens || 0,
-        total_tokens: data.usage?.total_tokens || 0,
-        model: data.model || model,
-        system_prompt_chars: systemPrompt.length,
-        temperature,
-        finish_reason: finishReason,
-        message_count: messages.length + 1,
-      },
-    });
-
-  } catch (error) {
-    console.error('AI Playground error:', error);
-    res.status(500).json({
-      error: 'Playground error',
-      message: error.message || 'Something went wrong',
-      metadata: { total_latency_ms: Date.now() - requestStart },
-    });
-  }
-});
-
-// ============================================================================
 // GET /:agencyId/ai-playground/clients
-// List all clients for the agency with AI-relevant fields
-// Used by the AI Lab client selector
+// List all clients with AI-relevant fields for the client selector
 // ============================================================================
 router.get('/:agencyId/ai-playground/clients', async (req, res) => {
   try {
@@ -138,7 +17,7 @@ router.get('/:agencyId/ai-playground/clients', async (req, res) => {
 
     const { data: clients, error } = await supabase
       .from('clients')
-      .select('id, business_name, industry, owner_name, owner_phone, email, vapi_assistant_id, vapi_phone_number, vapi_phone_id, knowledge_base_id, subscription_status, status, plan_type, business_city, business_state')
+      .select('id, business_name, industry, owner_name, owner_phone, email, vapi_assistant_id, vapi_phone_number, vapi_phone_id, knowledge_base_id, subscription_status, status, plan_type, business_city, business_state, call_mode')
       .eq('agency_id', agencyId)
       .neq('status', 'deleted')
       .order('created_at', { ascending: false });
@@ -157,12 +36,16 @@ router.get('/:agencyId/ai-playground/clients', async (req, res) => {
 
 // ============================================================================
 // GET /:agencyId/ai-playground/clients/:clientId/ai-details
-// Get full AI config for a specific client (for live call testing)
+// Full AI config for a client:
+//   - Fetches live VAPI assistant config (prompt, voice, model, temp, tools)
+//   - Merges call_mode from Supabase (not stored in VAPI)
+// Used by the AI Lab to populate the config editor
 // ============================================================================
 router.get('/:agencyId/ai-playground/clients/:clientId/ai-details', async (req, res) => {
   try {
     const { agencyId, clientId } = req.params;
 
+    // Fetch client from supabase (scoped to agency)
     const { data: client, error } = await supabase
       .from('clients')
       .select('*')
@@ -174,7 +57,7 @@ router.get('/:agencyId/ai-playground/clients/:clientId/ai-details', async (req, 
       return res.status(404).json({ error: 'Client not found' });
     }
 
-    // Fetch VAPI assistant details if we have an ID
+    // Fetch full VAPI assistant config if assistant exists
     let assistantDetails = null;
     if (client.vapi_assistant_id && process.env.VAPI_API_KEY) {
       try {
@@ -182,7 +65,34 @@ router.get('/:agencyId/ai-playground/clients/:clientId/ai-details', async (req, 
           headers: { 'Authorization': `Bearer ${process.env.VAPI_API_KEY}` },
         });
         if (vapiResponse.ok) {
-          assistantDetails = await vapiResponse.json();
+          const raw = await vapiResponse.json();
+
+          // Extract system prompt from model.messages array
+          let systemPrompt = '';
+          if (raw.model?.messages && Array.isArray(raw.model.messages)) {
+            const systemMsg = raw.model.messages.find(m => m.role === 'system');
+            if (systemMsg) systemPrompt = systemMsg.content || '';
+          }
+
+          assistantDetails = {
+            id: raw.id,
+            name: raw.name || null,
+            model: raw.model?.model || 'gpt-4o-mini',
+            voice: raw.voice?.voiceId || '',
+            voiceProvider: raw.voice?.provider || '11labs',
+            firstMessage: raw.firstMessage || '',
+            systemPrompt: systemPrompt,
+            systemPromptLength: systemPrompt.length,
+            temperature: raw.model?.temperature ?? 0.7,
+            tools: (raw.model?.tools || []).map(t => {
+              if (t.type === 'transferCall') return 'transferCall';
+              return t.function?.name || t.type || 'unknown';
+            }),
+            toolIds: raw.model?.toolIds || [],
+            serverUrl: raw.serverUrl || null,
+          };
+        } else {
+          console.warn('VAPI assistant fetch failed:', vapiResponse.status);
         }
       } catch (vapiErr) {
         console.warn('Failed to fetch VAPI assistant details:', vapiErr.message);
@@ -206,18 +116,9 @@ router.get('/:agencyId/ai-playground/clients/:clientId/ai-details', async (req, 
         subscription_status: client.subscription_status,
         status: client.status,
         plan_type: client.plan_type,
+        call_mode: client.call_mode || 'primary',
       },
-      assistant: assistantDetails ? {
-        id: assistantDetails.id,
-        name: assistantDetails.name,
-        model: assistantDetails.model?.model || 'unknown',
-        voice: assistantDetails.voice?.voiceId || 'unknown',
-        voiceProvider: assistantDetails.voice?.provider || 'unknown',
-        firstMessage: assistantDetails.firstMessage || null,
-        systemPromptLength: assistantDetails.model?.messages?.[0]?.content?.length || 0,
-        tools: (assistantDetails.model?.tools || []).map(t => t.function?.name || t.type || 'unknown'),
-        serverUrl: assistantDetails.serverUrl || null,
-      } : null,
+      assistant: assistantDetails,
     });
   } catch (error) {
     console.error('AI details error:', error);
@@ -227,8 +128,8 @@ router.get('/:agencyId/ai-playground/clients/:clientId/ai-details', async (req, 
 
 // ============================================================================
 // PUT /:agencyId/ai-playground/clients/:clientId/notification-phone
-// Swap the SMS notification phone number for testing
-// Agency owner can temporarily set it to their own number, test, then revert
+// Swap SMS notification phone for testing
+// Agency owner sets it to their number → tests → reverts to owner
 // ============================================================================
 router.put('/:agencyId/ai-playground/clients/:clientId/notification-phone', async (req, res) => {
   try {
@@ -277,21 +178,6 @@ router.put('/:agencyId/ai-playground/clients/:clientId/notification-phone', asyn
     console.error('Notification phone swap error:', error);
     res.status(500).json({ error: 'Server error' });
   }
-});
-
-// ============================================================================
-// GET /:agencyId/ai-playground/models
-// Available models for the playground
-// ============================================================================
-router.get('/:agencyId/ai-playground/models', (req, res) => {
-  res.json({
-    models: [
-      { id: 'gpt-4o-mini', name: 'GPT-4o Mini', description: 'Fast, cost-effective — default for most assistants', recommended: true },
-      { id: 'gpt-4o', name: 'GPT-4o', description: 'Most capable, higher latency and cost' },
-      { id: 'gpt-4.1-mini', name: 'GPT-4.1 Mini', description: 'Latest mini model' },
-      { id: 'gpt-4.1', name: 'GPT-4.1', description: 'Latest flagship model' },
-    ],
-  });
 });
 
 module.exports = router;
