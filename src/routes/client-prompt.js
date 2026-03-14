@@ -1,13 +1,7 @@
 // ============================================================================
 // CLIENT PROMPT ROUTES - Agency-level editing of individual client AI config
-// Allows agency owners to view/edit/reset a client's VAPI assistant:
-//   - System prompt (model.messages)
-//   - First message / greeting (firstMessage)
-//   - Voice (voice.voiceId)
-//   - Model (model.model)
-//   - Temperature (model.temperature)
-//   - Call mode: primary / secondary (Supabase only — controls routing logic)
-// Pattern: VAPI PATCH + Supabase cache
+// PUT handles: system_prompt, first_message, voice_id, model, temperature,
+//              call_mode (Supabase-only), transfer_phone (VAPI transferCall tool)
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -18,7 +12,6 @@ const VAPI_API_KEY = process.env.VAPI_API_KEY;
 
 // ============================================================================
 // GET /api/agency/:agencyId/clients/:clientId/prompt
-// Fetches current system prompt — checks DB cache first, falls back to VAPI
 // ============================================================================
 router.get('/:agencyId/clients/:clientId/prompt', async (req, res) => {
   try {
@@ -41,43 +34,24 @@ router.get('/:agencyId/clients/:clientId/prompt', async (req, res) => {
 
     const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
 
-    // Return cached prompt if available
     if (client.system_prompt) {
-      return res.json({
-        success: true,
-        system_prompt: client.system_prompt,
-        industry: industryKey,
-        business_name: client.business_name,
-        source: 'cache',
-      });
+      return res.json({ success: true, system_prompt: client.system_prompt, industry: industryKey, business_name: client.business_name, source: 'cache' });
     }
 
-    // Fetch from VAPI
     const vapiResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
       headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` },
     });
 
     if (!vapiResponse.ok) {
-      console.error('VAPI fetch failed:', vapiResponse.status);
       return res.status(500).json({ success: false, error: 'Failed to fetch assistant from VAPI' });
     }
 
     const assistant = await vapiResponse.json();
     const systemPrompt = assistant.model?.messages?.[0]?.content || '';
 
-    // Cache in DB
-    await supabase
-      .from('clients')
-      .update({ system_prompt: systemPrompt })
-      .eq('id', clientId);
+    await supabase.from('clients').update({ system_prompt: systemPrompt }).eq('id', clientId);
 
-    return res.json({
-      success: true,
-      system_prompt: systemPrompt,
-      industry: industryKey,
-      business_name: client.business_name,
-      source: 'vapi',
-    });
+    return res.json({ success: true, system_prompt: systemPrompt, industry: industryKey, business_name: client.business_name, source: 'vapi' });
   } catch (error) {
     console.error('Error fetching client prompt:', error);
     res.status(500).json({ success: false, error: 'Server error' });
@@ -86,23 +60,12 @@ router.get('/:agencyId/clients/:clientId/prompt', async (req, res) => {
 
 // ============================================================================
 // PUT /api/agency/:agencyId/clients/:clientId/prompt
-// Updates AI assistant config in VAPI + caches relevant fields in Supabase
-//
-// Accepts (all optional — only provided fields are updated):
-//   - system_prompt: string (min 10 chars) → patches model.messages
-//   - first_message: string              → patches firstMessage
-//   - voice_id: string                   → patches voice.voiceId
-//   - model: string                      → patches model.model
-//   - temperature: number (0-1)          → patches model.temperature
-//   - call_mode: 'primary' | 'secondary' → Supabase only (not a VAPI field)
-//
-// Backwards compatible: if only system_prompt is sent, behaves identically
-// to the original endpoint.
+// All fields optional. Only provided fields are updated. Backwards compatible.
 // ============================================================================
 router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
   try {
     const { agencyId, clientId } = req.params;
-    const { system_prompt, first_message, voice_id, model, temperature, call_mode } = req.body;
+    const { system_prompt, first_message, voice_id, model, temperature, call_mode, transfer_phone } = req.body;
 
     // Detect which fields were provided
     const hasPrompt = typeof system_prompt === 'string' && system_prompt.trim().length >= 10;
@@ -111,21 +74,18 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     const hasModel = typeof model === 'string' && model.trim().length > 0;
     const hasTemp = typeof temperature === 'number' && temperature >= 0 && temperature <= 1;
     const hasCallMode = typeof call_mode === 'string' && (call_mode === 'primary' || call_mode === 'secondary');
+    const hasTransferPhone = typeof transfer_phone === 'string' && transfer_phone.trim().length > 0;
 
-    // Validate: prompt was provided but too short
+    // Validate prompt length
     if (typeof system_prompt === 'string' && system_prompt.trim().length > 0 && system_prompt.trim().length < 10) {
       return res.status(400).json({ success: false, error: 'system_prompt must be at least 10 characters' });
     }
 
-    // At least one field must be provided
-    if (!hasPrompt && !hasGreeting && !hasVoice && !hasModel && !hasTemp && !hasCallMode) {
-      return res.status(400).json({
-        success: false,
-        error: 'At least one field required: system_prompt, first_message, voice_id, model, temperature, call_mode',
-      });
+    if (!hasPrompt && !hasGreeting && !hasVoice && !hasModel && !hasTemp && !hasCallMode && !hasTransferPhone) {
+      return res.status(400).json({ success: false, error: 'At least one field required' });
     }
 
-    // Fetch client (scoped to agency)
+    // Fetch client
     const { data: client, error } = await supabase
       .from('clients')
       .select('id, vapi_assistant_id, business_name')
@@ -138,22 +98,21 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     }
 
     // ====================================================================
-    // VAPI PATCH (skip if only call_mode was changed — that's Supabase-only)
+    // VAPI PATCH
     // ====================================================================
-    const needsVapiPatch = hasPrompt || hasGreeting || hasVoice || hasModel || hasTemp;
+    const needsVapiPatch = hasPrompt || hasGreeting || hasVoice || hasModel || hasTemp || hasTransferPhone;
 
     if (needsVapiPatch) {
       if (!client.vapi_assistant_id) {
         return res.status(400).json({ success: false, error: 'Client has no AI assistant configured' });
       }
 
-      // GET current assistant config to preserve unchanged fields
+      // GET current config
       const getResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
         headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` },
       });
 
       if (!getResponse.ok) {
-        console.error('VAPI GET failed:', getResponse.status);
         return res.status(500).json({ success: false, error: 'Failed to fetch current assistant config from VAPI' });
       }
 
@@ -161,12 +120,10 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
       const currentModel = currentAssistant.model || {};
       const currentVoice = currentAssistant.voice || {};
 
-      // Build VAPI PATCH payload — only include changed fields
       const patchPayload = {};
 
-      // --- model object (prompt, model name, and/or temperature) ---
-      if (hasPrompt || hasModel || hasTemp) {
-        // Start with current model config to preserve tools, toolIds, provider, etc.
+      // --- model object (prompt, model name, temperature, transfer phone) ---
+      if (hasPrompt || hasModel || hasTemp || hasTransferPhone) {
         patchPayload.model = { ...currentModel };
 
         if (hasPrompt) {
@@ -178,61 +135,81 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
         if (hasTemp) {
           patchPayload.model.temperature = temperature;
         }
+
+        // --- Transfer phone: update transferCall tool destination ---
+        if (hasTransferPhone) {
+          const tools = patchPayload.model.tools || currentModel.tools || [];
+          const formattedPhone = formatPhoneForTransfer(transfer_phone.trim());
+
+          if (formattedPhone) {
+            const transferIdx = tools.findIndex(t => t.type === 'transferCall');
+            if (transferIdx !== -1) {
+              // Update existing transferCall tool destination
+              const existingTool = { ...tools[transferIdx] };
+              if (existingTool.destinations && existingTool.destinations.length > 0) {
+                existingTool.destinations = existingTool.destinations.map(d => ({
+                  ...d,
+                  number: formattedPhone,
+                }));
+              } else {
+                existingTool.destinations = [{
+                  type: 'number',
+                  number: formattedPhone,
+                  description: 'Transfer to business owner',
+                  message: 'One moment, let me connect you.',
+                }];
+              }
+              tools[transferIdx] = existingTool;
+            } else {
+              // No transferCall tool exists — add one
+              tools.push({
+                type: 'transferCall',
+                destinations: [{
+                  type: 'number',
+                  number: formattedPhone,
+                  description: 'Transfer to business owner',
+                  message: 'One moment, let me connect you.',
+                }],
+              });
+            }
+            patchPayload.model.tools = tools;
+          }
+        }
       }
 
-      // --- firstMessage (greeting) ---
+      // --- firstMessage ---
       if (hasGreeting) {
         patchPayload.firstMessage = first_message.trim();
       }
 
-      // --- voice object ---
+      // --- voice ---
       if (hasVoice) {
-        // Preserve existing voice config (provider, stability, etc.), only change voiceId
-        patchPayload.voice = {
-          ...currentVoice,
-          voiceId: voice_id.trim(),
-        };
+        patchPayload.voice = { ...currentVoice, voiceId: voice_id.trim() };
       }
 
-      // PATCH VAPI assistant
+      // PATCH VAPI
       const patchResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
         method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${VAPI_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(patchPayload),
       });
 
       if (!patchResponse.ok) {
         const errorText = await patchResponse.text();
         console.error('VAPI update failed:', patchResponse.status, errorText);
-        return res.status(500).json({
-          success: false,
-          error: 'Failed to update assistant in VAPI',
-          details: errorText,
-        });
+        return res.status(500).json({ success: false, error: 'Failed to update assistant in VAPI', details: errorText });
       }
     }
 
     // ====================================================================
-    // SUPABASE CACHE
-    // Prompt is cached in supabase for fast GET. call_mode is supabase-only.
-    // Voice/model/temp are VAPI-authoritative (not cached in supabase).
+    // SUPABASE
     // ====================================================================
     const supabaseUpdate = {};
     if (hasPrompt) supabaseUpdate.system_prompt = system_prompt.trim();
     if (hasCallMode) supabaseUpdate.call_mode = call_mode;
 
     if (Object.keys(supabaseUpdate).length > 0) {
-      const { error: updateError } = await supabase
-        .from('clients')
-        .update(supabaseUpdate)
-        .eq('id', clientId);
-
-      if (updateError) {
-        console.warn('Supabase cache update failed (VAPI was already updated):', updateError.message);
-      }
+      await supabase.from('clients').update(supabaseUpdate).eq('id', clientId);
     }
 
     // Build response
@@ -243,10 +220,9 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     if (hasModel) updated.model = model.trim();
     if (hasTemp) updated.temperature = temperature;
     if (hasCallMode) updated.call_mode = call_mode;
+    if (hasTransferPhone) updated.transfer_phone = transfer_phone.trim();
 
-    const fields = Object.keys(updated).join(', ');
-    console.log(`✅ AI config updated for ${client.business_name} (${clientId}): ${fields}`);
-
+    console.log(`✅ AI config updated for ${client.business_name} (${clientId}): ${Object.keys(updated).join(', ')}`);
     res.json({ success: true, updated });
   } catch (error) {
     console.error('Error updating client AI config:', error);
@@ -256,7 +232,6 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
 
 // ============================================================================
 // POST /api/agency/:agencyId/clients/:clientId/prompt/reset
-// Resets prompt to industry default from INDUSTRY_CONFIGS
 // ============================================================================
 router.post('/:agencyId/clients/:clientId/prompt/reset', async (req, res) => {
   try {
@@ -269,70 +244,54 @@ router.post('/:agencyId/clients/:clientId/prompt/reset', async (req, res) => {
       .eq('agency_id', agencyId)
       .single();
 
-    if (error || !client) {
-      return res.status(404).json({ success: false, error: 'Client not found' });
-    }
+    if (error || !client) return res.status(404).json({ success: false, error: 'Client not found' });
+    if (!client.vapi_assistant_id) return res.status(400).json({ success: false, error: 'Client has no AI assistant configured' });
 
-    if (!client.vapi_assistant_id) {
-      return res.status(400).json({ success: false, error: 'Client has no AI assistant configured' });
-    }
-
-    // Generate default prompt from industry config
     const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
     const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
     const defaultPrompt = config.systemPrompt(client.business_name);
 
-    // GET current assistant config from VAPI to preserve model settings
     const getResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
       headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` },
     });
 
-    if (!getResponse.ok) {
-      console.error('VAPI GET failed:', getResponse.status);
-      return res.status(500).json({ success: false, error: 'Failed to fetch current assistant config' });
-    }
+    if (!getResponse.ok) return res.status(500).json({ success: false, error: 'Failed to fetch current assistant config' });
 
     const currentAssistant = await getResponse.json();
-    const currentModel = currentAssistant.model || {};
+    const updatedModel = { ...currentAssistant.model, messages: [{ role: 'system', content: defaultPrompt }] };
 
-    // Build updated model with default prompt
-    const updatedModel = {
-      ...currentModel,
-      messages: [{ role: 'system', content: defaultPrompt }],
-    };
-
-    // PATCH VAPI assistant
     const patchResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
       method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${VAPI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: updatedModel }),
     });
 
     if (!patchResponse.ok) {
       const errorText = await patchResponse.text();
-      console.error('VAPI prompt reset failed:', errorText);
       return res.status(500).json({ success: false, error: 'Failed to reset prompt in VAPI' });
     }
 
-    // Update cache in Supabase
-    await supabase
-      .from('clients')
-      .update({ system_prompt: defaultPrompt })
-      .eq('id', clientId);
+    await supabase.from('clients').update({ system_prompt: defaultPrompt }).eq('id', clientId);
 
-    console.log(`✅ System prompt reset to ${industryKey} default for ${client.business_name} (${clientId})`);
-    res.json({
-      success: true,
-      system_prompt: defaultPrompt,
-      industry: industryKey,
-    });
+    console.log(`✅ Prompt reset to ${industryKey} default for ${client.business_name}`);
+    res.json({ success: true, system_prompt: defaultPrompt, industry: industryKey });
   } catch (error) {
     console.error('Error resetting client prompt:', error);
     res.status(500).json({ success: false, error: 'Server error' });
   }
 });
+
+// ============================================================================
+// HELPER: Format phone for VAPI transferCall (E.164)
+// ============================================================================
+function formatPhoneForTransfer(phone) {
+  if (!phone) return null;
+  // Already E.164
+  if (phone.startsWith('+') && phone.length >= 11) return phone;
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  return null;
+}
 
 module.exports = router;
