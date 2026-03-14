@@ -2,6 +2,7 @@
 // CLIENT SIGNUP & PROVISIONING - Multi-Tenant
 // WITH BYOT (Bring Your Own Twilio) SUPPORT
 // WITH INTERNATIONAL CLIENT SUPPORT
+// WITH OPTIONAL PASSWORD AT SIGNUP (Phase 2A)
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -190,6 +191,9 @@ async function provisionPhoneForClient(agency, clientData, assistantId) {
 
 // ============================================================================
 // MAIN CLIENT SIGNUP HANDLER (from agency marketing site)
+// PHASE 2A: Now accepts optional `password` field. If provided, hashes and
+// stores directly — client can log in immediately without email flow.
+// Still generates password token and sends welcome email as backup.
 // ============================================================================
 async function handleClientSignup(req, res) {
   try {
@@ -215,7 +219,8 @@ async function handleClientSignup(req, res) {
       businessState,
       businessCountry,
       websiteUrl: rawWebsiteUrl,
-      agencyId
+      agencyId,
+      password  // PHASE 2A: Optional password field
     } = req.body;
 
     // Get agency (need full record for BYOT check)
@@ -264,6 +269,17 @@ async function handleClientSignup(req, res) {
         error: 'Account already exists',
         message: 'An account with this email already exists for this agency.'
       });
+    }
+
+    // ============================================
+    // PHASE 2A: Hash password if provided
+    // ============================================
+    let passwordHash = null;
+    const hasPassword = password && typeof password === 'string' && password.trim().length >= 6;
+    if (hasPassword) {
+      const salt = await bcrypt.genSalt(10);
+      passwordHash = await bcrypt.hash(password, salt);
+      console.log('🔑 Password provided at signup — will store hash directly');
     }
 
     // ============================================
@@ -355,7 +371,8 @@ async function handleClientSignup(req, res) {
     console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult.provisioningMethod})`);
 
     // ============================================
-    // STEP 5: CREATE USER RECORD (no password - will be set later)
+    // STEP 5: CREATE USER RECORD
+    // PHASE 2A: Store password_hash if provided, otherwise null (email flow)
     // ============================================
     const { data: newUser, error: userError } = await supabase
       .from('users')
@@ -365,7 +382,7 @@ async function handleClientSignup(req, res) {
         first_name: firstName,
         last_name: lastName || null,
         role: 'client',
-        password_hash: null
+        password_hash: passwordHash  // PHASE 2A: null if no password, hash if provided
       })
       .select()
       .single();
@@ -375,15 +392,18 @@ async function handleClientSignup(req, res) {
       throw userError;
     }
 
-    console.log(`✅ User created: ${newUser.id}`);
+    console.log(`✅ User created: ${newUser.id}${hasPassword ? ' (with password)' : ' (no password — email flow)'}`);
 
     // ============================================
     // STEP 6: GENERATE PASSWORD TOKEN
+    // Always generate — serves as fallback even when password was provided
+    // (user might want to reset later, or email link is a nice-to-have)
     // ============================================
     const passwordToken = await createPasswordToken(newUser.id, email.toLowerCase());
 
     // ============================================
     // STEP 7: SEND WELCOME EMAIL
+    // Always send — contains set-password link as backup + useful info
     // ============================================
     console.log('📧 Sending welcome email...');
     await sendClientWelcomeEmail(newClient, agency, null, passwordToken);
@@ -402,6 +422,8 @@ async function handleClientSignup(req, res) {
 
     // ============================================
     // RETURN SUCCESS
+    // PHASE 2A: Include hasPassword flag so frontend knows whether to show
+    // credentials or redirect to set-password
     // ============================================
     console.log('🎉 Client onboarding complete:', businessName);
 
@@ -409,10 +431,12 @@ async function handleClientSignup(req, res) {
       success: true,
       message: 'Account created successfully!',
       token: passwordToken,
+      hasPassword: !!hasPassword,  // PHASE 2A: Frontend can check this
       client: {
         id: newClient.id,
         business_name: newClient.business_name,
         phone_number: phoneResult.number,
+        email: newClient.email,
         country: clientCountry,
         location: `${businessCity}, ${businessState}`,
         trial_ends_at: newClient.trial_ends_at,
@@ -522,7 +546,7 @@ async function handleAgencyAddClient(req, res) {
 
     // Hash temp password
     const salt = await bcrypt.genSalt(10);
-    const passwordHash = await bcrypt.hash(tempPassword, salt);
+    const tempPasswordHash = await bcrypt.hash(tempPassword, salt);
 
     // === STEP 1: Knowledge Base ===
     let knowledgeBaseData = null;
@@ -610,7 +634,7 @@ async function handleAgencyAddClient(req, res) {
         first_name: firstName,
         last_name: lastName || null,
         role: 'client',
-        password_hash: passwordHash
+        password_hash: tempPasswordHash
       })
       .select()
       .single();
