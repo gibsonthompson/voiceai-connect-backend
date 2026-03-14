@@ -150,6 +150,9 @@ const outreachRoutes = require('./routes/outreach');
 // Agency Templates Routes (Enterprise Feature - Custom AI Prompts)
 const agencyTemplatesRoutes = require('./routes/agency-templates');
 
+// AI Playground Routes (Test AI receptionists in real time)
+const aiPlaygroundRoutes = require('./routes/ai-playground');
+
 // BYOT Routes (Bring Your Own Twilio - International provisioning) // BYOT ADDITION
 const byotRoutes = require('./routes/byot'); // BYOT ADDITION
 
@@ -225,6 +228,7 @@ app.get('/health', (req, res) => {
       googleOAuth: true,
       googleCalendar: true,
       aiTemplates: true,
+      aiPlayground: true,
       byot: true // BYOT ADDITION
     },
     cron: {
@@ -695,6 +699,14 @@ app.use('/api/agency', demoPhoneRoutes);
 // ============================================================================
 
 app.use('/api/agency', agencyTemplatesRoutes);
+
+// ============================================================================
+// AI PLAYGROUND ROUTES (Test AI receptionists in real time)
+// POST /api/agency/:agencyId/ai-playground/chat
+// GET  /api/agency/:agencyId/ai-playground/models
+// ============================================================================
+
+app.use('/api/agency', aiPlaygroundRoutes);
 
 // ============================================================================
 // BYOT ROUTES (Bring Your Own Twilio - International provisioning)        
