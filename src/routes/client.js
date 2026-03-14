@@ -66,8 +66,7 @@ const VOICE_OPTIONS = [
     accent: 'Australian',
     style: 'Casual',
     description: 'Deep, confident, and energetic. Officially tagged for conversational AI.',
-    previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/IKne3meq5aSn9XLyUdCD/102de6f2-22ed-43e0-a1f1-111fa75c5481.mp3',
-    recommended: true
+    previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/IKne3meq5aSn9XLyUdCD/102de6f2-22ed-43e0-a1f1-111fa75c5481.mp3'
   },
   { 
     id: 'iP95p4xoKVk53GoZ742B', 
@@ -105,15 +104,6 @@ const VOICE_OPTIONS = [
     style: 'Deep',
     description: 'Steady broadcaster voice. Sophisticated British for premium businesses.',
     previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/onwK4e9ZLuTAKqWW03F9/7eee0236-1a72-4b86-b303-5dcadc007ba9.mp3'
-  },
-  { 
-    id: 'JBFqnCBsd6RMkjVDRZzb', 
-    name: 'George', 
-    gender: 'male', 
-    accent: 'British',
-    style: 'Raspy',
-    description: 'Warm, captivating storyteller. Distinguished British voice with character.',
-    previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/JBFqnCBsd6RMkjVDRZzb/e6206d1a-0721-4787-aafb-06a6e705cac5.mp3'
   },
   { 
     id: 'TX3LPaxmHKxFdv7VOQHJ', 

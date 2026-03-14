@@ -3,6 +3,7 @@
 // WITH BYOT (Bring Your Own Twilio) SUPPORT
 // WITH INTERNATIONAL CLIENT SUPPORT
 // WITH OPTIONAL PASSWORD AT SIGNUP (Phase 2A)
+// WITH AGENCY TEMPLATE KB INHERITANCE
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -314,6 +315,12 @@ async function handleClientSignup(req, res) {
     
     console.log(`✅ Assistant created: ${assistant.id}`);
 
+    // Extract template KB data if agency had a packaged config
+    const templateKB = assistant._templateKnowledgeBase || null;
+    if (templateKB) {
+      console.log(`📚 Agency template KB will be inherited by new client`);
+    }
+
     // ============================================
     // STEP 3: PROVISION PHONE NUMBER (unified)
     // Automatically picks platform vs BYOT based on agency config
@@ -351,6 +358,7 @@ async function handleClientSignup(req, res) {
         vapi_phone_number: phoneResult.number,
         vapi_phone_id: phoneResult.vapiPhoneId || null,
         knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
+        knowledge_base_data: templateKB,
         subscription_status: 'trial',
         trial_ends_at: trialEndsAt,
         status: 'active',
@@ -574,6 +582,12 @@ async function handleAgencyAddClient(req, res) {
     );
     console.log(`✅ Assistant created: ${assistant.id}`);
 
+    // Extract template KB data if agency had a packaged config
+    const templateKB = assistant._templateKnowledgeBase || null;
+    if (templateKB) {
+      console.log(`📚 Agency template KB will be inherited by new client`);
+    }
+
     // === STEP 3: Provision Phone (unified — picks platform vs BYOT) ===
     const phoneResult = await provisionPhoneForClient(agency, {
       businessCity,
@@ -607,6 +621,7 @@ async function handleAgencyAddClient(req, res) {
         vapi_phone_number: phoneResult.number,
         vapi_phone_id: phoneResult.vapiPhoneId || null,
         knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
+        knowledge_base_data: templateKB,
         subscription_status: 'trial',
         trial_ends_at: trialEndsAt,
         status: 'active',
@@ -727,6 +742,9 @@ async function provisionClient(clientId) {
       client.id,
       client.agency_id
     );
+
+    // Extract template KB data if agency had a packaged config
+    const templateKB = assistant._templateKnowledgeBase || null;
     
     // Provision phone (unified — picks platform vs BYOT)
     const phoneResult = await provisionPhoneForClient(agency, {
@@ -744,6 +762,7 @@ async function provisionClient(clientId) {
         vapi_phone_number: phoneResult.number,
         vapi_phone_id: phoneResult.vapiPhoneId || null,
         knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
+        knowledge_base_data: templateKB || client.knowledge_base_data || null,
         status: 'active',
         provisioning_method: phoneResult.provisioningMethod || 'platform'
       })

@@ -643,7 +643,7 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       customTemplate = await getAgencyTemplate(agencyId, industryKey);
     }
 
-    let systemPrompt, firstMessage, voiceId, temperature;
+    let systemPrompt, firstMessage, voiceId, temperature, modelId;
     
     if (customTemplate) {
       console.log(`   📝 Using CUSTOM template`);
@@ -651,12 +651,28 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       firstMessage = replacePlaceholders(customTemplate.first_message, businessName);
       voiceId = customTemplate.voice_id || config.voiceId;
       temperature = customTemplate.temperature || config.temperature;
+      modelId = customTemplate.model || 'gpt-4o-mini';
+
+      // Append agency's KB data to system prompt if template has it
+      if (customTemplate.knowledge_base_data) {
+        const kb = customTemplate.knowledge_base_data;
+        let kbSection = '\n\n## BUSINESS INFORMATION';
+        if (kb.businessHours && kb.businessHours.trim()) kbSection += `\n\n### Business Hours\n${kb.businessHours}`;
+        if (kb.services && kb.services.trim()) kbSection += `\n\n### Services & Pricing\n${kb.services}`;
+        if (kb.faqs && kb.faqs.trim()) kbSection += `\n\n### Frequently Asked Questions\n${kb.faqs}`;
+        if (kb.additionalInfo && kb.additionalInfo.trim()) kbSection += `\n\n### Additional Information\n${kb.additionalInfo}`;
+        if (kbSection !== '\n\n## BUSINESS INFORMATION') {
+          systemPrompt += kbSection;
+          console.log(`   📚 Appended agency KB data to system prompt (${kbSection.length} chars)`);
+        }
+      }
     } else {
       console.log(`   📝 Using DEFAULT template`);
       systemPrompt = config.systemPrompt(businessName);
       firstMessage = config.firstMessage(businessName);
       voiceId = config.voiceId;
       temperature = config.temperature;
+      modelId = 'gpt-4o-mini';
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -701,7 +717,7 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       name: sanitizeAssistantName(businessName),
       model: {
         provider: 'openai',
-        model: 'gpt-4o-mini',
+        model: modelId,
         temperature,
         messages: [{ role: 'system', content: systemPrompt }],
         ...(queryToolId && { toolIds: [queryToolId] }),
@@ -727,6 +743,12 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
 
     const assistant = await response.json();
     console.log(`✅ Assistant created: ${assistant.id}`);
+
+    // Attach template KB data so caller can save to client record
+    if (customTemplate?.knowledge_base_data) {
+      assistant._templateKnowledgeBase = customTemplate.knowledge_base_data;
+    }
+
     return assistant;
   } catch (error) {
     console.error('❌ Error creating assistant:', error);

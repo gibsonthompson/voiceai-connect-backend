@@ -96,7 +96,6 @@ const ELEVENLABS_VOICES = [
   { id: 'nPczCjzI2devNBz1zQrb', name: 'Brian', description: 'Deep, resonant — professional and corporate', gender: 'male' },
   { id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam', description: 'Dominant, firm — narration and professional', gender: 'male' },
   { id: 'onwK4e9ZLuTAKqWW03F9', name: 'Daniel', description: 'Steady British broadcaster — premium businesses', gender: 'male' },
-  { id: 'JBFqnCBsd6RMkjVDRZzb', name: 'George', description: 'Warm British storyteller — distinguished character', gender: 'male' },
   { id: 'TX3LPaxmHKxFdv7VOQHJ', name: 'Liam', description: 'Energetic, young — trendy businesses', gender: 'male' },
 ];
 
@@ -799,13 +798,16 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         first_message: customTemplate?.first_message || defaults.first_message,
         voice_id: voiceId,
         voice: voice || null,
+        model: customTemplate?.model || 'gpt-4o-mini',
         temperature: customTemplate?.temperature || 0.7,
+        knowledge_base_data: customTemplate?.knowledge_base_data || null,
         updated_at: customTemplate?.updated_at || null,
       },
       defaults: {
         system_prompt: defaults.system_prompt,
         first_message: defaults.first_message,
         voice_id: defaults.voice_id,
+        model: 'gpt-4o-mini',
         temperature: 0.7,
       },
       placeholders: [
@@ -824,7 +826,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
 // ============================================================================
 router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (req, res) => {
   const { agencyId, industry } = req.params;
-  const { system_prompt, first_message, voice_id, temperature, is_active } = req.body;
+  const { system_prompt, first_message, voice_id, temperature, is_active, model, knowledge_base_data } = req.body;
   
   // Map frontend key to backend key
   const industryConfig = INDUSTRY_CONFIG[industry];
@@ -844,6 +846,10 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
   if (isNaN(temp) || temp < 0 || temp > 1) {
     return res.status(400).json({ error: 'Temperature must be between 0 and 1' });
   }
+
+  // Validate model if provided
+  const validModels = ['gpt-4o-mini', 'gpt-4.1-mini', 'gpt-4o'];
+  const finalModel = validModels.includes(model) ? model : 'gpt-4o-mini';
   
   try {
     // Upsert template
@@ -855,7 +861,9 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         system_prompt,
         first_message,
         voice_id,
+        model: finalModel,
         temperature: temp,
+        knowledge_base_data: knowledge_base_data || null,
         is_active: is_active !== false,
         updated_at: new Date().toISOString(),
       }, {
