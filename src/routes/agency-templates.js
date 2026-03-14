@@ -2,6 +2,7 @@
 // AGENCY PROMPT TEMPLATES ROUTES
 // Enterprise Feature - Custom AI Receptionist Prompts per Industry
 // Routes: /api/agency/:agencyId/ai-templates/*
+// UPDATED: Removed retired voices, replaced Rachel with Matilda (2026-03-14)
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -82,18 +83,21 @@ const INDUSTRY_CONFIG = {
 
 // ============================================================================
 // ELEVENLABS VOICES (Curated List)
+// Last verified against ElevenLabs API: 2026-03-14
+// Retired voices removed: Rachel, Drew, Sam, Gigi, Freya
 // ============================================================================
 const ELEVENLABS_VOICES = [
-  { id: 'iP95p4xoKVk53GoZ742B', name: 'Chris', description: 'Warm, friendly male voice - great for home services & automotive', gender: 'male' },
-  { id: 'EXAVITQu4vr4xnSDxMaL', name: 'Sarah', description: 'Professional, caring female voice - ideal for medical', gender: 'female' },
-  { id: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel', description: 'Warm, welcoming female voice - perfect for hospitality & real estate', gender: 'female' },
-  { id: 'nPczCjzI2devNBz1zQrb', name: 'Brian', description: 'Authoritative male voice - suits legal & financial services', gender: 'male' },
-  { id: '29vD33N1CtxCmqQRPOHJ', name: 'Drew', description: 'Friendly, conversational male voice', gender: 'male' },
-  { id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam', description: 'Deep, trustworthy male voice', gender: 'male' },
-  { id: 'yoZ06aMxZJJ28mfd3POQ', name: 'Sam', description: 'Neutral, clear voice - works for any industry', gender: 'neutral' },
-  { id: 'jBpfuIE2acCO8z3wKNLl', name: 'Gigi', description: 'Energetic, youthful female voice', gender: 'female' },
-  { id: 'jsCqWAovK2LkecY7zXl4', name: 'Freya', description: 'Elegant, sophisticated female voice', gender: 'female' },
-  { id: 'onwK4e9ZLuTAKqWW03F9', name: 'Daniel', description: 'British accent, professional male voice', gender: 'male' },
+  { id: 'EXAVITQu4vr4xnSDxMaL', name: 'Sarah', description: 'Mature, reassuring — ideal for medical and professional', gender: 'female' },
+  { id: 'XrExE9yKIg1WjnnlVkGX', name: 'Matilda', description: 'Knowledgeable, professional — great for hospitality and retail', gender: 'female' },
+  { id: 'pFZP5JQG7iQjIQuC4Bku', name: 'Lily', description: 'Velvety British accent — upscale businesses', gender: 'female' },
+  { id: 'Xb7hH8MSUJpSbSDYk0k2', name: 'Alice', description: 'Clear, engaging — corporate environments', gender: 'female' },
+  { id: 'IKne3meq5aSn9XLyUdCD', name: 'Charlie', description: 'Deep, confident — conversational AI optimized', gender: 'male' },
+  { id: 'iP95p4xoKVk53GoZ742B', name: 'Chris', description: 'Charming, down-to-earth — conversational AI optimized', gender: 'male' },
+  { id: 'nPczCjzI2devNBz1zQrb', name: 'Brian', description: 'Deep, resonant — professional and corporate', gender: 'male' },
+  { id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam', description: 'Dominant, firm — narration and professional', gender: 'male' },
+  { id: 'onwK4e9ZLuTAKqWW03F9', name: 'Daniel', description: 'Steady British broadcaster — premium businesses', gender: 'male' },
+  { id: 'JBFqnCBsd6RMkjVDRZzb', name: 'George', description: 'Warm British storyteller — distinguished character', gender: 'male' },
+  { id: 'TX3LPaxmHKxFdv7VOQHJ', name: 'Liam', description: 'Energetic, young — trendy businesses', gender: 'male' },
 ];
 
 // ============================================================================
@@ -265,7 +269,7 @@ Search for: menu items, prices, ingredients, hours, location, parking, dietary a
 ## CRITICAL RULE
 You do NOT have the ability to end calls.`,
     first_message: `Hi, thanks for calling {businessName}! This call may be recorded. Are you calling about a reservation, takeout, or did you have a question?`,
-    voice_id: '21m00Tcm4TlvDq8ikWAM',
+    voice_id: 'XrExE9yKIg1WjnnlVkGX',
   },
 
   salon_spa: {
@@ -306,7 +310,7 @@ Search for: services offered, pricing, stylists/staff, hours, policies (cancella
 ## CRITICAL RULE
 You do NOT have the ability to end calls.`,
     first_message: `Hi, thank you for calling {businessName}! This call may be recorded. Are you calling to book an appointment?`,
-    voice_id: '21m00Tcm4TlvDq8ikWAM',
+    voice_id: 'XrExE9yKIg1WjnnlVkGX',
   },
 
   retail: {
@@ -346,7 +350,7 @@ Search for: products, pricing, stock information, store hours, location, return 
 ## CRITICAL RULE
 You do NOT have the ability to end calls.`,
     first_message: `Hi, thanks for calling {businessName}! This call may be recorded. How can I help you today?`,
-    voice_id: '21m00Tcm4TlvDq8ikWAM',
+    voice_id: 'XrExE9yKIg1WjnnlVkGX',
   },
 
   fitness: {
@@ -511,7 +515,7 @@ Search for: listings, agent info, areas served, services offered.
 ## CRITICAL RULE
 You do NOT have the ability to end calls.`,
     first_message: `Hi, thanks for calling {businessName}! This call may be recorded. Are you looking to buy, sell, or rent?`,
-    voice_id: '21m00Tcm4TlvDq8ikWAM',
+    voice_id: 'XrExE9yKIg1WjnnlVkGX',
   },
 
   financial_services: {

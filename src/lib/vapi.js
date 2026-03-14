@@ -4,6 +4,7 @@
 // WITH DEMO ASSISTANT PROVISIONING (Agency-level)
 // WITH INDUSTRY KNOWLEDGE BASES (Pre-loaded for every AI receptionist)
 // ALL 11 INDUSTRIES WITH UNIQUE KEYS
+// UPDATED: Retired Rachel voice, replaced with Matilda (2026-03-14)
 // ============================================================================
 const fetch = require('node-fetch');
 const FormData = require('form-data');
@@ -58,13 +59,14 @@ const INDUSTRY_MAPPING = {
 
 // ============================================================================
 // VOICES - ElevenLabs
+// UPDATED: rachel retired by ElevenLabs, replaced with matilda
 // ============================================================================
 const VOICES = {
   chris: 'iP95p4xoKVk53GoZ742B',
   sarah: 'EXAVITQu4vr4xnSDxMaL',
-  rachel: '21m00Tcm4TlvDq8ikWAM',
+  matilda: 'XrExE9yKIg1WjnnlVkGX',
   brian: 'nPczCjzI2devNBz1zQrb',
-  female_warm: '21m00Tcm4TlvDq8ikWAM'
+  female_warm: 'XrExE9yKIg1WjnnlVkGX'
 };
 
 // ============================================================================
@@ -165,7 +167,7 @@ You do NOT have the ability to end calls.`,
   },
 
   restaurants: {
-    voiceId: VOICES.rachel,
+    voiceId: VOICES.matilda,
     temperature: 0.7,
     systemPrompt: (businessName) => `You are the phone assistant for ${businessName}, a restaurant.
 
@@ -196,7 +198,7 @@ You do NOT have the ability to end calls.`,
   },
 
   salon_spa: {
-    voiceId: VOICES.rachel,
+    voiceId: VOICES.matilda,
     temperature: 0.7,
     systemPrompt: (businessName) => `You are the receptionist for ${businessName}, a salon and spa.
 
@@ -254,7 +256,7 @@ You do NOT have the ability to end calls.`,
   },
 
   fitness: {
-    voiceId: VOICES.rachel,
+    voiceId: VOICES.matilda,
     temperature: 0.7,
     systemPrompt: (businessName) => `You are the front desk assistant for ${businessName}, a fitness center.
 
@@ -332,7 +334,7 @@ You do NOT have the ability to end calls.`,
   },
 
   real_estate: {
-    voiceId: VOICES.rachel,
+    voiceId: VOICES.matilda,
     temperature: 0.7,
     systemPrompt: (businessName) => `You are the assistant for ${businessName}, a real estate company.
 
@@ -1018,20 +1020,14 @@ async function provisionPhoneNumber(areaCode, assistantId, businessName) {
 async function provisionLocalPhone(city, state, assistantId, businessName, ownerPhone = null) {
   console.log(`📞 Provisioning phone for ${businessName} in ${city}, ${state}`);
   
-  // Build area code priority list:
-  // 1. State-specific area codes (business location — most important)
-  // 2. Client's own area code (fallback if state codes exhausted)
-  // 3. Fallback to 404 (Atlanta)
   const areaCodesToTry = [];
   
-  // Business location area codes first — the number should match where the business is
   const stateCodes = STATE_AREA_CODES[state.toUpperCase()] || [];
   for (const code of stateCodes) {
     areaCodesToTry.push(code);
   }
   console.log(`   📍 Trying ${stateCodes.length} area codes for ${state}`);
   
-  // Owner's area code as fallback (only if not already in the list)
   if (ownerPhone) {
     const digits = ownerPhone.replace(/\D/g, '');
     let clientAreaCode = null;
@@ -1044,7 +1040,6 @@ async function provisionLocalPhone(city, state, assistantId, businessName, owner
     }
   }
   
-  // Fallback
   if (!areaCodesToTry.includes('404')) {
     areaCodesToTry.push('404');
   }
