@@ -162,6 +162,9 @@ const abandonedCartRoutes = require('./routes/abandoned-cart');
 // Agency Feedback
 const feedbackRoutes = require('./routes/feedback');
 
+// Support Chat (AI-powered with Claude)
+const supportRoutes = require('./routes/support');
+
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 
@@ -719,6 +722,13 @@ app.use('/api/agency', byotRoutes); // BYOT ADDITION
 // ============================================================================
 
 app.use('/api/agency', feedbackRoutes);
+
+// ============================================================================
+// SUPPORT CHAT ROUTES (AI-powered with Claude)
+// POST /api/agency/:agencyId/support/chat
+// ============================================================================
+
+app.use('/api/agency', supportRoutes);
 
 // ============================================================================
 // LEADS & OUTREACH ROUTES (Agency CRM)
