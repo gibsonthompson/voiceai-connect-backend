@@ -897,7 +897,7 @@ async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
     const assistant = await createDemoAssistant(agencyName);
 
     // 2. Provision a phone number with requested area code
-    const phoneData = await provisionPhoneNumber(areaCode, assistant.id, `${agencyName} Demo`);
+    const phoneData = await provisionPhoneNumber(areaCode);
     console.log(`✅ Demo phone provisioned: ${phoneData.number}`);
 
     // 3. Configure webhook on the phone
@@ -1049,21 +1049,29 @@ const STATE_AREA_CODES = {
   'WY': ['307'],
 };
 
-async function provisionPhoneNumber(areaCode, assistantId, businessName) {
-  const response = await fetch('https://api.vapi.ai/phone-number/buy', {
+async function provisionPhoneNumber(areaCode) {
+  // Buy number — VAPI only accepts areaCode on this endpoint
+  // assistantId + serverUrl are set afterward by configurePhoneWebhook in client-signup.js
+  const buyResponse = await fetch('https://api.vapi.ai/phone-number/buy', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${VAPI_API_KEY}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({
-      areaCode,
-      name: `${businessName} - Business Line`,
-      assistantId
-    })
+    body: JSON.stringify({ areaCode })
   });
-  if (!response.ok) throw new Error('Failed to buy phone number');
-  return response.json();
+
+  if (!buyResponse.ok) {
+    const errData = await buyResponse.json().catch(() => ({}));
+    const error = new Error(errData.message || 'Failed to buy phone number');
+    const hintMatch = (errData.message || '').match(/Try one of ([0-9, ]+)/);
+    if (hintMatch) {
+      error.suggestedCodes = hintMatch[1].split(',').map(c => c.trim()).filter(c => /^\d{3}$/.test(c));
+    }
+    throw error;
+  }
+
+  return buyResponse.json();
 }
 
 async function provisionLocalPhone(city, state, assistantId, businessName, ownerPhone = null) {
@@ -1093,16 +1101,40 @@ async function provisionLocalPhone(city, state, assistantId, businessName, owner
     areaCodesToTry.push('404');
   }
   
+  // Track VAPI-suggested codes to try after state codes fail
+  const suggestedCodes = new Set();
+  
   for (const areaCode of areaCodesToTry) {
     try {
-      const phoneData = await provisionPhoneNumber(areaCode, assistantId, businessName);
+      const phoneData = await provisionPhoneNumber(areaCode);
       console.log(`✅ Phone provisioned: ${phoneData.number} (area code: ${areaCode})`);
       return phoneData;
     } catch (error) {
       console.log(`   ❌ ${areaCode} unavailable, trying next...`);
+      // Collect VAPI's suggested available codes
+      if (error.suggestedCodes) {
+        error.suggestedCodes.forEach(c => {
+          if (!areaCodesToTry.includes(c)) suggestedCodes.add(c);
+        });
+      }
     }
   }
-  throw new Error(`Failed to provision phone for ${state} — tried ${areaCodesToTry.length} area codes`);
+  
+  // Try VAPI-suggested area codes as last resort
+  if (suggestedCodes.size > 0) {
+    console.log(`   🔄 Trying ${suggestedCodes.size} VAPI-suggested area codes: ${[...suggestedCodes].join(', ')}`);
+    for (const areaCode of suggestedCodes) {
+      try {
+        const phoneData = await provisionPhoneNumber(areaCode);
+        console.log(`✅ Phone provisioned (suggested): ${phoneData.number} (area code: ${areaCode})`);
+        return phoneData;
+      } catch (error) {
+        console.log(`   ❌ ${areaCode} (suggested) unavailable`);
+      }
+    }
+  }
+  
+  throw new Error(`Failed to provision phone for ${state} — tried ${areaCodesToTry.length} state codes + ${suggestedCodes.size} suggested codes`);
 }
 
 // ============================================================================
