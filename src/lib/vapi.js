@@ -1074,34 +1074,153 @@ async function provisionPhoneNumber(areaCode) {
   return buyResponse.json();
 }
 
+// ============================================================================
+// CITY → AREA CODE MAPPING (major US metros — city codes tried FIRST)
+// ============================================================================
+const CITY_AREA_CODES = {
+  // Georgia
+  'atlanta': ['404', '470', '678', '770'],
+  'savannah': ['912'],
+  'augusta': ['706', '762'],
+  'macon': ['478'],
+  // California
+  'los angeles': ['213', '323', '310', '424', '818', '747'],
+  'san francisco': ['415', '628'],
+  'san diego': ['619', '858'],
+  'san jose': ['408', '669'],
+  'sacramento': ['916'],
+  'oakland': ['510'],
+  'fresno': ['559'],
+  'long beach': ['562'],
+  'anaheim': ['714', '657'],
+  'irvine': ['949'],
+  'riverside': ['951'],
+  'bakersfield': ['661'],
+  // Texas
+  'houston': ['713', '281', '832', '346'],
+  'dallas': ['214', '972', '469'],
+  'san antonio': ['210'],
+  'austin': ['512', '737'],
+  'fort worth': ['817', '682'],
+  'el paso': ['915'],
+  // Florida
+  'miami': ['305', '786'],
+  'orlando': ['407', '321', '689'],
+  'tampa': ['813', '656'],
+  'jacksonville': ['904'],
+  'fort lauderdale': ['954', '754'],
+  'st petersburg': ['727'],
+  'west palm beach': ['561'],
+  // New York
+  'new york': ['212', '646', '917', '718', '347', '929'],
+  'brooklyn': ['718', '347', '929'],
+  'queens': ['718', '347', '929'],
+  'bronx': ['718', '347', '929'],
+  'buffalo': ['716'],
+  // Illinois
+  'chicago': ['312', '773', '872', '708', '630'],
+  // Pennsylvania
+  'philadelphia': ['215', '267', '445'],
+  'pittsburgh': ['412', '878'],
+  // Arizona
+  'phoenix': ['602', '480', '623'],
+  'tucson': ['520'],
+  'scottsdale': ['480'],
+  // North Carolina
+  'charlotte': ['704', '980'],
+  'raleigh': ['919', '984'],
+  // Colorado
+  'denver': ['303', '720'],
+  'colorado springs': ['719'],
+  // Washington
+  'seattle': ['206', '253'],
+  // Massachusetts
+  'boston': ['617', '857'],
+  // Oregon
+  'portland': ['503', '971'],
+  // Nevada
+  'las vegas': ['702', '725'],
+  // Tennessee
+  'nashville': ['615', '629'],
+  'memphis': ['901'],
+  // Michigan
+  'detroit': ['313', '248'],
+  // Minnesota
+  'minneapolis': ['612', '763'],
+  // Louisiana
+  'new orleans': ['504'],
+  // Maryland
+  'baltimore': ['410', '443'],
+  // Virginia
+  'virginia beach': ['757'],
+  'richmond': ['804'],
+  // Ohio
+  'columbus': ['614'],
+  'cleveland': ['216'],
+  'cincinnati': ['513'],
+  // Indiana
+  'indianapolis': ['317', '463'],
+  // Missouri
+  'kansas city': ['816'],
+  'st louis': ['314'],
+  // Wisconsin
+  'milwaukee': ['414'],
+  // New Jersey
+  'newark': ['973', '862'],
+  'jersey city': ['201', '551'],
+  // South Carolina
+  'charleston': ['843'],
+  'columbia': ['803'],
+  // Alabama
+  'birmingham': ['205'],
+  // Utah
+  'salt lake city': ['801', '385'],
+  // Oklahoma
+  'oklahoma city': ['405'],
+  // Connecticut
+  'hartford': ['860'],
+  // Hawaii
+  'honolulu': ['808'],
+};
+
 async function provisionLocalPhone(city, state, assistantId, businessName, ownerPhone = null) {
   console.log(`📞 Provisioning phone for ${businessName} in ${city}, ${state}`);
   
   const areaCodesToTry = [];
+  const seen = new Set();
   
-  const stateCodes = STATE_AREA_CODES[state.toUpperCase()] || [];
-  for (const code of stateCodes) {
-    areaCodesToTry.push(code);
+  const addCode = (code) => {
+    if (!seen.has(code)) { seen.add(code); areaCodesToTry.push(code); }
+  };
+
+  // Priority 1: City-specific area codes (most relevant to the business location)
+  const cityKey = (city || '').toLowerCase().trim();
+  const cityCodes = CITY_AREA_CODES[cityKey] || [];
+  if (cityCodes.length > 0) {
+    console.log(`   🏙️ City match: ${city} → [${cityCodes.join(', ')}]`);
+    cityCodes.forEach(addCode);
   }
-  console.log(`   📍 Trying ${stateCodes.length} area codes for ${state}`);
   
+  // Priority 2: Owner's phone area code (local feel)
   if (ownerPhone) {
     const digits = ownerPhone.replace(/\D/g, '');
     let clientAreaCode = null;
     if (digits.length === 10) clientAreaCode = digits.substring(0, 3);
     else if (digits.length === 11 && digits.startsWith('1')) clientAreaCode = digits.substring(1, 4);
     
-    if (clientAreaCode && /^\d{3}$/.test(clientAreaCode) && !areaCodesToTry.includes(clientAreaCode)) {
-      areaCodesToTry.push(clientAreaCode);
-      console.log(`   📱 Owner area code ${clientAreaCode} added as fallback`);
+    if (clientAreaCode && /^\d{3}$/.test(clientAreaCode)) {
+      addCode(clientAreaCode);
+      console.log(`   📱 Owner area code: ${clientAreaCode}`);
     }
   }
   
-  if (!areaCodesToTry.includes('404')) {
-    areaCodesToTry.push('404');
-  }
+  // Priority 3: Remaining state area codes (not already queued)
+  const stateCodes = STATE_AREA_CODES[state.toUpperCase()] || [];
+  stateCodes.forEach(addCode);
   
-  // Track VAPI-suggested codes to try after state codes fail
+  console.log(`   📍 Total: ${areaCodesToTry.length} area codes to try (${cityCodes.length} city + ${areaCodesToTry.length - cityCodes.length} state/fallback)`);
+  
+  // Track VAPI-suggested codes to try after all else fails
   const suggestedCodes = new Set();
   
   for (const areaCode of areaCodesToTry) {
@@ -1111,16 +1230,15 @@ async function provisionLocalPhone(city, state, assistantId, businessName, owner
       return phoneData;
     } catch (error) {
       console.log(`   ❌ ${areaCode} unavailable, trying next...`);
-      // Collect VAPI's suggested available codes
       if (error.suggestedCodes) {
         error.suggestedCodes.forEach(c => {
-          if (!areaCodesToTry.includes(c)) suggestedCodes.add(c);
+          if (!seen.has(c)) suggestedCodes.add(c);
         });
       }
     }
   }
   
-  // Try VAPI-suggested area codes as last resort
+  // Last resort: VAPI-suggested area codes
   if (suggestedCodes.size > 0) {
     console.log(`   🔄 Trying ${suggestedCodes.size} VAPI-suggested area codes: ${[...suggestedCodes].join(', ')}`);
     for (const areaCode of suggestedCodes) {
@@ -1134,7 +1252,7 @@ async function provisionLocalPhone(city, state, assistantId, businessName, owner
     }
   }
   
-  throw new Error(`Failed to provision phone for ${state} — tried ${areaCodesToTry.length} state codes + ${suggestedCodes.size} suggested codes`);
+  throw new Error(`Failed to provision phone for ${city}, ${state} — tried ${areaCodesToTry.length} codes + ${suggestedCodes.size} suggested`);
 }
 
 // ============================================================================
