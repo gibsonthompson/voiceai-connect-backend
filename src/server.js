@@ -159,6 +159,9 @@ const byotRoutes = require('./routes/byot'); // BYOT ADDITION
 // Abandoned Cart SMS (cron-driven nudge sequence for agencies who didn't subscribe)
 const abandonedCartRoutes = require('./routes/abandoned-cart');
 
+// Agency Onboarding Engagement SMS (cron-driven conditional nudge sequence)
+const agencyOnboardingSmsRoutes = require('./routes/agency-onboarding-sms');
+
 // Agency Feedback
 const feedbackRoutes = require('./routes/feedback');
 
@@ -236,7 +239,8 @@ app.get('/health', (req, res) => {
     },
     cron: {
       expireTrials: true,
-      abandonedCart: true
+      abandonedCart: true,
+      agencyOnboardingSms: true
     }
   });
 });
@@ -891,6 +895,9 @@ app.post('/api/cron/warn-agency-trials', async (req, res) => {
 
 // Abandoned cart SMS nudges (called by cron-job.org every 30 min)
 app.use('/api/cron', abandonedCartRoutes);
+
+// Agency onboarding engagement SMS (called by cron-job.org every hour)
+app.use('/api/cron', agencyOnboardingSmsRoutes);
 
 // ============================================================================
 // WEBHOOK ROUTES

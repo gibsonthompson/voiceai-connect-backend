@@ -234,6 +234,37 @@ async function sendAgencySignupNotificationSMS(agency) {
   return sendPlatformNotificationSMS(message);
 }
 
+// Welcome SMS to the AGENCY OWNER (not platform owner) on signup
+async function sendAgencyWelcomeSMS(agency) {
+  if (!agency?.phone) {
+    console.log(`⚠️ Agency ${agency?.name || 'Unknown'} has no phone number — skipping welcome SMS`);
+    return false;
+  }
+
+  const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
+
+  let agencyUrl;
+  if (agency.slug) {
+    agencyUrl = `https://${agency.slug}.${platformDomain}`;
+  } else {
+    agencyUrl = `https://${platformDomain}`;
+  }
+
+  const message =
+    `Welcome to VoiceAI Connect! 🚀\n\n` +
+    `Your white-label AI receptionist agency is live:\n` +
+    `${agencyUrl}\n\n` +
+    `Log in and finish setting up — it takes about 5 minutes:\n` +
+    `https://${platformDomain}/agency/login\n\n` +
+    `Your 14-day free trial has started. Let's build something.`;
+
+  console.log(`📱 Sending welcome SMS to agency owner: ${agency.name} (${agency.phone})`);
+  return sendTelnyxSMS(
+    formatPhoneE164(agency.phone, agency.country || 'US'),
+    message
+  );
+}
+
 // New client signed up - notify AGENCY OWNER (not platform owner)
 async function sendClientSignupNotificationSMS(client, agency) {
   if (!agency?.phone) {
@@ -787,6 +818,9 @@ module.exports = {
   // Platform notifications (to Gibson)
   sendPlatformNotificationSMS,
   sendAgencySignupNotificationSMS,
+
+  // Agency owner welcome SMS
+  sendAgencyWelcomeSMS,
 
   // Agency owner notifications
   sendClientSignupNotificationSMS,
