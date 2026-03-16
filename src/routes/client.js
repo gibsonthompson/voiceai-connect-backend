@@ -134,6 +134,7 @@ router.get('/:id', async (req, res) => {
           logo_url, support_email, support_phone,
           website_theme,
           branding_overrides,
+          client_header_mode,
           price_starter, price_pro, price_growth,
           limit_starter, limit_pro, limit_growth,
           plan_features
