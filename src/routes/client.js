@@ -184,6 +184,46 @@ router.put('/:id/settings', async (req, res) => {
 });
 
 // ============================================================================
+// PUT /api/client/:id/branding - Update client-level branding
+// Called by agency from client detail page to set per-client logo/colors
+// ============================================================================
+router.put('/:id/branding', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { logo_url, primary_color, secondary_color, accent_color, business_name } = req.body;
+
+    const updates = {};
+    // Allow null to clear (fall back to agency branding)
+    if (logo_url !== undefined) updates.logo_url = logo_url || null;
+    if (primary_color !== undefined) updates.primary_color = primary_color || null;
+    if (secondary_color !== undefined) updates.secondary_color = secondary_color || null;
+    if (accent_color !== undefined) updates.accent_color = accent_color || null;
+    if (business_name !== undefined && business_name.trim()) updates.business_name = business_name.trim();
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, error: 'No fields to update' });
+    }
+
+    const { data, error } = await supabase
+      .from('clients')
+      .update(updates)
+      .eq('id', id)
+      .select('id, business_name, logo_url, primary_color, secondary_color, accent_color')
+      .single();
+
+    if (error) {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+
+    console.log(`✅ Client branding updated for ${id}: ${Object.keys(updates).join(', ')}`);
+    res.json({ success: true, client: data });
+  } catch (error) {
+    console.error('Error updating client branding:', error);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+// ============================================================================
 // GET /api/client/:id/voice - Get current voice
 // FIXED: Response format to match frontend expectations
 // ============================================================================
