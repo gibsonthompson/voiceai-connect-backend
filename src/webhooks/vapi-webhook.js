@@ -1,5 +1,6 @@
 // ============================================================================
 // VAPI WEBHOOK HANDLER - Multi-Tenant Aware
+// UPDATED: Transfer tracking (ended_reason, transfer_status)
 // UPDATED: Demo call detection + agency follow-up SMS
 // UPDATED: Email summaries gated by plan_features (Phase 5)
 // UPDATED: Unlimited calls support (-1 = no limit)
@@ -13,7 +14,6 @@ const { upsertContactFromCall } = require('../lib/contact-upsert');
 // ============================================================================
 // PLAN FEATURE CHECK HELPER
 // ============================================================================
-// Default plan features — used when agency hasn't configured plan_features yet
 const DEFAULT_PLAN_FEATURES = {
   starter: {
     sms_notifications: true,
@@ -47,22 +47,44 @@ const DEFAULT_PLAN_FEATURES = {
   },
 };
 
-/**
- * Check if a feature is enabled for a client based on their plan and agency config.
- * Fails open (returns true) if data is missing — better to send a notification
- * than to silently drop it due to a config issue.
- */
 function isFeatureEnabled(client, agency, featureKey) {
   const planType = client.plan_type || 'starter';
   const agencyFeatures = agency?.plan_features;
-
-  // Use agency's custom config if available, otherwise defaults
   const planConfig = agencyFeatures?.[planType] || DEFAULT_PLAN_FEATURES[planType];
-
-  if (!planConfig) return true; // Fail open if plan not found
-
-  // Fail open if feature key not defined in config
+  if (!planConfig) return true;
   return planConfig[featureKey] !== false;
+}
+
+// ============================================================================
+// TRANSFER STATUS DETECTION
+// Maps VAPI endedReason to a transfer status for our records
+// ============================================================================
+function detectTransferStatus(endedReason, transcript) {
+  if (!endedReason) return { transferStatus: null, wasTransferred: false };
+
+  // Successful transfer — VAPI forwarded the call
+  if (endedReason === 'assistant-forwarded-call') {
+    return { transferStatus: 'transferred', wasTransferred: true };
+  }
+
+  // Transfer was attempted but failed — check for specific error patterns
+  if (endedReason === 'pipeline-error') {
+    // Check if transcript shows a transfer attempt (AI said transfer-like words then errored)
+    const transferAttempted = transcript && (
+      transcript.toLowerCase().includes('let me connect you') ||
+      transcript.toLowerCase().includes('let me transfer') ||
+      transcript.toLowerCase().includes('let me get the team') ||
+      transcript.toLowerCase().includes('let me grab someone') ||
+      transcript.toLowerCase().includes('i\'ll connect you')
+    );
+    if (transferAttempted) {
+      return { transferStatus: 'transfer_failed', wasTransferred: false };
+    }
+    return { transferStatus: null, wasTransferred: false };
+  }
+
+  // Call ended for other reasons — no transfer involved
+  return { transferStatus: null, wasTransferred: false };
 }
 
 // ============================================================================
@@ -74,10 +96,16 @@ async function generateAISummary(transcript, industry, callerPhone) {
   const industryGuidance = {
     home_services: 'Focus on: the specific problem, property location, urgency level, and service needed.',
     medical: 'Focus on: appointment type, patient status, general reason (HIPAA-compliant), urgency.',
+    dental: 'Focus on: appointment type (cleaning, consultation, emergency, ortho), patient status, urgency.',
     retail: 'Focus on: products discussed, customer intent, visit plans.',
     professional_services: 'Focus on: matter type (no confidential details), client status, urgency.',
     restaurants: 'Focus on: reservation vs takeout, party size, date/time, menu items.',
-    salon_spa: 'Focus on: service type, preferred provider, appointment preferences.'
+    salon_spa: 'Focus on: service type, preferred provider, appointment preferences.',
+    fitness: 'Focus on: membership inquiry, class interest, training goals.',
+    legal: 'Focus on: matter type (no confidential details), urgency, client status.',
+    real_estate: 'Focus on: buyer/seller/renter, property interests, timeline.',
+    financial: 'Focus on: service type (tax, bookkeeping, planning), urgency, client status.',
+    automotive: 'Focus on: vehicle info, service needed, safety concerns, urgency.'
   };
 
   const prompt = `Analyze this phone call transcript for a ${industry} business.
@@ -403,6 +431,21 @@ async function handleVapiWebhook(req, res) {
     }
     
     // ============================================
+    // TRANSFER TRACKING
+    // Detect if the call was transferred and track the outcome
+    // ============================================
+    const endedReason = call.endedReason || message.endedReason || null;
+    const { transferStatus, wasTransferred } = detectTransferStatus(endedReason, transcript);
+
+    if (wasTransferred) {
+      console.log(`📲 Call was TRANSFERRED (endedReason: ${endedReason})`);
+    } else if (transferStatus === 'transfer_failed') {
+      console.log(`❌ Transfer FAILED (endedReason: ${endedReason})`);
+    } else {
+      console.log(`📞 Call ended normally (endedReason: ${endedReason || 'unknown'})`);
+    }
+    
+    // ============================================
     // SAVE CALL TO DATABASE
     // ============================================
     const callRecord = {
@@ -415,7 +458,9 @@ async function handleVapiWebhook(req, res) {
       recording_url: recordingUrl,
       duration_seconds: durationSeconds,
       urgency_level: urgency,
-      call_status: 'completed',
+      call_status: wasTransferred ? 'transferred' : 'completed',
+      ended_reason: endedReason,
+      transfer_status: transferStatus,
       created_at: new Date().toISOString()
     };
     
@@ -426,9 +471,28 @@ async function handleVapiWebhook(req, res) {
     
     if (insertError) {
       console.error('❌ Error inserting call:', insertError);
-      return res.status(500).json({ error: 'Failed to save call' });
+      // If the error is about missing columns, try without new fields
+      if (insertError.message && (insertError.message.includes('ended_reason') || insertError.message.includes('transfer_status'))) {
+        console.log('⚠️ Transfer tracking columns not yet added — saving without them');
+        delete callRecord.ended_reason;
+        delete callRecord.transfer_status;
+        callRecord.call_status = 'completed'; // revert to safe value
+        const { data: retryCall, error: retryError } = await supabase
+          .from('calls')
+          .insert([callRecord])
+          .select();
+        if (retryError) {
+          console.error('❌ Retry insert also failed:', retryError);
+          return res.status(500).json({ error: 'Failed to save call' });
+        }
+        // Use retry result
+        var insertedCallFinal = retryCall;
+      } else {
+        return res.status(500).json({ error: 'Failed to save call' });
+      }
     }
     
+    const savedCall = insertedCall || insertedCallFinal;
     console.log('✅ Call saved successfully');
     
     // ============================================
@@ -438,7 +502,7 @@ async function handleVapiWebhook(req, res) {
       const { contact, isNew } = await upsertContactFromCall({
         clientId: client.id,
         agencyId: agency?.id,
-        callId: insertedCall[0]?.id,
+        callId: savedCall?.[0]?.id,
         customerPhone: customerPhone,
         customerName: customerName,
         customerEmail: customerEmail,
@@ -452,7 +516,6 @@ async function handleVapiWebhook(req, res) {
         console.log(`📇 Contact ${isNew ? 'created' : 'updated'}: ${contact.name} (${contact.phone})`);
       }
     } catch (contactErr) {
-      // Non-fatal — don't fail the webhook if contact upsert fails
       console.warn('⚠️ Contact upsert failed (non-fatal):', contactErr.message);
     }
     
@@ -495,12 +558,11 @@ async function handleVapiWebhook(req, res) {
     
     // ============================================
     // SEND NOTIFICATIONS
-    // Phase 5: SMS for all plans, email gated by plan_features
     // ============================================
     let smsSent = false;
     let emailSent = false;
     
-    // 1. SMS — all plans get this (if client has an owner phone number)
+    // 1. SMS — all plans get this
     if (client.owner_phone) {
       console.log('📱 Sending SMS notification...');
       smsSent = await sendCallNotificationSMS(client, agency, aiData);
@@ -518,7 +580,7 @@ async function handleVapiWebhook(req, res) {
         const emailResult = await sendCallSummaryEmail(client, agency, aiData, {
           duration_seconds: durationSeconds,
           transcript: transcript,
-          created_at: insertedCall[0]?.created_at || new Date().toISOString(),
+          created_at: savedCall?.[0]?.created_at || new Date().toISOString(),
         });
         emailSent = emailResult?.success || false;
         
@@ -540,12 +602,15 @@ async function handleVapiWebhook(req, res) {
     return res.status(200).json({ 
       received: true,
       saved: true,
-      callId: insertedCall[0]?.id,
+      callId: savedCall?.[0]?.id,
       smsSent: smsSent,
       emailSent: emailSent,
       firstCall: isFirstCall,
       agency: agency?.name || null,
-      duration: durationSeconds
+      duration: durationSeconds,
+      endedReason: endedReason,
+      transferStatus: transferStatus,
+      wasTransferred: wasTransferred
     });
     
   } catch (error) {
