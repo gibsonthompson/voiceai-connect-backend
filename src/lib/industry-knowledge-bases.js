@@ -7,6 +7,7 @@
 // handle calls intelligently even without a client-provided knowledge base.
 //
 // USAGE: Called by createIndustryAssistant() in vapi.js
+// UPDATED: Dental split from medical into its own industry
 // ============================================================================
 
 const INDUSTRY_KNOWLEDGE_BASES = {
@@ -167,7 +168,7 @@ A: Yes. Regular maintenance plans are available, especially for HVAC systems and
 `,
 
   // ══════════════════════════════════════════════════════════════════════════
-  // MEDICAL / DENTAL
+  // MEDICAL (Physician / Clinic — dental split into its own industry)
   // ══════════════════════════════════════════════════════════════════════════
   medical: (businessName) => `# ${businessName} — AI Receptionist Knowledge Base
 
@@ -186,22 +187,6 @@ ${businessName} is a healthcare practice dedicated to providing quality patient 
 - Sports physicals and school physicals
 - Weight management consultations
 - Referrals to specialists
-
-### Dental Services
-- Routine cleanings and exams
-- X-rays and diagnostics
-- Fillings and cavity treatment
-- Crowns, bridges, and veneers
-- Root canal therapy
-- Tooth extractions (including wisdom teeth)
-- Teeth whitening
-- Orthodontic consultations (braces, Invisalign)
-- Dentures and partials
-- Dental implants
-- Emergency dental care (toothache, broken tooth, abscess)
-- Periodontal (gum) treatment
-- Night guards and mouth guards
-- Pediatric dentistry
 
 ### Specialty Services
 - Dermatology (skin exams, mole checks, acne treatment)
@@ -273,7 +258,6 @@ A: Many of our providers see patients of all ages, including children. Pediatric
 - Urinary tract infection symptoms
 - Persistent vomiting or diarrhea
 - Minor injuries (sprains, small cuts needing stitches)
-- Dental: severe toothache, broken tooth, swelling
 - Eye pain or sudden vision changes
 - Allergic reactions (mild-moderate, no breathing difficulty)
 
@@ -282,7 +266,6 @@ A: Many of our providers see patients of all ages, including children. Pediatric
 - Follow-up appointments
 - Medication reviews
 - Routine bloodwork
-- Dental cleanings and checkups
 - Vaccination appointments
 - Referral consultations
 - Cosmetic consultations
@@ -296,6 +279,173 @@ A: Many of our providers see patients of all ages, including children. Pediatric
 - **Prior Authorization**: Approval required from insurance before certain procedures
 - **EOB (Explanation of Benefits)**: Statement from insurance showing what was covered
 - **FSA/HSA**: Tax-advantaged savings accounts for medical expenses
+`,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // DENTAL & ORTHODONTICS (NEW — split from medical)
+  // ══════════════════════════════════════════════════════════════════════════
+  dental: (businessName) => `# ${businessName} — AI Receptionist Knowledge Base
+
+## Practice Overview
+${businessName} is a dental and orthodontic practice dedicated to helping patients achieve and maintain healthy, beautiful smiles. Our team of dental professionals provides comprehensive care in a comfortable, welcoming environment.
+
+## Common Services
+
+### Preventive Care
+- Routine cleanings (prophylaxis)
+- Comprehensive dental exams
+- Digital X-rays and diagnostics
+- Oral cancer screenings
+- Fluoride treatments
+- Dental sealants
+- Periodontal (gum) evaluations
+- Custom night guards and mouth guards
+- Sports mouth guards
+- Pediatric dentistry (children's cleanings and exams)
+
+### Restorative Dentistry
+- Fillings (composite / tooth-colored)
+- Crowns and bridges
+- Root canal therapy (endodontics)
+- Tooth extractions (simple and surgical)
+- Wisdom teeth removal
+- Dental implants (single tooth, implant-supported bridges)
+- Dentures and partials (full and partial)
+- Inlays and onlays
+- Post and core buildups
+- Bone grafting (for implant preparation)
+
+### Cosmetic Dentistry
+- Professional teeth whitening (in-office and take-home)
+- Porcelain veneers
+- Dental bonding
+- Smile makeovers
+- Gum contouring / reshaping
+- Tooth-colored fillings (replacing silver/amalgam)
+
+### Orthodontics
+- Traditional metal braces (adults and children)
+- Clear / ceramic braces
+- Invisalign (clear aligner therapy)
+- Invisalign Teen
+- Retainers (fixed and removable)
+- Early intervention / Phase 1 orthodontics
+- Orthodontic consultations and evaluations
+- Space maintainers
+- Palatal expanders
+
+### Periodontal (Gum) Treatment
+- Deep cleaning (scaling and root planing)
+- Gum disease treatment
+- Periodontal maintenance
+- Gum grafting
+- Pocket reduction surgery
+- Antibiotic therapy
+
+### Emergency Dental Care
+- Severe toothache
+- Knocked-out tooth (avulsed tooth)
+- Broken, cracked, or chipped tooth
+- Lost filling or crown
+- Dental abscess (infection with swelling)
+- Bleeding that won't stop
+- Injury to mouth, lips, or jaw
+- Broken braces or orthodontic wire
+
+## Frequently Asked Questions
+
+**Q: Are you accepting new patients?**
+A: Yes, we welcome new patients of all ages. Our team will help schedule your first visit and walk you through what to expect.
+
+**Q: What insurance do you accept?**
+A: We accept most major dental insurance plans. Our team can verify your specific coverage when you call. We also offer options for patients without insurance.
+
+**Q: What should I bring to my first appointment?**
+A: Please bring a valid photo ID, your dental insurance card, a list of any medications you take, and any recent dental records or X-rays if you have them. Arriving 10-15 minutes early to complete new patient paperwork is recommended.
+
+**Q: How often should I come in for a cleaning?**
+A: Most patients benefit from a cleaning and exam every six months. Some patients with gum disease may need more frequent visits (every 3-4 months). Your dentist will recommend the best schedule for you.
+
+**Q: Do you see children?**
+A: Yes. We recommend a child's first dental visit by age one or when their first tooth appears. Our team is experienced with pediatric patients and makes visits fun and comfortable for kids.
+
+**Q: What should I do if I have a dental emergency?**
+A: Call our office right away. For severe pain, a knocked-out tooth, uncontrolled bleeding, or facial swelling, we will work to see you as soon as possible. If a tooth is knocked out, keep it moist (in milk or saliva) and get to us within 30 minutes if possible.
+
+**Q: Do you offer sedation or options for anxious patients?**
+A: We understand dental anxiety is common. We offer options to help you feel comfortable, which may include nitrous oxide (laughing gas), oral sedation, or other calming techniques. Let us know about your concerns and we'll find the right approach for you.
+
+**Q: How much does a cleaning cost without insurance?**
+A: Pricing for cleanings and other services varies. We can provide a cost estimate when you schedule. We also offer payment plans and may have special pricing for uninsured patients.
+
+**Q: How long does Invisalign treatment take?**
+A: Invisalign treatment typically takes 6-18 months depending on the complexity of your case. A consultation with our orthodontist will give you a personalized timeline and cost estimate.
+
+**Q: Do braces hurt?**
+A: There is some discomfort when braces are first placed and after adjustments, but it typically lasts only a few days. Over-the-counter pain relievers and soft foods help. Most patients adjust quickly.
+
+**Q: What's the difference between a crown and a veneer?**
+A: A crown covers the entire tooth and is used for damaged or weakened teeth. A veneer is a thin shell that covers only the front surface and is primarily cosmetic. Your dentist will recommend the best option for your situation.
+
+**Q: Do you offer teeth whitening?**
+A: Yes. We offer both in-office professional whitening (fastest results, typically one visit) and custom take-home whitening kits. Both are more effective and safer than over-the-counter products.
+
+**Q: What is a root canal? Does it hurt?**
+A: A root canal removes infected tissue from inside a tooth to save it from extraction. With modern techniques and anesthesia, most patients report little to no pain during the procedure — similar to getting a filling.
+
+**Q: Can I pay in installments?**
+A: Yes. We offer flexible payment plans and may accept financing through third-party providers. Our team can discuss options during your visit.
+
+## Dental Emergency Guidelines
+
+### See Immediately (Same Day)
+- Knocked-out permanent tooth (time-critical — within 30 minutes)
+- Severe, uncontrolled bleeding from the mouth
+- Facial swelling that is spreading or affecting breathing/swallowing
+- Jaw fracture or dislocation
+- Severe trauma to teeth or mouth
+
+### See Urgently (Within 24 Hours)
+- Severe toothache not relieved by over-the-counter pain medication
+- Broken or cracked tooth with sharp edges or pain
+- Lost crown or filling with sensitivity
+- Dental abscess (pimple on gums, swelling, fever)
+- Broken orthodontic wire poking cheek or gums
+
+### Schedule Soon (Within a Few Days)
+- Mild toothache that comes and goes
+- Chipped tooth with no pain
+- Loose permanent tooth
+- Lost retainer or broken aligner
+- Sensitivity to hot or cold
+
+### Home Care Tips for Dental Emergencies
+- **Knocked-out tooth**: Handle by the crown (not the root). Rinse gently. Place back in socket if possible, or keep in milk. Get to the dentist immediately.
+- **Toothache**: Rinse with warm salt water. Use over-the-counter pain relief. Do not place aspirin directly on gums.
+- **Broken tooth**: Rinse mouth, apply cold compress to reduce swelling. Save any pieces.
+- **Lost filling/crown**: Keep the crown if you have it. Dental cement from a pharmacy can temporarily hold it.
+
+## Insurance and Payment Terminology
+- **Copay**: Fixed amount you pay per visit or procedure
+- **Deductible**: Amount you pay before insurance starts covering
+- **Annual Maximum**: The most your dental plan will pay in a calendar year (commonly dollar one thousand to dollar two thousand)
+- **In-Network**: Dentists who have agreed to reduced fees with your insurance
+- **Out-of-Network**: Dentists without an insurance agreement — you may pay more
+- **Waiting Period**: Time you must be enrolled before certain services are covered (common for major work)
+- **Pre-Authorization**: Approval from insurance before expensive procedures
+- **UCR (Usual, Customary, and Reasonable)**: The fee your insurance uses to calculate coverage
+
+## First Visit Expectations
+1. Check in and complete new patient paperwork (or complete online beforehand)
+2. Meet your dental team
+3. Comprehensive exam — the dentist checks teeth, gums, jaw, and oral tissues
+4. Digital X-rays (if needed)
+5. Professional cleaning (may be same visit or scheduled separately depending on findings)
+6. Discussion of findings and recommended treatment plan
+7. Insurance verification and cost estimate for any recommended treatment
+8. Schedule follow-up appointments as needed
+
+Typical first visit duration: 60-90 minutes
 `,
 
   // ══════════════════════════════════════════════════════════════════════════
