@@ -1,23 +1,96 @@
 /**
- * Google Places Enrichment Service
- * Uses Google Places API to find business details from company name + location
+ * Google Places Enrichment Service v2
  * 
- * This is the most reliable path for local businesses since they almost always
- * have a Google Business Profile. One API call gets website, phone, address, 
- * hours, rating, and business type.
- * 
- * Requires GOOGLE_PLACES_API_KEY env var
+ * Fixes applied:
+ * - Location match validation (compares returned city/state against expected)
+ * - Retry with backoff on transient API failures (OVER_QUERY_LIMIT, etc.)
+ * - Match confidence score so pipeline can flag questionable matches
+ * - Better error isolation (one failed lookup doesn't kill the batch)
+ * - Request spacing respects Google's rate limits
  */
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const PLACES_BASE = "https://maps.googleapis.com/maps/api/place";
+const MAX_RETRIES = 2;
+
+/**
+ * Normalize a location string for comparison
+ * "Atlanta, GA 30301" → "atlanta ga"
+ */
+function normalizeLocation(str) {
+  if (!str) return "";
+  return str
+    .toLowerCase()
+    .replace(/\d{5}(-\d{4})?/g, "") // Remove zip codes
+    .replace(/,/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/united states|usa|us$/i, "")
+    .trim();
+}
+
+/**
+ * Calculate how well the returned address matches the expected location
+ * Returns 0-1 confidence score
+ */
+function locationMatchScore(expectedLocation, returnedAddress) {
+  if (!expectedLocation || !returnedAddress) return 0.5; // No data to compare
+
+  const expected = normalizeLocation(expectedLocation);
+  const returned = normalizeLocation(returnedAddress);
+
+  if (!expected || !returned) return 0.5;
+
+  // Extract city and state from expected
+  const expectedParts = expected.split(" ").filter(Boolean);
+
+  let matched = 0;
+  for (const part of expectedParts) {
+    if (part.length < 2) continue;
+    if (returned.includes(part)) matched++;
+  }
+
+  if (expectedParts.length === 0) return 0.5;
+  return matched / expectedParts.length;
+}
+
+/**
+ * Fetch with retry for transient Google API errors
+ */
+async function fetchWithRetry(url, retries = MAX_RETRIES) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url);
+      const data = await res.json();
+
+      // Retry on rate limit
+      if (data.status === "OVER_QUERY_LIMIT" && attempt < retries) {
+        console.log(`[Places] Rate limited — retrying in ${(attempt + 1) * 2}s`);
+        await delay((attempt + 1) * 2000);
+        continue;
+      }
+
+      // Retry on unknown error
+      if (data.status === "UNKNOWN_ERROR" && attempt < retries) {
+        console.log(`[Places] Unknown error — retrying in ${(attempt + 1) * 1}s`);
+        await delay((attempt + 1) * 1000);
+        continue;
+      }
+
+      return data;
+    } catch (error) {
+      if (attempt < retries) {
+        console.log(`[Places] Network error — retrying: ${error.message}`);
+        await delay((attempt + 1) * 1000);
+        continue;
+      }
+      throw error;
+    }
+  }
+}
 
 /**
  * Search for a business using Google Places Text Search
- * @param {string} companyName 
- * @param {string} location - City/state from Indeed
- * @returns {Object|null} Place result with place_id
  */
 async function searchPlace(companyName, location) {
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
@@ -27,16 +100,35 @@ async function searchPlace(companyName, location) {
   const url = `${PLACES_BASE}/textsearch/json?query=${encodeURIComponent(query)}&key=${apiKey}`;
 
   try {
-    const res = await fetch(url);
-    const data = await res.json();
+    const data = await fetchWithRetry(url);
+
+    if (data.status === "REQUEST_DENIED") {
+      throw new Error(`Google Places API denied: ${data.error_message || "Check API key"}`);
+    }
 
     if (data.status !== "OK" || !data.results?.length) {
-      console.log(`[Places] No results for: ${query}`);
+      console.log(`[Places] No results for: ${query} (status: ${data.status})`);
       return null;
     }
 
-    // Return the top result — usually correct for "{business name} {city}"
-    return data.results[0];
+    // Score the top results by location match and pick the best
+    const expectedLocation = location;
+    let bestMatch = null;
+    let bestScore = -1;
+
+    for (const result of data.results.slice(0, 3)) {
+      const score = locationMatchScore(expectedLocation, result.formatted_address);
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = result;
+      }
+    }
+
+    if (bestMatch) {
+      bestMatch._locationMatchScore = bestScore;
+    }
+
+    return bestMatch;
   } catch (error) {
     console.error(`[Places] Search failed for ${query}:`, error.message);
     return null;
@@ -45,9 +137,6 @@ async function searchPlace(companyName, location) {
 
 /**
  * Get detailed info for a place using Place Details API
- * This is where we get phone number, website, hours, etc.
- * @param {string} placeId - Google Place ID from search
- * @returns {Object|null} Detailed place info
  */
 async function getPlaceDetails(placeId) {
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
@@ -59,7 +148,7 @@ async function getPlaceDetails(placeId) {
     "formatted_phone_number",
     "international_phone_number",
     "website",
-    "url",               // Google Maps URL
+    "url",
     "types",
     "business_status",
     "rating",
@@ -70,8 +159,7 @@ async function getPlaceDetails(placeId) {
   const url = `${PLACES_BASE}/details/json?place_id=${placeId}&fields=${fields}&key=${apiKey}`;
 
   try {
-    const res = await fetch(url);
-    const data = await res.json();
+    const data = await fetchWithRetry(url);
 
     if (data.status !== "OK" || !data.result) {
       console.log(`[Places] No details for place_id: ${placeId}`);
@@ -87,9 +175,7 @@ async function getPlaceDetails(placeId) {
 
 /**
  * Full enrichment: search + details in one call
- * @param {string} companyName 
- * @param {string} location 
- * @returns {Object} Enriched company data
+ * Returns enriched data with a location match confidence score
  */
 async function enrichFromPlaces(companyName, location) {
   const result = {
@@ -105,10 +191,10 @@ async function enrichFromPlaces(companyName, location) {
     businessTypes: [],
     hours: null,
     matchedName: null,
+    locationMatchScore: 0,
   };
 
   try {
-    // Step 1: Text search to find the business
     const place = await searchPlace(companyName, location);
     if (!place) return result;
 
@@ -117,9 +203,9 @@ async function enrichFromPlaces(companyName, location) {
     result.rating = place.rating || null;
     result.reviewCount = place.user_ratings_total || null;
     result.businessTypes = place.types || [];
+    result.locationMatchScore = place._locationMatchScore || 0;
 
-    // Step 2: Get detailed info (phone, website, hours)
-    await delay(200); // Slight delay between calls
+    await delay(250);
     const details = await getPlaceDetails(place.place_id);
     if (!details) return result;
 
@@ -130,7 +216,6 @@ async function enrichFromPlaces(companyName, location) {
     result.businessStatus = details.business_status || null;
     result.matchedName = details.name || result.matchedName;
 
-    // Parse hours into readable format
     if (details.opening_hours?.weekday_text) {
       result.hours = details.opening_hours.weekday_text;
     }
@@ -144,11 +229,8 @@ async function enrichFromPlaces(companyName, location) {
 
 /**
  * Batch enrich multiple companies with rate limiting
- * @param {Array} companies - Array of { companyName, location }
- * @param {number} delayMs - Delay between API calls (default 300ms)
- * @returns {Map} Map of companyName -> enrichment data
  */
-async function batchEnrichFromPlaces(companies, delayMs = 300) {
+async function batchEnrichFromPlaces(companies, delayMs = 350) {
   const results = new Map();
 
   for (let i = 0; i < companies.length; i++) {
@@ -158,7 +240,6 @@ async function batchEnrichFromPlaces(companies, delayMs = 300) {
     const enriched = await enrichFromPlaces(companyName, location);
     results.set(companyName, enriched);
 
-    // Rate limit spacing
     if (i < companies.length - 1) {
       await delay(delayMs + Math.random() * 200);
     }
