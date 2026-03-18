@@ -4,6 +4,8 @@
 // WITH INTERNATIONAL CLIENT SUPPORT
 // WITH OPTIONAL PASSWORD AT SIGNUP (Phase 2A)
 // WITH AGENCY TEMPLATE KB INHERITANCE
+// UPDATED: Phase 2 — Phone numbers use serverUrl only (no assistantId)
+// UPDATED: Extract and store vapi_query_tool_id for dynamic config builder
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -29,8 +31,6 @@ const { provisionBYOTNumber } = require('./byot');
 
 // ============================================================================
 // COUNTRY → PROVISIONING METHOD
-// Countries where we can auto-provision via platform's Twilio/VAPI
-// Everything else requires BYOT
 // ============================================================================
 const PLATFORM_PROVISIONING_COUNTRIES = ['US']; // Only US for now
 
@@ -50,7 +50,6 @@ function validateSignupRequest(body) {
   if (!body.email || !body.email.includes('@')) {
     errors.push('Valid email is required');
   }
-  // International phone validation: 7-15 digits
   const phoneDigits = (body.phone || '').replace(/\D/g, '');
   if (phoneDigits.length < 7 || phoneDigits.length > 15) {
     errors.push('Valid phone number is required (7-15 digits)');
@@ -106,6 +105,9 @@ async function createPasswordToken(userId, email) {
 
 // ============================================================================
 // CONFIGURE PHONE WEBHOOK
+// UPDATED: Phase 2 — serverUrl ONLY, no assistantId on the phone number.
+// The static assistant remains on VAPI (stored in client.vapi_assistant_id)
+// but the phone number uses serverUrl so assistant-request fires.
 // ============================================================================
 async function configurePhoneWebhook(phoneId, assistantId) {
   try {
@@ -116,7 +118,7 @@ async function configurePhoneWebhook(phoneId, assistantId) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        assistantId: assistantId,
+        assistantId: null,
         serverUrl: process.env.BACKEND_URL + '/webhook/vapi'
       })
     });
@@ -129,16 +131,31 @@ async function configurePhoneWebhook(phoneId, assistantId) {
 }
 
 // ============================================================================
+// EXTRACT QUERY TOOL ID FROM VAPI ASSISTANT
+// After creating an assistant, fetch it back to get the toolIds[0]
+// (the KB query tool) so the dynamic config builder can reference it.
+// ============================================================================
+async function extractQueryToolId(assistantId) {
+  if (!assistantId) return null;
+  try {
+    const response = await fetch(`https://api.vapi.ai/assistant/${assistantId}`, {
+      headers: { 'Authorization': `Bearer ${process.env.VAPI_API_KEY}` }
+    });
+    if (!response.ok) return null;
+    const assistant = await response.json();
+    return assistant.model?.toolIds?.[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+// ============================================================================
 // UNIFIED PHONE PROVISIONING
-// Branches between platform provisioning (US) and BYOT (international)
 // ============================================================================
 async function provisionPhoneForClient(agency, clientData, assistantId) {
   const agencyCountry = (agency.country || 'US').toUpperCase();
 
-  // ============================================
   // PATH 1: Platform provisioning (US agencies)
-  // Uses our VAPI account's Twilio to buy + assign numbers
-  // ============================================
   if (canPlatformProvision(agencyCountry)) {
     console.log(`📞 Platform provisioning (${agencyCountry}) for ${clientData.businessName}`);
 
@@ -147,10 +164,10 @@ async function provisionPhoneForClient(agency, clientData, assistantId) {
       clientData.businessState,
       assistantId,
       clientData.businessName,
-      clientData.phone // Pass client's phone for area code matching
+      clientData.phone
     );
 
-    // Configure webhook
+    // Configure webhook — serverUrl only, no assistantId
     await configurePhoneWebhook(phoneData.id, assistantId);
 
     return {
@@ -160,10 +177,7 @@ async function provisionPhoneForClient(agency, clientData, assistantId) {
     };
   }
 
-  // ============================================
   // PATH 2: BYOT provisioning (international agencies)
-  // Uses agency's own Twilio credentials
-  // ============================================
   if (agency.byot_enabled && agency.twilio_account_sid && agency.twilio_api_key_encrypted) {
     console.log(`📞 BYOT provisioning (${agencyCountry}) for ${clientData.businessName}`);
 
@@ -181,9 +195,7 @@ async function provisionPhoneForClient(agency, clientData, assistantId) {
     };
   }
 
-  // ============================================
   // PATH 3: International agency without BYOT configured
-  // ============================================
   throw new Error(
     `Phone provisioning not available for ${agencyCountry}. ` +
     `Please configure your Twilio credentials in Settings → Twilio Integration to provision numbers in your country.`
@@ -192,15 +204,11 @@ async function provisionPhoneForClient(agency, clientData, assistantId) {
 
 // ============================================================================
 // MAIN CLIENT SIGNUP HANDLER (from agency marketing site)
-// PHASE 2A: Now accepts optional `password` field. If provided, hashes and
-// stores directly — client can log in immediately without email flow.
-// Still generates password token and sends welcome email as backup.
 // ============================================================================
 async function handleClientSignup(req, res) {
   try {
     console.log('📝 Client Signup Request Received');
 
-    // Validate request
     const validationErrors = validateSignupRequest(req.body);
     if (validationErrors.length > 0) {
       return res.status(400).json({ 
@@ -221,10 +229,9 @@ async function handleClientSignup(req, res) {
       businessCountry,
       websiteUrl: rawWebsiteUrl,
       agencyId,
-      password  // PHASE 2A: Optional password field
+      password
     } = req.body;
 
-    // Get agency (need full record for BYOT check)
     const agency = await getAgencyById(agencyId);
     if (!agency) {
       return res.status(404).json({ error: 'Agency not found' });
@@ -234,10 +241,8 @@ async function handleClientSignup(req, res) {
       return res.status(403).json({ error: 'Agency is not active' });
     }
 
-    // Resolve client country: provided → agency country → US
     const clientCountry = (businessCountry || agency.country || 'US').toUpperCase();
 
-    // Check client limit
     const limitCheck = await canAgencyAddClient(agencyId);
     if (!limitCheck.allowed) {
       console.log(`🚫 Client limit reached for agency ${agency.name}: ${limitCheck.reason}`);
@@ -252,7 +257,6 @@ async function handleClientSignup(req, res) {
     console.log(`✅ Client limit check passed: ${limitCheck.current}/${limitCheck.limit === -1 ? 'unlimited' : limitCheck.limit}`);
     console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Client country: ${clientCountry}`);
 
-    // Normalize website URL
     let websiteUrl = rawWebsiteUrl;
     if (websiteUrl && !websiteUrl.startsWith('http')) {
       websiteUrl = `https://${websiteUrl}`;
@@ -263,7 +267,6 @@ async function handleClientSignup(req, res) {
 
     console.log(`📋 Creating client: ${businessName} (${clientCountry}) for agency: ${agency.name}`);
 
-    // Check for duplicate within this agency
     const existingClient = await getClientByEmail(email.toLowerCase(), agencyId);
     if (existingClient) {
       return res.status(409).json({ 
@@ -272,9 +275,7 @@ async function handleClientSignup(req, res) {
       });
     }
 
-    // ============================================
     // PHASE 2A: Hash password if provided
-    // ============================================
     let passwordHash = null;
     const hasPassword = password && typeof password === 'string' && password.trim().length >= 6;
     if (hasPassword) {
@@ -310,12 +311,15 @@ async function handleClientSignup(req, res) {
       knowledgeBaseData,
       formattedOwnerPhone,
       null,     // clientId (not created yet)
-      agencyId  // Pass agencyId for template override lookup (Enterprise feature)
+      agencyId  // Pass agencyId for template override lookup
     );
     
     console.log(`✅ Assistant created: ${assistant.id}`);
 
-    // Extract template KB data if agency had a packaged config
+    // Extract query tool ID for dynamic config builder
+    const queryToolId = await extractQueryToolId(assistant.id);
+    if (queryToolId) console.log(`🔧 Query tool ID extracted: ${queryToolId}`);
+
     const templateKB = assistant._templateKnowledgeBase || null;
     if (templateKB) {
       console.log(`📚 Agency template KB will be inherited by new client`);
@@ -323,7 +327,6 @@ async function handleClientSignup(req, res) {
 
     // ============================================
     // STEP 3: PROVISION PHONE NUMBER (unified)
-    // Automatically picks platform vs BYOT based on agency config
     // ============================================
     const phoneResult = await provisionPhoneForClient(agency, {
       businessCity,
@@ -357,6 +360,7 @@ async function handleClientSignup(req, res) {
         vapi_assistant_id: assistant.id,
         vapi_phone_number: phoneResult.number,
         vapi_phone_id: phoneResult.vapiPhoneId || null,
+        vapi_query_tool_id: queryToolId,
         knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
         knowledge_base_data: templateKB,
         subscription_status: 'trial',
@@ -380,7 +384,6 @@ async function handleClientSignup(req, res) {
 
     // ============================================
     // STEP 5: CREATE USER RECORD
-    // PHASE 2A: Store password_hash if provided, otherwise null (email flow)
     // ============================================
     const { data: newUser, error: userError } = await supabase
       .from('users')
@@ -390,7 +393,7 @@ async function handleClientSignup(req, res) {
         first_name: firstName,
         last_name: lastName || null,
         role: 'client',
-        password_hash: passwordHash  // PHASE 2A: null if no password, hash if provided
+        password_hash: passwordHash
       })
       .select()
       .single();
@@ -404,14 +407,11 @@ async function handleClientSignup(req, res) {
 
     // ============================================
     // STEP 6: GENERATE PASSWORD TOKEN
-    // Always generate — serves as fallback even when password was provided
-    // (user might want to reset later, or email link is a nice-to-have)
     // ============================================
     const passwordToken = await createPasswordToken(newUser.id, email.toLowerCase());
 
     // ============================================
     // STEP 7: SEND WELCOME EMAIL
-    // Always send — contains set-password link as backup + useful info
     // ============================================
     console.log('📧 Sending welcome email...');
     await sendClientWelcomeEmail(newClient, agency, null, passwordToken);
@@ -430,8 +430,6 @@ async function handleClientSignup(req, res) {
 
     // ============================================
     // RETURN SUCCESS
-    // PHASE 2A: Include hasPassword flag so frontend knows whether to show
-    // credentials or redirect to set-password
     // ============================================
     console.log('🎉 Client onboarding complete:', businessName);
 
@@ -439,7 +437,7 @@ async function handleClientSignup(req, res) {
       success: true,
       message: 'Account created successfully!',
       token: passwordToken,
-      hasPassword: !!hasPassword,  // PHASE 2A: Frontend can check this
+      hasPassword: !!hasPassword,
       client: {
         id: newClient.id,
         business_name: newClient.business_name,
@@ -465,7 +463,6 @@ async function handleClientSignup(req, res) {
 
 // ============================================================================
 // AGENCY ADD CLIENT HANDLER
-// Agency owner adds a client from the dashboard with a temp password.
 // ============================================================================
 async function handleAgencyAddClient(req, res) {
   try {
@@ -492,7 +489,6 @@ async function handleAgencyAddClient(req, res) {
     if (!firstName || firstName.trim().length < 1) errors.push('First name is required');
     if (!email || !email.includes('@')) errors.push('Valid email is required');
 
-    // International phone validation: 7-15 digits
     const phoneDigits = (phone || '').replace(/\D/g, '');
     if (phoneDigits.length < 7 || phoneDigits.length > 15) {
       errors.push('Valid phone number is required (7-15 digits)');
@@ -508,7 +504,6 @@ async function handleAgencyAddClient(req, res) {
       return res.status(400).json({ error: 'Validation failed', errors });
     }
 
-    // Get agency (full record for BYOT check)
     const agency = await getAgencyById(agencyId);
     if (!agency) {
       return res.status(404).json({ error: 'Agency not found' });
@@ -517,10 +512,8 @@ async function handleAgencyAddClient(req, res) {
       return res.status(403).json({ error: 'Agency is not active' });
     }
 
-    // Resolve client country: provided → agency country → US
     const clientCountry = (businessCountry || agency.country || 'US').toUpperCase();
 
-    // Check client limit
     const limitCheck = await canAgencyAddClient(agencyId);
     if (!limitCheck.allowed) {
       console.log(`🚫 Client limit reached for agency ${agency.name}: ${limitCheck.reason}`);
@@ -535,7 +528,6 @@ async function handleAgencyAddClient(req, res) {
     console.log(`✅ Limit check passed: ${limitCheck.current}/${limitCheck.limit === -1 ? 'unlimited' : limitCheck.limit}`);
     console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Adding: ${businessName} (${clientCountry})`);
 
-    // Normalize inputs
     let websiteUrl = rawWebsiteUrl;
     if (websiteUrl && !websiteUrl.startsWith('http')) {
       websiteUrl = `https://${websiteUrl}`;
@@ -543,7 +535,6 @@ async function handleAgencyAddClient(req, res) {
     const ownerName = lastName ? `${firstName} ${lastName}`.trim() : firstName;
     const formattedOwnerPhone = formatPhoneE164(phone, clientCountry);
 
-    // Check duplicate
     const existingClient = await getClientByEmail(email.toLowerCase(), agencyId);
     if (existingClient) {
       return res.status(409).json({
@@ -552,7 +543,6 @@ async function handleAgencyAddClient(req, res) {
       });
     }
 
-    // Hash temp password
     const salt = await bcrypt.genSalt(10);
     const tempPasswordHash = await bcrypt.hash(tempPassword, salt);
 
@@ -582,13 +572,16 @@ async function handleAgencyAddClient(req, res) {
     );
     console.log(`✅ Assistant created: ${assistant.id}`);
 
-    // Extract template KB data if agency had a packaged config
+    // Extract query tool ID for dynamic config builder
+    const queryToolId = await extractQueryToolId(assistant.id);
+    if (queryToolId) console.log(`🔧 Query tool ID extracted: ${queryToolId}`);
+
     const templateKB = assistant._templateKnowledgeBase || null;
     if (templateKB) {
       console.log(`📚 Agency template KB will be inherited by new client`);
     }
 
-    // === STEP 3: Provision Phone (unified — picks platform vs BYOT) ===
+    // === STEP 3: Provision Phone (unified) ===
     const phoneResult = await provisionPhoneForClient(agency, {
       businessCity,
       businessState,
@@ -620,6 +613,7 @@ async function handleAgencyAddClient(req, res) {
         vapi_assistant_id: assistant.id,
         vapi_phone_number: phoneResult.number,
         vapi_phone_id: phoneResult.vapiPhoneId || null,
+        vapi_query_tool_id: queryToolId,
         knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
         knowledge_base_data: templateKB,
         subscription_status: 'trial',
@@ -716,7 +710,6 @@ async function provisionClient(clientId) {
       throw new Error('Client not found');
     }
     
-    // If already provisioned, skip
     if (client.vapi_assistant_id && client.vapi_phone_number) {
       console.log('✅ Client already provisioned');
       return client;
@@ -724,7 +717,6 @@ async function provisionClient(clientId) {
     
     const agency = client.agencies;
     
-    // Create knowledge base if website exists
     let knowledgeBaseData = null;
     if (client.business_website) {
       knowledgeBaseData = await createKnowledgeBaseFromWebsite(
@@ -733,7 +725,6 @@ async function provisionClient(clientId) {
       );
     }
     
-    // Create VAPI assistant
     const assistant = await createIndustryAssistant(
       client.business_name,
       client.industry,
@@ -743,10 +734,12 @@ async function provisionClient(clientId) {
       client.agency_id
     );
 
-    // Extract template KB data if agency had a packaged config
+    // Extract query tool ID for dynamic config builder
+    const queryToolId = await extractQueryToolId(assistant.id);
+    if (queryToolId) console.log(`🔧 Query tool ID extracted: ${queryToolId}`);
+
     const templateKB = assistant._templateKnowledgeBase || null;
     
-    // Provision phone (unified — picks platform vs BYOT)
     const phoneResult = await provisionPhoneForClient(agency, {
       businessCity: client.business_city,
       businessState: client.business_state,
@@ -754,13 +747,13 @@ async function provisionClient(clientId) {
       phone: client.owner_phone
     }, assistant.id);
     
-    // Update client
     const { data: updatedClient } = await supabase
       .from('clients')
       .update({
         vapi_assistant_id: assistant.id,
         vapi_phone_number: phoneResult.number,
         vapi_phone_id: phoneResult.vapiPhoneId || null,
+        vapi_query_tool_id: queryToolId,
         knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
         knowledge_base_data: templateKB || client.knowledge_base_data || null,
         status: 'active',
@@ -770,7 +763,6 @@ async function provisionClient(clientId) {
       .select()
       .single();
     
-    // Create user if not exists
     const { data: existingUser } = await supabase
       .from('users')
       .select('id')
