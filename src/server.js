@@ -118,6 +118,7 @@ const clientContactsRoutes = require('./routes/client-contacts');
 const clientPromptRoutes = require('./routes/client-prompt');
 const clientKnowledgeBaseRoutes = require('./routes/client-knowledge-base');
 const toolConfigRoutes = require('./routes/tool-config');
+const pwaTrackingRoutes = require('./routes/pwa-tracking');
 const leadRoutes = require('./routes/leads');
 const activityRoutes = require('./routes/activity');
 const outreachRoutes = require('./routes/outreach');
@@ -585,6 +586,7 @@ app.use('/api/client', clientRoutes);
 app.use('/api/client', require('./routes/call-mode'));
 app.use('/api/client', clientContactsRoutes);
 app.use('/api/client', toolConfigRoutes);
+app.use('/api/client', pwaTrackingRoutes);
 app.post('/api/client/checkout', createClientCheckout);
 app.post('/api/client/portal', createClientPortal);
 
