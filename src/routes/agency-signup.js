@@ -85,6 +85,63 @@ function getCurrencyForCountry(countryCode) {
 }
 
 // ============================================================================
+// DEFAULT PLAN FEATURES — seeded on every new agency
+// ============================================================================
+const DEFAULT_PLAN_FEATURES = {
+  starter: {
+    sms_notifications: true,
+    email_summaries: false,
+    custom_greeting: false,
+    custom_voice: false,
+    knowledge_base: false,
+    business_hours: false,
+    google_calendar: false,
+    advanced_analytics: false,
+    priority_support: false,
+    // AI Tools
+    caller_recognition: false,
+    spam_detection: true,
+    call_transfer: false,
+    transfer_fallback: false,
+    after_hours_mode: false,
+  },
+  pro: {
+    sms_notifications: true,
+    email_summaries: true,
+    custom_greeting: true,
+    custom_voice: false,
+    knowledge_base: true,
+    business_hours: true,
+    google_calendar: true,
+    advanced_analytics: true,
+    priority_support: false,
+    // AI Tools
+    caller_recognition: true,
+    spam_detection: true,
+    call_transfer: true,
+    transfer_fallback: true,
+    after_hours_mode: true,
+  },
+  growth: {
+    sms_notifications: true,
+    email_summaries: true,
+    custom_greeting: true,
+    custom_voice: true,
+    knowledge_base: true,
+    business_hours: true,
+    google_calendar: true,
+    advanced_analytics: true,
+    priority_support: true,
+    // AI Tools
+    caller_recognition: true,
+    spam_detection: true,
+    call_transfer: true,
+    transfer_fallback: true,
+    after_hours_mode: true,
+  },
+};
+
+// ============================================================================
 // VALIDATE AGENCY SIGNUP
 // ============================================================================
 function validateAgencySignup(body) {
@@ -235,6 +292,7 @@ async function handleAgencySignup(req, res) {
         limit_starter: 50,
         limit_pro: 150,
         limit_growth: 500,
+        plan_features: DEFAULT_PLAN_FEATURES,
         referral_code: slug
       })
       .select()

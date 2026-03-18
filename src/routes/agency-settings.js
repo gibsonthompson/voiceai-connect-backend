@@ -4,6 +4,7 @@
 // UPDATED: Added branding_overrides support for UI theme customization
 // UPDATED: Added calendar_enabled_plans for Google Calendar plan gating
 // UPDATED: Added analytics tracking (GTM, GA4, FB Pixel) + OG meta fields
+// UPDATED: Added AI tool keys to plan_features validation
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
@@ -359,8 +360,10 @@ async function updateAgencySettings(req, res) {
       const validFeatures = [
         'sms_notifications', 'email_summaries', 'custom_greeting',
         'custom_voice', 'knowledge_base', 'business_hours',
-        'google_calendar',
-        'advanced_analytics', 'priority_support'
+        'google_calendar', 'advanced_analytics', 'priority_support',
+        // AI Tools
+        'caller_recognition', 'spam_detection', 'call_transfer',
+        'transfer_fallback', 'after_hours_mode'
       ];
       
       let isValid = true;
@@ -369,7 +372,7 @@ async function updateAgencySettings(req, res) {
           isValid = false;
           break;
         }
-        // Only validate known features, allow extra keys to be flexible
+        // Validate all feature values are booleans
         for (const feature of Object.keys(pf[plan])) {
           if (typeof pf[plan][feature] !== 'boolean') {
             isValid = false;
