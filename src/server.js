@@ -125,6 +125,7 @@ const agencyTemplatesRoutes = require('./routes/agency-templates');
 const aiPlaygroundRoutes = require('./routes/ai-playground');
 const byotRoutes = require('./routes/byot');
 const abandonedCartRoutes = require('./routes/abandoned-cart');
+const agencyOnboardingSmsRoutes = require('./routes/agency-onboarding-sms');
 const feedbackRoutes = require('./routes/feedback');
 const supportRoutes = require('./routes/support');
 
@@ -192,7 +193,8 @@ app.get('/health', (req, res) => {
     },
     cron: {
       expireTrials: true,
-      abandonedCart: true
+      abandonedCart: true,
+      agencyOnboardingSms: true
     }
   });
 });
@@ -681,6 +683,9 @@ app.post('/api/cron/warn-agency-trials', async (req, res) => {
 });
 
 app.use('/api/cron', abandonedCartRoutes);
+
+// Agency onboarding engagement SMS (called by cron-job.org every hour)
+app.use('/api/cron', agencyOnboardingSmsRoutes);
 
 // ============================================================================
 // WEBHOOK ROUTES
