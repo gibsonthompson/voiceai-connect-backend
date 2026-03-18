@@ -4,6 +4,7 @@
 // WITH DEMO CALL FOLLOW-UP SMS
 // WITH CALL SUMMARY EMAIL (international)
 // WITH INTERNATIONAL PHONE FORMATTING
+// WITH SPAM BLOCKED SMS (Phase 1 — Spam Detection)
 // ============================================================================
 const fetch = require('node-fetch');
 
@@ -49,18 +50,11 @@ const COUNTRY_CALLING_CODES = {
 // PHONE FORMATTING (International)
 // ============================================================================
 
-/**
- * Format a phone number to E.164 international format.
- * @param {string} phone - Raw phone input (digits, possibly with formatting)
- * @param {string} countryCode - ISO 3166-1 alpha-2 country code (default: 'US')
- * @returns {string|null} E.164 formatted phone or null if invalid
- */
 function formatPhoneE164(phone, countryCode = 'US') {
   if (!phone) return null;
 
   const digits = phone.replace(/\D/g, '');
 
-  // If already in E.164 format (starts with +), clean and return
   if (phone.startsWith('+') && digits.length >= 7) {
     return '+' + digits;
   }
@@ -68,37 +62,30 @@ function formatPhoneE164(phone, countryCode = 'US') {
   const country = (countryCode || 'US').toUpperCase();
   const callingCode = COUNTRY_CALLING_CODES[country] || '1';
 
-  // US/CA: if 11 digits starting with 1, already includes country code
   if ((country === 'US' || country === 'CA') && digits.length === 11 && digits.startsWith('1')) {
     return `+${digits}`;
   }
 
-  // US/CA: standard 10-digit
   if ((country === 'US' || country === 'CA') && digits.length === 10) {
     return `+1${digits}`;
   }
 
-  // UK: strip leading 0 (local format) before adding +44
   if (country === 'GB' && digits.startsWith('0')) {
     return `+${callingCode}${digits.substring(1)}`;
   }
 
-  // AU: strip leading 0 before adding +61
   if (country === 'AU' && digits.startsWith('0')) {
     return `+${callingCode}${digits.substring(1)}`;
   }
 
-  // NZ: strip leading 0 before adding +64
   if (country === 'NZ' && digits.startsWith('0')) {
     return `+${callingCode}${digits.substring(1)}`;
   }
 
-  // General international: if we have enough digits, prepend calling code
   if (digits.length >= 7 && digits.length <= 15) {
     return `+${callingCode}${digits}`;
   }
 
-  // Fallback: if nothing matched but we have 10+ digits, try with calling code
   if (digits.length >= 10) {
     return `+${callingCode}${digits}`;
   }
@@ -106,35 +93,24 @@ function formatPhoneE164(phone, countryCode = 'US') {
   return null;
 }
 
-/**
- * Format a phone number for display.
- * US/CA numbers get (XXX) XXX-XXXX format. International numbers
- * get a simple spaced format with their country code.
- * @param {string} phone - Phone number (E.164 or raw)
- * @returns {string|null} Display-formatted phone
- */
 function formatPhoneDisplay(phone) {
   if (!phone) return null;
 
   const cleaned = phone.replace(/\D/g, '');
 
-  // US/CA: 10 digits → (XXX) XXX-XXXX
   if (cleaned.length === 10) {
     return `(${cleaned.substring(0, 3)}) ${cleaned.substring(3, 6)}-${cleaned.substring(6)}`;
   }
 
-  // US/CA: 11 digits starting with 1 → (XXX) XXX-XXXX
   if (cleaned.length === 11 && cleaned.startsWith('1')) {
     const without1 = cleaned.substring(1);
     return `(${without1.substring(0, 3)}) ${without1.substring(3, 6)}-${without1.substring(6)}`;
   }
 
-  // International: if starts with +, return as-is (already formatted)
   if (phone.startsWith('+')) {
     return phone;
   }
 
-  // Fallback: return original
   return phone;
 }
 
@@ -166,7 +142,6 @@ async function sendTelnyxSMS(toPhone, message) {
       return false;
     }
 
-    // Accept already-formatted E.164 or try to format as US
     const formattedPhone = toPhone?.startsWith('+') ? toPhone : formatPhoneE164(toPhone, 'US');
     if (!formattedPhone) {
       console.log(`⚠️ Invalid phone: ${toPhone}`);
@@ -214,7 +189,6 @@ async function sendPlatformNotificationSMS(message) {
 // AGENCY SMS NOTIFICATIONS
 // ============================================================================
 
-// New agency signed up - notify platform owner (Gibson)
 async function sendAgencySignupNotificationSMS(agency) {
   let message = `🎉 New Agency Signup!\n` +
     `Name: ${agency.name}\n` +
@@ -234,7 +208,6 @@ async function sendAgencySignupNotificationSMS(agency) {
   return sendPlatformNotificationSMS(message);
 }
 
-// Welcome SMS to the AGENCY OWNER (not platform owner) on signup
 async function sendAgencyWelcomeSMS(agency) {
   if (!agency?.phone) {
     console.log(`⚠️ Agency ${agency?.name || 'Unknown'} has no phone number — skipping welcome SMS`);
@@ -265,7 +238,6 @@ async function sendAgencyWelcomeSMS(agency) {
   );
 }
 
-// New client signed up - notify AGENCY OWNER (not platform owner)
 async function sendClientSignupNotificationSMS(client, agency) {
   if (!agency?.phone) {
     console.log(`⚠️ Agency ${agency?.name || 'Unknown'} has no phone number - skipping client signup SMS`);
@@ -282,7 +254,6 @@ async function sendClientSignupNotificationSMS(client, agency) {
   return sendTelnyxSMS(agency.phone, message);
 }
 
-// Agency trial ending in X days - notify agency owner
 async function sendAgencyTrialEndingSMS(agency, daysLeft) {
   if (!agency.phone) {
     console.log(`⚠️ Agency ${agency.name} has no phone number`);
@@ -297,7 +268,6 @@ async function sendAgencyTrialEndingSMS(agency, daysLeft) {
   return sendTelnyxSMS(agency.phone, message);
 }
 
-// Agency payment failed - notify agency owner
 async function sendAgencyPaymentFailedSMS(agency) {
   if (!agency.phone) {
     console.log(`⚠️ Agency ${agency.name} has no phone number`);
@@ -312,7 +282,6 @@ async function sendAgencyPaymentFailedSMS(agency) {
   return sendTelnyxSMS(agency.phone, message);
 }
 
-// Agency subscription canceled - notify agency owner
 async function sendAgencySubscriptionCanceledSMS(agency) {
   if (!agency.phone) {
     console.log(`⚠️ Agency ${agency.name} has no phone number`);
@@ -327,7 +296,6 @@ async function sendAgencySubscriptionCanceledSMS(agency) {
   return sendTelnyxSMS(agency.phone, message);
 }
 
-// Agency payment succeeded (after failed) - notify agency owner
 async function sendAgencyPaymentSucceededSMS(agency) {
   if (!agency.phone) {
     console.log(`⚠️ Agency ${agency.name} has no phone number`);
@@ -377,7 +345,6 @@ async function sendDemoCallFollowUpSMS(callerPhone, agency) {
 // CLIENT SMS NOTIFICATIONS
 // ============================================================================
 
-// Call notification SMS (Multi-tenant)
 async function sendCallNotificationSMS(client, agency, callData) {
   const { customerName, customerPhone, urgency, summary } = callData;
 
@@ -397,7 +364,6 @@ async function sendCallNotificationSMS(client, agency, callData) {
   return sendTelnyxSMS(client.owner_phone, smsMessage);
 }
 
-// Welcome SMS (simple confirmation)
 async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency = null) {
   const brandName = agency?.name || 'VoiceAI Connect';
 
@@ -408,7 +374,6 @@ async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency = null)
   return sendTelnyxSMS(phone, message);
 }
 
-// Client trial expired - notify client
 async function sendClientTrialExpiredSMS(client, agency) {
   const brandName = agency?.name || 'AI Receptionist';
 
@@ -429,7 +394,6 @@ async function sendClientTrialExpiredSMS(client, agency) {
   return sendTelnyxSMS(client.owner_phone, message);
 }
 
-// Client payment failed - notify client
 async function sendClientPaymentFailedSMS(client, agency) {
   const brandName = agency?.name || 'AI Receptionist';
 
@@ -440,7 +404,6 @@ async function sendClientPaymentFailedSMS(client, agency) {
   return sendTelnyxSMS(client.owner_phone, message);
 }
 
-// Client subscription activated - notify client
 async function sendClientSubscriptionActivatedSMS(client, agency, plan) {
   const brandName = agency?.name || 'AI Receptionist';
 
@@ -450,6 +413,30 @@ async function sendClientSubscriptionActivatedSMS(client, agency, plan) {
     `📞 ${formatPhoneDisplay(client.vapi_phone_number)}`;
 
   return sendTelnyxSMS(client.owner_phone, message);
+}
+
+// ============================================================================
+// SPAM BLOCKED SMS (Phase 1 — Spam Detection)
+// ============================================================================
+async function sendSpamBlockedSMS(client, agency, callerPhone, spamReason) {
+  if (!client.owner_phone) return false;
+
+  const businessName = client.business_name || 'your business';
+  const callerDisplay = formatPhoneDisplay(callerPhone) || callerPhone || 'Unknown';
+  
+  const message = 
+    `🚫 Spam Blocked — ${businessName}\n\n` +
+    `Your AI receptionist detected and blocked a spam call.\n\n` +
+    `Caller: ${callerDisplay}\n` +
+    `Type: ${spamReason || 'Robocall / telemarketer'}\n\n` +
+    `No action needed — this call was not counted against your limit.`;
+
+  try {
+    return await sendTelnyxSMS(client.owner_phone, message);
+  } catch (error) {
+    console.error('❌ Spam blocked SMS error:', error.message);
+    return false;
+  }
 }
 
 // ============================================================================
@@ -568,14 +555,12 @@ async function sendCallSummaryEmail(client, agency, callData, callRecord) {
       <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f4f4f5;">
         <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
           
-          <!-- Header -->
           <div style="background-color: #ffffff; border-radius: 12px 12px 0 0; padding: 24px; text-align: center; border-bottom: 3px solid ${primaryColor};">
             ${agencyLogo ? `<img src="${agencyLogo}" alt="${agencyName}" style="max-height: 40px; margin-bottom: 12px;">` : ''}
             <h2 style="margin: 0; font-size: 18px; color: #111;">New Call Summary</h2>
             <p style="margin: 4px 0 0; font-size: 13px; color: #666;">${callTime}</p>
           </div>
 
-          <!-- Main Content -->
           <div style="background-color: #ffffff; padding: 24px;">
             
             ${(urgency === 'high' || urgency === 'emergency') ? `
@@ -584,7 +569,6 @@ async function sendCallSummaryEmail(client, agency, callData, callRecord) {
             </div>
             ` : ''}
 
-            <!-- Caller Info -->
             <div style="background-color: #f9fafb; border-radius: 8px; padding: 16px; margin-bottom: 20px;">
               <table style="width: 100%; border-collapse: collapse;">
                 <tr>
@@ -618,13 +602,11 @@ async function sendCallSummaryEmail(client, agency, callData, callRecord) {
               </table>
             </div>
 
-            <!-- AI Summary -->
             <div style="margin-bottom: 20px;">
               <h3 style="font-size: 14px; color: #111; margin: 0 0 8px;">Summary</h3>
               <p style="font-size: 14px; color: #444; margin: 0; line-height: 1.6;">${summary || 'No summary available.'}</p>
             </div>
 
-            <!-- Transcript Preview -->
             ${transcriptPreview ? `
             <div style="margin-bottom: 20px;">
               <h3 style="font-size: 14px; color: #111; margin: 0 0 8px;">Transcript Preview</h3>
@@ -632,7 +614,6 @@ async function sendCallSummaryEmail(client, agency, callData, callRecord) {
             </div>
             ` : ''}
 
-            <!-- CTA Button -->
             <div style="text-align: center; margin: 24px 0 8px;">
               <a href="${baseUrl}/client/dashboard" 
                  style="display: inline-block; background-color: ${primaryColor}; color: #ffffff; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 14px;">
@@ -641,7 +622,6 @@ async function sendCallSummaryEmail(client, agency, callData, callRecord) {
             </div>
           </div>
 
-          <!-- Footer -->
           <div style="background-color: #ffffff; border-radius: 0 0 12px 12px; padding: 16px 24px; border-top: 1px solid #e5e7eb; text-align: center;">
             <p style="margin: 0; font-size: 12px; color: #999;">
               ${client.business_name} — Powered by ${agencyName}
@@ -806,7 +786,7 @@ module.exports = {
   formatPhoneE164,
   formatPhoneDisplay,
 
-  // Country codes (exported so other modules can use them)
+  // Country codes
   COUNTRY_CALLING_CODES,
 
   // International detection
@@ -840,6 +820,7 @@ module.exports = {
   sendClientTrialExpiredSMS,
   sendClientPaymentFailedSMS,
   sendClientSubscriptionActivatedSMS,
+  sendSpamBlockedSMS,
 
   // Email
   sendEmail,

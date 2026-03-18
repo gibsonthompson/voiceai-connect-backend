@@ -5,10 +5,11 @@
 // UPDATED: Email summaries gated by plan_features (Phase 5)
 // UPDATED: Unlimited calls support (-1 = no limit)
 // UPDATED: Contact upsert (Lead Capture) after call save
+// UPDATED: Spam detection — AI flags spam, different SMS, skip call count
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
-const { sendCallNotificationSMS, sendDemoCallFollowUpSMS, sendCallSummaryEmail } = require('../lib/notifications');
+const { sendCallNotificationSMS, sendDemoCallFollowUpSMS, sendCallSummaryEmail, sendSpamBlockedSMS } = require('../lib/notifications');
 const { upsertContactFromCall } = require('../lib/contact-upsert');
 
 // ============================================================================
@@ -62,14 +63,11 @@ function isFeatureEnabled(client, agency, featureKey) {
 function detectTransferStatus(endedReason, transcript) {
   if (!endedReason) return { transferStatus: null, wasTransferred: false };
 
-  // Successful transfer — VAPI forwarded the call
   if (endedReason === 'assistant-forwarded-call') {
     return { transferStatus: 'transferred', wasTransferred: true };
   }
 
-  // Transfer was attempted but failed — check for specific error patterns
   if (endedReason === 'pipeline-error') {
-    // Check if transcript shows a transfer attempt (AI said transfer-like words then errored)
     const transferAttempted = transcript && (
       transcript.toLowerCase().includes('let me connect you') ||
       transcript.toLowerCase().includes('let me transfer') ||
@@ -83,12 +81,12 @@ function detectTransferStatus(endedReason, transcript) {
     return { transferStatus: null, wasTransferred: false };
   }
 
-  // Call ended for other reasons — no transfer involved
   return { transferStatus: null, wasTransferred: false };
 }
 
 // ============================================================================
 // AI SUMMARY GENERATION (via Claude)
+// UPDATED: Now includes isSpam + spamReason detection
 // ============================================================================
 async function generateAISummary(transcript, industry, callerPhone) {
   console.log('🤖 Generating AI summary...');
@@ -121,8 +119,20 @@ Extract and return ONLY valid JSON:
   "customerPhone": "formatted (XXX) XXX-XXXX",
   "customerEmail": "string or null",
   "urgency": "emergency|high|medium|routine",
-  "summary": "2-3 sentence summary focusing on: ${industryGuidance[industry] || 'what the customer needs'}"
-}`;
+  "summary": "2-3 sentence summary focusing on: ${industryGuidance[industry] || 'what the customer needs'}",
+  "isSpam": false,
+  "spamReason": null
+}
+
+SPAM DETECTION: Set isSpam to true and provide spamReason if ANY of these apply:
+- The caller is a telemarketer or robocall trying to sell something TO the business
+- The caller plays a pre-recorded message instead of having a real conversation
+- The caller asks for "the business owner" or "the person in charge of your Google listing" (common spam patterns)
+- The caller doesn't respond naturally to the AI's questions (one-sided, scripted)
+- The call is extremely short with no real interaction (silence, hang-up, automated message)
+- The caller is selling SEO services, Google Ads, insurance leads, credit card processing, or similar B2B solicitation
+
+If spam: set urgency to "routine", summary should briefly describe what the spam was about, and spamReason should be a short label like "telemarketer selling SEO" or "robocall - pre-recorded message" or "Google listing scam".`;
 
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -148,7 +158,13 @@ Extract and return ONLY valid JSON:
     let responseText = data.content[0].text.trim();
     responseText = responseText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
     
-    return JSON.parse(responseText);
+    const parsed = JSON.parse(responseText);
+    
+    // Normalize isSpam to boolean
+    parsed.isSpam = parsed.isSpam === true;
+    if (!parsed.isSpam) parsed.spamReason = null;
+    
+    return parsed;
   } catch (error) {
     console.error('❌ AI summary failed, using fallback:', error.message);
     
@@ -157,7 +173,9 @@ Extract and return ONLY valid JSON:
       customerPhone: callerPhone,
       customerEmail: null,
       urgency: 'routine',
-      summary: `Customer called regarding ${industry.replace('_', ' ')} services. Team should follow up.`
+      summary: `Customer called regarding ${industry.replace('_', ' ')} services. Team should follow up.`,
+      isSpam: false,
+      spamReason: null
     };
   }
 }
@@ -411,7 +429,7 @@ async function handleVapiWebhook(req, res) {
       callerPhone
     );
     
-    const { customerName, customerPhone, customerEmail, urgency, summary: aiSummary } = aiData;
+    const { customerName, customerPhone, customerEmail, urgency, summary: aiSummary, isSpam, spamReason } = aiData;
     
     const recordingUrl = 
       message.recordingUrl ||
@@ -432,7 +450,6 @@ async function handleVapiWebhook(req, res) {
     
     // ============================================
     // TRANSFER TRACKING
-    // Detect if the call was transferred and track the outcome
     // ============================================
     const endedReason = call.endedReason || message.endedReason || null;
     const { transferStatus, wasTransferred } = detectTransferStatus(endedReason, transcript);
@@ -446,7 +463,72 @@ async function handleVapiWebhook(req, res) {
     }
     
     // ============================================
-    // SAVE CALL TO DATABASE
+    // SPAM DETECTED — FAST PATH
+    // Save call with spam flag, send different SMS, skip call count + contact upsert
+    // ============================================
+    if (isSpam) {
+      console.log(`🚫 SPAM DETECTED: ${spamReason || 'Unknown spam type'}`);
+      console.log(`   Caller: ${callerPhone}`);
+      
+      const spamCallRecord = {
+        client_id: client.id,
+        customer_name: customerName || 'Spam Caller',
+        customer_phone: customerPhone || callerPhone,
+        customer_email: null,
+        ai_summary: aiSummary,
+        transcript: transcript,
+        recording_url: recordingUrl,
+        duration_seconds: durationSeconds,
+        urgency_level: 'spam',
+        call_status: 'spam',
+        ended_reason: endedReason,
+        transfer_status: null,
+        is_spam: true,
+        spam_reason: spamReason,
+        created_at: new Date().toISOString()
+      };
+      
+      const { data: insertedSpamCall, error: spamInsertError } = await supabase
+        .from('calls')
+        .insert([spamCallRecord])
+        .select();
+      
+      if (spamInsertError) {
+        if (spamInsertError.message && (spamInsertError.message.includes('is_spam') || spamInsertError.message.includes('spam_reason') || spamInsertError.message.includes('ended_reason') || spamInsertError.message.includes('transfer_status'))) {
+          console.log('⚠️ Some columns not yet added — saving without them');
+          delete spamCallRecord.is_spam;
+          delete spamCallRecord.spam_reason;
+          delete spamCallRecord.ended_reason;
+          delete spamCallRecord.transfer_status;
+          await supabase.from('calls').insert([spamCallRecord]).select();
+        } else {
+          console.error('❌ Error inserting spam call:', spamInsertError);
+        }
+      }
+      
+      console.log('✅ Spam call saved (not counted against limit)');
+      
+      if (client.owner_phone) {
+        try {
+          await sendSpamBlockedSMS(client, agency, callerPhone, spamReason);
+          console.log('✅ Spam blocked SMS sent');
+        } catch (smsErr) {
+          console.warn('⚠️ Spam SMS failed (non-fatal):', smsErr.message);
+        }
+      }
+      
+      return res.status(200).json({
+        received: true,
+        saved: true,
+        spam: true,
+        spamReason: spamReason,
+        callId: insertedSpamCall?.[0]?.id || null,
+        agency: agency?.name || null
+      });
+    }
+    
+    // ============================================
+    // SAVE CALL TO DATABASE (normal, non-spam)
     // ============================================
     const callRecord = {
       client_id: client.id,
@@ -461,6 +543,8 @@ async function handleVapiWebhook(req, res) {
       call_status: wasTransferred ? 'transferred' : 'completed',
       ended_reason: endedReason,
       transfer_status: transferStatus,
+      is_spam: false,
+      spam_reason: null,
       created_at: new Date().toISOString()
     };
     
@@ -470,13 +554,13 @@ async function handleVapiWebhook(req, res) {
       .select();
     
     if (insertError) {
-      console.error('❌ Error inserting call:', insertError);
-      // If the error is about missing columns, try without new fields
-      if (insertError.message && (insertError.message.includes('ended_reason') || insertError.message.includes('transfer_status'))) {
-        console.log('⚠️ Transfer tracking columns not yet added — saving without them');
+      if (insertError.message && (insertError.message.includes('ended_reason') || insertError.message.includes('transfer_status') || insertError.message.includes('is_spam') || insertError.message.includes('spam_reason'))) {
+        console.log('⚠️ Some columns not yet added — saving without them');
         delete callRecord.ended_reason;
         delete callRecord.transfer_status;
-        callRecord.call_status = 'completed'; // revert to safe value
+        delete callRecord.is_spam;
+        delete callRecord.spam_reason;
+        callRecord.call_status = 'completed';
         const { data: retryCall, error: retryError } = await supabase
           .from('calls')
           .insert([callRecord])
@@ -485,9 +569,9 @@ async function handleVapiWebhook(req, res) {
           console.error('❌ Retry insert also failed:', retryError);
           return res.status(500).json({ error: 'Failed to save call' });
         }
-        // Use retry result
         var insertedCallFinal = retryCall;
       } else {
+        console.error('❌ Error inserting call:', insertError);
         return res.status(500).json({ error: 'Failed to save call' });
       }
     }
@@ -562,7 +646,6 @@ async function handleVapiWebhook(req, res) {
     let smsSent = false;
     let emailSent = false;
     
-    // 1. SMS — all plans get this
     if (client.owner_phone) {
       console.log('📱 Sending SMS notification...');
       smsSent = await sendCallNotificationSMS(client, agency, aiData);
@@ -573,7 +656,6 @@ async function handleVapiWebhook(req, res) {
       }
     }
     
-    // 2. Email — only if enabled for this client's plan
     if (isFeatureEnabled(client, agency, 'email_summaries')) {
       if (client.email) {
         console.log('📧 Email summaries enabled for plan — sending email...');
@@ -610,7 +692,8 @@ async function handleVapiWebhook(req, res) {
       duration: durationSeconds,
       endedReason: endedReason,
       transferStatus: transferStatus,
-      wasTransferred: wasTransferred
+      wasTransferred: wasTransferred,
+      spam: false
     });
     
   } catch (error) {

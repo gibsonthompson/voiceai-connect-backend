@@ -6,7 +6,6 @@
 // ALL 12 INDUSTRIES WITH UNIQUE KEYS (dental split from medical)
 // UPDATED: Full prompt rewrite — transfer logic, endCall, hooks, TTS norms
 // UPDATED: Retired Rachel voice, replaced with Matilda (2026-03-14)
-// UPDATED: Spam detection block appended to all assistants (2026-03-17)
 // ============================================================================
 const fetch = require('node-fetch');
 const FormData = require('form-data');
@@ -1244,25 +1243,6 @@ Hours, services, location, payment methods, shuttle/loaner info.
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
-
-// ============================================================================
-// SPAM DETECTION BLOCK — Appended to every assistant's system prompt
-// Trains the AI to detect and end spam/robocalls during the call itself.
-// Post-call detection also happens in the webhook via Claude analysis.
-// ============================================================================
-const SPAM_DETECTION_BLOCK = `
-
-# Spam Detection
-If the caller appears to be a robocall, telemarketer, or spam:
-- They play a pre-recorded message or sales pitch
-- They don't respond to your questions naturally
-- They're trying to sell a product or service TO the business (SEO, Google ads, insurance leads, credit card processing, etc.)
-- They ask for "the business owner" or "the person in charge of your Google listing"
-- The line goes silent after connecting
-- They use high-pressure tactics or claim there's an urgent issue with the business's online presence
-
-If you detect spam: say "We're not interested, thanks. Have a good day." Then end the call using the endCall tool if available. If you cannot end the call, simply stop responding after your goodbye.`;
-
 function sanitizeAssistantName(businessName) {
   const suffix = ' AI Receptionist';
   const maxLength = 40;
@@ -1487,10 +1467,6 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       modelId = 'gpt-4o-mini';
       // NOTE: No guardrails appended — default prompts have # Guardrails built in
     }
-    // ═══════════════════════════════════════════════════════════════════
-    // SPAM DETECTION — Appended to ALL assistants (default + custom)
-    // ═══════════════════════════════════════════════════════════════════
-    systemPrompt += SPAM_DETECTION_BLOCK;
 
     // ══════════════════════════════════════════════════════════════════════
     // KNOWLEDGE BASE — Always create one (industry doc + optional website)
@@ -2137,7 +2113,6 @@ module.exports = {
   INDUSTRY_MAPPING,
   VOICES,
   INDUSTRY_CONFIGS,
-  SPAM_DETECTION_BLOCK,
   sanitizeAssistantName,
   formatPhoneE164,
   isValidE164,
