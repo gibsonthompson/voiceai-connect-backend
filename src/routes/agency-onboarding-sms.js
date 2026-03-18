@@ -7,6 +7,11 @@
 // silently skipped (no SMS, step incremented) so the next cron run
 // picks up the next relevant nudge.
 //
+// SAFEGUARDS:
+// - Only processes agencies created within the last 14 days
+// - 60-minute minimum gap between ANY step change (send or skip)
+// - Skips update the timestamp so they can't chain in rapid succession
+//
 // Step 1:  2 hours   — Upload logo/branding     (skip if logo_url set)
 // Step 2:  6 hours   — Connect Stripe            (skip if stripe_charges_enabled)
 // Step 3:  24 hours  — Add a test client          (skip if client_count > 0)
@@ -41,6 +46,9 @@ const STEP_THRESHOLDS = {
   9: 18720       // 312 hours (13 days)
 };
 
+// Max age of agencies to process (14 days in minutes)
+const MAX_AGENCY_AGE_MINUTES = 20160;
+
 // ============================================================================
 // CONDITION CHECKS
 // Returns true if the agency has ALREADY completed the action
@@ -67,8 +75,6 @@ function isStepAlreadyDone(step, agency, clientCount) {
       return !!agency.logo_url && !!agency.stripe_charges_enabled && clientCount > 0;
 
     case 7: // Midpoint — skip if they have a paying/active client
-      // We can't easily check paying client status here without another query,
-      // so we just check if they have 2+ clients (good enough proxy)
       return clientCount >= 2;
 
     case 8: // Urgency — skip if subscribed (not pending/trialing)
@@ -217,19 +223,22 @@ function getNextStep(agency, clientCount) {
   // All 9 steps sent
   if (nextStep > 9) return null;
 
-  // Check time threshold
+  // Hard cutoff: ignore agencies older than 14 days
   const signupTime = new Date(agency.created_at).getTime();
   const now = Date.now();
   const minutesSinceSignup = (now - signupTime) / (1000 * 60);
 
+  if (minutesSinceSignup > MAX_AGENCY_AGE_MINUTES) return null;
+
+  // Check time threshold for the next step
   const threshold = STEP_THRESHOLDS[nextStep];
   if (minutesSinceSignup < threshold) return null;
 
-  // Enforce minimum gap between sends (30 min for this sequence)
+  // Enforce minimum gap between ANY step changes — sends AND skips (60 min)
   if (agency.onboarding_sms_last_sent_at) {
     const lastSent = new Date(agency.onboarding_sms_last_sent_at).getTime();
     const minutesSinceLastSent = (now - lastSent) / (1000 * 60);
-    if (minutesSinceLastSent < 30) return null;
+    if (minutesSinceLastSent < 60) return null;
   }
 
   // Check condition
@@ -251,11 +260,9 @@ router.post('/agency-onboarding-sms', async (req, res) => {
   try {
     console.log('📬 Running agency onboarding engagement SMS check...');
 
-    // Fetch agencies that:
-    // 1. Are in trial or pending (not yet paying, not canceled)
-    // 2. Haven't received all 9 steps
-    // 3. Have a phone number
-    // 4. Have completed at least onboarding step 1 (so we have their real name/phone)
+    // Only process agencies created within the last 14 days
+    const fourteenDaysAgo = new Date(Date.now() - (14 * 24 * 60 * 60 * 1000)).toISOString();
+
     const { data: agencies, error } = await supabase
       .from('agencies')
       .select('id, name, slug, email, phone, logo_url, stripe_charges_enabled, ' +
@@ -265,7 +272,8 @@ router.post('/agency-onboarding-sms', async (req, res) => {
       .in('subscription_status', ['pending', 'trialing', 'trial'])
       .lt('onboarding_sms_step', 9)
       .not('phone', 'is', null)
-      .gte('onboarding_step', 2) // Past step 1 = we have their real name/phone
+      .gte('onboarding_step', 2)
+      .gte('created_at', fourteenDaysAgo)
       .order('created_at', { ascending: true });
 
     if (error) {
@@ -318,11 +326,15 @@ router.post('/agency-onboarding-sms', async (req, res) => {
 
       const { step, skip } = result;
 
-      // If condition already met, silently skip (increment step, no SMS)
+      // If condition already met, silently skip (increment step + update timestamp)
+      // Timestamp update prevents another skip/send within 60 minutes
       if (skip) {
         await supabase
           .from('agencies')
-          .update({ onboarding_sms_step: step })
+          .update({
+            onboarding_sms_step: step,
+            onboarding_sms_last_sent_at: new Date().toISOString()
+          })
           .eq('id', agency.id);
 
         skippedDone++;
