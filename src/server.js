@@ -124,6 +124,7 @@ const activityRoutes = require('./routes/activity');
 const outreachRoutes = require('./routes/outreach');
 const agencyTemplatesRoutes = require('./routes/agency-templates');
 const aiPlaygroundRoutes = require('./routes/ai-playground');
+const leadScraperRoutes = require('./routes/lead-scraper');
 const byotRoutes = require('./routes/byot');
 const abandonedCartRoutes = require('./routes/abandoned-cart');
 const agencyOnboardingSmsRoutes = require('./routes/agency-onboarding-sms');
@@ -576,6 +577,7 @@ app.use('/api/agency', supportRoutes);
 app.use('/api/agency', leadRoutes);
 app.use('/api/agency', activityRoutes);
 app.use('/api/agency', outreachRoutes);
+app.use('/api/leads', leadScraperRoutes);
 
 // ============================================================================
 // CLIENT ROUTES (Agencies → Clients)
