@@ -9,7 +9,7 @@
 const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
-const { supabase } = require('../lib/supabase');
+const { supabase } = require('../src/lib/supabase');
 const { runPipeline } = require('../services/enrichment-pipeline');
 const { enrichFromPlaces } = require('../services/places-enricher');
 const { scrapeWebsite } = require('../services/website-scraper');
