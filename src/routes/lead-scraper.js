@@ -214,17 +214,17 @@ router.get('/search/stream/:id', (req, res) => {
     const currentJob = jobs.get(jobId);
     if (!currentJob) { clearInterval(interval); res.end(); return; }
 
-    res.write(`data: ${JSON.stringify({
-      status: currentJob.status, progress: currentJob.progress, stats: currentJob.stats,
-    })}\n\n`);
-
     if (currentJob.status === 'complete' || currentJob.status === 'error') {
       res.write(`data: ${JSON.stringify({
         status: currentJob.status, progress: currentJob.progress,
-        stats: currentJob.stats, leads: currentJob.leads, error: currentJob.error,
+        stats: currentJob.stats, leads: currentJob.leads || [], error: currentJob.error,
       })}\n\n`);
       clearInterval(interval);
       res.end();
+    } else {
+      res.write(`data: ${JSON.stringify({
+        status: currentJob.status, progress: currentJob.progress, stats: currentJob.stats,
+      })}\n\n`);
     }
   }, 500);
 
