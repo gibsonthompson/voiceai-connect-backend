@@ -215,6 +215,7 @@ router.get('/search/stream/:id', (req, res) => {
     if (!currentJob) { clearInterval(interval); res.end(); return; }
 
     if (currentJob.status === 'complete' || currentJob.status === 'error') {
+      // Send ONE message with leads included, then close
       res.write(`data: ${JSON.stringify({
         status: currentJob.status, progress: currentJob.progress,
         stats: currentJob.stats, leads: currentJob.leads || [], error: currentJob.error,
@@ -222,6 +223,7 @@ router.get('/search/stream/:id', (req, res) => {
       clearInterval(interval);
       res.end();
     } else {
+      // Progress updates only while still running
       res.write(`data: ${JSON.stringify({
         status: currentJob.status, progress: currentJob.progress, stats: currentJob.stats,
       })}\n\n`);
