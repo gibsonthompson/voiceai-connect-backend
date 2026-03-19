@@ -1,7 +1,9 @@
 /**
- * Indeed Scraper Service v2
+ * Indeed Scraper Service v3
  * 
  * Fixes applied:
+ * - Residential proxy support (IPRoyal) to bypass datacenter IP blocks
+ * - Puppeteer-extra stealth plugin for anti-bot evasion
  * - User agent rotation (pool of 8 realistic UAs)
  * - CAPTCHA / block detection with clear error messaging
  * - Multi-layer selector strategy with text-content fallback
@@ -255,10 +257,24 @@ async function scrapeIndeed({ keywords, location, maxPages = 1 }) {
   let browserKillTimer;
 
   try {
+    // Build proxy args if configured
+    const proxyHost = process.env.PROXY_HOST;
+    const proxyPort = process.env.PROXY_PORT;
+    const proxyArgs = proxyHost && proxyPort
+      ? [`--proxy-server=http://${proxyHost}:${proxyPort}`]
+      : [];
+
+    if (proxyHost) {
+      console.log(`[Indeed] Using proxy: ${proxyHost}:${proxyPort}`);
+    } else {
+      console.log("[Indeed] ⚠️ No proxy configured — datacenter IP may be blocked");
+    }
+
     browser = await puppeteer.launch({
       headless: "new",
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
+        ...proxyArgs,
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
@@ -267,7 +283,7 @@ async function scrapeIndeed({ keywords, location, maxPages = 1 }) {
         "--window-size=1920,1080",
         "--disable-background-timer-throttling",
         "--disable-renderer-backgrounding",
-        "--single-process", // Reduces memory on small droplets
+        "--single-process",
       ],
     });
 
@@ -278,6 +294,15 @@ async function scrapeIndeed({ keywords, location, maxPages = 1 }) {
     }, BROWSER_TIMEOUT_MS);
 
     const page = await browser.newPage();
+
+    // Authenticate with proxy if credentials are set
+    if (process.env.PROXY_USER && process.env.PROXY_PASS) {
+      await page.authenticate({
+        username: process.env.PROXY_USER,
+        password: process.env.PROXY_PASS,
+      });
+    }
+
     await page.setUserAgent(getRandomUA());
     await page.setViewport({ width: 1920, height: 1080 });
 
