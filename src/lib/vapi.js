@@ -7,6 +7,7 @@
 // UPDATED: Full prompt rewrite — transfer logic, endCall, hooks, TTS norms
 // UPDATED: Retired Rachel voice, replaced with Matilda (2026-03-14)
 // UPDATED: Spam detection block appended to all assistants (2026-03-17)
+// UPDATED: Transfer keywords block — "representative", "live agent" (2026-03-19)
 // ============================================================================
 const fetch = require('node-fetch');
 const FormData = require('form-data');
@@ -77,12 +78,6 @@ const VOICES = {
   female_warm: 'XrExE9yKIg1WjnnlVkGX'
 };
 
-// ============================================================================
-// INDUSTRY CONFIGURATIONS
-// REWRITTEN: Every prompt now includes transfer logic, endCall awareness,
-// TTS normalization, info verification, tool error handling, and tight
-// industry-specific guardrails. No more generic guardrail block append.
-// ============================================================================
 // ============================================================================
 // INDUSTRY CONFIGURATIONS — Transfer-first, conversational prompts v4
 // Every prompt: transfer as default action, conversational tone, natural
@@ -1263,6 +1258,21 @@ If the caller appears to be a robocall, telemarketer, or spam:
 
 If you detect spam: say "We're not interested, thanks. Have a good day." Then end the call using the endCall tool if available. If you cannot end the call, simply stop responding after your goodbye.`;
 
+// ============================================================================
+// TRANSFER KEYWORDS BLOCK — Appended when transfer tool is available
+// Ensures callers who explicitly ask for a human get transferred immediately.
+// ============================================================================
+const TRANSFER_KEYWORDS_BLOCK = `
+
+# Transfer Keywords
+If the caller says any of the following, transfer them immediately — no questions, no pushback:
+- "representative" / "real person" / "live agent" / "human" / "operator"
+- "actual person" / "someone real" / "talk to someone" / "speak to someone"
+- "speak with someone" / "get me someone" / "talk to a human" / "real agent"
+- "I want to talk to a person" / "can I speak with a human" / "transfer me"
+
+Say something natural like "Sure, let me connect you with someone." Then call the transferCall tool immediately. Do not ask why, do not try to help first.`;
+
 function sanitizeAssistantName(businessName) {
   const suffix = ' AI Receptionist';
   const maxLength = 40;
@@ -1374,18 +1384,12 @@ async function createQueryTool(fileId, businessName) {
 
 // ============================================================================
 // CREATE INDUSTRY KNOWLEDGE BASE
-// Generates an industry-specific KB doc, optionally merges with website
-// content, uploads to VAPI as a file.
-// The query tool (created separately) references this file via fileIds.
-// No standalone KB object needed — the query tool handles KB internally.
 // ============================================================================
 async function createIndustryKnowledgeBase(businessName, industryKey, websiteKnowledgeBase = null) {
   try {
-    // Get the industry-specific knowledge base document
     const kbGenerator = INDUSTRY_KNOWLEDGE_BASES[industryKey] || INDUSTRY_KNOWLEDGE_BASES['professional_services'];
     const industryDoc = kbGenerator(businessName);
 
-    // Combine: industry doc + website content (if available)
     let fullContent = industryDoc;
 
     if (websiteKnowledgeBase?.websiteContent) {
@@ -1394,7 +1398,6 @@ async function createIndustryKnowledgeBase(businessName, industryKey, websiteKno
 
     console.log(`📚 Uploading knowledge base for ${businessName} (${industryKey}): ${fullContent.length} chars`);
 
-    // Upload as a file to VAPI
     const form = new FormData();
     form.append('file', Buffer.from(fullContent, 'utf-8'), {
       filename: `${businessName.replace(/\s+/g, '_')}_knowledge.txt`,
@@ -1454,7 +1457,6 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       temperature = customTemplate.temperature || config.temperature;
       modelId = customTemplate.model || 'gpt-4o-mini';
 
-      // Append agency's KB data to system prompt if template has it
       if (customTemplate.knowledge_base_data) {
         const kb = customTemplate.knowledge_base_data;
         let kbSection = '\n\n## BUSINESS INFORMATION';
@@ -1468,11 +1470,6 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
         }
       }
 
-      // ═══════════════════════════════════════════════════════════════════
-      // MINIMAL GUARDRAILS — Only for custom agency templates
-      // Default prompts already have # Guardrails baked in. Custom templates
-      // written by agencies might not, so we append a safety net.
-      // ═══════════════════════════════════════════════════════════════════
       systemPrompt += `\n\n# Safety
 - If the caller asks about topics unrelated to this business, redirect: "I'm here to help with our services — is there something I can help you with?"
 - Never reveal you are AI, a language model, or powered by any specific technology.
@@ -1485,12 +1482,18 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       voiceId = config.voiceId;
       temperature = config.temperature;
       modelId = 'gpt-4o-mini';
-      // NOTE: No guardrails appended — default prompts have # Guardrails built in
     }
     // ═══════════════════════════════════════════════════════════════════
     // SPAM DETECTION — Appended to ALL assistants (default + custom)
     // ═══════════════════════════════════════════════════════════════════
     systemPrompt += SPAM_DETECTION_BLOCK;
+
+    // ═══════════════════════════════════════════════════════════════════
+    // TRANSFER KEYWORDS — Appended when transfer tool is available
+    // ═══════════════════════════════════════════════════════════════════
+    if (ownerPhone) {
+      systemPrompt += TRANSFER_KEYWORDS_BLOCK;
+    }
 
     // ══════════════════════════════════════════════════════════════════════
     // KNOWLEDGE BASE — Always create one (industry doc + optional website)
@@ -1515,7 +1518,6 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
     // ══════════════════════════════════════════════════════════════════════
     const tools = [];
 
-    // Transfer call tool — only if we have a valid owner phone
     if (ownerPhone) {
       let formattedPhone = isValidE164(ownerPhone) ? ownerPhone : formatPhoneE164(ownerPhone);
       if (formattedPhone && isValidE164(formattedPhone)) {
@@ -1531,15 +1533,12 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       }
     }
 
-    // End call tool — always included
     tools.push({
       type: 'endCall'
     });
 
     // ══════════════════════════════════════════════════════════════════════
     // HOOKS — Default hooks for every assistant
-    // - customer.speech.timeout: handle silence
-    // - call.ending on pipeline-error: fallback transfer to owner
     // ══════════════════════════════════════════════════════════════════════
     const hooks = [
       {
@@ -1556,7 +1555,6 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       }
     ];
 
-    // Pipeline error fallback — transfer to owner if we have their number
     if (ownerPhone) {
       let formattedPhone = isValidE164(ownerPhone) ? ownerPhone : formatPhoneE164(ownerPhone);
       if (formattedPhone && isValidE164(formattedPhone)) {
@@ -1616,7 +1614,6 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
     const assistant = await response.json();
     console.log(`✅ Assistant created: ${assistant.id}`);
 
-    // Attach template KB data so caller can save to client record
     if (customTemplate?.knowledge_base_data) {
       assistant._templateKnowledgeBase = customTemplate.knowledge_base_data;
     }
@@ -1630,7 +1627,6 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
 
 // ============================================================================
 // DEMO ASSISTANT SYSTEM PROMPT
-// Extracted so createDemoAssistant and updateDemoAssistantName share it
 // ============================================================================
 function getDemoSystemPrompt(agencyName) {
   return `You are a demo AI receptionist for ${agencyName}. Your job is to showcase how an AI receptionist works for businesses.
@@ -1828,74 +1824,7 @@ async function updateDemoAssistantName(assistantId, newAgencyName) {
 // ============================================================================
 // PHONE PROVISIONING
 // ============================================================================
-const STATE_AREA_CODES = {
-  'AL': ['205', '251', '256', '334', '938'],
-  'AK': ['907'],
-  'AZ': ['480', '520', '602', '623', '928'],
-  'AR': ['479', '501', '870'],
-  'CA': ['213', '310', '323', '408', '415', '510', '530', '559', '619', '626', '650', '661', '707', '714', '760', '805', '818', '831', '858', '909', '916', '925', '949', '951'],
-  'CO': ['303', '719', '720', '970'],
-  'CT': ['203', '475', '860'],
-  'DE': ['302'],
-  'DC': ['202'],
-  'FL': ['239', '305', '321', '352', '386', '407', '561', '727', '754', '772', '786', '813', '850', '863', '904', '941', '954'],
-  'GA': ['229', '404', '470', '478', '678', '706', '770', '912'],
-  'HI': ['808'],
-  'ID': ['208', '986'],
-  'IL': ['217', '224', '309', '312', '331', '618', '630', '708', '773', '815', '847'],
-  'IN': ['219', '260', '317', '463', '574', '765', '812'],
-  'IA': ['319', '515', '563', '641', '712'],
-  'KS': ['316', '620', '785', '913'],
-  'KY': ['270', '364', '502', '606', '859'],
-  'LA': ['225', '318', '337', '504', '985'],
-  'ME': ['207'],
-  'MD': ['240', '301', '410', '443', '667'],
-  'MA': ['339', '351', '413', '508', '617', '774', '781', '857', '978'],
-  'MI': ['231', '248', '269', '313', '517', '586', '616', '734', '810', '906', '947', '989'],
-  'MN': ['218', '320', '507', '612', '651', '763', '952'],
-  'MS': ['228', '601', '662', '769'],
-  'MO': ['314', '417', '573', '636', '660', '816'],
-  'MT': ['406'],
-  'NE': ['308', '402', '531'],
-  'NV': ['702', '725', '775'],
-  'NH': ['603'],
-  'NJ': ['201', '551', '609', '732', '848', '856', '862', '908', '973'],
-  'NM': ['505', '575'],
-  'NY': ['212', '315', '347', '516', '518', '585', '607', '631', '646', '716', '718', '845', '914', '917', '929'],
-  'NC': ['252', '336', '704', '743', '828', '910', '919', '980', '984'],
-  'ND': ['701'],
-  'OH': ['216', '234', '330', '380', '419', '440', '513', '567', '614', '740', '937'],
-  'OK': ['405', '539', '580', '918'],
-  'OR': ['458', '503', '541', '971'],
-  'PA': ['215', '267', '272', '412', '484', '570', '610', '717', '724', '814', '878'],
-  'RI': ['401'],
-  'SC': ['803', '843', '854', '864'],
-  'SD': ['605'],
-  'TN': ['423', '615', '629', '731', '865', '901', '931'],
-  'TX': ['210', '214', '254', '281', '325', '346', '361', '409', '430', '432', '469', '512', '682', '713', '726', '737', '806', '817', '830', '832', '903', '915', '936', '940', '956', '972', '979'],
-  'UT': ['385', '435', '801'],
-  'VT': ['802'],
-  'VA': ['276', '434', '540', '571', '703', '757', '804'],
-  'WA': ['206', '253', '360', '425', '509', '564'],
-  'WV': ['304', '681'],
-  'WI': ['262', '414', '534', '608', '715', '920'],
-  'WY': ['307'],
-
-  // Canadian Provinces & Territories
-  'AB': ['403', '587', '780', '825'],
-  'BC': ['236', '250', '604', '672', '778'],
-  'MB': ['204', '431'],
-  'NB': ['506'],
-  'NL': ['709'],
-  'NS': ['782', '902'],
-  'NT': ['867'],
-  'NU': ['867'],
-  'ON': ['226', '249', '289', '343', '365', '382', '416', '437', '519', '548', '613', '647', '705', '742', '807', '905'],
-  'PE': ['782', '902'],
-  'QC': ['354', '367', '418', '438', '450', '468', '514', '579', '581', '819', '873'],
-  'SK': ['306', '639'],
-  'YT': ['867'],
-};
+const STATE_AREA_CODES = {"AL":["205","251","256","334","938"],"AK":["907"],"AZ":["480","520","602","623","928"],"AR":["479","501","870"],"CA":["213","310","323","408","415","510","530","559","619","626","650","661","707","714","760","805","818","831","858","909","916","925","949","951"],"CO":["303","719","720","970"],"CT":["203","475","860"],"DE":["302"],"DC":["202"],"FL":["239","305","321","352","386","407","561","727","754","772","786","813","850","863","904","941","954"],"GA":["229","404","470","478","678","706","770","912"],"HI":["808"],"ID":["208","986"],"IL":["217","224","309","312","331","618","630","708","773","815","847"],"IN":["219","260","317","463","574","765","812"],"IA":["319","515","563","641","712"],"KS":["316","620","785","913"],"KY":["270","364","502","606","859"],"LA":["225","318","337","504","985"],"ME":["207"],"MD":["240","301","410","443","667"],"MA":["339","351","413","508","617","774","781","857","978"],"MI":["231","248","269","313","517","586","616","734","810","906","947","989"],"MN":["218","320","507","612","651","763","952"],"MS":["228","601","662","769"],"MO":["314","417","573","636","660","816"],"MT":["406"],"NE":["308","402","531"],"NV":["702","725","775"],"NH":["603"],"NJ":["201","551","609","732","848","856","862","908","973"],"NM":["505","575"],"NY":["212","315","347","516","518","585","607","631","646","716","718","845","914","917","929"],"NC":["252","336","704","743","828","910","919","980","984"],"ND":["701"],"OH":["216","234","330","380","419","440","513","567","614","740","937"],"OK":["405","539","580","918"],"OR":["458","503","541","971"],"PA":["215","267","272","412","484","570","610","717","724","814","878"],"RI":["401"],"SC":["803","843","854","864"],"SD":["605"],"TN":["423","615","629","731","865","901","931"],"TX":["210","214","254","281","325","346","361","409","430","432","469","512","682","713","726","737","806","817","830","832","903","915","936","940","956","972","979"],"UT":["385","435","801"],"VT":["802"],"VA":["276","434","540","571","703","757","804"],"WA":["206","253","360","425","509","564"],"WV":["304","681"],"WI":["262","414","534","608","715","920"],"WY":["307"],"AB":["403","587","780","825"],"BC":["236","250","604","672","778"],"MB":["204","431"],"NB":["506"],"NL":["709"],"NS":["782","902"],"NT":["867"],"NU":["867"],"ON":["226","249","289","343","365","382","416","437","519","548","613","647","705","742","807","905"],"PE":["782","902"],"QC":["354","367","418","438","450","468","514","579","581","819","873"],"SK":["306","639"],"YT":["867"]};
 
 async function provisionPhoneNumber(areaCode) {
   const buyResponse = await fetch('https://api.vapi.ai/phone-number/buy', {
@@ -1923,267 +1852,7 @@ async function provisionPhoneNumber(areaCode) {
 // ============================================================================
 // CITY → AREA CODE MAPPING
 // ============================================================================
-const CITY_AREA_CODES = {
-  'atlanta': ['404', '470', '678', '770'],
-  'savannah': ['912'],
-  'augusta': ['706', '762'],
-  'macon': ['478'],
-  'los angeles': ['213', '323', '310', '424', '818', '747'],
-  'san francisco': ['415', '628'],
-  'san diego': ['619', '858'],
-  'san jose': ['408', '669'],
-  'sacramento': ['916'],
-  'oakland': ['510'],
-  'fresno': ['559'],
-  'long beach': ['562'],
-  'anaheim': ['714', '657'],
-  'irvine': ['949'],
-  'riverside': ['951'],
-  'bakersfield': ['661'],
-  'houston': ['713', '281', '832', '346'],
-  'dallas': ['214', '972', '469'],
-  'san antonio': ['210'],
-  'austin': ['512', '737'],
-  'fort worth': ['817', '682'],
-  'el paso': ['915'],
-  'miami': ['305', '786'],
-  'orlando': ['407', '321', '689'],
-  'tampa': ['813', '656'],
-  'jacksonville': ['904'],
-  'fort lauderdale': ['954', '754'],
-  'st petersburg': ['727'],
-  'west palm beach': ['561'],
-  'new york': ['212', '646', '917', '718', '347', '929'],
-  'brooklyn': ['718', '347', '929'],
-  'queens': ['718', '347', '929'],
-  'bronx': ['718', '347', '929'],
-  'buffalo': ['716'],
-  'chicago': ['312', '773', '872', '708', '630'],
-  'philadelphia': ['215', '267', '445'],
-  'pittsburgh': ['412', '878'],
-  'phoenix': ['602', '480', '623'],
-  'tucson': ['520'],
-  'scottsdale': ['480'],
-  'charlotte': ['704', '980'],
-  'raleigh': ['919', '984'],
-  'denver': ['303', '720'],
-  'colorado springs': ['719'],
-  'seattle': ['206', '253'],
-  'boston': ['617', '857'],
-  'portland': ['503', '971'],
-  'las vegas': ['702', '725'],
-  'nashville': ['615', '629'],
-  'memphis': ['901'],
-  'detroit': ['313', '248'],
-  'minneapolis': ['612', '763'],
-  'new orleans': ['504'],
-  'baltimore': ['410', '443'],
-  'virginia beach': ['757'],
-  'richmond': ['804'],
-  'columbus': ['614'],
-  'cleveland': ['216'],
-  'cincinnati': ['513'],
-  'indianapolis': ['317', '463'],
-  'kansas city': ['816'],
-  'st louis': ['314'],
-  'milwaukee': ['414'],
-  'newark': ['973', '862'],
-  'jersey city': ['201', '551'],
-  'charleston': ['843'],
-  'columbia': ['803'],
-  'birmingham': ['205'],
-  'salt lake city': ['801', '385'],
-  'oklahoma city': ['405'],
-  'hartford': ['860'],
-  'honolulu': ['808'],
-
-  // ── Ontario ──────────────────────────────────────────────────────────
-  'toronto': ['416', '437', '647'],
-  'mississauga': ['905', '289', '365'],
-  'brampton': ['905', '289', '365'],
-  'hamilton': ['905', '289', '365'],
-  'ottawa': ['613', '343'],
-  'markham': ['905', '289', '365'],
-  'vaughan': ['905', '289', '365'],
-  'oakville': ['905', '289', '365'],
-  'burlington': ['905', '289', '365'],
-  'oshawa': ['905', '289', '365'],
-  'whitby': ['905', '289', '365'],
-  'ajax': ['905', '289', '365'],
-  'pickering': ['905', '289', '365'],
-  'st catharines': ['905', '289', '365'],
-  'niagara falls': ['905', '289', '365'],
-  'barrie': ['705', '249'],
-  'guelph': ['519', '226', '548'],
-  'kitchener': ['519', '226', '548'],
-  'waterloo': ['519', '226', '548'],
-  'london ontario': ['519', '226', '548'],
-  'windsor ontario': ['519', '226', '548'],
-  'sudbury': ['705', '249'],
-  'thunder bay': ['807'],
-  'peterborough': ['705', '249'],
-  'belleville': ['613', '343'],
-  'sarnia': ['519', '226'],
-  'north bay': ['705', '249'],
-  'sault ste marie': ['705', '249'],
-  'brantford': ['519', '226', '548'],
-  'newmarket': ['905', '289', '365'],
-  'aurora': ['905', '289', '365'],
-  'stouffville': ['905', '289', '365'],
-  'milton': ['905', '289', '365'],
-  'georgetown': ['905', '289', '365'],
-  'orangeville': ['519', '226'],
-  'orillia': ['705', '249'],
-  'welland': ['905', '289', '365'],
-  'st thomas': ['519', '226', '548'],
-  'woodstock ontario': ['519', '226', '548'],
-  'stratford ontario': ['519', '226', '548'],
-  'chatham': ['519', '226'],
-  'cornwall': ['613', '343'],
-  'brockville': ['613', '343'],
-  'pembroke': ['613', '343'],
-  'kenora': ['807'],
-  'timmins': ['705', '249'],
-  'bowmanville': ['905', '289', '365'],
-  'cobourg': ['905', '289'],
-  'lindsay': ['705', '249'],
-  // ── Quebec ───────────────────────────────────────────────────────────
-  'montreal': ['514', '438'],
-  'quebec city': ['418', '581'],
-  'laval': ['450', '579'],
-  'gatineau': ['819', '873'],
-  'longueuil': ['450', '579'],
-  'sherbrooke': ['819', '873'],
-  'levis': ['418', '581'],
-  'saguenay': ['418', '581'],
-  'trois-rivieres': ['819', '873'],
-  'terrebonne': ['450', '579'],
-  'repentigny': ['450', '579'],
-  'brossard': ['450', '579'],
-  'drummondville': ['819', '873'],
-  'saint-jean-sur-richelieu': ['450', '579'],
-  'granby': ['450', '579'],
-  'blainville': ['450', '579'],
-  'saint-hyacinthe': ['450', '579'],
-  'rimouski': ['418', '581'],
-  'victoriaville': ['819', '873'],
-  'chicoutimi': ['418', '581'],
-  'shawinigan': ['819', '873'],
-  'dollard-des-ormeaux': ['514', '438'],
-  'pointe-claire': ['514', '438'],
-  'saint-laurent': ['514', '438'],
-  'joliette': ['450', '579'],
-  'val-dor': ['819', '873'],
-  'rouyn-noranda': ['819', '873'],
-  'sept-iles': ['418', '581'],
-  'alma': ['418', '581'],
-  'magog': ['819', '873'],
-  // ── British Columbia ─────────────────────────────────────────────────
-  'vancouver': ['604', '778', '236'],
-  'surrey': ['604', '778', '236'],
-  'burnaby': ['604', '778', '236'],
-  'richmond bc': ['604', '778', '236'],
-  'coquitlam': ['604', '778', '236'],
-  'langley': ['604', '778', '236'],
-  'delta': ['604', '778', '236'],
-  'north vancouver': ['604', '778', '236'],
-  'west vancouver': ['604', '778', '236'],
-  'new westminster': ['604', '778', '236'],
-  'maple ridge': ['604', '778', '236'],
-  'port coquitlam': ['604', '778', '236'],
-  'abbotsford': ['604', '778', '236'],
-  'chilliwack': ['604', '778', '236'],
-  'victoria': ['250', '778'],
-  'nanaimo': ['250', '778'],
-  'kamloops': ['250', '778'],
-  'kelowna': ['250', '778'],
-  'prince george': ['250', '778'],
-  'vernon': ['250', '778'],
-  'courtenay': ['250', '778'],
-  'penticton': ['250', '778'],
-  'campbell river': ['250', '778'],
-  'cranbrook': ['250', '778'],
-  'duncan': ['250', '778'],
-  'powell river': ['604', '778'],
-  'white rock': ['604', '778', '236'],
-  'mission': ['604', '778', '236'],
-  // ── Alberta ──────────────────────────────────────────────────────────
-  'calgary': ['403', '587'],
-  'edmonton': ['780', '587', '825'],
-  'red deer': ['403', '587'],
-  'lethbridge': ['403', '587'],
-  'medicine hat': ['403', '587'],
-  'grande prairie': ['780', '587'],
-  'airdrie': ['403', '587'],
-  'spruce grove': ['780', '587'],
-  'st albert': ['780', '587'],
-  'leduc': ['780', '587'],
-  'fort mcmurray': ['780', '587'],
-  'okotoks': ['403', '587'],
-  'cochrane': ['403', '587'],
-  'lloydminster': ['780', '587'],
-  'camrose': ['780', '587'],
-  'brooks': ['403', '587'],
-  'canmore': ['403', '587'],
-  'banff': ['403', '587'],
-  // ── Manitoba ─────────────────────────────────────────────────────────
-  'winnipeg': ['204', '431'],
-  'brandon': ['204', '431'],
-  'steinbach': ['204', '431'],
-  'portage la prairie': ['204', '431'],
-  'thompson': ['204', '431'],
-  'selkirk': ['204', '431'],
-  'winkler': ['204', '431'],
-  // ── Saskatchewan ─────────────────────────────────────────────────────
-  'regina': ['306', '639'],
-  'saskatoon': ['306', '639'],
-  'prince albert': ['306', '639'],
-  'moose jaw': ['306', '639'],
-  'swift current': ['306', '639'],
-  'north battleford': ['306', '639'],
-  'yorkton': ['306', '639'],
-  'estevan': ['306', '639'],
-  // ── Nova Scotia ──────────────────────────────────────────────────────
-  'halifax': ['902', '782'],
-  'dartmouth': ['902', '782'],
-  'sydney': ['902', '782'],
-  'truro': ['902', '782'],
-  'new glasgow': ['902', '782'],
-  'yarmouth': ['902', '782'],
-  'kentville': ['902', '782'],
-  'bridgewater': ['902', '782'],
-  'antigonish': ['902', '782'],
-  // ── New Brunswick ────────────────────────────────────────────────────
-  'fredericton': ['506'],
-  'moncton': ['506'],
-  'saint john': ['506'],
-  'miramichi': ['506'],
-  'bathurst': ['506'],
-  'edmundston': ['506'],
-  'dieppe': ['506'],
-  'riverview': ['506'],
-  // ── Newfoundland & Labrador ──────────────────────────────────────────
-  'st johns': ['709'],
-  "st john's": ['709'],
-  'mount pearl': ['709'],
-  'corner brook': ['709'],
-  'conception bay south': ['709'],
-  'paradise': ['709'],
-  'grand falls-windsor': ['709'],
-  'gander': ['709'],
-  'labrador city': ['709'],
-  // ── Prince Edward Island ─────────────────────────────────────────────
-  'charlottetown': ['902', '782'],
-  'summerside': ['902', '782'],
-  'stratford pei': ['902', '782'],
-  // ── Territories ──────────────────────────────────────────────────────
-  'whitehorse': ['867'],
-  'yellowknife': ['867'],
-  'iqaluit': ['867'],
-  'dawson city': ['867'],
-  'hay river': ['867'],
-  'inuvik': ['867'],
-};
+const CITY_AREA_CODES = {"atlanta":["404","470","678","770"],"savannah":["912"],"augusta":["706","762"],"macon":["478"],"los angeles":["213","323","310","424","818","747"],"san francisco":["415","628"],"san diego":["619","858"],"san jose":["408","669"],"sacramento":["916"],"oakland":["510"],"fresno":["559"],"long beach":["562"],"anaheim":["714","657"],"irvine":["949"],"riverside":["951"],"bakersfield":["661"],"houston":["713","281","832","346"],"dallas":["214","972","469"],"san antonio":["210"],"austin":["512","737"],"fort worth":["817","682"],"el paso":["915"],"miami":["305","786"],"orlando":["407","321","689"],"tampa":["813","656"],"jacksonville":["904"],"fort lauderdale":["954","754"],"st petersburg":["727"],"west palm beach":["561"],"new york":["212","646","917","718","347","929"],"brooklyn":["718","347","929"],"queens":["718","347","929"],"bronx":["718","347","929"],"buffalo":["716"],"chicago":["312","773","872","708","630"],"philadelphia":["215","267","445"],"pittsburgh":["412","878"],"phoenix":["602","480","623"],"tucson":["520"],"scottsdale":["480"],"charlotte":["704","980"],"raleigh":["919","984"],"denver":["303","720"],"colorado springs":["719"],"seattle":["206","253"],"boston":["617","857"],"portland":["503","971"],"las vegas":["702","725"],"nashville":["615","629"],"memphis":["901"],"detroit":["313","248"],"minneapolis":["612","763"],"new orleans":["504"],"baltimore":["410","443"],"virginia beach":["757"],"richmond":["804"],"columbus":["614"],"cleveland":["216"],"cincinnati":["513"],"indianapolis":["317","463"],"kansas city":["816"],"st louis":["314"],"milwaukee":["414"],"newark":["973","862"],"jersey city":["201","551"],"charleston":["843"],"columbia":["803"],"birmingham":["205"],"salt lake city":["801","385"],"oklahoma city":["405"],"hartford":["860"],"honolulu":["808"],"toronto":["416","437","647"],"mississauga":["905","289","365"],"brampton":["905","289","365"],"hamilton":["905","289","365"],"ottawa":["613","343"],"markham":["905","289","365"],"vaughan":["905","289","365"],"oakville":["905","289","365"],"burlington":["905","289","365"],"oshawa":["905","289","365"],"whitby":["905","289","365"],"ajax":["905","289","365"],"pickering":["905","289","365"],"st catharines":["905","289","365"],"niagara falls":["905","289","365"],"barrie":["705","249"],"guelph":["519","226","548"],"kitchener":["519","226","548"],"waterloo":["519","226","548"],"london ontario":["519","226","548"],"windsor ontario":["519","226","548"],"sudbury":["705","249"],"thunder bay":["807"],"peterborough":["705","249"],"belleville":["613","343"],"sarnia":["519","226"],"north bay":["705","249"],"sault ste marie":["705","249"],"brantford":["519","226","548"],"newmarket":["905","289","365"],"aurora":["905","289","365"],"stouffville":["905","289","365"],"milton":["905","289","365"],"georgetown":["905","289","365"],"orangeville":["519","226"],"orillia":["705","249"],"welland":["905","289","365"],"st thomas":["519","226","548"],"woodstock ontario":["519","226","548"],"stratford ontario":["519","226","548"],"chatham":["519","226"],"cornwall":["613","343"],"brockville":["613","343"],"pembroke":["613","343"],"kenora":["807"],"timmins":["705","249"],"bowmanville":["905","289","365"],"cobourg":["905","289"],"lindsay":["705","249"],"montreal":["514","438"],"quebec city":["418","581"],"laval":["450","579"],"gatineau":["819","873"],"longueuil":["450","579"],"sherbrooke":["819","873"],"levis":["418","581"],"saguenay":["418","581"],"trois-rivieres":["819","873"],"terrebonne":["450","579"],"repentigny":["450","579"],"brossard":["450","579"],"drummondville":["819","873"],"saint-jean-sur-richelieu":["450","579"],"granby":["450","579"],"blainville":["450","579"],"saint-hyacinthe":["450","579"],"rimouski":["418","581"],"victoriaville":["819","873"],"chicoutimi":["418","581"],"shawinigan":["819","873"],"dollard-des-ormeaux":["514","438"],"pointe-claire":["514","438"],"saint-laurent":["514","438"],"joliette":["450","579"],"val-dor":["819","873"],"rouyn-noranda":["819","873"],"sept-iles":["418","581"],"alma":["418","581"],"magog":["819","873"],"vancouver":["604","778","236"],"surrey":["604","778","236"],"burnaby":["604","778","236"],"richmond bc":["604","778","236"],"coquitlam":["604","778","236"],"langley":["604","778","236"],"delta":["604","778","236"],"north vancouver":["604","778","236"],"west vancouver":["604","778","236"],"new westminster":["604","778","236"],"maple ridge":["604","778","236"],"port coquitlam":["604","778","236"],"abbotsford":["604","778","236"],"chilliwack":["604","778","236"],"victoria":["250","778"],"nanaimo":["250","778"],"kamloops":["250","778"],"kelowna":["250","778"],"prince george":["250","778"],"vernon":["250","778"],"courtenay":["250","778"],"penticton":["250","778"],"campbell river":["250","778"],"cranbrook":["250","778"],"duncan":["250","778"],"powell river":["604","778"],"white rock":["604","778","236"],"mission":["604","778","236"],"calgary":["403","587"],"edmonton":["780","587","825"],"red deer":["403","587"],"lethbridge":["403","587"],"medicine hat":["403","587"],"grande prairie":["780","587"],"airdrie":["403","587"],"spruce grove":["780","587"],"st albert":["780","587"],"leduc":["780","587"],"fort mcmurray":["780","587"],"okotoks":["403","587"],"cochrane":["403","587"],"lloydminster":["780","587"],"camrose":["780","587"],"brooks":["403","587"],"canmore":["403","587"],"banff":["403","587"],"winnipeg":["204","431"],"brandon":["204","431"],"steinbach":["204","431"],"portage la prairie":["204","431"],"thompson":["204","431"],"selkirk":["204","431"],"winkler":["204","431"],"regina":["306","639"],"saskatoon":["306","639"],"prince albert":["306","639"],"moose jaw":["306","639"],"swift current":["306","639"],"north battleford":["306","639"],"yorkton":["306","639"],"estevan":["306","639"],"halifax":["902","782"],"dartmouth":["902","782"],"sydney":["902","782"],"truro":["902","782"],"new glasgow":["902","782"],"yarmouth":["902","782"],"kentville":["902","782"],"bridgewater":["902","782"],"antigonish":["902","782"],"fredericton":["506"],"moncton":["506"],"saint john":["506"],"miramichi":["506"],"bathurst":["506"],"edmundston":["506"],"dieppe":["506"],"riverview":["506"],"st johns":["709"],"st john's":["709"],"mount pearl":["709"],"corner brook":["709"],"conception bay south":["709"],"paradise":["709"],"grand falls-windsor":["709"],"gander":["709"],"labrador city":["709"],"charlottetown":["902","782"],"summerside":["902","782"],"stratford pei":["902","782"],"whitehorse":["867"],"yellowknife":["867"],"iqaluit":["867"],"dawson city":["867"],"hay river":["867"],"inuvik":["867"]};
 
 async function provisionLocalPhone(city, state, assistantId, businessName, ownerPhone = null) {
   console.log(`📞 Provisioning phone for ${businessName} in ${city}, ${state}`);
@@ -2340,6 +2009,7 @@ module.exports = {
   VOICES,
   INDUSTRY_CONFIGS,
   SPAM_DETECTION_BLOCK,
+  TRANSFER_KEYWORDS_BLOCK,
   sanitizeAssistantName,
   formatPhoneE164,
   isValidE164,

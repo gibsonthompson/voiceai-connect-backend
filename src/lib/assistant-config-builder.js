@@ -9,9 +9,10 @@
 // Phase 4: Tool config toggles (callerRecognition, spamDetection, 
 //          businessHours, transferFallback, speechTimeout)
 // Phase 5: Business hours routing, transfer fallback to message-taking
+// UPDATED: Transfer keywords block — "representative", "live agent", etc.
 // ============================================================================
 
-const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, VOICES,
+const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, TRANSFER_KEYWORDS_BLOCK, VOICES,
         sanitizeAssistantName, formatPhoneE164, isValidE164 } = require('./vapi');
 
 let supabase;
@@ -250,6 +251,11 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     systemPrompt += SPAM_DETECTION_BLOCK;
   }
 
+  // Transfer keywords — immediate transfer on "representative", "live agent", etc.
+  if (toolConfig.transferCall) {
+    systemPrompt += TRANSFER_KEYWORDS_BLOCK;
+  }
+
   // After-hours mode
   if (isAfterHours && toolConfig.businessHoursRouting) {
     systemPrompt += buildAfterHoursBlock(client, toolConfig);
@@ -340,14 +346,45 @@ function buildHooks(client, toolConfig, isAfterHours) {
 }
 
 // ============================================================================
+// ENFORCE AGENCY PLAN FEATURES
+// Force-disables tools the client's plan doesn't allow at call time.
+// Maps plan_features (snake_case) → tool_config (camelCase).
+// ============================================================================
+function enforceAgencyPlanFeatures(toolConfig, client, agency) {
+  if (!agency?.plan_features) return toolConfig;
+
+  const planType = client.plan_type || 'starter';
+  const planFeatures = agency.plan_features[planType];
+  if (!planFeatures) return toolConfig;
+
+  const PLAN_FEATURE_TO_TOOL_CONFIG = {
+    caller_recognition: 'callerRecognition',
+    spam_detection: 'spamDetection',
+    call_transfer: 'transferCall',
+    transfer_fallback: 'transferFallbackToMessage',
+    after_hours_mode: 'businessHoursRouting',
+  };
+
+  const enforced = { ...toolConfig };
+  for (const [planKey, toolKey] of Object.entries(PLAN_FEATURE_TO_TOOL_CONFIG)) {
+    if (planFeatures[planKey] === false) {
+      enforced[toolKey] = false;
+    }
+  }
+
+  return enforced;
+}
+
+// ============================================================================
 // MAIN: Build complete VAPI assistant config for a single call
 // ============================================================================
 async function buildDynamicAssistantConfig(client, agency, callerContext) {
   const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
   const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
 
-  // Merge tool_config with defaults
-  const toolConfig = { ...DEFAULT_TOOL_CONFIG, ...(client.tool_config || {}) };
+  // Merge tool_config with defaults, then enforce agency plan features
+  let toolConfig = { ...DEFAULT_TOOL_CONFIG, ...(client.tool_config || {}) };
+  toolConfig = enforceAgencyPlanFeatures(toolConfig, client, agency);
 
   // Check business hours
   const { isOpen } = checkBusinessHours(client);
@@ -428,5 +465,6 @@ module.exports = {
   buildTools,
   buildHooks,
   checkBusinessHours,
+  enforceAgencyPlanFeatures,
   DEFAULT_TOOL_CONFIG,
 };
