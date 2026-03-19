@@ -10,10 +10,10 @@ const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const { supabase } = require('../lib/supabase');
-const { runPipeline } = require('../services/enrichment-pipeline');
-const { enrichFromPlaces } = require('../services/places-enricher');
-const { scrapeWebsite } = require('../services/website-scraper');
-const { INDUSTRY_QUERIES } = require('../services/google-maps-source');
+const { runPipeline } = require('../../services/enrichment-pipeline');
+const { enrichFromPlaces } = require('../../services/places-enricher');
+const { scrapeWebsite } = require('../../services/website-scraper');
+const { INDUSTRY_QUERIES } = require('../../services/google-maps-source');
 
 // ── Search Queue (1 Puppeteer at a time) ────────────────────────────────
 let searchRunning = false;
