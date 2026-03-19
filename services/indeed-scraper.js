@@ -11,7 +11,9 @@
  * - Indeed page count detection (stops early if no more pages)
  */
 
-const puppeteer = require("puppeteer");
+const puppeteer = require("puppeteer-extra");
+const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+puppeteer.use(StealthPlugin());
 
 const INDEED_BASE = "https://www.indeed.com";
 const BROWSER_TIMEOUT_MS = 120000; // Kill browser after 2 min no matter what
