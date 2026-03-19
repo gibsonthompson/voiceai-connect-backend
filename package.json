@@ -4,8 +4,6 @@
   "description": "Multi-tenant white-label voice AI platform backend",
   "main": "src/server.js",
   "scripts": {
-    "build": "npx puppeteer browsers install chrome",
-    "postinstall": "npx puppeteer browsers install chrome",
     "start": "node src/server.js",
     "dev": "nodemon src/server.js"
   },
