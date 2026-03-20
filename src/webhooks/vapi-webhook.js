@@ -7,12 +7,14 @@
 // UPDATED: Contact upsert (Lead Capture) after call save
 // UPDATED: Spam detection — AI flags spam, different SMS, skip call count
 // UPDATED: Phase 2 — assistant-request handler (dynamic per-call config)
+// UPDATED: Team member notification routing
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
 const { sendCallNotificationSMS, sendDemoCallFollowUpSMS, sendCallSummaryEmail, sendSpamBlockedSMS } = require('../lib/notifications');
 const { upsertContactFromCall } = require('../lib/contact-upsert');
 const { buildDynamicAssistantConfig } = require('../lib/assistant-config-builder');
+const { notifyTeamMembers } = require('../lib/team-notifications');
 
 // ============================================================================
 // PLAN FEATURE CHECK HELPER
@@ -604,6 +606,9 @@ async function handleVapiWebhook(req, res) {
       smsSent = await sendCallNotificationSMS(client, agency, aiData);
       if (smsSent) console.log('✅ SMS notification sent');
     }
+    
+    // Notify team members who opted in for call alerts
+    await notifyTeamMembers(client.id, aiData, agency);
     
     if (isFeatureEnabled(client, agency, 'email_summaries') && client.email) {
       const emailResult = await sendCallSummaryEmail(client, agency, aiData, {

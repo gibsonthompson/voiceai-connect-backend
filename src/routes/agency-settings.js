@@ -5,6 +5,7 @@
 // UPDATED: Added calendar_enabled_plans for Google Calendar plan gating
 // UPDATED: Added analytics tracking (GTM, GA4, FB Pixel) + OG meta fields
 // UPDATED: Added AI tool keys to plan_features validation
+// UPDATED: Added team member limits to settings response
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
@@ -236,6 +237,10 @@ async function getAgencySettings(req, res) {
         byot_enabled: agency.byot_enabled || false,
         byot_verified_at: agency.byot_verified_at || null,
         twilio_account_sid: agency.twilio_account_sid || null,
+
+        // Team member limits
+        max_team_members_agency: agency.max_team_members_agency || 0,
+        max_team_members_client: agency.max_team_members_client || 0,
 
         // Analytics & Tracking
         gtm_id: agency.gtm_id || null,
