@@ -27,6 +27,30 @@ function getSendSms() {
 // HELPERS
 // ============================================================================
 
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+
+/** Decode JWT from Authorization header. Returns { userId, role, ... } or null. */
+function decodeToken(req) {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) return null;
+    return jwt.verify(token, JWT_SECRET);
+  } catch {
+    return null;
+  }
+}
+
+/** Check if decoded JWT role is an agency owner */
+function isAgencyOwnerRole(role) {
+  return role === 'agency_owner' || role === 'super_admin';
+}
+
+/** Check if decoded JWT role is a client owner (not staff) */
+function isClientOwnerRole(role) {
+  return role === 'client';
+}
+
 /** Generate a random 10-char password (readable, no ambiguous chars) */
 function generateTempPassword() {
   const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
@@ -203,6 +227,13 @@ router.post('/:agencyId/team', async (req, res) => {
     const { agencyId } = req.params;
     const { name, email, phone, permissions } = req.body;
 
+    // Only agency owners can add team members
+    const decoded = decodeToken(req);
+    if (!decoded || !isAgencyOwnerRole(decoded.role)) {
+      return res.status(403).json({ error: 'Only the agency owner can manage team members' });
+    }
+    const ownerUserId = decoded.userId;
+
     if (!name || !email) {
       return res.status(400).json({ error: 'Name and email are required' });
     }
@@ -230,12 +261,6 @@ router.post('/:agencyId/team', async (req, res) => {
       }
       return res.status(409).json({ error: 'This email is already associated with another account' });
     }
-
-    // Get the owner user (from JWT — the person making the request)
-    const jwt = require('jsonwebtoken');
-    const token = req.headers.authorization?.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-in-production');
-    const ownerUserId = decoded.userId;
 
     // Generate temp password
     const tempPassword = generateTempPassword();
@@ -338,6 +363,12 @@ router.put('/:agencyId/team/:memberId', async (req, res) => {
     const { agencyId, memberId } = req.params;
     const { display_name, phone, permissions, notification_prefs, status } = req.body;
 
+    // Only agency owners can update team members
+    const decoded = decodeToken(req);
+    if (!decoded || !isAgencyOwnerRole(decoded.role)) {
+      return res.status(403).json({ error: 'Only the agency owner can manage team members' });
+    }
+
     // Verify member belongs to this agency
     const { data: existing } = await supabase
       .from('team_members')
@@ -392,9 +423,6 @@ router.put('/:agencyId/team/:memberId', async (req, res) => {
 
     // Log permission changes
     if (permissions !== undefined) {
-      const jwt = require('jsonwebtoken');
-      const token = req.headers.authorization?.split(' ')[1];
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-in-production');
       await logActivity(memberId, decoded.userId, 'agency', agencyId, 'permissions_changed', {
         old: existing.permissions,
         new: updates.permissions,
@@ -417,6 +445,12 @@ router.post('/:agencyId/team/:memberId/reset-password', async (req, res) => {
   try {
     const { agencyId, memberId } = req.params;
     const { password } = req.body;
+
+    // Only agency owners can reset passwords
+    const decoded = decodeToken(req);
+    if (!decoded || !isAgencyOwnerRole(decoded.role)) {
+      return res.status(403).json({ error: 'Only the agency owner can manage team members' });
+    }
 
     // Verify member belongs to this agency
     const { data: member } = await supabase
@@ -444,9 +478,6 @@ router.post('/:agencyId/team/:memberId/reset-password', async (req, res) => {
     }).eq('id', memberId);
 
     // Log
-    const jwt = require('jsonwebtoken');
-    const token = req.headers.authorization?.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-in-production');
     await logActivity(memberId, decoded.userId, 'agency', agencyId, 'password_reset', {
       reset_by: 'owner',
     });
@@ -478,6 +509,12 @@ router.delete('/:agencyId/team/:memberId', async (req, res) => {
   try {
     const { agencyId, memberId } = req.params;
 
+    // Only agency owners can remove team members
+    const decoded = decodeToken(req);
+    if (!decoded || !isAgencyOwnerRole(decoded.role)) {
+      return res.status(403).json({ error: 'Only the agency owner can manage team members' });
+    }
+
     const { data: member } = await supabase
       .from('team_members')
       .select('id, member_user_id, display_name')
@@ -491,9 +528,6 @@ router.delete('/:agencyId/team/:memberId', async (req, res) => {
     }
 
     // Log before deleting
-    const jwt = require('jsonwebtoken');
-    const token = req.headers.authorization?.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-in-production');
     await logActivity(memberId, decoded.userId, 'agency', agencyId, 'member_removed', {
       name: member.display_name,
     });
@@ -569,6 +603,13 @@ router.post('/client/:clientId/team', async (req, res) => {
     const { clientId } = req.params;
     const { name, email, phone, permissions } = req.body;
 
+    // Only client owners can add team members (not client_staff)
+    const decoded = decodeToken(req);
+    if (!decoded || !isClientOwnerRole(decoded.role)) {
+      return res.status(403).json({ error: 'Only the account owner can manage team members' });
+    }
+    const ownerUserId = decoded.userId;
+
     if (!name || !email) {
       return res.status(400).json({ error: 'Name and email are required' });
     }
@@ -598,11 +639,6 @@ router.post('/client/:clientId/team', async (req, res) => {
     if (existingUser) {
       return res.status(409).json({ error: 'This email is already associated with an account' });
     }
-
-    const jwt = require('jsonwebtoken');
-    const token = req.headers.authorization?.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-in-production');
-    const ownerUserId = decoded.userId;
 
     const tempPassword = generateTempPassword();
     const passwordHash = await bcrypt.hash(tempPassword, 10);
@@ -695,6 +731,12 @@ router.put('/client/:clientId/team/:memberId', async (req, res) => {
     const { clientId, memberId } = req.params;
     const { display_name, phone, permissions, notification_prefs, status } = req.body;
 
+    // Only client owners can update team members
+    const decoded = decodeToken(req);
+    if (!decoded || !isClientOwnerRole(decoded.role)) {
+      return res.status(403).json({ error: 'Only the account owner can manage team members' });
+    }
+
     const { data: existing } = await supabase
       .from('team_members')
       .select('id, member_user_id')
@@ -739,6 +781,12 @@ router.post('/client/:clientId/team/:memberId/reset-password', async (req, res) 
   try {
     const { clientId, memberId } = req.params;
 
+    // Only client owners can reset passwords
+    const decoded = decodeToken(req);
+    if (!decoded || !isClientOwnerRole(decoded.role)) {
+      return res.status(403).json({ error: 'Only the account owner can manage team members' });
+    }
+
     const { data: member } = await supabase
       .from('team_members')
       .select('id, member_user_id, phone, display_name')
@@ -773,6 +821,12 @@ router.post('/client/:clientId/team/:memberId/reset-password', async (req, res) 
 router.delete('/client/:clientId/team/:memberId', async (req, res) => {
   try {
     const { clientId, memberId } = req.params;
+
+    // Only client owners can remove team members
+    const decoded = decodeToken(req);
+    if (!decoded || !isClientOwnerRole(decoded.role)) {
+      return res.status(403).json({ error: 'Only the account owner can manage team members' });
+    }
 
     const { data: member } = await supabase
       .from('team_members')
