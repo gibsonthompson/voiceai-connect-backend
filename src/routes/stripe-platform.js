@@ -1,5 +1,6 @@
 // ============================================================================
 // STRIPE PLATFORM BILLING - Agencies Pay Platform
+// UPDATED: Team member limits set on plan activation
 // ============================================================================
 const Stripe = require('stripe');
 const { supabase, getAgencyByStripeCustomerId } = require('../lib/supabase');
@@ -21,6 +22,13 @@ const PLAN_DETAILS = {
   professional: { name: 'Professional', clientLimit: 100, priceUsdCents: 19900 },
   enterprise: { name: 'Enterprise', clientLimit: -1, priceUsdCents: 49900 }
 }; // -1 = unlimited
+
+// Team member limits per plan (set on agencies table at checkout/subscription)
+const TEAM_MEMBER_LIMITS = {
+  starter:      { agency: 0, client: 0 },
+  professional: { agency: 3, client: 2 },
+  enterprise:   { agency: 10, client: 5 },
+};
 
 // ============================================================================
 // COUNTRY → CURRENCY MAPPING + EXCHANGE RATES
@@ -318,7 +326,14 @@ async function handleAgencyCheckoutCompleted(session) {
   const plan = session.metadata?.plan_type || session.metadata?.plan || 'starter';
   if (!agencyId) return;
 
-  let updateData = { plan_type: plan, stripe_subscription_id: session.subscription, updated_at: new Date().toISOString() };
+  const teamLimits = TEAM_MEMBER_LIMITS[plan] || TEAM_MEMBER_LIMITS.starter;
+  let updateData = {
+    plan_type: plan,
+    stripe_subscription_id: session.subscription,
+    updated_at: new Date().toISOString(),
+    max_team_members_agency: teamLimits.agency,
+    max_team_members_client: teamLimits.client
+  };
 
   if (session.subscription) {
     try {
@@ -347,7 +362,7 @@ async function handleAgencyCheckoutCompleted(session) {
     });
   } catch (e) { /* Non-critical */ }
   
-  console.log('Agency activated:', agencyId, 'Plan:', plan, 'Status:', updateData.subscription_status);
+  console.log('Agency activated:', agencyId, 'Plan:', plan, 'Status:', updateData.subscription_status, 'Team limits:', teamLimits.agency, '/', teamLimits.client);
 }
 
 async function handleAgencySubscriptionCreated(subscription) {
@@ -355,8 +370,15 @@ async function handleAgencySubscriptionCreated(subscription) {
   const agency = await getAgencyByStripeCustomerId(subscription.customer);
   if (!agency) return;
   const plan = subscription.metadata?.plan_type || subscription.metadata?.plan || 'starter';
-  await supabase.from('agencies').update({ stripe_subscription_id: subscription.id, subscription_status: subscription.status, plan_type: plan }).eq('id', agency.id);
-  console.log(`   Status: ${subscription.status}, Plan: ${plan}`);
+  const teamLimits = TEAM_MEMBER_LIMITS[plan] || TEAM_MEMBER_LIMITS.starter;
+  await supabase.from('agencies').update({
+    stripe_subscription_id: subscription.id,
+    subscription_status: subscription.status,
+    plan_type: plan,
+    max_team_members_agency: teamLimits.agency,
+    max_team_members_client: teamLimits.client
+  }).eq('id', agency.id);
+  console.log(`   Status: ${subscription.status}, Plan: ${plan}, Team limits: ${teamLimits.agency}/${teamLimits.client}`);
 }
 
 async function handleAgencySubscriptionUpdated(subscription) {
@@ -577,6 +599,7 @@ async function warnExpiringAgencyTrials() {
 // EXPORTS
 // ============================================================================
 module.exports = {
+  TEAM_MEMBER_LIMITS,
   createAgencyCheckout,
   createAgencyPortal,
   handlePlatformStripeWebhook,
