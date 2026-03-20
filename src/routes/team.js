@@ -15,7 +15,7 @@ function getSendSms() {
   if (!sendSms) {
     try {
       const notifications = require('../lib/notifications');
-      sendSms = notifications.sendSms || notifications.sendSMS;
+      sendSms = notifications.sendTelnyxSMS;
     } catch {
       sendSms = async () => console.warn('⚠️ SMS not available');
     }
