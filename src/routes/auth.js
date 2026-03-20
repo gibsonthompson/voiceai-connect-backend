@@ -1,5 +1,9 @@
 // ============================================================================
 // AUTHENTICATION ROUTES
+// UPDATED: Team member permissions in login responses
+// UPDATED: client_staff role accepted in client login
+// UPDATED: Clear visible_password on self-password-change
+// Destination: src/routes/auth.js (FULL REPLACEMENT)
 // ============================================================================
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -80,6 +84,27 @@ async function agencyLogin(req, res) {
       });
     }
     
+    // ================================================================
+    // TEAM PERMISSIONS: Fetch for agency_staff users
+    // ================================================================
+    let teamPermissions = null;
+    if (user.role === 'agency_staff') {
+      const { data: teamMember } = await supabase
+        .from('team_members')
+        .select('permissions, notification_prefs, status')
+        .eq('member_user_id', user.id)
+        .eq('entity_type', 'agency')
+        .eq('entity_id', user.agency_id)
+        .single();
+      
+      if (teamMember) {
+        if (teamMember.status === 'disabled') {
+          return res.status(403).json({ error: 'Your account has been disabled by the agency owner.' });
+        }
+        teamPermissions = teamMember.permissions;
+      }
+    }
+    
     // Update last login
     await supabase
       .from('users')
@@ -96,9 +121,9 @@ async function agencyLogin(req, res) {
     // Generate token
     const token = generateToken(user);
     
-    console.log('✅ Agency login:', user.email, '| Agency:', agency?.name);
+    console.log('✅ Agency login:', user.email, '| Agency:', agency?.name, '| Role:', user.role);
     
-    // Return token, user (with agency_id), and full agency object
+    // Return token, user (with agency_id + permissions), and full agency object
     res.json({
       success: true,
       token,
@@ -108,7 +133,8 @@ async function agencyLogin(req, res) {
         first_name: user.first_name,
         last_name: user.last_name,
         role: user.role,
-        agency_id: user.agency_id  // CRITICAL: Include agency_id
+        agency_id: user.agency_id,
+        permissions: teamPermissions  // null for owners, object for staff
       },
       agency  // CRITICAL: Full agency object from separate query
     });
@@ -121,6 +147,7 @@ async function agencyLogin(req, res) {
 
 // ============================================================================
 // CLIENT LOGIN
+// UPDATED: Accept 'client_staff' role + fetch team permissions
 // ============================================================================
 async function clientLogin(req, res) {
   try {
@@ -137,8 +164,8 @@ async function clientLogin(req, res) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
     
-    // Check if client user
-    if (!user.client_id || user.role !== 'client') {
+    // Check if client user — UPDATED: accept both 'client' and 'client_staff'
+    if (!user.client_id || !['client', 'client_staff'].includes(user.role)) {
       return res.status(401).json({ error: 'Invalid credentials for client login' });
     }
     
@@ -166,6 +193,27 @@ async function clientLogin(req, res) {
       console.error('❌ Client fetch error:', clientError);
     }
     
+    // ================================================================
+    // TEAM PERMISSIONS: Fetch for client_staff users
+    // ================================================================
+    let teamPermissions = null;
+    if (user.role === 'client_staff') {
+      const { data: teamMember } = await supabase
+        .from('team_members')
+        .select('permissions, notification_prefs, status')
+        .eq('member_user_id', user.id)
+        .eq('entity_type', 'client')
+        .eq('entity_id', user.client_id)
+        .single();
+      
+      if (teamMember) {
+        if (teamMember.status === 'disabled') {
+          return res.status(403).json({ error: 'Your account has been disabled.' });
+        }
+        teamPermissions = teamMember.permissions;
+      }
+    }
+    
     // Update last login
     await supabase
       .from('users')
@@ -175,7 +223,7 @@ async function clientLogin(req, res) {
     // Generate token
     const token = generateToken(user);
     
-    console.log('✅ Client login:', user.email, '| Client:', client?.business_name);
+    console.log('✅ Client login:', user.email, '| Client:', client?.business_name, '| Role:', user.role);
     
     res.json({
       success: true,
@@ -186,7 +234,8 @@ async function clientLogin(req, res) {
         first_name: user.first_name,
         last_name: user.last_name,
         role: user.role,
-        client_id: user.client_id  // Include client_id
+        client_id: user.client_id,
+        permissions: teamPermissions  // null for owners, object for staff
       },
       client  // Full client object
     });
@@ -342,6 +391,7 @@ async function setPassword(req, res) {
 
 // ============================================================================
 // CHANGE PASSWORD (Authenticated - for clients & agencies)
+// UPDATED: Clears visible_password in team_members when user changes own pw
 // ============================================================================
 async function changePassword(req, res) {
   try {
@@ -399,6 +449,15 @@ async function changePassword(req, res) {
       console.error('❌ Password update error:', updateError);
       return res.status(500).json({ error: 'Failed to update password' });
     }
+
+    // ================================================================
+    // TEAM: Clear visible_password since user chose their own
+    // Owner will see "Changed by user" instead of plaintext
+    // ================================================================
+    await supabase
+      .from('team_members')
+      .update({ visible_password: null, updated_at: new Date().toISOString() })
+      .eq('member_user_id', user.id);
 
     console.log('✅ Password changed for:', user.email);
 

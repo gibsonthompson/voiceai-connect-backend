@@ -1,5 +1,7 @@
 // ============================================================================
 // VOICEAI CONNECT - MULTI-TENANT BACKEND SERVER
+// UPDATED: Team member routes mounted
+// Destination: src/server.js (or src/index.js) — FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
 
@@ -130,6 +132,7 @@ const abandonedCartRoutes = require('./routes/abandoned-cart');
 const agencyOnboardingSmsRoutes = require('./routes/agency-onboarding-sms');
 const feedbackRoutes = require('./routes/feedback');
 const supportRoutes = require('./routes/support');
+const teamRoutes = require('./routes/team'); // NEW: Team member routes
 
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
@@ -191,7 +194,8 @@ app.get('/health', (req, res) => {
       googleCalendar: true,
       aiTemplates: true,
       aiPlayground: true,
-      byot: true
+      byot: true,
+      teamMembers: true  // NEW
     },
     cron: {
       expireTrials: true,
@@ -580,6 +584,14 @@ app.use('/api/agency', outreachRoutes);
 app.use('/api/leads', leadScraperRoutes);
 
 // ============================================================================
+// TEAM MEMBER ROUTES (Agency-level)
+// GET/POST   /api/agency/:agencyId/team
+// PUT/DELETE  /api/agency/:agencyId/team/:memberId
+// POST       /api/agency/:agencyId/team/:memberId/reset-password
+// ============================================================================
+app.use('/api/agency', teamRoutes);
+
+// ============================================================================
 // CLIENT ROUTES (Agencies → Clients)
 // ============================================================================
 
@@ -591,6 +603,14 @@ app.use('/api/client', toolConfigRoutes);
 app.use('/api/client', pwaTrackingRoutes);
 app.post('/api/client/checkout', createClientCheckout);
 app.post('/api/client/portal', createClientPortal);
+
+// ============================================================================
+// TEAM MEMBER ROUTES (Client-level)
+// GET/POST   /api/client/:clientId/team
+// PUT/DELETE  /api/client/:clientId/team/:memberId
+// POST       /api/client/:clientId/team/:memberId/reset-password
+// ============================================================================
+app.use('/api', teamRoutes);
 
 app.get('/api/client/:clientId/details', async (req, res) => {
   try {
