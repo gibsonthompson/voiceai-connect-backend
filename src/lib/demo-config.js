@@ -93,7 +93,7 @@ Break character and transition:
 
 Pause briefly for their reaction, then continue:
 
-"Now here's the part business owners love. After every single call, your team automatically gets a text with a full summary — the caller's name, number, what they need, urgency level, everything. No more listening to voicemails or writing things down. Let me send you an example right now so you can see exactly what it looks like."
+"Now here's the part business owners love. After every single call, your team automatically gets a text with a summary — the caller's name, number, and what they need. No more listening to voicemails or writing things down. Let me send you an example right now so you can see exactly what it looks like."
 
 NOW call the send_demo_sms tool with:
 - business_name: their business name
@@ -132,11 +132,14 @@ After answering questions: "Any other questions? ... Great — like I said, I'll
 
 WHEN TO CALL: Only during Phase 3, after the roleplay is 100% complete and you have broken character.
 
+CALL THIS TOOL EXACTLY ONCE. Never call it a second time, even if you think it failed. If you already called it, do not call it again.
+
 DO NOT CALL THIS TOOL:
 - During the roleplay
 - Before you've confirmed their details back to them
 - Before you've given your in-character closing line
 - Before you've transitioned out of character with the "so that's exactly how I'd handle a real call" line
+- A second time for any reason
 
 Pass in:
 - business_name: their business name (required)
@@ -188,38 +191,23 @@ function buildDemoSmsContent(params, agency) {
     caller_phone_display = '',
   } = params;
 
-  const agencyName = agency.name || 'VoiceAI Connect';
-  const signupUrl = buildSignupUrl(agency);
+  const brandName = agency.name || 'VoiceAI Connect';
 
-  // Build a realistic time for the "call"
-  const now = new Date();
-  const timeStr = now.toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  });
+  // Match the exact format of sendCallNotificationSMS from notifications.js
+  let smsMessage = `New Call - ${business_name}\n`;
+  smsMessage += `Customer: ${customer_name}\n`;
+  smsMessage += `Phone: ${caller_phone_display || 'On file'}\n`;
 
-  // Determine urgency based on service type keywords
-  let urgency = 'Medium';
+  // Determine urgency from service keywords
   const lower = service_requested.toLowerCase();
   if (lower.includes('emergency') || lower.includes('flood') || lower.includes('leak') || lower.includes('broken') || lower.includes('pain') || lower.includes('urgent')) {
-    urgency = 'High';
-  } else if (lower.includes('cleaning') || lower.includes('checkup') || lower.includes('routine') || lower.includes('question') || lower.includes('info')) {
-    urgency = 'Routine';
+    smsMessage += `Urgency: HIGH\n`;
   }
 
-  return `📞 New Call Summary — ${business_name}
-⏰ ${timeStr} | ⚡ ${urgency} Priority
+  smsMessage += `Summary: ${service_requested}\n`;
+  smsMessage += `Powered by ${brandName}`;
 
-👤 ${customer_name}
-📱 ${caller_phone_display || 'On file'}
-
-📋 ${service_requested}
-
-💬 ${customer_name} called requesting ${service_requested.toLowerCase()}. Please follow up to confirm details and schedule.
-
-— This is a demo from ${agencyName}
-Start your free trial: ${signupUrl}`;
+  return smsMessage;
 }
 
 // ============================================================================

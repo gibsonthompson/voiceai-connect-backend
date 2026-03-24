@@ -252,6 +252,23 @@ async function handleDemoCall(agency, message) {
 }
 
 // ============================================================================
+// DEMO SMS DEDUP — Prevent duplicate sends if AI calls tool twice
+// Simple in-memory set keyed by call ID, auto-expires after 5 minutes
+// ============================================================================
+const _demoSmsSent = new Map();
+function hasDemoSmsSent(callId) {
+  if (!callId) return false;
+  const sent = _demoSmsSent.get(callId);
+  if (sent) return true;
+  _demoSmsSent.set(callId, Date.now());
+  // Cleanup old entries every call
+  for (const [k, v] of _demoSmsSent) {
+    if (Date.now() - v > 5 * 60 * 1000) _demoSmsSent.delete(k);
+  }
+  return false;
+}
+
+// ============================================================================
 // HANDLE DEMO FUNCTION CALL (mid-call SMS)
 //
 // Called when the demo AI triggers send_demo_sms during the roleplay.
@@ -264,6 +281,18 @@ async function handleDemoToolCall(req, res, message) {
   const startTime = Date.now();
 
   try {
+    // Dedup: only send one SMS per call
+    const callId = message.call?.id || message.callId || null;
+    if (hasDemoSmsSent(callId)) {
+      console.log(`⚠️ Demo SMS already sent for call ${callId} — skipping duplicate`);
+      return res.status(200).json({
+        results: [{
+          toolCallId: message.toolCallList?.[0]?.id || 'dedup',
+          result: 'Already sent the text — they should have it on their phone.',
+        }],
+      });
+    }
+
     // Extract tool call info — handle both VAPI formats
     const toolCallList = message.toolCallList || message.toolCalls || [];
     const toolCall = toolCallList[0];
