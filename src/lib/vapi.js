@@ -1715,8 +1715,60 @@ async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
 
     // Still create static assistant as fallback
     const assistant = await createDemoAssistant(agencyName);
-    const phoneData = await provisionPhoneNumber(areaCode);
-    console.log(`✅ Demo phone provisioned: ${phoneData.number}`);
+
+    // Try requested area code first, then fallbacks
+    let phoneData = null;
+    const triedCodes = new Set();
+    const codesToTry = [areaCode];
+
+    // Add nearby Georgia codes as fallback if starting with GA area code
+    const GA_CODES = ['404', '470', '678', '770', '229', '478', '706', '912'];
+    if (GA_CODES.includes(areaCode)) {
+      GA_CODES.forEach(c => { if (c !== areaCode) codesToTry.push(c); });
+    }
+
+    // Find the state for the requested area code and add all state codes
+    for (const [state, codes] of Object.entries(STATE_AREA_CODES)) {
+      if (codes.includes(areaCode)) {
+        codes.forEach(c => { if (!codesToTry.includes(c)) codesToTry.push(c); });
+        break;
+      }
+    }
+
+    const suggestedCodes = new Set();
+
+    for (const code of codesToTry) {
+      if (triedCodes.has(code)) continue;
+      triedCodes.add(code);
+      try {
+        phoneData = await provisionPhoneNumber(code);
+        console.log(`✅ Demo phone provisioned: ${phoneData.number} (area code: ${code})`);
+        break;
+      } catch (err) {
+        console.log(`   ❌ Area code ${code} unavailable, trying next...`);
+        if (err.suggestedCodes) {
+          err.suggestedCodes.forEach(c => { if (!triedCodes.has(c)) suggestedCodes.add(c); });
+        }
+      }
+    }
+
+    // Try VAPI-suggested codes as last resort
+    if (!phoneData && suggestedCodes.size > 0) {
+      console.log(`   🔄 Trying ${suggestedCodes.size} VAPI-suggested codes...`);
+      for (const code of suggestedCodes) {
+        try {
+          phoneData = await provisionPhoneNumber(code);
+          console.log(`✅ Demo phone provisioned (suggested): ${phoneData.number} (area code: ${code})`);
+          break;
+        } catch (err) {
+          console.log(`   ❌ ${code} (suggested) unavailable`);
+        }
+      }
+    }
+
+    if (!phoneData) {
+      throw new Error(`No available phone numbers — tried ${triedCodes.size} area codes + ${suggestedCodes.size} suggested`);
+    }
 
     // Configure phone: serverUrl ONLY (no assistantId)
     // This forces VAPI to send assistant-request, enabling dynamic demo config.
