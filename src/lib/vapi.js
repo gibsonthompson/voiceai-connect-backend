@@ -8,7 +8,6 @@
 // UPDATED: Retired Rachel voice, replaced with Matilda (2026-03-14)
 // UPDATED: Spam detection block appended to all assistants (2026-03-17)
 // UPDATED: Transfer keywords block — "representative", "live agent" (2026-03-19)
-// UPDATED: Demo provisioning — serverUrl only, no assistantId (dynamic mode)
 // ============================================================================
 const fetch = require('node-fetch');
 const FormData = require('form-data');
@@ -1243,6 +1242,8 @@ Hours, services, location, payment methods, shuttle/loaner info.
 
 // ============================================================================
 // SPAM DETECTION BLOCK — Appended to every assistant's system prompt
+// Trains the AI to detect and end spam/robocalls during the call itself.
+// Post-call detection also happens in the webhook via Claude analysis.
 // ============================================================================
 const SPAM_DETECTION_BLOCK = `
 
@@ -1259,6 +1260,7 @@ If you detect spam: say "We're not interested, thanks. Have a good day." Then en
 
 // ============================================================================
 // TRANSFER KEYWORDS BLOCK — Appended when transfer tool is available
+// Ensures callers who explicitly ask for a human get transferred immediately.
 // ============================================================================
 const TRANSFER_KEYWORDS_BLOCK = `
 
@@ -1299,6 +1301,8 @@ function replacePlaceholders(text, businessName) {
 
 // ============================================================================
 // FETCH AGENCY CUSTOM TEMPLATE
+// Checks if agency has enterprise access (including during trial)
+// and returns their custom template if one exists for the industry
 // ============================================================================
 async function getAgencyTemplate(agencyId, industryKey) {
   if (!supabase || !agencyId) return null;
@@ -1310,6 +1314,7 @@ async function getAgencyTemplate(agencyId, industryKey) {
       .eq('id', agencyId)
       .single();
     
+    // During trial, grant enterprise access for template lookups
     const isTrialing = ['trialing', 'trial'].includes(agency?.subscription_status);
     const effectivePlan = isTrialing ? 'enterprise' : agency?.plan_type;
     
@@ -1427,6 +1432,7 @@ async function createIndustryKnowledgeBase(businessName, industryKey, websiteKno
 
 // ============================================================================
 // CREATE INDUSTRY ASSISTANT (Client-level)
+// UPDATED: Always includes endCall tool, default hooks, conditional guardrails
 // ============================================================================
 async function createIndustryAssistant(businessName, industry, knowledgeBaseData = null, ownerPhone = null, clientId = null, agencyId = null) {
   try {
@@ -1477,13 +1483,21 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       temperature = config.temperature;
       modelId = 'gpt-4o-mini';
     }
-
+    // ═══════════════════════════════════════════════════════════════════
+    // SPAM DETECTION — Appended to ALL assistants (default + custom)
+    // ═══════════════════════════════════════════════════════════════════
     systemPrompt += SPAM_DETECTION_BLOCK;
 
+    // ═══════════════════════════════════════════════════════════════════
+    // TRANSFER KEYWORDS — Appended when transfer tool is available
+    // ═══════════════════════════════════════════════════════════════════
     if (ownerPhone) {
       systemPrompt += TRANSFER_KEYWORDS_BLOCK;
     }
 
+    // ══════════════════════════════════════════════════════════════════════
+    // KNOWLEDGE BASE — Always create one (industry doc + optional website)
+    // ══════════════════════════════════════════════════════════════════════
     let finalKnowledgeBase = knowledgeBaseData;
 
     if (!finalKnowledgeBase) {
@@ -1499,6 +1513,9 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       queryToolId = await createQueryTool(finalKnowledgeBase.fileId, businessName);
     }
 
+    // ══════════════════════════════════════════════════════════════════════
+    // TOOLS — transferCall (if owner phone), endCall (always)
+    // ══════════════════════════════════════════════════════════════════════
     const tools = [];
 
     if (ownerPhone) {
@@ -1520,6 +1537,9 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       type: 'endCall'
     });
 
+    // ══════════════════════════════════════════════════════════════════════
+    // HOOKS — Default hooks for every assistant
+    // ══════════════════════════════════════════════════════════════════════
     const hooks = [
       {
         on: 'customer.speech.timeout',
@@ -1606,7 +1626,7 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
 }
 
 // ============================================================================
-// DEMO ASSISTANT SYSTEM PROMPT (legacy — kept for static fallback)
+// DEMO ASSISTANT SYSTEM PROMPT
 // ============================================================================
 function getDemoSystemPrompt(agencyName) {
   return `You are a demo AI receptionist for ${agencyName}. Your job is to showcase how an AI receptionist works for businesses.
@@ -1656,9 +1676,7 @@ function getDemoFirstMessage(agencyName) {
 }
 
 // ============================================================================
-// CREATE DEMO ASSISTANT (Agency-level — static fallback assistant)
-// The dynamic demo config is now built by demo-config.js via assistant-request.
-// This static assistant is kept as a crash fallback.
+// CREATE DEMO ASSISTANT (Agency-level, industry-agnostic)
 // ============================================================================
 async function createDemoAssistant(agencyName) {
   try {
@@ -1707,20 +1725,15 @@ async function createDemoAssistant(agencyName) {
 
 // ============================================================================
 // PROVISION DEMO PHONE FOR AGENCY
-// UPDATED: serverUrl only, no assistantId — forces dynamic assistant-request
 // ============================================================================
 async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
   try {
     console.log(`📞 Provisioning demo phone for agency: ${agencyName} (area code: ${areaCode})`);
 
-    // Still create static assistant as fallback
     const assistant = await createDemoAssistant(agencyName);
     const phoneData = await provisionPhoneNumber(areaCode);
     console.log(`✅ Demo phone provisioned: ${phoneData.number}`);
 
-    // Configure phone: serverUrl ONLY (no assistantId)
-    // This forces VAPI to send assistant-request, enabling dynamic demo config.
-    // The static assistant is still stored in demo_assistant_id as a fallback.
     try {
       const webhookResponse = await fetch(`https://api.vapi.ai/phone-number/${phoneData.id}`, {
         method: 'PATCH',
@@ -1729,14 +1742,12 @@ async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
+          assistantId: assistant.id,
           serverUrl: `${BACKEND_URL}/webhook/vapi`
-          // No assistantId — VAPI will send assistant-request to our server,
-          // which builds a dynamic gpt-4o demo config on the fly.
-          // The static assistant (demo_assistant_id) is kept as crash fallback.
         })
       });
       if (webhookResponse.ok) {
-        console.log('✅ Demo phone configured for dynamic assistant-request');
+        console.log('✅ Demo phone webhook configured');
       }
     } catch (whErr) {
       console.warn('⚠️ Demo phone webhook config failed (non-blocking):', whErr.message);
@@ -1911,7 +1922,7 @@ async function provisionLocalPhone(city, state, assistantId, businessName, owner
 }
 
 // ============================================================================
-// KNOWLEDGE BASE (Website scraping)
+// KNOWLEDGE BASE (Website scraping — called before createIndustryAssistant)
 // ============================================================================
 async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
   try {

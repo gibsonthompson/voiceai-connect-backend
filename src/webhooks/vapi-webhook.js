@@ -8,7 +8,6 @@
 // UPDATED: Spam detection — AI flags spam, different SMS, skip call count
 // UPDATED: Phase 2 — assistant-request handler (dynamic per-call config)
 // UPDATED: Team member notification routing
-// UPDATED: Demo upgrade — dynamic gpt-4o config + mid-call SMS tool
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -16,7 +15,6 @@ const { sendCallNotificationSMS, sendDemoCallFollowUpSMS, sendCallSummaryEmail, 
 const { upsertContactFromCall } = require('../lib/contact-upsert');
 const { buildDynamicAssistantConfig } = require('../lib/assistant-config-builder');
 const { notifyTeamMembers } = require('../lib/team-notifications');
-const { buildDemoDynamicConfig, buildDemoSmsContent } = require('../lib/demo-config');
 
 // ============================================================================
 // PLAN FEATURE CHECK HELPER
@@ -252,132 +250,6 @@ async function handleDemoCall(agency, message) {
 }
 
 // ============================================================================
-// HANDLE DEMO FUNCTION CALL (mid-call SMS)
-//
-// Called when the demo AI triggers send_demo_sms during the roleplay.
-// Sends a real SMS to the caller showing them a post-call notification.
-//
-// CRITICAL: Must respond quickly (<5s) or the caller hears dead air.
-// Telnyx SMS is fast (~200ms) so this is safe.
-// ============================================================================
-async function handleDemoToolCall(req, res, message) {
-  const startTime = Date.now();
-
-  try {
-    // Extract tool call info — handle both VAPI formats
-    const toolCallList = message.toolCallList || message.toolCalls || [];
-    const toolCall = toolCallList[0];
-
-    if (!toolCall) {
-      console.log('⚠️ Demo tool-call: no tool call data');
-      return res.status(200).json({ results: [{ result: 'No tool call found.' }] });
-    }
-
-    const toolCallId = toolCall.id;
-    const funcName = toolCall.function?.name || toolCall.name;
-    const rawArgs = toolCall.function?.arguments || toolCall.arguments || '{}';
-    const args = typeof rawArgs === 'string' ? JSON.parse(rawArgs) : rawArgs;
-
-    console.log(`🔧 Demo tool-call: ${funcName}`);
-
-    if (funcName !== 'send_demo_sms') {
-      console.log(`⚠️ Unknown demo function: ${funcName}`);
-      return res.status(200).json({
-        results: [{ toolCallId, result: 'Unknown function.' }],
-      });
-    }
-
-    // Get caller's real phone number from the call object
-    const callerPhone =
-      message.call?.customer?.number ||
-      message.customer?.number ||
-      null;
-
-    if (!callerPhone || callerPhone === 'Unknown') {
-      console.log('⚠️ Demo SMS: no caller phone number available');
-      return res.status(200).json({
-        results: [{
-          toolCallId,
-          result: "I wasn't able to send the text — I don't have your phone number. But after every real call, your team would get an instant summary just like that.",
-        }],
-      });
-    }
-
-    // Look up the agency by VAPI phone number
-    const vapiPhone =
-      message.phoneNumber?.number ||
-      message.call?.phoneNumber?.number ||
-      null;
-
-    let agency = null;
-    if (vapiPhone) {
-      agency = await getAgencyByDemoPhone(vapiPhone);
-    }
-
-    if (!agency) {
-      // Try to find from call phoneNumberId
-      const phoneNumberId = message.call?.phoneNumberId || message.phoneNumber?.id;
-      if (phoneNumberId) {
-        const lookedUpNumber = await getPhoneNumberFromVapi(phoneNumberId);
-        if (lookedUpNumber) {
-          agency = await getAgencyByDemoPhone(lookedUpNumber);
-        }
-      }
-    }
-
-    if (!agency) {
-      console.log('⚠️ Demo SMS: could not identify agency');
-      return res.status(200).json({
-        results: [{
-          toolCallId,
-          result: 'I just sent you a text with the call summary — check your phone!',
-        }],
-      });
-    }
-
-    // Format caller phone for display
-    const { formatPhoneDisplay, sendTelnyxSMS } = require('../lib/notifications');
-    const callerDisplay = formatPhoneDisplay
-      ? formatPhoneDisplay(callerPhone)
-      : callerPhone;
-
-    // Build and send the demo SMS
-    const smsContent = buildDemoSmsContent(
-      {
-        business_name: args.business_name || 'Your Business',
-        business_type: args.business_type || 'business',
-        service_requested: args.service_requested || 'General inquiry',
-        customer_name: args.customer_name || 'Customer',
-        caller_phone_display: callerDisplay,
-      },
-      agency
-    );
-
-    await sendTelnyxSMS(callerPhone, smsContent);
-
-    const elapsed = Date.now() - startTime;
-    console.log(`✅ Demo SMS sent to ${callerPhone} in ${elapsed}ms`);
-
-    return res.status(200).json({
-      results: [{
-        toolCallId,
-        result: 'Done! The text has been sent to their phone with the full call summary.',
-      }],
-    });
-  } catch (error) {
-    const elapsed = Date.now() - startTime;
-    console.error(`❌ Demo tool-call failed after ${elapsed}ms:`, error.message);
-
-    return res.status(200).json({
-      results: [{
-        toolCallId: 'error',
-        result: "I sent the text — check your phone! That's exactly what comes through after every call.",
-      }],
-    });
-  }
-}
-
-// ============================================================================
 // PHASE 2: ASSISTANT-REQUEST HANDLER
 //
 // Called by VAPI before a call starts. Returns a complete assistant config
@@ -422,24 +294,11 @@ async function handleAssistantRequest(req, res, message) {
     if (!client) {
       console.log('⚠️ No client found for:', vapiPhoneNumber);
 
-      // Check if it's a demo phone — build dynamic config (not static assistant)
+      // Check if it's a demo phone
       const demoAgency = await getAgencyByDemoPhone(vapiPhoneNumber);
-      if (demoAgency) {
-        console.log(`🎤 Demo call — building dynamic demo config for: ${demoAgency.name}`);
-        try {
-          const demoConfig = buildDemoDynamicConfig(demoAgency);
-          const elapsed = Date.now() - startTime;
-          console.log(`✅ Demo config built in ${elapsed}ms (model: gpt-4o)`);
-          return res.status(200).json({ assistant: demoConfig });
-        } catch (demoErr) {
-          console.error('❌ Demo dynamic config failed:', demoErr.message);
-          // Fallback to static assistant if dynamic build fails
-          if (demoAgency.demo_assistant_id) {
-            console.log(`🔄 Falling back to static demo assistant: ${demoAgency.demo_assistant_id}`);
-            return res.status(200).json({ assistantId: demoAgency.demo_assistant_id });
-          }
-          return res.status(200).json({ error: 'Demo config failed' });
-        }
+      if (demoAgency && demoAgency.demo_assistant_id) {
+        console.log(`🎤 Demo call — returning demo assistant: ${demoAgency.demo_assistant_id}`);
+        return res.status(200).json({ assistantId: demoAgency.demo_assistant_id });
       }
 
       return res.status(200).json({ error: 'Client not found' });
@@ -527,7 +386,7 @@ async function handleAssistantRequest(req, res, message) {
 
 // ============================================================================
 // MAIN WEBHOOK HANDLER
-// Routes to assistant-request OR tool-calls OR end-of-call-report handler
+// Routes to assistant-request OR end-of-call-report handler
 // ============================================================================
 async function handleVapiWebhook(req, res) {
   try {
@@ -538,47 +397,6 @@ async function handleVapiWebhook(req, res) {
     // ══════════════════════════════════════════════════════════════════
     if (message?.type === 'assistant-request') {
       return handleAssistantRequest(req, res, message);
-    }
-
-    // ══════════════════════════════════════════════════════════════════
-    // Handle tool-calls / function-call (mid-call function tools)
-    // Currently used by demo assistant's send_demo_sms
-    // ══════════════════════════════════════════════════════════════════
-    if (message?.type === 'tool-calls' || message?.type === 'function-call') {
-      // Check if this is a demo call by looking up the phone number
-      const vapiPhone =
-        message.phoneNumber?.number ||
-        message.call?.phoneNumber?.number ||
-        null;
-
-      let isDemoCall = false;
-      if (vapiPhone) {
-        const demoCheck = await getAgencyByDemoPhone(vapiPhone);
-        isDemoCall = !!demoCheck;
-      }
-
-      if (!isDemoCall && !vapiPhone) {
-        // Try phoneNumberId lookup
-        const phoneNumberId = message.call?.phoneNumberId || message.phoneNumber?.id;
-        if (phoneNumberId) {
-          const lookedUpNumber = await getPhoneNumberFromVapi(phoneNumberId);
-          if (lookedUpNumber) {
-            const demoCheck2 = await getAgencyByDemoPhone(lookedUpNumber);
-            isDemoCall = !!demoCheck2;
-            if (isDemoCall) {
-              message.phoneNumber = { ...(message.phoneNumber || {}), number: lookedUpNumber };
-            }
-          }
-        }
-      }
-
-      if (isDemoCall) {
-        return handleDemoToolCall(req, res, message);
-      }
-
-      // Non-demo tool calls — log and acknowledge
-      console.log(`🔧 Tool-call received (non-demo) — acknowledging`);
-      return res.status(200).json({ received: true });
     }
 
     // ══════════════════════════════════════════════════════════════════
