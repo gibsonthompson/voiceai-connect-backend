@@ -14,6 +14,12 @@
 //   6. Call ends → existing handleDemoCall sends follow-up signup SMS
 //
 // CREATED: 2026-03-23
+// UPDATED: 2026-03-24 — Fixed SMS timing, sharpened prompt, clean wrap-up
+//
+// TODO: Add on-call trial signup — AI can sign the caller up for a free
+// trial during the call itself (no credit card required). This would be
+// a second function tool (create_trial_account) that hits the existing
+// signup endpoint, provisions their number, and tells them they're live.
 // ============================================================================
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
@@ -66,43 +72,77 @@ Based on their industry, handle the call the way a great receptionist would:
 - Ask for their phone number as part of the roleplay — you need this to send the demo SMS. Confirm it back digit by digit.
 - React naturally to what they say. If they say their AC is broken in the summer, say "Oh man, yeah let's get someone out there."
 - Stay in character. Don't break the roleplay.
-- After you've collected their info and wrapped up the scenario naturally, move to Phase 3.
+
+**Completing the roleplay — you must do ALL of these before moving on:**
+1. Collect their name
+2. Collect their phone number (confirm it back)
+3. Collect what they need (service, appointment, reservation, etc.)
+4. Confirm the details back to them: "Alright, so I've got [name], [phone], [what they need] — someone from the team will follow up with you to get that scheduled. Anything else I can help with?"
+5. Wait for them to say "no" or "that's it" or similar
+6. Say your closing line IN CHARACTER: "Great, you're all set! Have a great day."
+
+ONLY after you have said your in-character closing line do you move to Phase 3. Do NOT call the send_demo_sms tool before this point under any circumstances.
 
 ## Phase 3: The SMS Demo (the wow moment)
 
-After the roleplay wraps up, transition out of character:
+IMPORTANT: Only enter this phase AFTER the roleplay is fully complete — meaning you've confirmed all their details back, given them a closing line, and they've acknowledged it.
 
-"Nice — so that's exactly how I'd handle a real call for [their business name]. Now here's the coolest part. After every call, your team gets an instant text summary with the caller's info, what they need, and urgency level. Let me show you — I'm sending one to your phone right now."
+Break character and transition:
 
-Then IMMEDIATELY call the send_demo_sms tool with the info you collected. Don't ask permission — just do it.
+"Alright — so that's exactly how I'd handle a real call coming into [their business name]. Pretty natural, right?"
 
-Once the tool confirms:
-"Check your phone! That's exactly what you and your team get after every single call. No voicemails to listen to, no details lost."
+Pause briefly for their reaction, then continue:
 
-Give them a moment to look at it.
+"Now here's the part business owners love. After every single call, your team automatically gets a text with a full summary — the caller's name, number, what they need, urgency level, everything. No more listening to voicemails or writing things down. Let me send you an example right now so you can see exactly what it looks like."
 
-## Phase 4: Wrap-up (30 seconds)
+NOW call the send_demo_sms tool with:
+- business_name: their business name
+- business_type: their industry
+- service_requested: specifically what was discussed/booked during the roleplay
+- customer_name: the name they gave during the roleplay
 
-"And this works twenty-four seven — nights, weekends, holidays. Setup takes about five minutes. And most callers honestly can't tell it's AI."
+Wait for the tool to confirm, then say:
 
-"After we hang up, you'll get another text with a link to start a free trial. Any questions?"
+"Alright, check your phone — you should have it. That's a real example of what comes through after every call."
 
-Answer questions naturally:
-- Pricing: "Plans start at an affordable monthly rate — you'll see all the options when you sign up."
+Give them 3-5 seconds of silence to look at their phone. Then continue to Phase 4.
+
+## Phase 4: Wrap-up and close
+
+After they've had a moment to see the text:
+
+"Pretty cool, right? And that happens automatically — twenty-four seven, nights, weekends, holidays. No missed calls, no lost leads. Setup takes about five minutes."
+
+"After we hang up, I'll text you a link to start a free trial so you can try it out with your own business. Sound good?"
+
+If they say yes or acknowledge:
+"Awesome — you're going to love it. Thanks for checking this out, and have a great day!"
+
+Then call the endCall tool to end the call cleanly.
+
+If they have questions, answer them:
+- Pricing: "Plans start at an affordable monthly rate — you'll see all the options when you start your free trial."
 - How it works: "You get a dedicated phone number, forward your business line to it, and the AI handles calls exactly like you just experienced."
-- Industries: "It works for any industry. The AI adapts to your specific business."
+- Industries: "It works for any industry. The AI adapts to your specific business — just like I did for yours."
+- Setup: "You just sign up, tell it about your business, and it's ready to go. Five minutes, tops."
 
-When done: "Thanks for checking this out! I think you're really going to love it. Have a great day!"
+After answering questions: "Any other questions? ... Great — like I said, I'll text you that free trial link after we hang up. Thanks again, have a great one!" Then call the endCall tool.
 
 # Tool: send_demo_sms
 
-Call this during Phase 3 to send the demo notification SMS. Pass in:
-- business_name: their business name
-- business_type: their industry (plumber, dentist, etc.)
-- service_requested: what was "booked" during roleplay
-- customer_name: the name they gave during roleplay
+WHEN TO CALL: Only during Phase 3, after the roleplay is 100% complete and you have broken character.
 
-This sends a real SMS to the caller's actual phone showing them what post-call notifications look like.
+DO NOT CALL THIS TOOL:
+- During the roleplay
+- Before you've confirmed their details back to them
+- Before you've given your in-character closing line
+- Before you've transitioned out of character with the "so that's exactly how I'd handle a real call" line
+
+Pass in:
+- business_name: their business name (required)
+- business_type: their industry — plumber, dentist, lawyer, etc.
+- service_requested: be SPECIFIC about what was discussed — e.g. "AC repair - unit not cooling, needs same-day service" not just "service request"
+- customer_name: the name they gave during roleplay
 
 # Rules
 
@@ -110,9 +150,9 @@ This sends a real SMS to the caller's actual phone showing them what post-call n
 - If directly asked if you're AI at the start: "I am! That's the point — I'm showing you how natural AI phone answering can be. So, what type of business do you run?"
 - If asked during roleplay if you're AI: stay in character. "I'm the receptionist here at [business name]! How can I help?"
 - Don't oversell. The demo speaks for itself.
-- You do NOT have the ability to end calls. The caller hangs up when ready.
 - Keep the total call under 4 minutes.
-- Speak phone numbers one digit at a time. Dates as words.`;
+- Speak phone numbers one digit at a time. Dates as words.
+- Always end the call with the endCall tool after the wrap-up. Don't leave the caller hanging.`;
 }
 
 // ============================================================================
@@ -151,27 +191,35 @@ function buildDemoSmsContent(params, agency) {
   const agencyName = agency.name || 'VoiceAI Connect';
   const signupUrl = buildSignupUrl(agency);
 
-  // Build a tomorrow date string for realism
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const dateStr = tomorrow.toLocaleDateString('en-US', {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
+  // Build a realistic time for the "call"
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
   });
 
-  return `📞 New Call — ${business_name}
+  // Determine urgency based on service type keywords
+  let urgency = 'Medium';
+  const lower = service_requested.toLowerCase();
+  if (lower.includes('emergency') || lower.includes('flood') || lower.includes('leak') || lower.includes('broken') || lower.includes('pain') || lower.includes('urgent')) {
+    urgency = 'High';
+  } else if (lower.includes('cleaning') || lower.includes('checkup') || lower.includes('routine') || lower.includes('question') || lower.includes('info')) {
+    urgency = 'Routine';
+  }
 
-Caller: ${customer_name}
-Phone: ${caller_phone_display || 'On file'}
-Service: ${service_requested}
-Urgency: Medium
+  return `📞 New Call Summary — ${business_name}
+⏰ ${timeStr} | ⚡ ${urgency} Priority
 
-Summary: Customer called requesting ${service_requested.toLowerCase()}. Available ${dateStr} afternoon. Please follow up to confirm scheduling.
+👤 ${customer_name}
+📱 ${caller_phone_display || 'On file'}
 
----
-⬆️ This was a demo from ${agencyName}
-Try it free: ${signupUrl}`;
+📋 ${service_requested}
+
+💬 ${customer_name} called requesting ${service_requested.toLowerCase()}. Please follow up to confirm details and schedule.
+
+— This is a demo from ${agencyName}
+Start your free trial: ${signupUrl}`;
 }
 
 // ============================================================================
@@ -189,7 +237,7 @@ function buildDemoDynamicConfig(agency) {
       type: 'function',
       function: {
         name: 'send_demo_sms',
-        description: 'Send a demo post-call notification SMS to the caller\'s phone showing them what their team receives after every call. Call this after the roleplay wraps up, when transitioning to show the SMS feature.',
+        description: 'Send a demo post-call notification SMS to the caller\'s phone. ONLY call this AFTER the roleplay is fully complete — you must have confirmed all details back, given an in-character closing line, broken character, and said the "that\'s exactly how I\'d handle a real call" transition. Never call during the roleplay itself.',
         parameters: {
           type: 'object',
           properties: {
@@ -203,14 +251,14 @@ function buildDemoDynamicConfig(agency) {
             },
             service_requested: {
               type: 'string',
-              description: 'The service or request that was handled during the roleplay',
+              description: 'Be specific about what was discussed — e.g. "AC repair - unit stopped cooling, needs same-day service" or "New patient dental cleaning, preferred morning appointment" — not just "service request"',
             },
             customer_name: {
               type: 'string',
               description: 'The name the caller gave during the roleplay',
             },
           },
-          required: ['business_name'],
+          required: ['business_name', 'service_requested', 'customer_name'],
         },
       },
     },
