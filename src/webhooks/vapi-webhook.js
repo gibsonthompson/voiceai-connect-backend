@@ -227,8 +227,16 @@ async function handleDemoCall(agency, message) {
 
   if (callerPhone && callerPhone !== 'Unknown') {
     try {
-      await sendDemoCallFollowUpSMS(callerPhone, agency);
-      console.log('✅ Demo follow-up SMS sent');
+      if (agency.demo_followup_sms_override) {
+        // Custom follow-up message for this agency
+        const { sendTelnyxSMS: sendSMS } = require('../lib/notifications');
+        await sendSMS(callerPhone, agency.demo_followup_sms_override);
+        console.log('✅ Demo follow-up SMS sent (custom override)');
+      } else {
+        // Default: signup link
+        await sendDemoCallFollowUpSMS(callerPhone, agency);
+        console.log('✅ Demo follow-up SMS sent');
+      }
     } catch (smsErr) {
       console.warn('⚠️ Demo follow-up SMS failed:', smsErr.message);
     }
@@ -241,7 +249,7 @@ async function handleDemoCall(agency, message) {
     
     try {
       await sendTelnyxSMS(agency.phone,
-        `🎤 Demo Call - ${agency.name}\nCaller: ${callerDisplay}\nDuration: ${durationDisplay}\nThey received your signup link via SMS.`
+        `🎤 Demo Call - ${agency.name}\nCaller: ${callerDisplay}\nDuration: ${durationDisplay}\nFollow-up SMS sent.`
       );
     } catch (ownerSmsErr) {
       console.warn('⚠️ Agency owner demo notification failed:', ownerSmsErr.message);

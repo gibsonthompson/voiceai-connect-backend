@@ -23,7 +23,15 @@ const DEMO_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL'; // Sarah — warm, professional
 // ============================================================================
 // DEMO SYSTEM PROMPT v4
 // ============================================================================
-function getDemoSystemPromptV2(agencyName) {
+function getDemoSystemPromptV2(agencyName, options = {}) {
+  const { skipSignupMention = false } = options;
+
+  const wrapUpLine = skipSignupMention
+    ? 'Then wrap up naturally: this works 24/7, setup takes a few minutes. Ask if they have any questions.'
+    : "Then wrap up naturally: this works 24/7, setup takes a few minutes, they'll get another text after this call with a link to start a free trial. Ask if they have any questions.";
+
+  const goodbyeLine = `Thanks for calling the ${agencyName} demo, really appreciate you checking it out — have a great day!`;
+
   return `# Role
 
 You are a live demo AI receptionist for ${agencyName}. Show the caller what it's like to have an AI answer their business phone. Be impressive, natural, and human.
@@ -70,9 +78,9 @@ Let them react briefly. Then immediately call the send_demo_sms tool — don't s
 
 "One of the best parts — after every call, your team automatically gets a text with the caller's info and what they need. I actually just sent one to your phone right now — check it out."
 
-Give them a moment to look. Then wrap up naturally: this works 24/7, setup takes a few minutes, they'll get another text after this call with a link to start a free trial. Ask if they have any questions.
+Give them a moment to look. ${wrapUpLine}
 
-Answer questions using the product knowledge below. Keep answers conversational and brief — don't lecture. When they're done with questions, say something like "Thanks for calling the ${agencyName} demo, really appreciate you checking it out — have a great day!" Then end the call with endCall.
+Answer questions using the product knowledge below. Keep answers conversational and brief — don't lecture. When they're done with questions, say something like "${goodbyeLine}" Then end the call with endCall.
 
 # send_demo_sms tool
 
@@ -193,7 +201,8 @@ function buildDemoSmsContent(params, agency) {
 function buildDemoDynamicConfig(agency) {
   const agencyName = agency.name || 'VoiceAI Connect';
 
-  const systemPrompt = getDemoSystemPromptV2(agencyName);
+  const skipSignupMention = !!agency.demo_followup_sms_override;
+  const systemPrompt = getDemoSystemPromptV2(agencyName, { skipSignupMention });
   const firstMessage = getDemoFirstMessageV2(agencyName);
 
   const tools = [
