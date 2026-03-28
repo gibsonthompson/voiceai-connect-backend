@@ -343,11 +343,11 @@ function statCallout(content, biz) {
       <div style="position:absolute;top:0;left:0;right:0;bottom:0;background:radial-gradient(circle at 50% 40%,${primary}50 0%,transparent 50%);"></div>
       <div style="position:absolute;top:28px;left:28px;z-index:2;">${logoCircle(biz,64)}</div>
       <div style="position:absolute;top:24px;right:24px;z-index:2;">${badgeImgs(biz,'corner')}</div>
-      <div style="position:relative;z-index:1;">
+      <div style="position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;width:100%;">
         ${content.eyebrow?`<div class="bf" style="font-size:20px;font-weight:700;color:rgba(255,255,255,0.45);text-transform:uppercase;letter-spacing:5px;margin-bottom:20px;">${esc(content.eyebrow)}</div>`:''}
-        <div class="hf" style="font-size:180px;color:${accent};line-height:0.95;">${esc(content.headline)}</div>
+        <div class="hf" style="font-size:180px;color:${accent};line-height:0.95;text-align:center;">${esc(content.headline)}</div>
         <div style="width:100px;height:4px;background:${accent};margin:28px auto;opacity:0.4;"></div>
-        <div class="bf" style="font-size:28px;color:rgba(255,255,255,0.85);font-weight:600;line-height:1.4;max-width:720px;">${esc(content.subtext)}</div>
+        <div class="bf" style="font-size:28px;color:rgba(255,255,255,0.85);font-weight:600;line-height:1.4;max-width:720px;text-align:center;margin:0 auto;">${esc(content.subtext)}</div>
         ${items.length?`<div style="display:flex;justify-content:center;gap:12px;margin-top:32px;flex-wrap:wrap;">
           ${items.map(it=>{const l=typeof it==='string'?it:it.title||it;
           return`<div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);border-radius:24px;padding:11px 24px;">
