@@ -113,10 +113,12 @@ async function renderHTML(html) {
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const type = req.resourceType();
-      // Allow fonts and stylesheets, block everything else that's not the page itself
-      if (['image', 'media', 'websocket'].includes(type)) {
-        // Allow data: URLs (our base64 photos) but block external images
-        if (req.url().startsWith('data:')) {
+      const url = req.url();
+      if (['media', 'websocket'].includes(type)) {
+        req.abort();
+      } else if (type === 'image') {
+        // Allow data: URLs (base64 badges/logos) and Supabase Storage URLs
+        if (url.startsWith('data:') || url.includes('supabase.co')) {
           req.continue();
         } else {
           req.abort();

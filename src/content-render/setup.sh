@@ -32,6 +32,16 @@ if [ -f montserrat.zip ]; then
   rm montserrat.zip
 fi
 
+echo "=== Installing Plus Jakarta Sans ==="
+sudo mkdir -p /usr/local/share/fonts/plus-jakarta-sans
+wget -q "https://github.com/google/fonts/raw/main/ofl/plusjakartasans/PlusJakartaSans%5Bwght%5D.ttf" -O /usr/local/share/fonts/plus-jakarta-sans/PlusJakartaSans.ttf 2>/dev/null
+wget -q "https://github.com/google/fonts/raw/main/ofl/plusjakartasans/PlusJakartaSans-Italic%5Bwght%5D.ttf" -O /usr/local/share/fonts/plus-jakarta-sans/PlusJakartaSans-Italic.ttf 2>/dev/null
+
+echo "=== Installing Space Mono ==="
+sudo mkdir -p /usr/local/share/fonts/space-mono
+wget -q "https://github.com/google/fonts/raw/main/ofl/spacemono/SpaceMono-Regular.ttf" -O /usr/local/share/fonts/space-mono/SpaceMono-Regular.ttf 2>/dev/null
+wget -q "https://github.com/google/fonts/raw/main/ofl/spacemono/SpaceMono-Bold.ttf" -O /usr/local/share/fonts/space-mono/SpaceMono-Bold.ttf 2>/dev/null
+
 echo "=== Refreshing font cache ==="
 sudo fc-cache -fv
 
