@@ -20,6 +20,7 @@
     "jsonwebtoken": "^9.0.2",
     "node-fetch": "^2.7.0",
     "puppeteer": "^24.39.1",
+    "puppeteer-core": "^24.40.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "resend": "^2.0.0",

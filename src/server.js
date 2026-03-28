@@ -1,6 +1,6 @@
 // ============================================================================
 // VOICEAI CONNECT - MULTI-TENANT BACKEND SERVER
-// UPDATED: Team member routes mounted
+// UPDATED: Team member routes mounted, Content render service mounted
 // Destination: src/server.js (or src/index.js) — FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -27,18 +27,19 @@ app.options('*', (req, res) => {
     'https://www.myvoiceaiconnect.com',
     'https://callbirdai.com',
     'https://www.callbirdai.com',
+    'https://social-automation.vercel.app',
   ];
   
   const origin = req.headers.origin;
   
-  if (allowedOrigins.includes(origin) || /^https:\/\/[^.]+\.myvoiceaiconnect\.com$/.test(origin)) {
+  if (allowedOrigins.includes(origin) || /^https:\/\/[^.]+\.myvoiceaiconnect\.com$/.test(origin) || /\.vercel\.app$/.test(origin)) {
     res.header('Access-Control-Allow-Origin', origin);
   } else {
     res.header('Access-Control-Allow-Origin', origin);
   }
   
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, X-Render-Key');
   res.header('Access-Control-Allow-Credentials', 'true');
   res.sendStatus(200);
 });
@@ -56,10 +57,12 @@ const corsOptions = {
       'https://www.myvoiceaiconnect.com',
       'https://callbirdai.com',
       'https://www.callbirdai.com',
+      'https://social-automation.vercel.app',
     ];
 
     if (staticAllowed.includes(origin)) return callback(null, true);
     if (/^https:\/\/[^.]+\.myvoiceaiconnect\.com$/.test(origin)) return callback(null, true);
+    if (/\.vercel\.app$/.test(origin)) return callback(null, true);
 
     try {
       const originHost = new URL(origin).hostname.replace('www.', '');
@@ -78,7 +81,7 @@ const corsOptions = {
     callback(new Error('Not allowed by CORS'));
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Render-Key'],
   credentials: true
 };
 
@@ -132,7 +135,8 @@ const abandonedCartRoutes = require('./routes/abandoned-cart');
 const agencyOnboardingSmsRoutes = require('./routes/agency-onboarding-sms');
 const feedbackRoutes = require('./routes/feedback');
 const supportRoutes = require('./routes/support');
-const teamRoutes = require('./routes/team'); // NEW: Team member routes
+const teamRoutes = require('./routes/team');
+const contentRender = require('./content-render');  // Content render service
 
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
@@ -195,7 +199,8 @@ app.get('/health', (req, res) => {
       aiTemplates: true,
       aiPlayground: true,
       byot: true,
-      teamMembers: true  // NEW
+      teamMembers: true,
+      contentRender: true
     },
     cron: {
       expireTrials: true,
@@ -204,6 +209,12 @@ app.get('/health', (req, res) => {
     }
   });
 });
+
+// ============================================================================
+// CONTENT RENDER SERVICE (Social Media Image Generation)
+// ============================================================================
+
+app.use('/api/content-render', contentRender);
 
 // ============================================================================
 // AGENCY ROUTES (Platform → Agencies)
@@ -799,6 +810,7 @@ app.listen(PORT, () => {
 ║                                                               ║
 ║   Server running on port ${PORT}                                ║
 ║   Environment: ${process.env.NODE_ENV || 'development'}                              ║
+║   Content Render: /api/content-render                         ║
 ║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝
   `);
