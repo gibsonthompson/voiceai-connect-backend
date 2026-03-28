@@ -59,8 +59,9 @@ function shell(biz, body) {
   const urgency = ds.colors_extended?.urgency || '#C62828';
 
   const fams = [];
-  if (hf) fams.push(hf.replace(/ /g, '+'));
+  if (hf) fams.push(hf.replace(/ /g, '+') + ':wght@400;500;600;700;800;900');
   if (bf && bf !== hf) fams.push(bf.replace(/ /g, '+') + ':wght@400;500;600;700;800;900');
+  fams.push('Space+Mono:wght@400;700');
 
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
 @import url('https://fonts.googleapis.com/css2?family=${fams.join('&family=')}&display=swap');
@@ -71,6 +72,8 @@ body{width:1080px;height:1350px;overflow:hidden;}
 .bf{font-family:'${bf}','Montserrat','Segoe UI',sans-serif;}
 .hl{color:${accent};}
 .ur{color:${urgency};}
+.mono{font-family:'Space Mono',monospace;letter-spacing:0.03em;}
+.glass{background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);}
 </style></head><body>${body}</body></html>`;
 }
 
@@ -118,12 +121,27 @@ function accentStrip(biz, h) {
 }
 
 function logoCircle(biz, size) {
-  const a = getAssets(biz); if (!a.logo) return '';
-  const s = size||68; const is = Math.round(s*0.72);
-  return `<div style="width:${s}px;height:${s}px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 20px rgba(0,0,0,0.3);"><img src="${a.logo}" style="width:${is}px;height:${is}px;object-fit:contain;"/></div>`;
+  const a = getAssets(biz);
+  const s = size||68;
+  // Image logo
+  if (a.logo) {
+    const is = Math.round(s*0.72);
+    return `<div style="width:${s}px;height:${s}px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 20px rgba(0,0,0,0.3);"><img src="${a.logo}" style="width:${is}px;height:${is}px;object-fit:contain;"/></div>`;
+  }
+  // Text logo fallback for brands without image logos
+  const accent = biz.design_system?.colors_extended?.accent_light || biz.accent_color || '#10b981';
+  const initial = (biz.name||'V').charAt(0);
+  return `<div style="width:${s}px;height:${s}px;border-radius:${s<70?'12':'16'}px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;">
+    <span class="bf" style="font-size:${Math.round(s*0.4)}px;font-weight:800;color:${accent};">${initial}</span>
+  </div>`;
 }
 
-function decorCircles(color, opacity) {
+function decorCircles(color, opacity, biz) {
+  // For dark SaaS brands — emerald radial glow orb instead of solid circles
+  if (biz && (biz.industry === 'saas_tech' || biz.industry === 'saas_smb')) {
+    const accent = biz.design_system?.colors_extended?.accent_light || biz.accent_color || '#10b981';
+    return `<div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:600px;height:600px;border-radius:50%;background:radial-gradient(circle,${accent}12 0%,transparent 70%);pointer-events:none;"></div>`;
+  }
   const c = color || 'rgba(255,255,255,0.03)';
   return `<div style="position:absolute;top:-80px;right:-80px;width:300px;height:300px;border-radius:50%;background:${c};opacity:${opacity||1};"></div>
   <div style="position:absolute;bottom:-120px;left:-60px;width:240px;height:240px;border-radius:50%;background:${c};opacity:${opacity||1};"></div>`;
@@ -152,7 +170,7 @@ function photoHero(content, biz, photo) {
         </div>
       </div>`
     : `<div style="flex:0 0 40%;background:linear-gradient(160deg,${biz.bg_color||'#1a2a6c'},${primary});display:flex;align-items:center;justify-content:center;padding:40px 52px;text-align:center;position:relative;overflow:hidden;">
-        ${decorCircles(primary+'30')}
+        ${decorCircles(primary+'30',1,biz)}
         <div style="position:absolute;top:28px;left:28px;">${logoCircle(biz,68)}</div>
         <div style="position:absolute;top:24px;right:24px;">${badgeImgs(biz,'corner')}</div>
         <div class="hf" style="font-size:92px;color:#fff;line-height:0.9;position:relative;z-index:1;">${hl(content.headline, content.highlight_words)}</div>
@@ -198,15 +216,14 @@ function fullGraphic(content, biz) {
       <div class="bf" style="font-size:20px;font-weight:800;color:#fff;text-transform:uppercase;letter-spacing:6px;">${esc(badge)}</div>
     </div>`:''}
     <div style="flex:1;background:linear-gradient(160deg,${biz.bg_color||'#1a2a6c'},${primary});display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 56px;text-align:center;position:relative;overflow:hidden;">
-      ${decorCircles(accent+'10')}
+      ${decorCircles(accent+'10',1,biz)}
       <div style="position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;">
         ${logoCircle(biz,88)}
-        <div style="margin-top:32px;" class="hf" style2="a">${''}</div>
         <div class="hf" style="font-size:96px;color:#fff;line-height:0.92;margin-top:32px;">${hl(content.headline, content.highlight_words)}</div>
         ${content.subtext?`<div class="bf" style="font-size:22px;color:rgba(255,255,255,0.65);margin-top:18px;line-height:1.5;max-width:780px;font-weight:500;">${esc(content.subtext)}</div>`:''}
         ${items.length?`<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:12px;margin-top:36px;">
           ${items.map(it=>{const l=typeof it==='string'?it:it.title||it;
-          return`<div style="background:rgba(132,210,242,0.12);border:1px solid rgba(132,210,242,0.25);border-radius:24px;padding:12px 28px;font-size:17px;font-weight:700;color:${accent};text-transform:uppercase;letter-spacing:1px;font-family:'Montserrat',sans-serif;">${esc(l)}</div>`;}).join('')}
+          return`<div class="bf glass" style="border-radius:24px;padding:12px 28px;font-size:17px;font-weight:700;color:${accent};text-transform:uppercase;letter-spacing:1px;">${esc(l)}</div>`;}).join('')}
         </div>`:''}
         <div style="margin-top:32px;">${badgeImgs(biz,'center')}</div>
       </div>
@@ -229,7 +246,7 @@ function checklist(content, biz) {
   return shell(biz, `<div class="post">
     ${brandBar(biz)}
     <div style="flex:1;background:${biz.bg_color||'#0d1b2a'};padding:44px 56px;display:flex;flex-direction:column;position:relative;overflow:hidden;">
-      ${decorCircles('rgba(255,255,255,0.015)')}
+      ${decorCircles('rgba(255,255,255,0.015)',1,biz)}
       ${badge?`<div style="position:absolute;top:-62px;right:48px;background:${urgency};border-radius:6px;padding:8px 18px;z-index:2;">
         <div class="bf" style="font-size:14px;font-weight:800;color:#fff;text-transform:uppercase;letter-spacing:2px;">${esc(badge)}</div>
       </div>`:''}
@@ -372,7 +389,7 @@ function serviceHighlight(content, biz) {
   return shell(biz, `<div class="post">
     ${accentStrip(biz, 8)}
     <div style="flex:1;background:${primary};padding:48px 56px;display:flex;flex-direction:column;text-align:center;position:relative;overflow:hidden;">
-      ${decorCircles(accent+'08')}
+      ${decorCircles(accent+'08',1,biz)}
       <div style="position:relative;z-index:1;">
         ${logoCircle(biz,80)}
         ${content.eyebrow?`<div class="bf" style="font-size:18px;font-weight:700;color:${accent};text-transform:uppercase;letter-spacing:5px;margin:24px 0 8px;">${esc(content.eyebrow)}</div>`:''}
@@ -437,7 +454,7 @@ function warningSigns(content, biz) {
     ${brandBar(biz)}
     ${accentStrip(biz, 4)}
     <div style="flex:1;background:${biz.bg_color||'#0d1b2a'};padding:44px 56px;display:flex;flex-direction:column;position:relative;overflow:hidden;">
-      ${decorCircles('rgba(198,40,40,0.04)')}
+      ${decorCircles('rgba(198,40,40,0.04)',1,biz)}
       <div style="text-align:center;margin-bottom:32px;position:relative;z-index:1;">
         <div style="margin-bottom:12px;">${ICONS.alert(urgency, 44)}</div>
         <div class="hf" style="font-size:78px;color:#fff;line-height:0.92;">${hl(content.headline, content.highlight_words, 'ur')}</div>
@@ -511,7 +528,7 @@ function brandIntro(content, biz) {
   return shell(biz, `<div class="post">
     <div style="flex:0 0 8%;background:linear-gradient(90deg,${accent},${secondary},${primary});flex-shrink:0;"></div>
     <div style="flex:1;background:${primary};padding:48px 56px;display:flex;flex-direction:column;align-items:center;text-align:center;position:relative;overflow:hidden;">
-      ${decorCircles(accent+'06')}
+      ${decorCircles(accent+'06',1,biz)}
       <div style="position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;width:100%;">
         ${logoCircle(biz,96)}
         <div class="hf" style="font-size:86px;color:#fff;line-height:0.92;margin:24px 0 12px;">${hl(content.headline, content.highlight_words)}</div>
@@ -554,7 +571,7 @@ function splitFeature(content, biz, photo) {
         </div>
       </div>`
     : `<div style="flex:0 0 42%;background:linear-gradient(180deg,${biz.bg_color||'#0d1b2a'},${primary});display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px;text-align:center;position:relative;overflow:hidden;">
-        ${decorCircles(accent+'10')}
+        ${decorCircles(accent+'10',1,biz)}
         <div style="position:relative;z-index:1;">
           ${logoCircle(biz,72)}
           <div class="hf" style="font-size:72px;color:#fff;line-height:0.9;margin-top:24px;">${hl(content.headline, content.highlight_words)}</div>
