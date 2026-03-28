@@ -600,6 +600,8 @@ function splitFeature(content, biz, photo) {
 // REGISTRY
 // ═══════════════════════════════════════════════════════════════════
 
+const { renderVacTemplate } = require('./vac-templates');
+
 const TEMPLATES = {
   photo_hero:        { render: photoHero, photo: true },
   full_graphic:      { render: fullGraphic, photo: false },
@@ -616,6 +618,10 @@ const TEMPLATES = {
 };
 
 function renderTemplate(id, content, biz, photo) {
+  // Route SaaS brands to their own template system
+  if (biz.industry === 'saas_tech') {
+    return renderVacTemplate(id, content, biz);
+  }
   const tpl = TEMPLATES[id || 'full_graphic'];
   if (!tpl) return fullGraphic(content, biz);
   return tpl.render(content, biz, photo);
