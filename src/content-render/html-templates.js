@@ -617,10 +617,10 @@ const TEMPLATES = {
   split_feature:     { render: splitFeature, photo: true },
 };
 
-function renderTemplate(id, content, biz, photo) {
+function renderTemplate(id, content, biz, photo, options = {}) {
   // Route SaaS brands to their own template system
   if (biz.industry === 'saas_tech') {
-    return renderVacTemplate(id, content, biz);
+    return renderVacTemplate(id, content, biz, options);
   }
   const tpl = TEMPLATES[id || 'full_graphic'];
   if (!tpl) return fullGraphic(content, biz);

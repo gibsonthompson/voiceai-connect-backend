@@ -453,6 +453,47 @@ function vacReviewShowcase(content, biz) {
 
 
 // ═══════════════════════════════════════════════════════════════════
+// LINKEDIN — SIMPLE GRAPHIC (caption is the content, graphic is the hook)
+// 1200x628 landscape — LinkedIn native card format
+// ═══════════════════════════════════════════════════════════════════
+
+function vacLinkedInShell(body) {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&family=Space+Mono:wght@400;700&display=swap');
+*{margin:0;padding:0;box-sizing:border-box;}
+body{width:1200px;height:628px;overflow:hidden;background:#050505;}
+.post{width:1200px;height:628px;display:flex;flex-direction:column;overflow:hidden;position:relative;background:#050505;color:#fafaf9;font-family:'Plus Jakarta Sans',system-ui,sans-serif;}
+.mono{font-family:'Space Mono',monospace;letter-spacing:0.05em;}
+.em{color:${EMERALD};}
+</style></head><body>${body}</body></html>`;
+}
+
+function vacLinkedIn(content, biz) {
+  const hl = content.highlight_words || [];
+  const headline = esc(content.headline || '');
+  let headlineHl = headline;
+  if (hl.length) {
+    hl.forEach(w => { headlineHl = headlineHl.replace(new RegExp(`(${esc(w)})`, 'gi'), `<span class="em">$1</span>`); });
+  }
+
+  return vacLinkedInShell(`<div class="post">
+    ${glow('left:50%','top:50%',500,0.06)}
+    <div style="flex:1;display:flex;align-items:center;padding:0 80px;position:relative;z-index:1;">
+      <div style="flex:1;">
+        <div style="font-size:52px;font-weight:900;line-height:1.1;letter-spacing:-0.04em;max-width:800px;">${headlineHl}</div>
+        ${content.subtext?`<div style="font-size:20px;color:rgba(250,250,249,0.45);margin-top:16px;line-height:1.5;max-width:640px;font-weight:400;">${esc(content.subtext)}</div>`:''}
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:12px;flex-shrink:0;margin-left:40px;">
+        ${VAC_LOGO}
+        <div class="mono" style="font-size:11px;color:rgba(250,250,249,0.2);">myvoiceaiconnect.com</div>
+      </div>
+    </div>
+    <div style="height:3px;background:linear-gradient(90deg,${EMERALD},transparent);"></div>
+  </div>`);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
 // REGISTRY
 // ═══════════════════════════════════════════════════════════════════
 
@@ -472,7 +513,10 @@ const VAC_TEMPLATES = {
   offer_coupon:      vacStatCallout,
 };
 
-function renderVacTemplate(templateId, content, biz) {
+function renderVacTemplate(templateId, content, biz, options = {}) {
+  if (options.platform === 'linkedin') {
+    return vacLinkedIn(content, biz);
+  }
   const fn = VAC_TEMPLATES[templateId] || vacFullGraphic;
   return fn(content, biz);
 }

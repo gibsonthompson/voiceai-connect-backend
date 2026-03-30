@@ -41,22 +41,26 @@ router.post('/render', async (req, res) => {
   const start = Date.now();
 
   try {
-    const { content, business, templateId, photoDataUrl } = req.body;
+    const { content, business, templateId, photoDataUrl, platform } = req.body;
 
     if (!content || !business) {
       return res.status(400).json({ error: 'content and business are required' });
     }
+
+    const options = { platform: platform || 'instagram' };
 
     // Build HTML from template
     const html = renderTemplate(
       templateId || content.template || 'full_graphic',
       content,
       business,
-      photoDataUrl || null
+      photoDataUrl || null,
+      options
     );
 
-    // Render to PNG
-    const buffer = await renderHTML(html);
+    // Render to PNG (pass dimensions for LinkedIn)
+    const dimensions = platform === 'linkedin' ? { width: 1200, height: 628 } : null;
+    const buffer = await renderHTML(html, dimensions);
 
     // Return as base64
     const base64 = buffer.toString('base64');

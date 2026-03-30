@@ -99,7 +99,7 @@ function releaseSlot() {
  * @param {string} html - Complete HTML document
  * @returns {Promise<Buffer>} PNG buffer
  */
-async function renderHTML(html) {
+async function renderHTML(html, dimensions = null) {
   await acquireSlot();
   let page = null;
 
@@ -107,7 +107,7 @@ async function renderHTML(html) {
     const b = await getBrowser();
     page = await b.newPage();
 
-    await page.setViewport({ width: 1080, height: 1350, deviceScaleFactor: 1 });
+    await page.setViewport({ width: dimensions?.width || 1080, height: dimensions?.height || 1350, deviceScaleFactor: 1 });
 
     // Block unnecessary resources to speed up render
     await page.setRequestInterception(true);
