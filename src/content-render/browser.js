@@ -1,146 +1,173 @@
 /**
- * Content Render Service
+ * Chrome Browser Singleton
  * 
- * Express router that renders HTML templates to PNG via Puppeteer.
- * Mount on your VoiceAI Connect Express server:
- * 
- *   const contentRender = require('./content-render');
- *   app.use('/api/content-render', contentRender);
- * 
- * Then set RENDER_SERVICE_URL in Vercel env vars:
- *   NEXT_PUBLIC_RENDER_URL=https://your-do-server.com/api/content-render
+ * Launches Chrome once, reuses for all renders.
+ * Auto-closes after 90s of inactivity to free memory.
+ * Limits concurrent renders to 2 to prevent OOM on 1GB RAM.
  */
 
-const express = require('express');
-const { renderHTML } = require('./browser');
-const { renderTemplate } = require('./html-templates');
+const puppeteer = require('puppeteer-core');
 
-const router = express.Router();
+let browser = null;
+let closeTimer = null;
+let activeRenders = 0;
+const MAX_CONCURRENT = 2;
+const IDLE_TIMEOUT = 90000; // 90 seconds
 
-// ── Auth middleware ───────────────────────────────────────────────
-router.use((req, res, next) => {
-  const key = req.headers['x-render-key'];
-  const expected = process.env.RENDER_SERVICE_KEY;
+// Queue for pending renders when at capacity
+const queue = [];
 
-  // If no key is configured, skip auth (dev mode)
-  if (!expected) return next();
+function resetCloseTimer() {
+  if (closeTimer) clearTimeout(closeTimer);
+  closeTimer = setTimeout(async () => {
+    if (browser && activeRenders === 0) {
+      console.log('[content-render] Closing idle Chrome');
+      try { await browser.close(); } catch {}
+      browser = null;
+    }
+  }, IDLE_TIMEOUT);
+}
 
-  if (key !== expected) {
-    return res.status(401).json({ error: 'Unauthorized' });
+async function getBrowser() {
+  if (browser && browser.isConnected()) {
+    resetCloseTimer();
+    return browser;
   }
-  next();
-});
 
-// ── Health check ─────────────────────────────────────────────────
-router.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'content-render' });
-});
+  console.log('[content-render] Launching Chrome');
+  browser = await puppeteer.launch({
+    executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome-stable',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',       // Use /tmp instead of /dev/shm (prevents OOM on low RAM)
+      '--disable-gpu',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-sync',
+      '--disable-translate',
+      '--hide-scrollbars',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--no-first-run',
+      '--single-process',              // Reduces memory by ~30% on single-core
+      '--font-render-hinting=none',    // Consistent font rendering
+    ],
+    headless: 'new',
+    defaultViewport: null, // We set viewport per page
+  });
 
-// ── Render single post ───────────────────────────────────────────
-router.post('/render', async (req, res) => {
-  const start = Date.now();
+  browser.on('disconnected', () => {
+    console.log('[content-render] Chrome disconnected');
+    browser = null;
+  });
+
+  resetCloseTimer();
+  return browser;
+}
+
+/**
+ * Acquire a render slot. Resolves when a slot is available.
+ * This prevents more than MAX_CONCURRENT renders at once.
+ */
+function acquireSlot() {
+  return new Promise((resolve) => {
+    if (activeRenders < MAX_CONCURRENT) {
+      activeRenders++;
+      resolve();
+    } else {
+      queue.push(resolve);
+    }
+  });
+}
+
+function releaseSlot() {
+  activeRenders--;
+  if (queue.length > 0 && activeRenders < MAX_CONCURRENT) {
+    activeRenders++;
+    const next = queue.shift();
+    next();
+  }
+  resetCloseTimer();
+}
+
+/**
+ * Render HTML to PNG buffer.
+ * Manages page lifecycle, font loading, and screenshot.
+ * 
+ * @param {string} html - Complete HTML document
+ * @returns {Promise<Buffer>} PNG buffer
+ */
+async function renderHTML(html, dimensions = null) {
+  await acquireSlot();
+  let page = null;
 
   try {
-    const { content, business, templateId, photoDataUrl, platform } = req.body;
+    const b = await getBrowser();
+    page = await b.newPage();
 
-    if (!content || !business) {
-      return res.status(400).json({ error: 'content and business are required' });
-    }
+    await page.setViewport({ width: dimensions?.width || 1080, height: dimensions?.height || 1350, deviceScaleFactor: 1 });
 
-    const options = { platform: platform || 'instagram' };
-
-    // Build HTML from template
-    const html = renderTemplate(
-      templateId || content.template || 'full_graphic',
-      content,
-      business,
-      photoDataUrl || null,
-      options
-    );
-
-    // Render to PNG (pass dimensions for LinkedIn)
-    const dimensions = platform === 'linkedin' ? { width: 1200, height: 628 } : null;
-    const buffer = await renderHTML(html, dimensions);
-
-    // Return as base64
-    const base64 = buffer.toString('base64');
-
-    console.log(`[content-render] Rendered ${templateId || content.template} in ${Date.now() - start}ms`);
-
-    res.json({
-      image: `data:image/png;base64,${base64}`,
-      renderTime: Date.now() - start,
-    });
-  } catch (error) {
-    console.error('[content-render] Error:', error.message);
-    res.status(500).json({ error: error.message || 'Render failed' });
-  }
-});
-
-// ── Render batch (all 12 at once) ────────────────────────────────
-router.post('/render-batch', async (req, res) => {
-  const start = Date.now();
-
-  try {
-    const { items, business, photos } = req.body;
-
-    if (!items || !business) {
-      return res.status(400).json({ error: 'items and business are required' });
-    }
-
-    const results = [];
-
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-
-      if (!item || !item.result) {
-        results.push({ index: i, success: false, error: 'No content' });
-        continue;
-      }
-
-      try {
-        // Determine photo
-        let photoDataUrl = null;
-        const pidx = item.result.photo_index;
-        if (pidx >= 0 && photos && photos[pidx]) {
-          photoDataUrl = photos[pidx];
-        } else if (
-          (item.result.template === 'photo_hero' || item.result.template === 'process_steps') &&
-          photos && photos.length > 0
-        ) {
-          photoDataUrl = photos[i % photos.length];
+    // Block unnecessary resources to speed up render
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const type = req.resourceType();
+      const url = req.url();
+      if (['media', 'websocket'].includes(type)) {
+        req.abort();
+      } else if (type === 'image') {
+        // Allow data: URLs (base64 badges/logos) and Supabase Storage URLs and VoiceAI logo
+        if (url.startsWith('data:') || url.includes('supabase.co') || url.includes('myvoiceaiconnect.com')) {
+          req.continue();
+        } else {
+          req.abort();
         }
-
-        const html = renderTemplate(
-          item.result.template || 'full_graphic',
-          item.result,
-          business,
-          photoDataUrl
-        );
-
-        const buffer = await renderHTML(html);
-        const base64 = buffer.toString('base64');
-
-        results.push({
-          index: i,
-          success: true,
-          image: `data:image/png;base64,${base64}`,
-        });
-
-        console.log(`[content-render] Batch item ${i + 1}/${items.length} done (${Date.now() - start}ms total)`);
-      } catch (error) {
-        console.error(`[content-render] Batch item ${i} failed:`, error.message);
-        results.push({ index: i, success: false, error: error.message });
+      } else {
+        req.continue();
       }
+    });
+
+    await page.setContent(html, {
+      waitUntil: 'networkidle0',
+      timeout: 12000,
+    });
+
+    // Wait for fonts to actually render
+    await page.evaluate(() => document.fonts.ready);
+
+    // Additional wait for font rasterization
+    await new Promise(r => setTimeout(r, 400));
+
+    // Screenshot the .post element specifically
+    const element = await page.$('.post');
+    if (!element) {
+      throw new Error('No .post element found in HTML');
     }
 
-    console.log(`[content-render] Batch complete: ${results.filter(r => r.success).length}/${items.length} in ${Date.now() - start}ms`);
+    const buffer = await element.screenshot({
+      type: 'png',
+      encoding: 'binary',
+    });
 
-    res.json({ results, totalTime: Date.now() - start });
-  } catch (error) {
-    console.error('[content-render] Batch error:', error.message);
-    res.status(500).json({ error: error.message || 'Batch render failed' });
+    return buffer;
+  } finally {
+    if (page) {
+      try { await page.close(); } catch {}
+    }
+    releaseSlot();
   }
-});
+}
 
-module.exports = router;
+/**
+ * Force close the browser (for graceful shutdown).
+ */
+async function closeBrowser() {
+  if (closeTimer) clearTimeout(closeTimer);
+  if (browser) {
+    try { await browser.close(); } catch {}
+    browser = null;
+  }
+}
+
+module.exports = { renderHTML, closeBrowser };
