@@ -9,6 +9,7 @@
 // UPDATED: Spam detection block appended to all assistants (2026-03-17)
 // UPDATED: Transfer keywords block — "representative", "live agent" (2026-03-19)
 // UPDATED: Demo provisioning — serverUrl only, no assistantId (dynamic mode)
+// UPDATED: disablePhoneNumber/enablePhoneNumber for trial expiry gating
 // ============================================================================
 const fetch = require('node-fetch');
 const FormData = require('form-data');
@@ -2043,6 +2044,77 @@ async function enableAssistant(assistantId) {
 }
 
 // ============================================================================
+// PHONE NUMBER ENABLE/DISABLE
+// Since Phase 2 dynamic assistant-request, the PHONE NUMBER's serverUrl is
+// what controls whether calls are routed to the backend — not the assistant's.
+// These functions are the PRIMARY mechanism for enabling/disabling call routing.
+// ============================================================================
+
+/**
+ * Disable a VAPI phone number by removing its serverUrl and assistantId.
+ * This prevents VAPI from routing calls to the backend for this number.
+ * The phone number stays purchased and can be re-enabled later.
+ */
+async function disablePhoneNumber(phoneId) {
+  if (!phoneId) return false;
+  try {
+    const response = await fetch(`https://api.vapi.ai/phone-number/${phoneId}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${VAPI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        serverUrl: null,
+        assistantId: null
+      })
+    });
+    if (response.ok) {
+      console.log(`✅ VAPI phone number disabled: ${phoneId}`);
+      return true;
+    }
+    const errText = await response.text().catch(() => '');
+    console.error(`❌ Failed to disable VAPI phone ${phoneId}: ${response.status} ${errText}`);
+    return false;
+  } catch (error) {
+    console.error(`❌ Error disabling VAPI phone ${phoneId}:`, error.message);
+    return false;
+  }
+}
+
+/**
+ * Re-enable a VAPI phone number by restoring its serverUrl.
+ * This allows VAPI to route calls back to the backend's assistant-request handler.
+ * No assistantId is set — forces dynamic mode via assistant-request.
+ */
+async function enablePhoneNumber(phoneId) {
+  if (!phoneId) return false;
+  try {
+    const response = await fetch(`https://api.vapi.ai/phone-number/${phoneId}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${VAPI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        serverUrl: `${BACKEND_URL}/webhook/vapi`
+        // No assistantId — forces assistant-request (dynamic mode)
+      })
+    });
+    if (response.ok) {
+      console.log(`✅ VAPI phone number re-enabled: ${phoneId}`);
+      return true;
+    }
+    const errText = await response.text().catch(() => '');
+    console.error(`❌ Failed to enable VAPI phone ${phoneId}: ${response.status} ${errText}`);
+    return false;
+  } catch (error) {
+    console.error(`❌ Error enabling VAPI phone ${phoneId}:`, error.message);
+    return false;
+  }
+}
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 module.exports = {
@@ -2065,6 +2137,8 @@ module.exports = {
   getPhoneNumberFromVapi,
   disableAssistant,
   enableAssistant,
+  disablePhoneNumber,
+  enablePhoneNumber,
   // Demo provisioning
   getDemoSystemPrompt,
   getDemoFirstMessage,

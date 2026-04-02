@@ -9,6 +9,7 @@
 // UPDATED: Phase 2 — assistant-request handler (dynamic per-call config)
 // UPDATED: Team member notification routing
 // UPDATED: Demo upgrade — dynamic gpt-4o config + mid-call SMS tool
+// UPDATED: Subscription gating in assistant-request (expired trials blocked)
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -213,6 +214,33 @@ async function getAgencyByDemoPhone(phoneNumber) {
   } catch {
     return null;
   }
+}
+
+// ============================================================================
+// DISCONNECTED NUMBER ASSISTANT CONFIG
+// Returns a minimal VAPI-compatible assistant config that tells the caller
+// the number is no longer in service and hangs up. Used when a client's
+// subscription is expired/canceled/suspended.
+// ============================================================================
+function buildDisconnectedAssistantConfig(businessName) {
+  return {
+    assistant: {
+      model: {
+        provider: 'openai',
+        model: 'gpt-3.5-turbo',
+        temperature: 0.1,
+        messages: [{
+          role: 'system',
+          content: `You are an automated message. Say exactly: "We're sorry, the number you have reached for ${businessName || 'this business'} is no longer in service. Please contact the business directly for assistance. Goodbye." Then end the call immediately using the endCall tool. Do not engage in any conversation. Do not answer any questions. Just deliver the message and end the call.`
+        }],
+        tools: [{ type: 'endCall' }]
+      },
+      voice: { provider: 'openai', voiceId: 'alloy' },
+      firstMessage: `We're sorry, the number you have reached for ${businessName || 'this business'} is no longer in service. Please contact the business directly for assistance. Goodbye.`,
+      maxDurationSeconds: 15,
+      recordingEnabled: false
+    }
+  };
 }
 
 // ============================================================================
@@ -423,6 +451,11 @@ async function handleDemoToolCall(req, res, message) {
 // CRITICAL: This must respond in under 2-3 seconds or the caller hears
 // dead air. All data comes from Supabase — no external API calls.
 // On ANY error, falls back to the static assistant via assistantId.
+//
+// UPDATED: Now checks subscription status BEFORE building the config.
+// Expired/canceled/suspended clients get a "disconnected" message instead
+// of a full AI receptionist. This prevents zombie calls from going through
+// on numbers whose trials have expired.
 // ============================================================================
 async function handleAssistantRequest(req, res, message) {
   const startTime = Date.now();
@@ -485,10 +518,75 @@ async function handleAssistantRequest(req, res, message) {
     console.log(`✅ Client: ${client.business_name}`);
     const agency = client.agencies || null;
 
-    // ── Quick status checks (fast — no need to block on these) ──────────
-    // If client/agency is expired or over limit, still answer — 
-    // the end-of-call handler will deal with logging/blocking.
-    // Better to answer with the AI than drop the call entirely.
+    // ═══════════════════════════════════════════════════════════════════
+    // SUBSCRIPTION GATING — Block expired/canceled/suspended clients
+    // This is the PRIMARY defense against zombie calls. If a client's
+    // trial is expired or subscription is canceled, return a minimal
+    // "disconnected number" config that tells the caller the number
+    // is no longer in service and hangs up in ~15 seconds.
+    // ═══════════════════════════════════════════════════════════════════
+
+    // Check agency status first
+    if (agency) {
+      const agencyValidStatuses = ['active', 'trial', 'trialing'];
+      if (!agencyValidStatuses.includes(agency.subscription_status)) {
+        console.log(`🚫 CALL BLOCKED (assistant-request): Agency ${agency.name} subscription not active (${agency.subscription_status})`);
+        return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
+      }
+
+      if ((agency.subscription_status === 'trial' || agency.subscription_status === 'trialing')
+          && isTrialExpired(agency.trial_ends_at)) {
+        console.log(`🚫 CALL BLOCKED (assistant-request): Agency ${agency.name} trial expired`);
+        // Also update agency status so it's caught for future calls without re-checking
+        await supabase.from('agencies').update({ subscription_status: 'expired' }).eq('id', agency.id);
+        return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
+      }
+    }
+
+    // Check client subscription status
+    const clientValidStatuses = ['active', 'trial'];
+    if (!clientValidStatuses.includes(client.subscription_status)) {
+      console.log(`🚫 CALL BLOCKED (assistant-request): ${client.business_name} subscription not active (${client.subscription_status})`);
+      return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
+    }
+
+    // Check if client trial has expired (status might not be updated yet)
+    if (client.subscription_status === 'trial' && isTrialExpired(client.trial_ends_at)) {
+      console.log(`🚫 CALL BLOCKED (assistant-request): ${client.business_name} trial expired`);
+      // Update status so the cron doesn't need to catch this one
+      await supabase.from('clients').update({ subscription_status: 'trial_expired', status: 'suspended' }).eq('id', client.id);
+      return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
+    }
+
+    // Check call limits
+    const currentCallCount = client.calls_this_month || 0;
+    const callLimit = client.monthly_call_limit ?? 50;
+    if (callLimit !== -1 && currentCallCount >= callLimit) {
+      console.log(`🚫 CALL BLOCKED (assistant-request): ${client.business_name} reached call limit (${currentCallCount}/${callLimit})`);
+      // Don't disconnect — just return a polite "at capacity" message
+      return res.status(200).json({
+        assistant: {
+          model: {
+            provider: 'openai',
+            model: 'gpt-3.5-turbo',
+            temperature: 0.1,
+            messages: [{
+              role: 'system',
+              content: `You are answering the phone for ${client.business_name}. Say: "Thank you for calling ${client.business_name}. We're currently unable to take your call through our automated system. Please try again later or reach the business directly. Goodbye." Then end the call using the endCall tool.`
+            }],
+            tools: [{ type: 'endCall' }]
+          },
+          voice: { provider: 'openai', voiceId: 'alloy' },
+          firstMessage: `Thank you for calling ${client.business_name}. We're currently unable to take your call through our automated system. Please try again later or reach the business directly. Goodbye.`,
+          maxDurationSeconds: 15,
+          recordingEnabled: false
+        }
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // CLIENT IS ACTIVE — Build the full dynamic assistant config
+    // ═══════════════════════════════════════════════════════════════════
 
     // ── Look up caller in contacts (Phase 3 — caller recognition) ───────
     let callerContext = null;
@@ -545,11 +643,18 @@ async function handleAssistantRequest(req, res, message) {
       if (vapiPhoneNumber) {
         const { data: fallbackClient } = await supabase
           .from('clients')
-          .select('vapi_assistant_id')
+          .select('vapi_assistant_id, subscription_status')
           .eq('vapi_phone_number', vapiPhoneNumber)
           .single();
 
         if (fallbackClient?.vapi_assistant_id) {
+          // Even in fallback, don't serve expired clients
+          const fallbackValidStatuses = ['active', 'trial'];
+          if (!fallbackValidStatuses.includes(fallbackClient.subscription_status)) {
+            console.log(`🚫 Fallback also blocked — client subscription: ${fallbackClient.subscription_status}`);
+            return res.status(200).json(buildDisconnectedAssistantConfig(null));
+          }
+
           console.log(`🔄 Falling back to static assistant: ${fallbackClient.vapi_assistant_id}`);
           return res.status(200).json({ assistantId: fallbackClient.vapi_assistant_id });
         }

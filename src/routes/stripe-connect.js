@@ -1,5 +1,7 @@
 // ============================================================================
 // STRIPE CONNECT - Clients Pay Agencies Directly
+// UPDATED: expireTrials disables VAPI phone number (not just static assistant)
+// UPDATED: reactivation re-enables VAPI phone number
 // ============================================================================
 const Stripe = require('stripe');
 const { 
@@ -16,7 +18,7 @@ const {
   sendClientSubscriptionActivatedSMS,
   sendPlatformNotificationSMS
 } = require('../lib/notifications');
-const { enableAssistant, disableAssistant } = require('../lib/vapi');
+const { enableAssistant, disableAssistant, disablePhoneNumber, enablePhoneNumber } = require('../lib/vapi');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -429,6 +431,12 @@ async function createClientPortal(req, res) {
 
 // ============================================================================
 // EXPIRE TRIALS - Cron job to disable expired trials
+// UPDATED: Now disables the VAPI phone number (removes serverUrl) instead of
+// just the static assistant. Since Phase 2 dynamic assistant-request, the
+// phone number's serverUrl is what matters — the static assistant is just
+// a fallback reference.
+//
+// Also keeps the old disableAssistant call as belt-and-suspenders.
 // ============================================================================
 async function expireTrials() {
   console.log('Checking for expired trials...');
@@ -452,15 +460,29 @@ async function expireTrials() {
 
   for (const client of expiredClients || []) {
     try {
+      // ── Disable VAPI phone number (PRIMARY — stops calls from routing) ──
+      if (client.vapi_phone_id) {
+        try {
+          await disablePhoneNumber(client.vapi_phone_id);
+          console.log('✅ VAPI phone number disabled (serverUrl removed):', client.vapi_phone_id);
+        } catch (phoneError) {
+          console.error('❌ Failed to disable VAPI phone number:', phoneError.message);
+        }
+      } else {
+        console.warn('⚠️ No vapi_phone_id for client:', client.business_name, '— phone number not disabled');
+      }
+
+      // ── Disable static assistant (SECONDARY — belt-and-suspenders) ──
       if (client.vapi_assistant_id) {
         try {
           await disableAssistant(client.vapi_assistant_id);
-          console.log('VAPI assistant disabled:', client.vapi_assistant_id);
+          console.log('✅ VAPI static assistant disabled:', client.vapi_assistant_id);
         } catch (vapiError) {
-          console.error('Failed to disable VAPI assistant:', vapiError);
+          console.error('⚠️ Failed to disable VAPI assistant (non-critical):', vapiError.message);
         }
       }
 
+      // ── Update client status ──
       await supabase
         .from('clients')
         .update({
@@ -472,7 +494,7 @@ async function expireTrials() {
       const agency = client.agencies;
       await sendClientTrialExpiredSMS(client, agency);
 
-      console.log('Trial expired for:', client.business_name);
+      console.log('✅ Trial expired for:', client.business_name);
       results.push({ id: client.id, business_name: client.business_name, success: true });
 
     } catch (err) {
@@ -618,12 +640,23 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
 
   console.log(`Client ${isUpgrade ? 'upgraded' : 'activated'}:`, client.business_name);
 
+  // ── Re-enable VAPI phone number (PRIMARY — restores call routing) ──
+  if (client.vapi_phone_id) {
+    try {
+      await enablePhoneNumber(client.vapi_phone_id);
+      console.log('✅ VAPI phone number re-enabled:', client.vapi_phone_id);
+    } catch (phoneError) {
+      console.error('❌ Failed to re-enable VAPI phone number:', phoneError.message);
+    }
+  }
+
+  // ── Re-enable static assistant (SECONDARY — belt-and-suspenders) ──
   if (client.vapi_assistant_id) {
     try {
       await enableAssistant(client.vapi_assistant_id);
-      console.log('VAPI assistant re-enabled:', client.vapi_assistant_id);
+      console.log('✅ VAPI assistant re-enabled:', client.vapi_assistant_id);
     } catch (vapiError) {
-      console.error('Failed to re-enable VAPI assistant:', vapiError);
+      console.error('⚠️ Failed to re-enable VAPI assistant (non-critical):', vapiError.message);
     }
   }
 
@@ -665,11 +698,23 @@ async function handleClientSubscriptionUpdated(subscription, stripeAccountId) {
 
   if (status === 'active') {
     clientStatus = 'active';
+    // Re-enable phone number when subscription becomes active
+    if (client.vapi_phone_id) {
+      await enablePhoneNumber(client.vapi_phone_id).catch(err =>
+        console.error('Failed to enable phone on subscription update:', err.message)
+      );
+    }
     if (client.vapi_assistant_id) {
       await enableAssistant(client.vapi_assistant_id);
     }
   } else if (status === 'canceled' || status === 'unpaid') {
     clientStatus = 'suspended';
+    // Disable phone number when subscription is canceled/unpaid
+    if (client.vapi_phone_id) {
+      await disablePhoneNumber(client.vapi_phone_id).catch(err =>
+        console.error('Failed to disable phone on subscription cancel:', err.message)
+      );
+    }
     if (client.vapi_assistant_id) {
       await disableAssistant(client.vapi_assistant_id);
     }
@@ -696,10 +741,21 @@ async function handleClientSubscriptionDeleted(subscription, stripeAccountId) {
   );
   if (!client) return;
 
+  // Disable phone number (PRIMARY)
+  if (client.vapi_phone_id) {
+    try {
+      await disablePhoneNumber(client.vapi_phone_id);
+      console.log('✅ VAPI phone number disabled:', client.vapi_phone_id);
+    } catch (phoneError) {
+      console.error('❌ Failed to disable VAPI phone number:', phoneError.message);
+    }
+  }
+
+  // Disable static assistant (SECONDARY)
   if (client.vapi_assistant_id) {
     try {
       await disableAssistant(client.vapi_assistant_id);
-      console.log('VAPI assistant disabled:', client.vapi_assistant_id);
+      console.log('✅ VAPI assistant disabled:', client.vapi_assistant_id);
     } catch (vapiError) {
       console.error('Failed to disable VAPI assistant:', vapiError);
     }
@@ -736,6 +792,16 @@ async function handleClientPaymentSucceeded(invoice, stripeAccountId) {
     })
     .eq('id', client.id);
 
+  // Re-enable phone number on successful payment (PRIMARY)
+  if (client.vapi_phone_id) {
+    try {
+      await enablePhoneNumber(client.vapi_phone_id);
+    } catch (phoneError) {
+      console.error('Failed to enable VAPI phone number:', phoneError.message);
+    }
+  }
+
+  // Re-enable static assistant (SECONDARY)
   if (client.vapi_assistant_id) {
     try {
       await enableAssistant(client.vapi_assistant_id);
