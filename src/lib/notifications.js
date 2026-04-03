@@ -208,28 +208,43 @@ async function sendAgencySignupNotificationSMS(agency) {
   return sendPlatformNotificationSMS(message);
 }
 
-async function sendAgencyWelcomeSMS(agency) {
+// ============================================================================
+// AGENCY WELCOME SMS
+// UPDATED: Accepts passwordToken param. If provided, links to /auth/set-password
+// with returnTo=/onboarding so they land in the right place on any device.
+// Removed inaccurate "trial has started" copy (trial starts at onboarding step 5).
+// ============================================================================
+async function sendAgencyWelcomeSMS(agency, passwordToken) {
   if (!agency?.phone) {
     console.log(`⚠️ Agency ${agency?.name || 'Unknown'} has no phone number — skipping welcome SMS`);
     return false;
   }
 
   const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
+  const platformUrl = `https://${platformDomain}`;
 
   let agencyUrl;
   if (agency.slug) {
     agencyUrl = `https://${agency.slug}.${platformDomain}`;
   } else {
-    agencyUrl = `https://${platformDomain}`;
+    agencyUrl = platformUrl;
+  }
+
+  // Build the right link — set-password if we have a token, login as fallback
+  let setupLink;
+  if (passwordToken) {
+    const returnTo = encodeURIComponent(`/onboarding?agency=${agency.id}`);
+    setupLink = `${platformUrl}/auth/set-password?token=${passwordToken}&returnTo=${returnTo}`;
+  } else {
+    setupLink = `${platformUrl}/agency/login`;
   }
 
   const message =
     `Welcome to VoiceAI Connect! 🚀\n\n` +
-    `Your white-label AI receptionist agency is live:\n` +
+    `Your agency is ready:\n` +
     `${agencyUrl}\n\n` +
-    `Log in and finish setting up — it takes about 5 minutes:\n` +
-    `https://${platformDomain}/agency/login\n\n` +
-    `Your 14-day free trial has started. Let's build something.`;
+    `Finish setting up — takes about 5 minutes:\n` +
+    `${setupLink}`;
 
   console.log(`📱 Sending welcome SMS to agency owner: ${agency.name} (${agency.phone})`);
   return sendTelnyxSMS(
@@ -764,7 +779,7 @@ async function sendAgencyWelcomeEmail(agency, passwordToken) {
             </a>
           </div>
           
-          <p>Your <strong>14-day free trial</strong> has started. No credit card required.</p>
+          <p>Your <strong>14-day free trial</strong> starts when you finish setup. No credit card required.</p>
           
           <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
           

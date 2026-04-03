@@ -1,7 +1,12 @@
 // ============================================================================
 // ABANDONED CART SMS - Cron Handler
 // Sends up to 5 nudge SMS to agencies who signed up but never subscribed.
-// 
+//
+// UPDATED: Now checks if agency owner has a password set. If not, generates
+// a fresh set-password token and links to /auth/set-password instead of
+// /agency/login. This eliminates the dead end where passwordless agencies
+// land on a login page they can't use.
+//
 // Sequence:
 //   Step 1: 30 minutes after signup
 //   Step 2: 1 hour after signup
@@ -17,6 +22,7 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { sendTelnyxSMS, formatPhoneE164 } = require('../lib/notifications');
+const { createPasswordToken } = require('./agency-signup');
 
 // ============================================================================
 // TIMING THRESHOLDS (minutes after signup)
@@ -30,13 +36,54 @@ const STEP_THRESHOLDS = {
 };
 
 // ============================================================================
-// MESSAGE TEMPLATES
-// Each step has a different message with escalating approach
+// GET RECOVERY LINK FOR AGENCY
+// If user has no password → generate fresh set-password token → /auth/set-password
+// If user has password → /agency/login (normal login)
 // ============================================================================
-function getAbandonedCartMessage(step, agency) {
-  const name = agency.name || 'there';
+async function getRecoveryLink(agency) {
   const platformUrl = 'https://myvoiceaiconnect.com';
   const loginUrl = `${platformUrl}/agency/login`;
+
+  try {
+    // Look up the agency owner user
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, email, password_hash')
+      .eq('agency_id', agency.id)
+      .eq('role', 'agency_owner')
+      .single();
+
+    if (error || !user) {
+      console.log(`⚠️ No owner user found for agency ${agency.name} — using login link`);
+      return loginUrl;
+    }
+
+    // If they already have a password, link to login
+    if (user.password_hash) {
+      return loginUrl;
+    }
+
+    // No password — generate a fresh set-password token
+    const token = await createPasswordToken(user.id, user.email);
+    const returnTo = encodeURIComponent(`/onboarding?agency=${agency.id}`);
+    const setPasswordUrl = `${platformUrl}/auth/set-password?token=${token}&returnTo=${returnTo}`;
+
+    console.log(`🔑 Generated fresh set-password token for ${agency.name} (no password set)`);
+    return setPasswordUrl;
+
+  } catch (err) {
+    console.error(`⚠️ Error checking password for ${agency.name}:`, err.message);
+    return loginUrl; // Fallback to login link
+  }
+}
+
+// ============================================================================
+// MESSAGE TEMPLATES
+// Each step has a different message with escalating approach
+// Link is dynamic — set-password for passwordless, login for password-set
+// ============================================================================
+function getAbandonedCartMessage(step, agency, recoveryLink) {
+  const name = agency.name || 'there';
 
   switch (step) {
     case 1:
@@ -46,7 +93,7 @@ function getAbandonedCartMessage(step, agency) {
         `Looks like you didn't finish setting up your VoiceAI Connect account. ` +
         `Your white-label AI receptionist platform is waiting for you.\n\n` +
         `Pick up where you left off:\n` +
-        `${loginUrl}\n\n` +
+        `${recoveryLink}\n\n` +
         `Takes less than 5 minutes to finish!`
       );
 
@@ -60,7 +107,7 @@ function getAbandonedCartMessage(step, agency) {
         `✅ Resell to unlimited businesses\n` +
         `✅ Clients pay YOU directly via Stripe\n` +
         `✅ 14-day free trial, no risk\n\n` +
-        `Finish setup: ${loginUrl}`
+        `Finish setup: ${recoveryLink}`
       );
 
     case 3:
@@ -71,7 +118,7 @@ function getAbandonedCartMessage(step, agency) {
         `Every day without your AI receptionist platform is missed revenue from businesses ` +
         `that need 24/7 phone coverage.\n\n` +
         `Your 14-day free trial is ready:\n` +
-        `${loginUrl}\n\n` +
+        `${recoveryLink}\n\n` +
         `No credit card needed to start.`
       );
 
@@ -81,7 +128,7 @@ function getAbandonedCartMessage(step, agency) {
         `${name}, quick question — was there something holding you back from finishing your VoiceAI Connect setup?\n\n` +
         `If you ran into any issues, reply to this text and we'll help you get set up personally.\n\n` +
         `Your account is still waiting:\n` +
-        `${loginUrl}`
+        `${recoveryLink}`
       );
 
     case 5:
@@ -91,7 +138,7 @@ function getAbandonedCartMessage(step, agency) {
         `This is our last reminder about your VoiceAI Connect account.\n\n` +
         `If now isn't the right time, no worries at all. Your account will be here whenever you're ready.\n\n` +
         `When you're ready to launch your AI receptionist agency:\n` +
-        `${loginUrl}\n\n` +
+        `${recoveryLink}\n\n` +
         `We're here if you have any questions. 🙏`
       );
 
@@ -187,8 +234,11 @@ router.post('/abandoned-cart', async (req, res) => {
         continue;
       }
 
+      // Get the right recovery link (set-password vs login)
+      const recoveryLink = await getRecoveryLink(agency);
+
       // Get message for this step
-      const message = getAbandonedCartMessage(nextStep, agency);
+      const message = getAbandonedCartMessage(nextStep, agency, recoveryLink);
       if (!message) {
         skipped++;
         continue;
@@ -213,10 +263,11 @@ router.post('/abandoned-cart', async (req, res) => {
           agency: agency.name,
           step: nextStep,
           phone: formattedPhone,
-          status: 'sent'
+          status: 'sent',
+          linkType: recoveryLink.includes('set-password') ? 'set-password' : 'login'
         });
 
-        console.log(`✅ Step ${nextStep} sent to ${agency.name}`);
+        console.log(`✅ Step ${nextStep} sent to ${agency.name} (${recoveryLink.includes('set-password') ? 'set-password link' : 'login link'})`);
       } else {
         results.push({
           agency: agency.name,
@@ -280,7 +331,9 @@ router.post('/abandoned-cart/test/:agencyId', async (req, res) => {
       return res.json({ success: false, message: `Invalid phone: ${agency.phone}` });
     }
 
-    const message = getAbandonedCartMessage(targetStep, agency);
+    const recoveryLink = await getRecoveryLink(agency);
+    const message = getAbandonedCartMessage(targetStep, agency, recoveryLink);
+
     console.log(`🧪 Test sending step ${targetStep} to ${agency.name}`);
 
     const smsSent = await sendTelnyxSMS(formattedPhone, message);
@@ -300,6 +353,8 @@ router.post('/abandoned-cart/test/:agencyId', async (req, res) => {
       agency: agency.name,
       step: targetStep,
       phone: formattedPhone,
+      linkType: recoveryLink.includes('set-password') ? 'set-password' : 'login',
+      recoveryLink,
       message: smsSent ? `Step ${targetStep} sent` : 'SMS failed'
     });
 

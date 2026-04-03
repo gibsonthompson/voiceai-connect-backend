@@ -361,9 +361,10 @@ async function handleAgencySignup(req, res) {
     }
     
     // Welcome SMS to agency owner (non-blocking)
+    // UPDATED: Pass password token so SMS links to /auth/set-password instead of /agency/login
     console.log('📱 Sending welcome SMS to agency owner...');
     try {
-      await sendAgencyWelcomeSMS(agency);
+      await sendAgencyWelcomeSMS(agency, token);
     } catch (smsError) {
       console.warn('⚠️ Agency welcome SMS failed (non-blocking):', smsError.message);
     }
