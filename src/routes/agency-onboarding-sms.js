@@ -11,6 +11,7 @@
 // - Only processes agencies created within the last 14 days
 // - 60-minute minimum gap between ANY step change (send or skip)
 // - Skips update the timestamp so they can't chain in rapid succession
+// - Defers to abandoned cart sequence for pending agencies (no overlap)
 //
 // Step 1:  2 hours   — Upload logo/branding     (skip if logo_url set)
 // Step 2:  6 hours   — Connect Stripe            (skip if stripe_charges_enabled)
@@ -268,7 +269,8 @@ router.post('/agency-onboarding-sms', async (req, res) => {
       .select('id, name, slug, email, phone, logo_url, stripe_charges_enabled, ' +
               'stripe_account_id, marketing_domain, domain_verified, country, ' +
               'subscription_status, onboarding_completed, onboarding_step, ' +
-              'trial_ends_at, created_at, onboarding_sms_step, onboarding_sms_last_sent_at')
+              'trial_ends_at, created_at, onboarding_sms_step, onboarding_sms_last_sent_at, ' +
+              'abandoned_cart_step')
       .in('subscription_status', ['pending', 'trialing', 'trial'])
       .lt('onboarding_sms_step', 9)
       .not('phone', 'is', null)
@@ -286,28 +288,49 @@ router.post('/agency-onboarding-sms', async (req, res) => {
       return res.json({ success: true, processed: 0, sent: 0, skipped: 0 });
     }
 
-    console.log(`📋 Found ${agencies.length} agencies to check`);
-
-    // Batch fetch client counts for all these agencies
-    const agencyIds = agencies.map(a => a.id);
-    const { data: clientCounts, error: countError } = await supabase
-      .rpc('get_client_counts_by_agency', { agency_ids: agencyIds });
-
-    // Fallback: if RPC doesn't exist, query manually
-    let clientCountMap = {};
-    if (countError || !clientCounts) {
-      console.log('⚠️ RPC not available, fetching client counts individually...');
-      for (const agency of agencies) {
-        const { count } = await supabase
-          .from('clients')
-          .select('id', { count: 'exact', head: true })
-          .eq('agency_id', agency.id);
-        clientCountMap[agency.id] = count || 0;
+    // ========================================================================
+    // OVERLAP PREVENTION: Skip pending agencies still in abandoned cart drip.
+    // Abandoned cart targets subscription_status='pending' with a 5-step SMS
+    // sequence. We defer to that sequence until it completes (step >= 5) or
+    // the agency starts their trial (status changes from 'pending').
+    // ========================================================================
+    const eligible = agencies.filter(a => {
+      if (a.subscription_status === 'pending' && (a.abandoned_cart_step || 0) < 5) {
+        return false; // still in abandoned cart sequence — let that finish first
       }
-    } else {
-      clientCounts.forEach(row => {
-        clientCountMap[row.agency_id] = row.client_count;
-      });
+      return true;
+    });
+
+    const skippedOverlap = agencies.length - eligible.length;
+    if (skippedOverlap > 0) {
+      console.log(`⏸️  Deferred ${skippedOverlap} agencies still in abandoned cart sequence`);
+    }
+
+    console.log(`📋 Found ${eligible.length} eligible agencies to check (${skippedOverlap} deferred to abandoned cart)`);
+
+    // Batch fetch client counts for eligible agencies
+    const agencyIds = eligible.map(a => a.id);
+
+    let clientCountMap = {};
+    if (agencyIds.length > 0) {
+      const { data: clientCounts, error: countError } = await supabase
+        .rpc('get_client_counts_by_agency', { agency_ids: agencyIds });
+
+      // Fallback: if RPC doesn't exist, query manually
+      if (countError || !clientCounts) {
+        console.log('⚠️ RPC not available, fetching client counts individually...');
+        for (const agency of eligible) {
+          const { count } = await supabase
+            .from('clients')
+            .select('id', { count: 'exact', head: true })
+            .eq('agency_id', agency.id);
+          clientCountMap[agency.id] = count || 0;
+        }
+      } else {
+        clientCounts.forEach(row => {
+          clientCountMap[row.agency_id] = row.client_count;
+        });
+      }
     }
 
     let sent = 0;
@@ -315,7 +338,7 @@ router.post('/agency-onboarding-sms', async (req, res) => {
     let skippedDone = 0;
     const results = [];
 
-    for (const agency of agencies) {
+    for (const agency of eligible) {
       const clientCount = clientCountMap[agency.id] || 0;
       const result = getNextStep(agency, clientCount);
 
@@ -392,14 +415,15 @@ router.post('/agency-onboarding-sms', async (req, res) => {
       }
     }
 
-    console.log(`📬 Onboarding SMS complete: ${sent} sent, ${skippedDone} skipped (done), ${skipped} not ready`);
+    console.log(`📬 Onboarding SMS complete: ${sent} sent, ${skippedDone} skipped (done), ${skipped} not ready, ${skippedOverlap} deferred (abandoned cart)`);
 
     res.json({
       success: true,
-      processed: agencies.length,
+      processed: eligible.length,
       sent,
       skipped_done: skippedDone,
       skipped_not_ready: skipped,
+      skipped_abandoned_cart: skippedOverlap,
       results
     });
 
@@ -454,7 +478,10 @@ router.post('/agency-onboarding-sms/test/:agencyId', async (req, res) => {
     const conditionMet = isStepAlreadyDone(targetStep, agency, clientCount || 0);
     const message = getOnboardingMessage(targetStep, agency, clientCount || 0);
 
-    console.log(`🧪 Test: step ${targetStep} for ${agency.name} | condition_met: ${conditionMet}`);
+    // Show overlap status in test response
+    const inAbandonedCart = agency.subscription_status === 'pending' && (agency.abandoned_cart_step || 0) < 5;
+
+    console.log(`🧪 Test: step ${targetStep} for ${agency.name} | condition_met: ${conditionMet} | in_abandoned_cart: ${inAbandonedCart}`);
 
     if (!message) {
       return res.json({ success: false, message: 'No message for this step' });
@@ -478,6 +505,7 @@ router.post('/agency-onboarding-sms/test/:agencyId', async (req, res) => {
       step: targetStep,
       condition_already_met: conditionMet,
       would_skip_in_cron: conditionMet,
+      would_defer_to_abandoned_cart: inAbandonedCart,
       phone: formattedPhone,
       message_preview: message.substring(0, 100) + '...',
       client_count: clientCount || 0
