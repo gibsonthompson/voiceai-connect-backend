@@ -9,7 +9,7 @@
 // UPDATED: Phase 2 — assistant-request handler (dynamic per-call config)
 // UPDATED: Team member notification routing
 // UPDATED: Demo upgrade — dynamic gpt-4o config + mid-call SMS tool
-// UPDATED: Subscription gating in assistant-request (expired trials blocked)
+// UPDATED: Admin demo call notification wired to getSmsTemplate()
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -18,40 +18,23 @@ const { upsertContactFromCall } = require('../lib/contact-upsert');
 const { buildDynamicAssistantConfig } = require('../lib/assistant-config-builder');
 const { notifyTeamMembers } = require('../lib/team-notifications');
 const { buildDemoDynamicConfig, buildDemoSmsContent } = require('../lib/demo-config');
+const { getSmsTemplate } = require('../lib/sms-templates');
 
 // ============================================================================
 // PLAN FEATURE CHECK HELPER
 // ============================================================================
 const DEFAULT_PLAN_FEATURES = {
   starter: {
-    sms_notifications: true,
-    email_summaries: false,
-    custom_greeting: false,
-    custom_voice: false,
-    knowledge_base: false,
-    business_hours: false,
-    advanced_analytics: false,
-    priority_support: false,
+    sms_notifications: true, email_summaries: false, custom_greeting: false, custom_voice: false,
+    knowledge_base: false, business_hours: false, advanced_analytics: false, priority_support: false,
   },
   pro: {
-    sms_notifications: true,
-    email_summaries: true,
-    custom_greeting: true,
-    custom_voice: false,
-    knowledge_base: true,
-    business_hours: true,
-    advanced_analytics: true,
-    priority_support: false,
+    sms_notifications: true, email_summaries: true, custom_greeting: true, custom_voice: false,
+    knowledge_base: true, business_hours: true, advanced_analytics: true, priority_support: false,
   },
   growth: {
-    sms_notifications: true,
-    email_summaries: true,
-    custom_greeting: true,
-    custom_voice: true,
-    knowledge_base: true,
-    business_hours: true,
-    advanced_analytics: true,
-    priority_support: true,
+    sms_notifications: true, email_summaries: true, custom_greeting: true, custom_voice: true,
+    knowledge_base: true, business_hours: true, advanced_analytics: true, priority_support: true,
   },
 };
 
@@ -68,11 +51,7 @@ function isFeatureEnabled(client, agency, featureKey) {
 // ============================================================================
 function detectTransferStatus(endedReason, transcript) {
   if (!endedReason) return { transferStatus: null, wasTransferred: false };
-
-  if (endedReason === 'assistant-forwarded-call') {
-    return { transferStatus: 'transferred', wasTransferred: true };
-  }
-
+  if (endedReason === 'assistant-forwarded-call') return { transferStatus: 'transferred', wasTransferred: true };
   if (endedReason === 'pipeline-error') {
     const transferAttempted = transcript && (
       transcript.toLowerCase().includes('let me connect you') ||
@@ -81,12 +60,9 @@ function detectTransferStatus(endedReason, transcript) {
       transcript.toLowerCase().includes('let me grab someone') ||
       transcript.toLowerCase().includes('i\'ll connect you')
     );
-    if (transferAttempted) {
-      return { transferStatus: 'transfer_failed', wasTransferred: false };
-    }
+    if (transferAttempted) return { transferStatus: 'transfer_failed', wasTransferred: false };
     return { transferStatus: null, wasTransferred: false };
   }
-
   return { transferStatus: null, wasTransferred: false };
 }
 
@@ -155,9 +131,7 @@ If spam: set urgency to "routine", summary should briefly describe what the spam
       })
     });
 
-    if (!response.ok) {
-      throw new Error(`Claude API failed: ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`Claude API failed: ${response.status}`);
 
     const data = await response.json();
     let responseText = data.content[0].text.trim();
@@ -170,15 +144,11 @@ If spam: set urgency to "routine", summary should briefly describe what the spam
     return parsed;
   } catch (error) {
     console.error('❌ AI summary failed, using fallback:', error.message);
-    
     return {
-      customerName: 'Unknown',
-      customerPhone: callerPhone,
-      customerEmail: null,
+      customerName: 'Unknown', customerPhone: callerPhone, customerEmail: null,
       urgency: 'routine',
       summary: `Customer called regarding ${industry.replace('_', ' ')} services. Team should follow up.`,
-      isSpam: false,
-      spamReason: null
+      isSpam: false, spamReason: null
     };
   }
 }
@@ -204,47 +174,33 @@ function isTrialExpired(trialEndsAt) {
 
 async function getAgencyByDemoPhone(phoneNumber) {
   try {
-    const { data, error } = await supabase
-      .from('agencies')
-      .select('*')
-      .eq('demo_phone_number', phoneNumber)
-      .single();
+    const { data, error } = await supabase.from('agencies').select('*').eq('demo_phone_number', phoneNumber).single();
     if (error || !data) return null;
     return data;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 // ============================================================================
 // DISCONNECTED NUMBER ASSISTANT CONFIG
-// Returns a minimal VAPI-compatible assistant config that tells the caller
-// the number is no longer in service and hangs up. Used when a client's
-// subscription is expired/canceled/suspended.
 // ============================================================================
 function buildDisconnectedAssistantConfig(businessName) {
   return {
     assistant: {
       model: {
-        provider: 'openai',
-        model: 'gpt-3.5-turbo',
-        temperature: 0.1,
-        messages: [{
-          role: 'system',
-          content: `You are an automated message. Say exactly: "We're sorry, the number you have reached for ${businessName || 'this business'} is no longer in service. Please contact the business directly for assistance. Goodbye." Then end the call immediately using the endCall tool. Do not engage in any conversation. Do not answer any questions. Just deliver the message and end the call.`
-        }],
+        provider: 'openai', model: 'gpt-3.5-turbo', temperature: 0.1,
+        messages: [{ role: 'system', content: `You are an automated message. Say exactly: "We're sorry, the number you have reached for ${businessName || 'this business'} is no longer in service. Please contact the business directly for assistance. Goodbye." Then end the call immediately using the endCall tool. Do not engage in any conversation. Do not answer any questions. Just deliver the message and end the call.` }],
         tools: [{ type: 'endCall' }]
       },
       voice: { provider: 'openai', voiceId: 'alloy' },
       firstMessage: `We're sorry, the number you have reached for ${businessName || 'this business'} is no longer in service. Please contact the business directly for assistance. Goodbye.`,
-      maxDurationSeconds: 15,
-      recordingEnabled: false
+      maxDurationSeconds: 15, recordingEnabled: false
     }
   };
 }
 
 // ============================================================================
 // HANDLE DEMO CALL (end-of-call)
+// UPDATED: Agency owner notification uses getSmsTemplate()
 // ============================================================================
 async function handleDemoCall(agency, message) {
   const call = message.call;
@@ -256,12 +212,10 @@ async function handleDemoCall(agency, message) {
   if (callerPhone && callerPhone !== 'Unknown') {
     try {
       if (agency.demo_followup_sms_override) {
-        // Custom follow-up message for this agency
         const { sendTelnyxSMS: sendSMS } = require('../lib/notifications');
         await sendSMS(callerPhone, agency.demo_followup_sms_override);
         console.log('✅ Demo follow-up SMS sent (custom override)');
       } else {
-        // Default: signup link
         await sendDemoCallFollowUpSMS(callerPhone, agency);
         console.log('✅ Demo follow-up SMS sent');
       }
@@ -270,14 +224,20 @@ async function handleDemoCall(agency, message) {
     }
   }
 
+  // Notify agency owner about demo call (TEMPLATE WIRED)
   if (agency.phone) {
     const { formatPhoneDisplay, sendTelnyxSMS } = require('../lib/notifications');
     const callerDisplay = callerPhone ? formatPhoneDisplay(callerPhone) : 'Unknown number';
     const durationDisplay = durationSeconds ? `${Math.round(durationSeconds / 60)}min ${durationSeconds % 60}s` : 'Unknown';
     
     try {
+      const templateMsg = await getSmsTemplate('admin_demo_call', {
+        agency_name: agency.name,
+        caller: callerDisplay,
+        duration: durationDisplay,
+      });
       await sendTelnyxSMS(agency.phone,
-        `🎤 Demo Call - ${agency.name}\nCaller: ${callerDisplay}\nDuration: ${durationDisplay}\nFollow-up SMS sent.`
+        templateMsg || `🎤 Demo Call - ${agency.name}\nCaller: ${callerDisplay}\nDuration: ${durationDisplay}\nFollow-up SMS sent.`
       );
     } catch (ownerSmsErr) {
       console.warn('⚠️ Agency owner demo notification failed:', ownerSmsErr.message);
@@ -288,8 +248,7 @@ async function handleDemoCall(agency, message) {
 }
 
 // ============================================================================
-// DEMO SMS DEDUP — Prevent duplicate sends if AI calls tool twice
-// Simple in-memory set keyed by call ID, auto-expires after 5 minutes
+// DEMO SMS DEDUP
 // ============================================================================
 const _demoSmsSent = new Map();
 function hasDemoSmsSent(callId) {
@@ -297,46 +256,26 @@ function hasDemoSmsSent(callId) {
   const sent = _demoSmsSent.get(callId);
   if (sent) return true;
   _demoSmsSent.set(callId, Date.now());
-  // Cleanup old entries every call
-  for (const [k, v] of _demoSmsSent) {
-    if (Date.now() - v > 5 * 60 * 1000) _demoSmsSent.delete(k);
-  }
+  for (const [k, v] of _demoSmsSent) { if (Date.now() - v > 5 * 60 * 1000) _demoSmsSent.delete(k); }
   return false;
 }
 
 // ============================================================================
 // HANDLE DEMO FUNCTION CALL (mid-call SMS)
-//
-// Called when the demo AI triggers send_demo_sms during the roleplay.
-// Sends a real SMS to the caller showing them a post-call notification.
-//
-// CRITICAL: Must respond quickly (<5s) or the caller hears dead air.
-// Telnyx SMS is fast (~200ms) so this is safe.
 // ============================================================================
 async function handleDemoToolCall(req, res, message) {
   const startTime = Date.now();
 
   try {
-    // Dedup: only send one SMS per call
     const callId = message.call?.id || message.callId || null;
     if (hasDemoSmsSent(callId)) {
       console.log(`⚠️ Demo SMS already sent for call ${callId} — skipping duplicate`);
-      return res.status(200).json({
-        results: [{
-          toolCallId: message.toolCallList?.[0]?.id || 'dedup',
-          result: 'Already sent the text — they should have it on their phone.',
-        }],
-      });
+      return res.status(200).json({ results: [{ toolCallId: message.toolCallList?.[0]?.id || 'dedup', result: 'Already sent the text — they should have it on their phone.' }] });
     }
 
-    // Extract tool call info — handle both VAPI formats
     const toolCallList = message.toolCallList || message.toolCalls || [];
     const toolCall = toolCallList[0];
-
-    if (!toolCall) {
-      console.log('⚠️ Demo tool-call: no tool call data');
-      return res.status(200).json({ results: [{ result: 'No tool call found.' }] });
-    }
+    if (!toolCall) { console.log('⚠️ Demo tool-call: no tool call data'); return res.status(200).json({ results: [{ result: 'No tool call found.' }] }); }
 
     const toolCallId = toolCall.id;
     const funcName = toolCall.function?.name || toolCall.name;
@@ -347,122 +286,64 @@ async function handleDemoToolCall(req, res, message) {
 
     if (funcName !== 'send_demo_sms') {
       console.log(`⚠️ Unknown demo function: ${funcName}`);
-      return res.status(200).json({
-        results: [{ toolCallId, result: 'Unknown function.' }],
-      });
+      return res.status(200).json({ results: [{ toolCallId, result: 'Unknown function.' }] });
     }
 
-    // Get caller's real phone number from the call object
-    const callerPhone =
-      message.call?.customer?.number ||
-      message.customer?.number ||
-      null;
+    const callerPhone = message.call?.customer?.number || message.customer?.number || null;
 
     if (!callerPhone || callerPhone === 'Unknown') {
       console.log('⚠️ Demo SMS: no caller phone number available');
-      return res.status(200).json({
-        results: [{
-          toolCallId,
-          result: "I wasn't able to send the text — I don't have your phone number. But after every real call, your team would get an instant summary just like that.",
-        }],
-      });
+      return res.status(200).json({ results: [{ toolCallId, result: "I wasn't able to send the text — I don't have your phone number. But after every real call, your team would get an instant summary just like that." }] });
     }
 
-    // Look up the agency by VAPI phone number
-    const vapiPhone =
-      message.phoneNumber?.number ||
-      message.call?.phoneNumber?.number ||
-      null;
-
+    const vapiPhone = message.phoneNumber?.number || message.call?.phoneNumber?.number || null;
     let agency = null;
-    if (vapiPhone) {
-      agency = await getAgencyByDemoPhone(vapiPhone);
-    }
+    if (vapiPhone) agency = await getAgencyByDemoPhone(vapiPhone);
 
     if (!agency) {
-      // Try to find from call phoneNumberId
       const phoneNumberId = message.call?.phoneNumberId || message.phoneNumber?.id;
       if (phoneNumberId) {
         const lookedUpNumber = await getPhoneNumberFromVapi(phoneNumberId);
-        if (lookedUpNumber) {
-          agency = await getAgencyByDemoPhone(lookedUpNumber);
-        }
+        if (lookedUpNumber) agency = await getAgencyByDemoPhone(lookedUpNumber);
       }
     }
 
     if (!agency) {
       console.log('⚠️ Demo SMS: could not identify agency');
-      return res.status(200).json({
-        results: [{
-          toolCallId,
-          result: 'I just sent you a text with the call summary — check your phone!',
-        }],
-      });
+      return res.status(200).json({ results: [{ toolCallId, result: 'I just sent you a text with the call summary — check your phone!' }] });
     }
 
-    // Format caller phone for display
     const { formatPhoneDisplay, sendTelnyxSMS } = require('../lib/notifications');
-    const callerDisplay = formatPhoneDisplay
-      ? formatPhoneDisplay(callerPhone)
-      : callerPhone;
+    const callerDisplay = formatPhoneDisplay ? formatPhoneDisplay(callerPhone) : callerPhone;
 
-    // Build and send the demo SMS
-    const smsContent = buildDemoSmsContent(
-      {
-        business_name: args.business_name || 'Your Business',
-        business_type: args.business_type || 'business',
-        service_requested: args.service_requested || 'General inquiry',
-        customer_name: args.customer_name || 'Customer',
-        caller_phone_display: callerDisplay,
-      },
-      agency
-    );
+    const smsContent = buildDemoSmsContent({
+      business_name: args.business_name || 'Your Business',
+      business_type: args.business_type || 'business',
+      service_requested: args.service_requested || 'General inquiry',
+      customer_name: args.customer_name || 'Customer',
+      caller_phone_display: callerDisplay,
+    }, agency);
 
     await sendTelnyxSMS(callerPhone, smsContent);
 
     const elapsed = Date.now() - startTime;
     console.log(`✅ Demo SMS sent to ${callerPhone} in ${elapsed}ms`);
 
-    return res.status(200).json({
-      results: [{
-        toolCallId,
-        result: 'Done! The text has been sent to their phone with the full call summary.',
-      }],
-    });
+    return res.status(200).json({ results: [{ toolCallId, result: 'Done! The text has been sent to their phone with the full call summary.' }] });
   } catch (error) {
     const elapsed = Date.now() - startTime;
     console.error(`❌ Demo tool-call failed after ${elapsed}ms:`, error.message);
-
-    return res.status(200).json({
-      results: [{
-        toolCallId: 'error',
-        result: "I sent the text — check your phone! That's exactly what comes through after every call.",
-      }],
-    });
+    return res.status(200).json({ results: [{ toolCallId: 'error', result: "I sent the text — check your phone! That's exactly what comes through after every call." }] });
   }
 }
 
 // ============================================================================
 // PHASE 2: ASSISTANT-REQUEST HANDLER
-//
-// Called by VAPI before a call starts. Returns a complete assistant config
-// with optional caller recognition (contact lookup).
-//
-// CRITICAL: This must respond in under 2-3 seconds or the caller hears
-// dead air. All data comes from Supabase — no external API calls.
-// On ANY error, falls back to the static assistant via assistantId.
-//
-// UPDATED: Now checks subscription status BEFORE building the config.
-// Expired/canceled/suspended clients get a "disconnected" message instead
-// of a full AI receptionist. This prevents zombie calls from going through
-// on numbers whose trials have expired.
 // ============================================================================
 async function handleAssistantRequest(req, res, message) {
   const startTime = Date.now();
 
   try {
-    // ── Extract phone numbers from the request ──────────────────────────
-    // VAPI sends the phone number object directly in assistant-request
     const vapiPhoneNumber = message.phoneNumber?.number || null;
     const callerPhone = message.customer?.number || message.call?.customer?.number || null;
 
@@ -471,13 +352,11 @@ async function handleAssistantRequest(req, res, message) {
     console.log(`   Caller: ${callerPhone || 'Unknown'}`);
 
     if (!vapiPhoneNumber) {
-      // Can't identify who this call is for — try phoneNumberId as fallback
       const phoneNumberId = message.call?.phoneNumberId || message.phoneNumber?.id;
       if (phoneNumberId) {
         const lookedUpNumber = await getPhoneNumberFromVapi(phoneNumberId);
         if (lookedUpNumber) {
           console.log(`   📱 Looked up number from VAPI: ${lookedUpNumber}`);
-          // Recurse with the looked-up number
           message.phoneNumber = { ...message.phoneNumber, number: lookedUpNumber };
           return handleAssistantRequest(req, res, message);
         }
@@ -486,13 +365,10 @@ async function handleAssistantRequest(req, res, message) {
       return res.status(200).json({ error: 'No phone number' });
     }
 
-    // ── Look up client ──────────────────────────────────────────────────
     const client = await getClientByVapiPhoneNumber(vapiPhoneNumber);
 
     if (!client) {
       console.log('⚠️ No client found for:', vapiPhoneNumber);
-
-      // Check if it's a demo phone — build dynamic config (not static assistant)
       const demoAgency = await getAgencyByDemoPhone(vapiPhoneNumber);
       if (demoAgency) {
         console.log(`🎤 Demo call — building dynamic demo config for: ${demoAgency.name}`);
@@ -503,7 +379,6 @@ async function handleAssistantRequest(req, res, message) {
           return res.status(200).json({ assistant: demoConfig });
         } catch (demoErr) {
           console.error('❌ Demo dynamic config failed:', demoErr.message);
-          // Fallback to static assistant if dynamic build fails
           if (demoAgency.demo_assistant_id) {
             console.log(`🔄 Falling back to static demo assistant: ${demoAgency.demo_assistant_id}`);
             return res.status(200).json({ assistantId: demoAgency.demo_assistant_id });
@@ -511,7 +386,6 @@ async function handleAssistantRequest(req, res, message) {
           return res.status(200).json({ error: 'Demo config failed' });
         }
       }
-
       return res.status(200).json({ error: 'Client not found' });
     }
 
@@ -519,67 +393,46 @@ async function handleAssistantRequest(req, res, message) {
     const agency = client.agencies || null;
 
     // ═══════════════════════════════════════════════════════════════════
-    // SUBSCRIPTION GATING — Block expired/canceled/suspended clients
-    // This is the PRIMARY defense against zombie calls. If a client's
-    // trial is expired or subscription is canceled, return a minimal
-    // "disconnected number" config that tells the caller the number
-    // is no longer in service and hangs up in ~15 seconds.
+    // SUBSCRIPTION GATING
     // ═══════════════════════════════════════════════════════════════════
-
-    // Check agency status first
     if (agency) {
       const agencyValidStatuses = ['active', 'trial', 'trialing'];
       if (!agencyValidStatuses.includes(agency.subscription_status)) {
         console.log(`🚫 CALL BLOCKED (assistant-request): Agency ${agency.name} subscription not active (${agency.subscription_status})`);
         return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
       }
-
-      if ((agency.subscription_status === 'trial' || agency.subscription_status === 'trialing')
-          && isTrialExpired(agency.trial_ends_at)) {
+      if ((agency.subscription_status === 'trial' || agency.subscription_status === 'trialing') && isTrialExpired(agency.trial_ends_at)) {
         console.log(`🚫 CALL BLOCKED (assistant-request): Agency ${agency.name} trial expired`);
-        // Also update agency status so it's caught for future calls without re-checking
         await supabase.from('agencies').update({ subscription_status: 'expired' }).eq('id', agency.id);
         return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
       }
     }
 
-    // Check client subscription status
     const clientValidStatuses = ['active', 'trial'];
     if (!clientValidStatuses.includes(client.subscription_status)) {
       console.log(`🚫 CALL BLOCKED (assistant-request): ${client.business_name} subscription not active (${client.subscription_status})`);
       return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
     }
 
-    // Check if client trial has expired (status might not be updated yet)
     if (client.subscription_status === 'trial' && isTrialExpired(client.trial_ends_at)) {
       console.log(`🚫 CALL BLOCKED (assistant-request): ${client.business_name} trial expired`);
-      // Update status so the cron doesn't need to catch this one
       await supabase.from('clients').update({ subscription_status: 'trial_expired', status: 'suspended' }).eq('id', client.id);
       return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
     }
 
-    // Check call limits
     const currentCallCount = client.calls_this_month || 0;
     const callLimit = client.monthly_call_limit ?? 50;
     if (callLimit !== -1 && currentCallCount >= callLimit) {
       console.log(`🚫 CALL BLOCKED (assistant-request): ${client.business_name} reached call limit (${currentCallCount}/${callLimit})`);
-      // Don't disconnect — just return a polite "at capacity" message
       return res.status(200).json({
         assistant: {
-          model: {
-            provider: 'openai',
-            model: 'gpt-3.5-turbo',
-            temperature: 0.1,
-            messages: [{
-              role: 'system',
-              content: `You are answering the phone for ${client.business_name}. Say: "Thank you for calling ${client.business_name}. We're currently unable to take your call through our automated system. Please try again later or reach the business directly. Goodbye." Then end the call using the endCall tool.`
-            }],
+          model: { provider: 'openai', model: 'gpt-3.5-turbo', temperature: 0.1,
+            messages: [{ role: 'system', content: `You are answering the phone for ${client.business_name}. Say: "Thank you for calling ${client.business_name}. We're currently unable to take your call through our automated system. Please try again later or reach the business directly. Goodbye." Then end the call using the endCall tool.` }],
             tools: [{ type: 'endCall' }]
           },
           voice: { provider: 'openai', voiceId: 'alloy' },
           firstMessage: `Thank you for calling ${client.business_name}. We're currently unable to take your call through our automated system. Please try again later or reach the business directly. Goodbye.`,
-          maxDurationSeconds: 15,
-          recordingEnabled: false
+          maxDurationSeconds: 15, recordingEnabled: false
         }
       });
     }
@@ -587,45 +440,30 @@ async function handleAssistantRequest(req, res, message) {
     // ═══════════════════════════════════════════════════════════════════
     // CLIENT IS ACTIVE — Build the full dynamic assistant config
     // ═══════════════════════════════════════════════════════════════════
-
-    // ── Look up caller in contacts (Phase 3 — caller recognition) ───────
     let callerContext = null;
     if (callerPhone && callerPhone !== 'Unknown') {
       try {
-        // Normalize caller phone for lookup
         let normalizedCaller = callerPhone;
         if (!normalizedCaller.startsWith('+')) {
           const digits = normalizedCaller.replace(/\D/g, '');
           if (digits.length === 10) normalizedCaller = `+1${digits}`;
           else if (digits.length === 11 && digits.startsWith('1')) normalizedCaller = `+${digits}`;
         }
-
         const { data: contact, error } = await supabase
           .from('client_contacts')
           .select('name, phone, email, total_calls, last_call_at, ai_summary, notes, tags, status')
-          .eq('client_id', client.id)
-          .eq('phone', normalizedCaller)
-          .single();
-
+          .eq('client_id', client.id).eq('phone', normalizedCaller).single();
         if (!error && contact && contact.name !== 'Unknown') {
           callerContext = contact;
           console.log(`📇 Recognized caller: ${contact.name} (${contact.total_calls} previous calls)`);
-        } else {
-          console.log(`📇 Unknown caller: ${callerPhone}`);
-        }
-      } catch (contactErr) {
-        console.warn('⚠️ Contact lookup failed (non-fatal):', contactErr.message);
-      }
+        } else { console.log(`📇 Unknown caller: ${callerPhone}`); }
+      } catch (contactErr) { console.warn('⚠️ Contact lookup failed (non-fatal):', contactErr.message); }
     }
 
-    // ── Build dynamic assistant config ──────────────────────────────────
     const assistantConfig = await buildDynamicAssistantConfig(client, agency, callerContext);
-
     const elapsed = Date.now() - startTime;
     console.log(`✅ Assistant config built in ${elapsed}ms`);
-    if (callerContext) {
-      console.log(`   🎯 Personalized greeting for ${callerContext.name}`);
-    }
+    if (callerContext) console.log(`   🎯 Personalized greeting for ${callerContext.name}`);
 
     return res.status(200).json({ assistant: assistantConfig });
 
@@ -633,35 +471,21 @@ async function handleAssistantRequest(req, res, message) {
     const elapsed = Date.now() - startTime;
     console.error(`❌ Assistant-request failed after ${elapsed}ms:`, error.message);
 
-    // ── FALLBACK: Use the static assistant ────────────────────────────
-    // If anything goes wrong, try to return the static assistant.
-    // This ensures the call still gets answered even if our dynamic
-    // config building crashes. The caller gets the standard experience
-    // instead of dead air.
     try {
       const vapiPhoneNumber = message.phoneNumber?.number;
       if (vapiPhoneNumber) {
-        const { data: fallbackClient } = await supabase
-          .from('clients')
-          .select('vapi_assistant_id, subscription_status')
-          .eq('vapi_phone_number', vapiPhoneNumber)
-          .single();
-
+        const { data: fallbackClient } = await supabase.from('clients').select('vapi_assistant_id, subscription_status').eq('vapi_phone_number', vapiPhoneNumber).single();
         if (fallbackClient?.vapi_assistant_id) {
-          // Even in fallback, don't serve expired clients
           const fallbackValidStatuses = ['active', 'trial'];
           if (!fallbackValidStatuses.includes(fallbackClient.subscription_status)) {
             console.log(`🚫 Fallback also blocked — client subscription: ${fallbackClient.subscription_status}`);
             return res.status(200).json(buildDisconnectedAssistantConfig(null));
           }
-
           console.log(`🔄 Falling back to static assistant: ${fallbackClient.vapi_assistant_id}`);
           return res.status(200).json({ assistantId: fallbackClient.vapi_assistant_id });
         }
       }
-    } catch (fallbackErr) {
-      console.error('❌ Even fallback failed:', fallbackErr.message);
-    }
+    } catch (fallbackErr) { console.error('❌ Even fallback failed:', fallbackErr.message); }
 
     return res.status(500).json({ error: 'Failed to build assistant config' });
   }
@@ -669,120 +493,71 @@ async function handleAssistantRequest(req, res, message) {
 
 // ============================================================================
 // MAIN WEBHOOK HANDLER
-// Routes to assistant-request OR tool-calls OR end-of-call-report handler
 // ============================================================================
 async function handleVapiWebhook(req, res) {
   try {
     const message = req.body.message;
 
-    // ══════════════════════════════════════════════════════════════════
-    // PHASE 2: Handle assistant-request (before-call config)
-    // ══════════════════════════════════════════════════════════════════
-    if (message?.type === 'assistant-request') {
-      return handleAssistantRequest(req, res, message);
-    }
+    if (message?.type === 'assistant-request') return handleAssistantRequest(req, res, message);
 
-    // ══════════════════════════════════════════════════════════════════
-    // Handle tool-calls / function-call (mid-call function tools)
-    // Currently used by demo assistant's send_demo_sms
-    // ══════════════════════════════════════════════════════════════════
     if (message?.type === 'tool-calls' || message?.type === 'function-call') {
-      // Check if this is a demo call by looking up the phone number
-      const vapiPhone =
-        message.phoneNumber?.number ||
-        message.call?.phoneNumber?.number ||
-        null;
-
+      const vapiPhone = message.phoneNumber?.number || message.call?.phoneNumber?.number || null;
       let isDemoCall = false;
-      if (vapiPhone) {
-        const demoCheck = await getAgencyByDemoPhone(vapiPhone);
-        isDemoCall = !!demoCheck;
-      }
-
+      if (vapiPhone) { const demoCheck = await getAgencyByDemoPhone(vapiPhone); isDemoCall = !!demoCheck; }
       if (!isDemoCall && !vapiPhone) {
-        // Try phoneNumberId lookup
         const phoneNumberId = message.call?.phoneNumberId || message.phoneNumber?.id;
         if (phoneNumberId) {
           const lookedUpNumber = await getPhoneNumberFromVapi(phoneNumberId);
-          if (lookedUpNumber) {
-            const demoCheck2 = await getAgencyByDemoPhone(lookedUpNumber);
-            isDemoCall = !!demoCheck2;
-            if (isDemoCall) {
-              message.phoneNumber = { ...(message.phoneNumber || {}), number: lookedUpNumber };
-            }
-          }
+          if (lookedUpNumber) { const demoCheck2 = await getAgencyByDemoPhone(lookedUpNumber); isDemoCall = !!demoCheck2; if (isDemoCall) message.phoneNumber = { ...(message.phoneNumber || {}), number: lookedUpNumber }; }
         }
       }
-
-      if (isDemoCall) {
-        return handleDemoToolCall(req, res, message);
-      }
-
-      // Non-demo tool calls — log and acknowledge
+      if (isDemoCall) return handleDemoToolCall(req, res, message);
       console.log(`🔧 Tool-call received (non-demo) — acknowledging`);
       return res.status(200).json({ received: true });
     }
 
-    // ══════════════════════════════════════════════════════════════════
-    // Handle end-of-call-report (existing behavior)
-    // ══════════════════════════════════════════════════════════════════
     console.log('📞 VAPI webhook received');
 
-    if (message?.type !== 'end-of-call-report') {
-      return res.status(200).json({ received: true });
-    }
+    if (message?.type !== 'end-of-call-report') return res.status(200).json({ received: true });
     
     const call = message.call;
     const phoneNumberId = call.phoneNumberId;
-    
     const phoneNumber = await getPhoneNumberFromVapi(phoneNumberId);
-    if (!phoneNumber) {
-      console.log('⚠️ Could not get phone number from VAPI');
-      return res.status(200).json({ received: true });
-    }
+    if (!phoneNumber) { console.log('⚠️ Could not get phone number from VAPI'); return res.status(200).json({ received: true }); }
     
     console.log('📱 Phone number:', phoneNumber);
-    
     const client = await getClientByVapiPhoneNumber(phoneNumber);
     
-    // ── Demo call check ─────────────────────────────────────────────────
     if (!client) {
       console.log('⚠️ No client found for phone:', phoneNumber);
       console.log('🔍 Checking if this is a demo call...');
-      
       const demoAgency = await getAgencyByDemoPhone(phoneNumber);
       if (demoAgency) {
         console.log(`✅ Demo call detected for agency: ${demoAgency.name}`);
         const result = await handleDemoCall(demoAgency, message);
         return res.status(200).json({ received: true, demo: true, ...result });
       }
-      
       console.log('⚠️ Not a demo call either — ignoring');
       return res.status(200).json({ received: true });
     }
     
     console.log('✅ Client found:', client.business_name);
     console.log('🏢 Agency:', client.agencies?.name || 'Direct (no agency)');
-    
     const agency = client.agencies;
     
-    // ── Agency status check ─────────────────────────────────────────────
     if (agency) {
       const agencyValidStatuses = ['active', 'trial', 'trialing'];
       if (!agencyValidStatuses.includes(agency.subscription_status)) {
         console.log(`🚫 CALL BLOCKED: Agency ${agency.name} subscription not active`);
         return res.status(200).json({ received: true, blocked: true, reason: 'Agency subscription not active' });
       }
-      
-      if ((agency.subscription_status === 'trial' || agency.subscription_status === 'trialing') 
-          && isTrialExpired(agency.trial_ends_at)) {
+      if ((agency.subscription_status === 'trial' || agency.subscription_status === 'trialing') && isTrialExpired(agency.trial_ends_at)) {
         console.log(`🚫 CALL BLOCKED: Agency ${agency.name} trial expired`);
         await supabase.from('agencies').update({ subscription_status: 'expired' }).eq('id', agency.id);
         return res.status(200).json({ received: true, blocked: true, reason: 'Agency trial expired' });
       }
     }
     
-    // ── Client status check ─────────────────────────────────────────────
     const validStatuses = ['active', 'trial'];
     if (!validStatuses.includes(client.subscription_status)) {
       console.log(`🚫 CALL BLOCKED: ${client.business_name} subscription not active`);
@@ -795,7 +570,6 @@ async function handleVapiWebhook(req, res) {
       return res.status(200).json({ received: true, blocked: true, reason: 'Trial expired' });
     }
     
-    // ── Call limit check ────────────────────────────────────────────────
     const currentCallCount = client.calls_this_month || 0;
     const callLimit = client.monthly_call_limit ?? 50;
     
@@ -808,10 +582,8 @@ async function handleVapiWebhook(req, res) {
     if (callLimit === -1) console.log(`♾️ Unlimited plan — no call cap`);
     else console.log(`📊 Usage: ${currentCallCount}/${callLimit} calls`);
     
-    // ── AI summary + spam detection ─────────────────────────────────────
     const transcript = message.transcript || '';
     const callerPhone = call.customer?.number || 'Unknown';
-    
     const aiData = await generateAISummary(transcript, client.industry || 'professional_services', callerPhone);
     const { customerName, customerPhone, customerEmail, urgency, summary: aiSummary, isSpam, spamReason } = aiData;
     
@@ -819,17 +591,15 @@ async function handleVapiWebhook(req, res) {
     const durationSeconds = call.duration || message.duration || message.call?.duration || message.artifact?.duration || null;
     if (durationSeconds) console.log(`⏱️ Call duration: ${durationSeconds} seconds`);
     
-    // ── Transfer tracking ───────────────────────────────────────────────
     const endedReason = call.endedReason || message.endedReason || null;
     const { transferStatus, wasTransferred } = detectTransferStatus(endedReason, transcript);
     if (wasTransferred) console.log(`📲 Call was TRANSFERRED (endedReason: ${endedReason})`);
     else if (transferStatus === 'transfer_failed') console.log(`❌ Transfer FAILED (endedReason: ${endedReason})`);
     else console.log(`📞 Call ended normally (endedReason: ${endedReason || 'unknown'})`);
     
-    // ── SPAM FAST PATH ──────────────────────────────────────────────────
+    // SPAM FAST PATH
     if (isSpam) {
       console.log(`🚫 SPAM DETECTED: ${spamReason || 'Unknown spam type'}`);
-      
       const spamCallRecord = {
         client_id: client.id, customer_name: customerName || 'Spam Caller',
         customer_phone: customerPhone || callerPhone, customer_email: null,
@@ -838,29 +608,19 @@ async function handleVapiWebhook(req, res) {
         ended_reason: endedReason, transfer_status: null,
         is_spam: true, spam_reason: spamReason, created_at: new Date().toISOString()
       };
-      
-      const { data: insertedSpamCall, error: spamInsertError } = await supabase
-        .from('calls').insert([spamCallRecord]).select();
-      
+      const { data: insertedSpamCall, error: spamInsertError } = await supabase.from('calls').insert([spamCallRecord]).select();
       if (spamInsertError) {
         if (spamInsertError.message && (spamInsertError.message.includes('is_spam') || spamInsertError.message.includes('spam_reason') || spamInsertError.message.includes('ended_reason') || spamInsertError.message.includes('transfer_status'))) {
-          delete spamCallRecord.is_spam; delete spamCallRecord.spam_reason;
-          delete spamCallRecord.ended_reason; delete spamCallRecord.transfer_status;
+          delete spamCallRecord.is_spam; delete spamCallRecord.spam_reason; delete spamCallRecord.ended_reason; delete spamCallRecord.transfer_status;
           await supabase.from('calls').insert([spamCallRecord]).select();
-        } else {
-          console.error('❌ Error inserting spam call:', spamInsertError);
-        }
+        } else { console.error('❌ Error inserting spam call:', spamInsertError); }
       }
-      
       console.log('✅ Spam call saved (not counted against limit)');
-      if (client.owner_phone) {
-        try { await sendSpamBlockedSMS(client, agency, callerPhone, spamReason); } catch {}
-      }
-      
+      if (client.owner_phone) { try { await sendSpamBlockedSMS(client, agency, callerPhone, spamReason); } catch {} }
       return res.status(200).json({ received: true, saved: true, spam: true, spamReason, callId: insertedSpamCall?.[0]?.id || null });
     }
     
-    // ── Save call (normal) ──────────────────────────────────────────────
+    // Save call (normal)
     const callRecord = {
       client_id: client.id, customer_name: customerName, customer_phone: customerPhone,
       customer_email: customerEmail, ai_summary: aiSummary, transcript,
@@ -869,27 +629,17 @@ async function handleVapiWebhook(req, res) {
       ended_reason: endedReason, transfer_status: transferStatus,
       is_spam: false, spam_reason: null, created_at: new Date().toISOString()
     };
-    
-    const { data: insertedCall, error: insertError } = await supabase
-      .from('calls').insert([callRecord]).select();
-    
+    const { data: insertedCall, error: insertError } = await supabase.from('calls').insert([callRecord]).select();
     if (insertError) {
       if (insertError.message && (insertError.message.includes('ended_reason') || insertError.message.includes('transfer_status') || insertError.message.includes('is_spam') || insertError.message.includes('spam_reason'))) {
-        delete callRecord.ended_reason; delete callRecord.transfer_status;
-        delete callRecord.is_spam; delete callRecord.spam_reason;
-        callRecord.call_status = 'completed';
+        delete callRecord.ended_reason; delete callRecord.transfer_status; delete callRecord.is_spam; delete callRecord.spam_reason; callRecord.call_status = 'completed';
         var { data: insertedCallFinal, error: retryError } = await supabase.from('calls').insert([callRecord]).select();
         if (retryError) { console.error('❌ Retry insert failed:', retryError); return res.status(500).json({ error: 'Failed to save call' }); }
-      } else {
-        console.error('❌ Error inserting call:', insertError);
-        return res.status(500).json({ error: 'Failed to save call' });
-      }
+      } else { console.error('❌ Error inserting call:', insertError); return res.status(500).json({ error: 'Failed to save call' }); }
     }
-    
     const savedCall = insertedCall || insertedCallFinal;
     console.log('✅ Call saved successfully');
     
-    // ── Contact upsert ──────────────────────────────────────────────────
     try {
       const { contact, isNew } = await upsertContactFromCall({
         clientId: client.id, agencyId: agency?.id, callId: savedCall?.[0]?.id,
@@ -898,51 +648,32 @@ async function handleVapiWebhook(req, res) {
         aiSummary, urgency, serviceRequested: call.customer?.serviceRequested || null,
       });
       if (contact) console.log(`📇 Contact ${isNew ? 'created' : 'updated'}: ${contact.name} (${contact.phone})`);
-    } catch (contactErr) {
-      console.warn('⚠️ Contact upsert failed (non-fatal):', contactErr.message);
-    }
+    } catch (contactErr) { console.warn('⚠️ Contact upsert failed (non-fatal):', contactErr.message); }
     
-    // ── Update call count ───────────────────────────────────────────────
     const newCallCount = currentCallCount + 1;
     const isFirstCall = newCallCount === 1;
     const updateData = { calls_this_month: newCallCount };
-    if (isFirstCall) {
-      updateData.first_call_received = true;
-      updateData.first_call_received_at = new Date().toISOString();
-      console.log('🎉 FIRST CALL for:', client.business_name);
-    }
+    if (isFirstCall) { updateData.first_call_received = true; updateData.first_call_received_at = new Date().toISOString(); console.log('🎉 FIRST CALL for:', client.business_name); }
     await supabase.from('clients').update(updateData).eq('id', client.id);
     
-    // ── Usage thresholds ────────────────────────────────────────────────
     if (callLimit !== -1) {
       const usagePercent = (newCallCount / callLimit) * 100;
-      if (usagePercent >= 80 && usagePercent < 100 && newCallCount === Math.floor(callLimit * 0.8))
-        await sendUsageWarningEmail(client, agency, newCallCount, callLimit);
-      if (newCallCount >= callLimit && newCallCount === callLimit)
-        await sendLimitReachedEmail(client, agency, callLimit);
+      if (usagePercent >= 80 && usagePercent < 100 && newCallCount === Math.floor(callLimit * 0.8)) await sendUsageWarningEmail(client, agency, newCallCount, callLimit);
+      if (newCallCount >= callLimit && newCallCount === callLimit) await sendLimitReachedEmail(client, agency, callLimit);
     }
     
-    // ── Notifications ───────────────────────────────────────────────────
     let smsSent = false;
     let emailSent = false;
     
-    if (client.owner_phone) {
-      smsSent = await sendCallNotificationSMS(client, agency, aiData);
-      if (smsSent) console.log('✅ SMS notification sent');
-    }
-    
-    // Notify team members who opted in for call alerts
+    if (client.owner_phone) { smsSent = await sendCallNotificationSMS(client, agency, aiData); if (smsSent) console.log('✅ SMS notification sent'); }
     await notifyTeamMembers(client.id, aiData, agency);
     
     if (isFeatureEnabled(client, agency, 'email_summaries') && client.email) {
-      const emailResult = await sendCallSummaryEmail(client, agency, aiData, {
-        duration_seconds: durationSeconds, transcript,
-        created_at: savedCall?.[0]?.created_at || new Date().toISOString(),
-      });
+      const emailResult = await sendCallSummaryEmail(client, agency, aiData, { duration_seconds: durationSeconds, transcript, created_at: savedCall?.[0]?.created_at || new Date().toISOString() });
       emailSent = emailResult?.success || false;
     }
     
-    return res.status(200).json({ 
+    return res.status(200).json({
       received: true, saved: true, callId: savedCall?.[0]?.id,
       smsSent, emailSent, firstCall: isFirstCall,
       agency: agency?.name || null, duration: durationSeconds,

@@ -1,6 +1,7 @@
 // ============================================================================
 // STRIPE PLATFORM BILLING - Agencies Pay Platform
 // UPDATED: Team member limits set on plan activation
+// UPDATED: All SMS wired to getSmsTemplate() with hardcoded fallbacks
 // ============================================================================
 const Stripe = require('stripe');
 const { supabase, getAgencyByStripeCustomerId } = require('../lib/supabase');
@@ -11,6 +12,7 @@ const {
   sendAgencySubscriptionCanceledSMS,
   sendPlatformNotificationSMS
 } = require('../lib/notifications');
+const { getSmsTemplate } = require('../lib/sms-templates');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -21,9 +23,8 @@ const PLAN_DETAILS = {
   starter: { name: 'Starter', clientLimit: 25, priceUsdCents: 9900 },
   professional: { name: 'Professional', clientLimit: 100, priceUsdCents: 19900 },
   enterprise: { name: 'Enterprise', clientLimit: -1, priceUsdCents: 49900 }
-}; // -1 = unlimited
+};
 
-// Team member limits per plan (set on agencies table at checkout/subscription)
 const TEAM_MEMBER_LIMITS = {
   starter:      { agency: 0, client: 0 },
   professional: { agency: 3, client: 2 },
@@ -162,9 +163,6 @@ async function createAgencyCheckout(req, res) {
 
 // ============================================================================
 // CREATE PORTAL SESSION (Agency manages subscription)
-// Handles two cases:
-// 1. Has stripe_customer_id → open Stripe billing portal
-// 2. No stripe_customer_id (no-card trial) → create checkout session (no trial)
 // ============================================================================
 async function createAgencyPortal(req, res) {
   try {
@@ -431,12 +429,15 @@ async function handleAgencyPaymentSucceeded(invoice) {
     subscription_status: 'active', status: 'active', updated_at: new Date().toISOString()
   }).eq('id', agency.id);
 
-  // Notify platform owner — agency converted to paid
+  // Notify platform owner — agency converted to paid (TEMPLATE WIRED)
+  const amountDisplay = `${(invoice.currency || 'usd').toUpperCase()} ${(invoice.amount_paid / 100).toFixed(2)}`;
+  const templateMsg = await getSmsTemplate('admin_agency_payment', {
+    name: agency.name,
+    amount: amountDisplay,
+    plan: agency.plan_type || 'unknown',
+  });
   sendPlatformNotificationSMS(
-    `Agency Payment Received\n` +
-    `Name: ${agency.name}\n` +
-    `Amount: ${(invoice.currency || 'usd').toUpperCase()} ${(invoice.amount_paid / 100).toFixed(2)}\n` +
-    `Plan: ${agency.plan_type || 'unknown'}`
+    templateMsg || `Agency Payment Received\nName: ${agency.name}\nAmount: ${amountDisplay}\nPlan: ${agency.plan_type || 'unknown'}`
   ).catch(err => console.error('Failed to send payment notification:', err));
 
   // =========================================================================
@@ -504,8 +505,7 @@ async function handleAgencyTrialEnding(subscription) {
 
 // ============================================================================
 // WARN NO-CARD TRIAL AGENCIES (3 days before expiry)
-// Called by cron — sends escalating SMS to agencies whose no-card trial is
-// ending soon. Each day has a different message and tone.
+// UPDATED: Uses getSmsTemplate() for all 3 warning messages + admin notification
 // ============================================================================
 async function warnExpiringAgencyTrials() {
   console.log('Checking for expiring agency trials (no-card)...');
@@ -535,36 +535,34 @@ async function warnExpiringAgencyTrials() {
       const trialEnd = new Date(agency.trial_ends_at);
       const hoursLeft = (trialEnd.getTime() - now.getTime()) / (1000 * 60 * 60);
       const daysLeft = Math.ceil(hoursLeft / 24);
+      const trialEndDate = trialEnd.toLocaleDateString();
 
       let agencyMessage = null;
 
       if (daysLeft >= 3) {
-        // ================================================================
-        // DAY 3 — Friendly check-in, remind them what's ready
-        // ================================================================
-        agencyMessage =
-          `Hey ${agency.name} — quick heads up, your VoiceAI Connect trial wraps up on ${trialEnd.toLocaleDateString()}.\n\n` +
+        // DAY 3 — Friendly check-in
+        const templateMsg = await getSmsTemplate('agency_trial_warning_day3', { name: agency.name, trial_end_date: trialEndDate });
+        agencyMessage = templateMsg ||
+          `Hey ${agency.name} — quick heads up, your VoiceAI Connect trial wraps up on ${trialEndDate}.\n\n` +
           `Your agency is fully set up — branding, pricing, signup page, all of it. You're ready to start bringing on clients whenever you want.\n\n` +
           `If you'd like to keep everything as-is, you can subscribe here:\n` +
           `myvoiceaiconnect.com/agency/settings?tab=billing\n\n` +
           `Any questions, just reply to this text.`;
 
       } else if (daysLeft === 2) {
-        // ================================================================
-        // DAY 2 — Honest about what happens, still helpful
-        // ================================================================
-        agencyMessage =
-          `Hey ${agency.name} — just wanted to make sure this doesn't catch you off guard. Your VoiceAI Connect trial ends ${trialEnd.toLocaleDateString()}.\n\n` +
+        // DAY 2 — Honest about what happens
+        const templateMsg = await getSmsTemplate('agency_trial_warning_day2', { name: agency.name, trial_end_date: trialEndDate });
+        agencyMessage = templateMsg ||
+          `Hey ${agency.name} — just wanted to make sure this doesn't catch you off guard. Your VoiceAI Connect trial ends ${trialEndDate}.\n\n` +
           `After that, your dashboard and client signup page will go offline, and any active AI receptionists will stop taking calls.\n\n` +
           `If you're planning to keep going, subscribing takes about 30 seconds:\n` +
           `myvoiceaiconnect.com/agency/settings?tab=billing\n\n` +
           `And if it's not the right time, no worries at all.`;
 
       } else if (daysLeft <= 1) {
-        // ================================================================
         // DAY 1 — Last day, short and direct
-        // ================================================================
-        agencyMessage =
+        const templateMsg = await getSmsTemplate('agency_trial_warning_day1', { name: agency.name });
+        agencyMessage = templateMsg ||
           `Hey ${agency.name} — your VoiceAI Connect trial ends tomorrow. After that your agency goes offline and any AI receptionists stop answering.\n\n` +
           `If you want to keep things running:\n` +
           `myvoiceaiconnect.com/agency/settings?tab=billing\n\n` +
@@ -577,12 +575,15 @@ async function warnExpiringAgencyTrials() {
         console.log(`Trial warning (day ${daysLeft}) sent to ${agency.name}`);
       }
 
+      // Admin notification (TEMPLATE WIRED)
+      const adminTemplate = await getSmsTemplate('admin_agency_trial_expiring', {
+        days_left: daysLeft,
+        name: agency.name,
+        email: agency.email,
+        plan: agency.plan_type || 'starter',
+      });
       await sendPlatformNotificationSMS(
-        `Agency Trial Expiring (${daysLeft}d)\n` +
-        `Name: ${agency.name}\n` +
-        `Email: ${agency.email}\n` +
-        `Plan: ${agency.plan_type || 'starter'}\n` +
-        `No card on file`
+        adminTemplate || `Agency Trial Expiring (${daysLeft}d)\nName: ${agency.name}\nEmail: ${agency.email}\nPlan: ${agency.plan_type || 'starter'}\nNo card on file`
       );
 
       results.push({ id: agency.id, name: agency.name, daysLeft, success: true });
