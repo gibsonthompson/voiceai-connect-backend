@@ -1,10 +1,7 @@
 // ============================================================================
 // CLIENT ROUTES - Dashboard Settings & AI Agent Configuration
 // VoiceAI Connect Multi-Tenant
-// UPDATED: Fixed response formats to match frontend expectations
-// UPDATED: Added branding_overrides to agency select for theme customization
-// UPDATED: Removed 5 retired ElevenLabs voices, updated preview URLs (2026-03-14)
-// UPDATED: Client branding now supports branding_overrides JSONB (nav, buttons, page, cards)
+// UPDATED: Branding now uses flat columns instead of broken branding_overrides JSONB
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -19,7 +16,6 @@ const VAPI_API_KEY = process.env.VAPI_API_KEY;
 // Retired voices removed: Rachel, Serena, Emily, Drew, Josh
 // ============================================================================
 const VOICE_OPTIONS = [
-  // Female voices
   { 
     id: 'EXAVITQu4vr4xnSDxMaL', 
     name: 'Sarah', 
@@ -58,8 +54,6 @@ const VOICE_OPTIONS = [
     description: 'Clear, engaging educator voice. Great for corporate environments.',
     previewUrl: 'https://storage.googleapis.com/eleven-public-prod/premade/voices/Xb7hH8MSUJpSbSDYk0k2/d10f7534-11f6-41fe-a012-2de1e482d336.mp3'
   },
-  
-  // Male voices
   { 
     id: 'IKne3meq5aSn9XLyUdCD', 
     name: 'Charlie', 
@@ -119,7 +113,6 @@ const VOICE_OPTIONS = [
 
 // ============================================================================
 // GET /api/client/:id - Full client data with agency
-// UPDATED: Added plan_features + branding_overrides to agency select
 // ============================================================================
 router.get('/:id', async (req, res) => {
   try {
@@ -134,7 +127,6 @@ router.get('/:id', async (req, res) => {
           primary_color, secondary_color, accent_color,
           logo_url, support_email, support_phone,
           website_theme,
-          branding_overrides,
           client_header_mode,
           price_starter, price_pro, price_growth,
           limit_starter, limit_pro, limit_growth,
@@ -187,13 +179,26 @@ router.put('/:id/settings', async (req, res) => {
 
 // ============================================================================
 // PUT /api/client/:id/branding - Update client-level branding
-// Nav/button colors auto-derive from primary_color on the frontend.
-// branding_overrides write is disabled until PostgREST schema cache is resolved.
+// Saves flat columns: primary_color, nav_bg, nav_text, button_text,
+// page_bg, card_bg, card_border, theme_mode, logo_url, business_name
 // ============================================================================
 router.put('/:id/branding', async (req, res) => {
   try {
     const { id } = req.params;
-    const { logo_url, primary_color, secondary_color, accent_color, business_name } = req.body;
+    const {
+      logo_url,
+      business_name,
+      primary_color,
+      secondary_color,
+      accent_color,
+      nav_bg,
+      nav_text,
+      button_text,
+      page_bg,
+      card_bg,
+      card_border,
+      theme_mode,
+    } = req.body;
 
     const updates = {};
     if (logo_url !== undefined) updates.logo_url = logo_url || null;
@@ -201,6 +206,13 @@ router.put('/:id/branding', async (req, res) => {
     if (secondary_color !== undefined) updates.secondary_color = secondary_color || null;
     if (accent_color !== undefined) updates.accent_color = accent_color || null;
     if (business_name !== undefined && business_name.trim()) updates.business_name = business_name.trim();
+    if (nav_bg !== undefined) updates.nav_bg = nav_bg || null;
+    if (nav_text !== undefined) updates.nav_text = nav_text || null;
+    if (button_text !== undefined) updates.button_text = button_text || null;
+    if (page_bg !== undefined) updates.page_bg = page_bg || null;
+    if (card_bg !== undefined) updates.card_bg = card_bg || null;
+    if (card_border !== undefined) updates.card_border = card_border || null;
+    if (theme_mode !== undefined) updates.theme_mode = theme_mode || null;
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ success: false, error: 'No fields to update' });
@@ -228,7 +240,6 @@ router.put('/:id/branding', async (req, res) => {
 
 // ============================================================================
 // GET /api/client/:id/voice - Get current voice
-// FIXED: Response format to match frontend expectations
 // ============================================================================
 router.get('/:id/voice', async (req, res) => {
   try {
@@ -246,11 +257,7 @@ router.get('/:id/voice', async (req, res) => {
 
     if (client.voice_id) {
       const voice = VOICE_OPTIONS.find(v => v.id === client.voice_id);
-      return res.json({ 
-        success: true, 
-        voice_id: client.voice_id, 
-        voice 
-      });
+      return res.json({ success: true, voice_id: client.voice_id, voice });
     }
 
     if (client.vapi_assistant_id) {
@@ -262,11 +269,7 @@ router.get('/:id/voice', async (req, res) => {
         const assistant = await response.json();
         const voiceId = assistant.voice?.voiceId;
         const voice = VOICE_OPTIONS.find(v => v.id === voiceId);
-        return res.json({ 
-          success: true, 
-          voice_id: voiceId, 
-          voice 
-        });
+        return res.json({ success: true, voice_id: voiceId, voice });
       }
     }
 
@@ -279,7 +282,6 @@ router.get('/:id/voice', async (req, res) => {
 
 // ============================================================================
 // PUT /api/client/:id/voice - Update voice
-// FIXED: Accept both voice_id and voiceId from request body
 // ============================================================================
 router.put('/:id/voice', async (req, res) => {
   try {
@@ -312,10 +314,7 @@ router.put('/:id/voice', async (req, res) => {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        voice: {
-          provider: '11labs',
-          voiceId: voiceId
-        }
+        voice: { provider: '11labs', voiceId: voiceId }
       })
     });
 
@@ -325,10 +324,7 @@ router.put('/:id/voice', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Failed to update voice in VAPI' });
     }
 
-    await supabase
-      .from('clients')
-      .update({ voice_id: voiceId })
-      .eq('id', id);
+    await supabase.from('clients').update({ voice_id: voiceId }).eq('id', id);
 
     console.log(`✅ Voice updated for client ${id}: ${validVoice.name}`);
     res.json({ success: true, voice: validVoice });
@@ -340,7 +336,6 @@ router.put('/:id/voice', async (req, res) => {
 
 // ============================================================================
 // GET /api/client/:id/greeting - Get greeting message
-// FIXED: Response format to match frontend expectations
 // ============================================================================
 router.get('/:id/greeting', async (req, res) => {
   try {
@@ -359,11 +354,7 @@ router.get('/:id/greeting', async (req, res) => {
     const defaultGreeting = `Hi, you've reached ${client.business_name}. This call may be recorded for quality and training purposes. How can I help you today?`;
 
     if (client.greeting_message) {
-      return res.json({ 
-        success: true, 
-        greeting_message: client.greeting_message,
-        default_greeting: defaultGreeting
-      });
+      return res.json({ success: true, greeting_message: client.greeting_message, default_greeting: defaultGreeting });
     }
 
     if (client.vapi_assistant_id) {
@@ -373,19 +364,11 @@ router.get('/:id/greeting', async (req, res) => {
 
       if (response.ok) {
         const assistant = await response.json();
-        return res.json({ 
-          success: true,
-          greeting_message: assistant.firstMessage || defaultGreeting,
-          default_greeting: defaultGreeting
-        });
+        return res.json({ success: true, greeting_message: assistant.firstMessage || defaultGreeting, default_greeting: defaultGreeting });
       }
     }
 
-    res.json({ 
-      success: true,
-      greeting_message: defaultGreeting,
-      default_greeting: defaultGreeting
-    });
+    res.json({ success: true, greeting_message: defaultGreeting, default_greeting: defaultGreeting });
   } catch (error) {
     console.error('Error fetching greeting:', error);
     res.status(500).json({ success: false, error: 'Server error' });
@@ -394,7 +377,6 @@ router.get('/:id/greeting', async (req, res) => {
 
 // ============================================================================
 // PUT /api/client/:id/greeting - Update greeting message
-// FIXED: Accept both greeting_message and greeting from request body
 // ============================================================================
 router.put('/:id/greeting', async (req, res) => {
   try {
@@ -417,13 +399,8 @@ router.put('/:id/greeting', async (req, res) => {
 
     const vapiResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
       method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${VAPI_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        firstMessage: greeting
-      })
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ firstMessage: greeting })
     });
 
     if (!vapiResponse.ok) {
@@ -432,10 +409,7 @@ router.put('/:id/greeting', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Failed to update greeting in VAPI' });
     }
 
-    await supabase
-      .from('clients')
-      .update({ greeting_message: greeting })
-      .eq('id', id);
+    await supabase.from('clients').update({ greeting_message: greeting }).eq('id', id);
 
     console.log(`✅ Greeting updated for client ${id}`);
     res.json({ success: true, greeting_message: greeting });
@@ -447,7 +421,6 @@ router.put('/:id/greeting', async (req, res) => {
 
 // ============================================================================
 // PUT /api/client/:id/business-hours - Update business hours
-// FIXED: Accept both businessHours and business_hours from request body
 // ============================================================================
 router.put('/:id/business-hours', async (req, res) => {
   try {
@@ -458,10 +431,7 @@ router.put('/:id/business-hours', async (req, res) => {
       return res.status(400).json({ success: false, error: 'business_hours required' });
     }
 
-    const { error } = await supabase
-      .from('clients')
-      .update({ business_hours: businessHours })
-      .eq('id', id);
+    const { error } = await supabase.from('clients').update({ business_hours: businessHours }).eq('id', id);
 
     if (error) {
       return res.status(400).json({ success: false, error: error.message });
@@ -477,7 +447,6 @@ router.put('/:id/business-hours', async (req, res) => {
 
 // ============================================================================
 // GET /api/client/:id/knowledge-base - Get knowledge base content
-// UPDATED: Returns structured data for the new Knowledge Base form
 // ============================================================================
 router.get('/:id/knowledge-base', async (req, res) => {
   try {
@@ -512,7 +481,7 @@ router.get('/:id/knowledge-base', async (req, res) => {
 
     res.json({
       success: true,
-      data: data,
+      data,
       websiteUrl: client.business_website || '',
       knowledge_base_id: client.knowledge_base_id,
       updated_at: client.knowledge_base_updated_at
@@ -612,21 +581,12 @@ router.get('/:id/calls', async (req, res) => {
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
 
-    const callsThisMonth = (calls || []).filter(
-      c => new Date(c.created_at) >= startOfMonth
-    ).length;
-
-    const highUrgency = (calls || []).filter(
-      c => c.urgency_level === 'high' || c.urgency_level === 'emergency'
-    ).length;
+    const callsThisMonth = (calls || []).filter(c => new Date(c.created_at) >= startOfMonth).length;
+    const highUrgency = (calls || []).filter(c => c.urgency_level === 'high' || c.urgency_level === 'emergency').length;
 
     res.json({
       calls: calls || [],
-      stats: {
-        callsThisMonth,
-        highUrgency,
-        total: (calls || []).length,
-      }
+      stats: { callsThisMonth, highUrgency, total: (calls || []).length }
     });
   } catch (error) {
     console.error('Error fetching calls:', error);
