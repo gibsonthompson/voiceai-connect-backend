@@ -4,6 +4,7 @@
 // UPDATED: Fixed response formats to match frontend expectations
 // UPDATED: Added branding_overrides to agency select for theme customization
 // UPDATED: Removed 5 retired ElevenLabs voices, updated preview URLs (2026-03-14)
+// UPDATED: Client branding now supports branding_overrides JSONB (nav, buttons, page, cards)
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -187,6 +188,7 @@ router.put('/:id/settings', async (req, res) => {
 // ============================================================================
 // PUT /api/client/:id/branding - Update client-level branding
 // Handles logo, colors, AND branding_overrides (nav, buttons, page, cards)
+// Uses .select('*') to avoid PostgREST schema cache misses on new columns
 // ============================================================================
 router.put('/:id/branding', async (req, res) => {
   try {
@@ -194,33 +196,15 @@ router.put('/:id/branding', async (req, res) => {
     const { logo_url, primary_color, secondary_color, accent_color, business_name, branding_overrides } = req.body;
 
     const updates = {};
-    // Allow null to clear (fall back to agency branding)
     if (logo_url !== undefined) updates.logo_url = logo_url || null;
     if (primary_color !== undefined) updates.primary_color = primary_color || null;
     if (secondary_color !== undefined) updates.secondary_color = secondary_color || null;
     if (accent_color !== undefined) updates.accent_color = accent_color || null;
     if (business_name !== undefined && business_name.trim()) updates.business_name = business_name.trim();
     
-    // branding_overrides: JSONB with nav_bg, nav_text, button_text, page_bg, card_bg, card_border, theme
-    // Send null to clear all overrides, or an object to set specific ones
+    // branding_overrides: full replace (frontend sends the complete object or null)
     if (branding_overrides !== undefined) {
-      if (branding_overrides === null) {
-        updates.branding_overrides = null;
-      } else {
-        // Merge with existing overrides so partial updates work
-        const { data: existing } = await supabase
-          .from('clients')
-          .select('branding_overrides')
-          .eq('id', id)
-          .single();
-        
-        const merged = { ...(existing?.branding_overrides || {}), ...branding_overrides };
-        // Remove null/empty values
-        Object.keys(merged).forEach(k => {
-          if (merged[k] === null || merged[k] === '' || merged[k] === undefined) delete merged[k];
-        });
-        updates.branding_overrides = Object.keys(merged).length > 0 ? merged : null;
-      }
+      updates.branding_overrides = branding_overrides || null;
     }
 
     if (Object.keys(updates).length === 0) {
@@ -231,10 +215,11 @@ router.put('/:id/branding', async (req, res) => {
       .from('clients')
       .update(updates)
       .eq('id', id)
-      .select('id, business_name, logo_url, primary_color, secondary_color, accent_color, branding_overrides')
+      .select('*')
       .single();
 
     if (error) {
+      console.error('Supabase branding update error:', error);
       return res.status(400).json({ success: false, error: error.message });
     }
 
@@ -264,7 +249,6 @@ router.get('/:id/voice', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Client not found' });
     }
 
-    // If we have cached voice_id, return it
     if (client.voice_id) {
       const voice = VOICE_OPTIONS.find(v => v.id === client.voice_id);
       return res.json({ 
@@ -274,7 +258,6 @@ router.get('/:id/voice', async (req, res) => {
       });
     }
 
-    // Otherwise fetch from VAPI
     if (client.vapi_assistant_id) {
       const response = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
         headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
@@ -306,14 +289,12 @@ router.get('/:id/voice', async (req, res) => {
 router.put('/:id/voice', async (req, res) => {
   try {
     const { id } = req.params;
-    // Accept both field names for compatibility
     const voiceId = req.body.voice_id || req.body.voiceId;
 
     if (!voiceId) {
       return res.status(400).json({ success: false, error: 'voice_id required' });
     }
 
-    // Validate voice ID
     const validVoice = VOICE_OPTIONS.find(v => v.id === voiceId);
     if (!validVoice) {
       return res.status(400).json({ success: false, error: 'Invalid voice ID' });
@@ -329,7 +310,6 @@ router.put('/:id/voice', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Client or assistant not found' });
     }
 
-    // Update VAPI assistant
     const vapiResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
       method: 'PATCH',
       headers: {
@@ -350,7 +330,6 @@ router.put('/:id/voice', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Failed to update voice in VAPI' });
     }
 
-    // Cache in database
     await supabase
       .from('clients')
       .update({ voice_id: voiceId })
@@ -384,7 +363,6 @@ router.get('/:id/greeting', async (req, res) => {
 
     const defaultGreeting = `Hi, you've reached ${client.business_name}. This call may be recorded for quality and training purposes. How can I help you today?`;
 
-    // Return cached greeting or fetch from VAPI
     if (client.greeting_message) {
       return res.json({ 
         success: true, 
@@ -426,7 +404,6 @@ router.get('/:id/greeting', async (req, res) => {
 router.put('/:id/greeting', async (req, res) => {
   try {
     const { id } = req.params;
-    // Accept both field names for compatibility
     const greeting = req.body.greeting_message || req.body.greeting;
 
     if (!greeting) {
@@ -443,7 +420,6 @@ router.put('/:id/greeting', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Client or assistant not found' });
     }
 
-    // Update VAPI assistant
     const vapiResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
       method: 'PATCH',
       headers: {
@@ -461,7 +437,6 @@ router.put('/:id/greeting', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Failed to update greeting in VAPI' });
     }
 
-    // Cache in database
     await supabase
       .from('clients')
       .update({ greeting_message: greeting })
@@ -482,7 +457,6 @@ router.put('/:id/greeting', async (req, res) => {
 router.put('/:id/business-hours', async (req, res) => {
   try {
     const { id } = req.params;
-    // Accept both field names for compatibility
     const businessHours = req.body.business_hours || req.body.businessHours;
 
     if (!businessHours) {
@@ -524,18 +498,14 @@ router.get('/:id/knowledge-base', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Client not found' });
     }
 
-    // Handle both old format (content string) and new format (structured object)
     let data = {};
     
     if (client.knowledge_base_data) {
       if (typeof client.knowledge_base_data === 'string') {
-        // Old format: plain text content
         data = { additionalInfo: client.knowledge_base_data };
       } else if (client.knowledge_base_data.content && typeof client.knowledge_base_data.content === 'string') {
-        // Old format: { content: "..." }
         data = { additionalInfo: client.knowledge_base_data.content };
       } else {
-        // New format: structured object with services, faqs, businessHours, additionalInfo
         data = {
           services: client.knowledge_base_data.services || '',
           faqs: client.knowledge_base_data.faqs || '',
@@ -567,14 +537,11 @@ router.put('/:id/knowledge-base', async (req, res) => {
     const { id } = req.params;
     const { content, services, faqs, businessHours, additionalInfo } = req.body;
 
-    // Support both old format (content) and new format (structured)
     let knowledgeBaseData;
     
     if (content !== undefined) {
-      // Old format
       knowledgeBaseData = { content };
     } else {
-      // New structured format
       knowledgeBaseData = {
         services: services || '',
         faqs: faqs || '',
@@ -646,7 +613,6 @@ router.get('/:id/calls', async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
 
-    // Calculate stats
     const startOfMonth = new Date();
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
