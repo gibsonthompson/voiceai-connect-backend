@@ -186,12 +186,12 @@ router.put('/:id/settings', async (req, res) => {
 
 // ============================================================================
 // PUT /api/client/:id/branding - Update client-level branding
-// Called by agency from client detail page to set per-client logo/colors
+// Handles logo, colors, AND branding_overrides (nav, buttons, page, cards)
 // ============================================================================
 router.put('/:id/branding', async (req, res) => {
   try {
     const { id } = req.params;
-    const { logo_url, primary_color, secondary_color, accent_color, business_name } = req.body;
+    const { logo_url, primary_color, secondary_color, accent_color, business_name, branding_overrides } = req.body;
 
     const updates = {};
     // Allow null to clear (fall back to agency branding)
@@ -200,6 +200,28 @@ router.put('/:id/branding', async (req, res) => {
     if (secondary_color !== undefined) updates.secondary_color = secondary_color || null;
     if (accent_color !== undefined) updates.accent_color = accent_color || null;
     if (business_name !== undefined && business_name.trim()) updates.business_name = business_name.trim();
+    
+    // branding_overrides: JSONB with nav_bg, nav_text, button_text, page_bg, card_bg, card_border, theme
+    // Send null to clear all overrides, or an object to set specific ones
+    if (branding_overrides !== undefined) {
+      if (branding_overrides === null) {
+        updates.branding_overrides = null;
+      } else {
+        // Merge with existing overrides so partial updates work
+        const { data: existing } = await supabase
+          .from('clients')
+          .select('branding_overrides')
+          .eq('id', id)
+          .single();
+        
+        const merged = { ...(existing?.branding_overrides || {}), ...branding_overrides };
+        // Remove null/empty values
+        Object.keys(merged).forEach(k => {
+          if (merged[k] === null || merged[k] === '' || merged[k] === undefined) delete merged[k];
+        });
+        updates.branding_overrides = Object.keys(merged).length > 0 ? merged : null;
+      }
+    }
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ success: false, error: 'No fields to update' });
@@ -209,7 +231,7 @@ router.put('/:id/branding', async (req, res) => {
       .from('clients')
       .update(updates)
       .eq('id', id)
-      .select('id, business_name, logo_url, primary_color, secondary_color, accent_color')
+      .select('id, business_name, logo_url, primary_color, secondary_color, accent_color, branding_overrides')
       .single();
 
     if (error) {
