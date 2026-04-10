@@ -187,13 +187,13 @@ router.put('/:id/settings', async (req, res) => {
 
 // ============================================================================
 // PUT /api/client/:id/branding - Update client-level branding
-// Handles logo, colors, AND branding_overrides (nav, buttons, page, cards)
-// Uses .select('*') to avoid PostgREST schema cache misses on new columns
+// Nav/button colors auto-derive from primary_color on the frontend.
+// branding_overrides write is disabled until PostgREST schema cache is resolved.
 // ============================================================================
 router.put('/:id/branding', async (req, res) => {
   try {
     const { id } = req.params;
-    const { logo_url, primary_color, secondary_color, accent_color, business_name, branding_overrides } = req.body;
+    const { logo_url, primary_color, secondary_color, accent_color, business_name } = req.body;
 
     const updates = {};
     if (logo_url !== undefined) updates.logo_url = logo_url || null;
@@ -201,11 +201,6 @@ router.put('/:id/branding', async (req, res) => {
     if (secondary_color !== undefined) updates.secondary_color = secondary_color || null;
     if (accent_color !== undefined) updates.accent_color = accent_color || null;
     if (business_name !== undefined && business_name.trim()) updates.business_name = business_name.trim();
-    
-    // branding_overrides: full replace (frontend sends the complete object or null)
-    if (branding_overrides !== undefined) {
-      updates.branding_overrides = branding_overrides || null;
-    }
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ success: false, error: 'No fields to update' });
