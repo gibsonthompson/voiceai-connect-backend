@@ -1,14 +1,12 @@
 // ============================================================================
-// DEMO ASSISTANT CONFIG — Dynamic per-call demo configuration
+// DEMO ASSISTANT CONFIG
+// Config format MATCHES buildDynamicAssistantConfig exactly (8 fields only):
+//   name, model, voice, firstMessage, recordingEnabled, serverMessages, serverUrl, hooks
+// No extra fields — maxDuration, transcriber, startSpeakingPlan etc. are NOT
+// included because the working client config doesn't use them and VAPI may
+// reject them in transient assistant-request responses.
 //
-// TWO DEMO MODES:
-//   1. GENERIC DEMO — buildDemoDynamicConfig(agency)
-//      Routes via agencies.demo_phone_number (+14706491985)
-//   2. INDUSTRY DEMO — buildIndustryDemoConfig(industryKey, agency)
-//      Routes via INDUSTRY_DEMO_NUMBERS (+15055945806 → dental)
-//
-// CREATED: 2026-03-23
-// UPDATED: 2026-04-12 — Industry demos, tools inside model (VAPI format)
+// UPDATED: 2026-04-12 — Stripped to match working client config format
 // ============================================================================
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
@@ -27,15 +25,6 @@ const INDUSTRY_DEMO_VOICES = {
   financial: 'nPczCjzI2devNBz1zQrb', automotive: 'iP95p4xoKVk53GoZ742B',
 };
 
-const INDUSTRY_DEMO_KEYWORDS = {
-  dental: [
-    'CallBird:2','dental:2','dentist:2','orthodontics:1','Invisalign:2',
-    'braces:1','cleaning:1','filling:1','crown:1','extraction:1',
-    'whitening:1','implant:1','root canal:1','cavity:1','hygienist:1',
-    'appointment:1','receptionist:1','patient:1',
-  ],
-};
-
 const INDUSTRY_DISPLAY_NAMES = {
   dental: 'dental', home_services: 'home services', medical: 'medical',
   professional_services: 'professional services', restaurants: 'restaurant',
@@ -44,23 +33,20 @@ const INDUSTRY_DISPLAY_NAMES = {
   automotive: 'automotive',
 };
 
-// ============================================================================
-// DEMO TOOLS — reusable across both generic and industry demos
-// ============================================================================
 function getDemoTools() {
   return [
     {
       type: 'function',
       function: {
         name: 'send_demo_sms',
-        description: 'Send a post-call notification SMS to the caller showing what their team receives after every call. Call this once after breaking out of the receptionist roleplay.',
+        description: 'Send a post-call notification SMS to the caller. Call once after breaking out of roleplay.',
         parameters: {
           type: 'object',
           properties: {
             business_name: { type: 'string', description: 'The caller\'s business name' },
             business_type: { type: 'string', description: 'Type of business' },
-            service_requested: { type: 'string', description: 'Be specific — "cleaning and checkup, new patient, Thursday at 2pm"' },
-            customer_name: { type: 'string', description: 'The name the caller gave during roleplay' },
+            service_requested: { type: 'string', description: 'Be specific' },
+            customer_name: { type: 'string', description: 'Name from roleplay' },
           },
           required: ['business_name', 'service_requested', 'customer_name'],
         },
@@ -71,10 +57,9 @@ function getDemoTools() {
 }
 
 // ============================================================================
-// INDUSTRY DEMO PROMPTS
+// DENTAL DEMO PROMPT
 // ============================================================================
 const INDUSTRY_DEMO_PROMPTS = {
-
   dental: (agencyName, options = {}) => {
     const { skipSignupMention = false } = options;
     const wrapUpLine = skipSignupMention
@@ -84,122 +69,73 @@ const INDUSTRY_DEMO_PROMPTS = {
 
     return `# Who You Are
 
-You are a live demo AI receptionist for ${agencyName}, specifically built for dental and orthodontic practices. Your job is to show a dental practice owner exactly what it sounds like when an AI answers their phones. You do this by learning their practice name, then immediately becoming their receptionist while they pretend to be a patient calling in.
+You are a live demo AI receptionist for ${agencyName}, specifically built for dental and orthodontic practices. Your job is to show a dental practice owner exactly what it sounds like when an AI answers their phones.
 
 This is a sales demo. Every moment should make them think "I need this for my practice."
 
 # How You Sound
 
-- Like a real person on a real phone call. Contractions, natural pacing, fillers like "gotcha," "sure thing," "of course."
+- Like a real person. Contractions, natural pacing, fillers like "gotcha," "sure thing," "of course."
 - Short. One to two sentences per turn.
-- Warm and upbeat — like a front desk person who loves their job.
-- Match their energy. One question at a time. Never stack questions.
-- Say phone numbers digit by digit. Say dates as words. Say "twenty four seven" not "24/7."
+- Warm and upbeat. Match their energy. One question at a time.
+- Say phone numbers digit by digit. Say dates as words.
 
 # The Demo
 
-Two parts. Move through them like a natural conversation.
-
 ## Part 1 — Get Their Practice Name
-
-After your greeting, ask what their practice is called. That's the ONLY thing you need.
-
-Once you have the name: "Love it. Alright, I'm gonna answer your next call like I've been working the front desk at [practice name] for years. Go ahead and call in like you're a patient."
-
-IMPORTANT: If they start roleplaying immediately, roll with it. Jump straight into character.
+Ask what their practice is called. Once you have it: "Love it. Alright, I'm gonna answer your next call like I've been working the front desk at [practice name] for years. Go ahead and call in like you're a patient."
+If they start roleplaying immediately, roll with it.
 
 ## Part 2 — Be Their Dental Receptionist
+You ARE the receptionist. Fully commit. Do not break character.
 
-You ARE the receptionist now. Fully commit. Do not break character.
-
-**SCHEDULING:** Collect one piece at a time: new or existing patient, what for, preferred day, name, phone number (repeat back digit by digit).
-
-**BOOKING CONFIDENTLY:** Give times. "How does tomorrow at ten work?" or "I've got a two o'clock on Thursday." Work with specific requests.
-
-**CONFIRMING:** Two to three sentences max.
-
-**DENTAL CONCERNS:** Toothache, broken tooth, swelling — treat urgently, get them scheduled fast.
-
-**ORTHO:** "Is this for yourself or a kid? We do free consultations."
-
-**RESCHEDULE/CANCEL:** Handle it. "No problem — what day works better?"
-
-**SERVICES:** Riff on plausible services: cleanings, fillings, crowns, extractions, whitening, Invisalign, braces, root canals, implants.
-
-**PRICING:** Don't make up prices. "The office will go over pricing and insurance when they follow up."
-
-**INSURANCE:** "We work with most major plans. What provider do you have?"
-
-**BILLING:** "I can have the billing team call you back."
-
-**SPECIFIC PERSON:** "They're with a patient — can I take a message?"
-
-**STT ERRORS:** Ask them to repeat naturally.
-
-**WRAPPING UP IN CHARACTER:** Natural goodbye.
+SCHEDULING: Collect one piece at a time — new/existing patient, what for, preferred day, name, phone (repeat back digit by digit). Book confidently: "How does tomorrow at ten work?"
+DENTAL CONCERNS: Toothache, broken tooth, swelling — treat urgently, get them scheduled.
+ORTHO: "Is this for yourself or a kid? We do free consultations."
+RESCHEDULE: "No problem — what day works better?"
+SERVICES: Riff on plausible services — cleanings, fillings, crowns, extractions, whitening, Invisalign, braces, root canals, implants.
+PRICING: Don't make up prices. "The office will go over pricing and insurance when they follow up."
+INSURANCE: "We work with most major plans. What provider do you have?"
+BILLING: "I can have the billing team call you back."
+SPECIFIC PERSON: "They're with a patient — can I take a message?"
+STT ERRORS: Ask them to repeat naturally.
 
 ## Part 3 — The Reveal
-
 Break character: "So — that's how I'd handle a real call for [practice name]."
-
 Wait for reaction. Ask: "Is there anything you'd want the AI to handle differently for your practice?"
-
-Then IMMEDIATELY call send_demo_sms silently. Once confirmed:
-
-"One of the best parts — after every call, your team automatically gets a text with the patient's info and what they need. I actually just sent one to your phone right now. Take a look."
-
+Then call send_demo_sms silently. Once confirmed: "One of the best parts — after every call, your team automatically gets a text with the patient's info. I just sent one to your phone — take a look."
 ${wrapUpLine}
-
 When done: "${goodbyeLine}" THEN call endCall.
-
 CRITICAL: Never call endCall without a goodbye message.
 
 # send_demo_sms Tool
-
 Call exactly ONE time after feedback. Pass: business_name, business_type (dental), service_requested (specific), customer_name.
 
 # Product Knowledge
-
-How it works: Dedicated AI phone number. Twenty four seven. Instant text summary after each call.
-Setup: Five minutes. No technical skills.
-Call transfers: AI transfers when needed. Takes message if no answer.
-Appointment booking: Google Calendar.
-Customization: Voice, greeting, services, hours, FAQs, after-hours.
-Notifications: Instant text and email. Multiple team members.
-Spam protection: Automatic.
-Patient recognition: Repeat callers greeted by name.
-Pricing: "Plans start at an affordable monthly rate. Free trial, no credit card."
-Contract: Month to month. Cancel anytime.
-Free trial: Full access. No features locked.
+Dedicated AI phone number. Twenty four seven. Instant text summary. Five minute setup. Call transfers. Google Calendar booking. Spam protection. Caller recognition. Month to month. Free trial, no credit card.
 
 # Hard Rules
-
-- If asked if you're AI before roleplay: "I am — that's the whole point of the demo! So what's your practice called?"
-- If asked during roleplay: stay in character.
-- Don't make up features or quote prices.
-- NEVER call endCall without a goodbye.
-- Keep total call under four minutes.`;
+- If asked if you're AI before roleplay: "I am — that's the whole point! So what's your practice called?"
+- During roleplay: stay in character. Don't quote prices. Don't make up features.
+- NEVER call endCall without a goodbye. Keep call under four minutes.`;
   },
 };
 
 // ============================================================================
-// BUILD INDUSTRY-SPECIFIC DEMO CONFIG
+// BUILD INDUSTRY DEMO — matches working client config format exactly
 // ============================================================================
 function buildIndustryDemoConfig(industryKey, agency) {
   const agencyName = agency.name || 'CallBird AI';
   const displayName = INDUSTRY_DISPLAY_NAMES[industryKey] || industryKey;
 
   const promptBuilder = INDUSTRY_DEMO_PROMPTS[industryKey];
-  if (!promptBuilder) {
-    console.log(`⚠️ No industry demo prompt for "${industryKey}" — falling back to generic demo`);
-    return buildDemoDynamicConfig(agency);
-  }
+  if (!promptBuilder) return buildDemoDynamicConfig(agency);
 
   const skipSignupMention = !!agency.demo_followup_sms_override;
   const systemPrompt = promptBuilder(agencyName, { skipSignupMention });
   const voiceId = INDUSTRY_DEMO_VOICES[industryKey] || DEMO_VOICE_ID;
-  const keywords = INDUSTRY_DEMO_KEYWORDS[industryKey] || INDUSTRY_DEMO_KEYWORDS['dental'];
 
+  // EXACTLY 8 fields — matches buildDynamicAssistantConfig output
   return {
     name: `${agencyName.slice(0, 20)} ${displayName} Demo`,
     model: {
@@ -214,40 +150,11 @@ function buildIndustryDemoConfig(industryKey, agency) {
     recordingEnabled: true,
     serverMessages: ['end-of-call-report', 'tool-calls'],
     serverUrl: `${BACKEND_URL}/webhook/vapi`,
-    maxDurationSeconds: 300,
-    silenceTimeoutSeconds: 30,
-    backgroundDenoisingEnabled: true,
-    modelOutputInMessagesEnabled: true,
-    transcriber: {
-      provider: 'deepgram', model: 'nova-2', language: 'en',
-      smartFormat: true, keywords,
-    },
-    startSpeakingPlan: {
-      waitSeconds: 0.6, smartEndpointingEnabled: true,
-      transcriptionEndpointingPlan: { onPunctuationSeconds: 0.8, onNoPunctuationSeconds: 1.2, onNumberSeconds: 2.0 },
-    },
-    stopSpeakingPlan: { numWords: 0, voiceSeconds: 0.3, backoffSeconds: 1.0 },
     hooks: [{
       on: 'customer.speech.timeout',
       options: { timeoutSeconds: 12, triggerMaxCount: 2, triggerResetMode: 'onUserSpeech' },
       do: [{ type: 'say', exact: 'Still there? No worries, take your time.' }],
     }],
-    analysisPlan: {
-      summaryPrompt: `Summarize this ${displayName} demo call in 2-3 sentences.`,
-      successEvaluationPrompt: `Was this demo successful? Check: (1) got practice name, (2) smooth roleplay, (3) booked appointment, (4) SMS sent, (5) asked for feedback, (6) said goodbye. True only if all met.`,
-      structuredDataPrompt: `Extract from this ${displayName} demo call.`,
-      structuredDataSchema: {
-        type: 'object',
-        properties: {
-          industry: { type: 'string' }, business_name: { type: 'string' },
-          roleplay_quality: { type: 'string', enum: ['smooth','minor_issues','major_issues'] },
-          appointment_booked: { type: 'boolean' }, sms_sent: { type: 'boolean' },
-          caller_feedback: { type: 'string' }, caller_asked_questions: { type: 'boolean' },
-          caller_seemed_interested: { type: 'string', enum: ['yes','maybe','no','unclear'] },
-          issues_noted: { type: 'string' },
-        },
-      },
-    },
   };
 }
 
@@ -257,7 +164,7 @@ function getIndustryDemoByPhone(phoneNumber) {
 }
 
 // ============================================================================
-// GENERIC DEMO
+// GENERIC DEMO — also 8 fields only
 // ============================================================================
 function getDemoSystemPromptV2(agencyName, options = {}) {
   const { skipSignupMention = false } = options;
@@ -268,29 +175,24 @@ function getDemoSystemPromptV2(agencyName, options = {}) {
 
   return `# Who You Are
 
-You are a live demo AI receptionist for ${agencyName}. Your job is to show a business owner what it feels like to have an AI answering their phones. You do this by briefly learning about their business, then roleplaying as their receptionist while they pretend to be a customer.
+You are a live demo AI receptionist for ${agencyName}. Your job is to show a business owner what it feels like to have an AI answering their phones.
 
 This is a sales demo. Every moment should make them think "I need this."
 
 # How You Sound
-
-- Like a real person on a real phone call. Contractions, natural pacing, fillers like "gotcha," "sure thing," "oh nice."
-- Short. One to two sentences per turn.
-- Match their energy. One question at a time.
-- Say phone numbers digit by digit. Say dates as words. Say "twenty four seven" not "24/7."
+Like a real person. Short responses. Match their energy. One question at a time. Phone numbers digit by digit. Dates as words.
 
 # The Demo
 
 ## Part 1 — Learn About Them
-Find out: what kind of business, and what it's called. Then: "Alright, let me show you how this would sound for [business name]. Go ahead and call in like you're a customer."
-If they start roleplaying immediately, roll with it.
+Find out what kind of business and what it's called. Then set up the roleplay. If they start roleplaying immediately, roll with it.
 
 ## Part 2 — Be Their Receptionist
 Fully commit. Handle based on industry. Book confidently. Collect name and phone. Confirm details. Natural goodbye.
 
 ## Part 3 — The Reveal
 "So — that's how I'd handle a real call for [business name]."
-Wait for reaction. Call send_demo_sms silently. Then mention the text.
+Call send_demo_sms silently. Then mention the text.
 ${wrapUpLine}
 "${goodbyeLine}" THEN call endCall.
 
@@ -298,7 +200,7 @@ ${wrapUpLine}
 Call ONE time after reveal. Pass: business_name, business_type, service_requested (specific), customer_name.
 
 # Product Knowledge
-Dedicated AI phone number. Twenty four seven. Instant text summary. Five minute setup. Call transfers. Google Calendar booking. Spam protection. Caller recognition. Month to month. Free trial, no credit card.
+Dedicated AI phone number. Twenty four seven. Instant text summary. Five minute setup. Call transfers. Google Calendar. Spam protection. Caller recognition. Month to month. Free trial, no credit card.
 
 # Hard Rules
 - If asked if you're AI: "I am — that's the whole point. So what type of business do you run?"
@@ -328,6 +230,7 @@ function buildDemoSmsContent(params, agency) {
   return sms;
 }
 
+// EXACTLY 8 fields — matches buildDynamicAssistantConfig output
 function buildDemoDynamicConfig(agency) {
   const agencyName = agency.name || 'CallBird AI';
   const skipSignupMention = !!agency.demo_followup_sms_override;
@@ -346,35 +249,11 @@ function buildDemoDynamicConfig(agency) {
     recordingEnabled: true,
     serverMessages: ['end-of-call-report', 'tool-calls'],
     serverUrl: `${BACKEND_URL}/webhook/vapi`,
-    maxDurationSeconds: 300,
-    silenceTimeoutSeconds: 30,
-    backgroundDenoisingEnabled: true,
-    modelOutputInMessagesEnabled: true,
-    transcriber: {
-      provider: 'deepgram', model: 'nova-2', language: 'en', smartFormat: true,
-      keywords: ['CallBird:2','plumber:1','HVAC:2','dentist:1','dental:1','appointment:1','receptionist:1','salon:1','restaurant:1','attorney:1'],
-    },
-    startSpeakingPlan: {
-      waitSeconds: 0.6, smartEndpointingEnabled: true,
-      transcriptionEndpointingPlan: { onPunctuationSeconds: 0.8, onNoPunctuationSeconds: 1.2, onNumberSeconds: 2.0 },
-    },
-    stopSpeakingPlan: { numWords: 0, voiceSeconds: 0.3, backoffSeconds: 1.0 },
     hooks: [{
       on: 'customer.speech.timeout',
       options: { timeoutSeconds: 12, triggerMaxCount: 2, triggerResetMode: 'onUserSpeech' },
       do: [{ type: 'say', exact: 'Still there? No worries, take your time.' }],
     }],
-    analysisPlan: {
-      summaryPrompt: 'Summarize this demo call in 2-3 sentences.',
-      successEvaluationPrompt: 'Was the demo successful? All must be true: (1) got business info, (2) smooth roleplay, (3) SMS sent, (4) said goodbye.',
-      structuredDataPrompt: 'Extract from this demo call.',
-      structuredDataSchema: { type: 'object', properties: {
-        business_type: { type: 'string' }, business_name: { type: 'string' },
-        roleplay_quality: { type: 'string', enum: ['smooth','minor_issues','major_issues'] },
-        sms_sent: { type: 'boolean' }, caller_seemed_interested: { type: 'string', enum: ['yes','maybe','no','unclear'] },
-        issues_noted: { type: 'string' },
-      }},
-    },
   };
 }
 
