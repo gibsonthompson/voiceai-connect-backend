@@ -1,6 +1,6 @@
 // ============================================================================
 // VAPI WEBHOOK HANDLER - Multi-Tenant Aware
-// UPDATED: Industry-specific demo routing + separate follow-up SMS
+// UPDATED: Industry demo routing, business name in follow-up SMS
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -53,7 +53,7 @@ async function generateAISummary(transcript, industry, callerPhone) {
     financial: 'Focus on: service type (tax, bookkeeping, planning), urgency, client status.',
     automotive: 'Focus on: vehicle info, service needed, safety concerns, urgency.'
   };
-  const prompt = `Analyze this phone call transcript for a ${industry} business.\n\nTranscript:\n${transcript}\n\nCaller Phone: ${callerPhone}\n\nExtract and return ONLY valid JSON:\n{"customerName":"string or Unknown","customerPhone":"formatted (XXX) XXX-XXXX","customerEmail":"string or null","urgency":"emergency|high|medium|routine","summary":"2-3 sentence summary focusing on: ${industryGuidance[industry] || 'what the customer needs'}","isSpam":false,"spamReason":null}\n\nSPAM DETECTION: Set isSpam true if: telemarketer, robocall, pre-recorded message, selling SEO/Google Ads/insurance, asks for "business owner" or "Google listing person", no natural interaction.\nIf spam: urgency "routine", summary describes spam, spamReason is short label.`;
+  const prompt = `Analyze this phone call transcript for a ${industry} business.\n\nTranscript:\n${transcript}\n\nCaller Phone: ${callerPhone}\n\nExtract and return ONLY valid JSON:\n{"customerName":"string or Unknown","customerPhone":"formatted (XXX) XXX-XXXX","customerEmail":"string or null","urgency":"emergency|high|medium|routine","summary":"2-3 sentence summary focusing on: ${industryGuidance[industry] || 'what the customer needs'}","isSpam":false,"spamReason":null}\n\nSPAM DETECTION: Set isSpam true if: telemarketer, robocall, pre-recorded message, selling SEO/Google Ads/insurance, asks for "business owner" or "Google listing person", no natural interaction.`;
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -122,9 +122,32 @@ function buildDisconnectedAssistantConfig(businessName) {
 }
 
 // ============================================================================
+// EXTRACT BUSINESS NAME FROM VAPI END-OF-CALL DATA
+// Tries multiple locations where VAPI stores analysis results
+// ============================================================================
+function extractBusinessNameFromCall(message) {
+  // Try structured data from analysis
+  const structured = message.analysis?.structuredData
+    || message.artifact?.structuredData
+    || message.call?.analysis?.structuredData
+    || null;
+  if (structured?.business_name) return structured.business_name;
+
+  // Try to extract from transcript as fallback — look for common patterns
+  const transcript = message.transcript || message.artifact?.transcript || '';
+  if (transcript) {
+    // Look for "practice called X" or "business called X" patterns
+    const match = transcript.match(/(?:practice|business|company|office)\s+(?:is\s+)?(?:called\s+)?["']?([A-Z][A-Za-z\s&'.]+?)["']?\s*[.,!?]/);
+    if (match?.[1]) return match[1].trim();
+  }
+
+  return null;
+}
+
+// ============================================================================
 // HANDLE DEMO CALL (end-of-call)
-// industryKey: if set, this was an industry demo — send simple follow-up
-// industryKey: null means generic branded demo — send signup link
+// industryKey: set = industry demo (simple follow-up)
+// industryKey: null = generic branded demo (signup link)
 // ============================================================================
 async function handleDemoCall(agency, message, industryKey = null) {
   const call = message.call;
@@ -132,20 +155,28 @@ async function handleDemoCall(agency, message, industryKey = null) {
   const durationSeconds = call.duration || message.duration || null;
   console.log(`🎤 Demo call completed for agency: ${agency.name}${industryKey ? ` (${industryKey} demo)` : ''}`);
 
+  // Extract business name from VAPI analysis
+  const callerBusinessName = extractBusinessNameFromCall(message);
+  if (callerBusinessName) console.log(`   📋 Caller's business: ${callerBusinessName}`);
+
   if (callerPhone && callerPhone !== 'Unknown') {
     try {
       const { sendTelnyxSMS } = require('../lib/notifications');
 
       if (industryKey) {
-        // Industry demo — simple thank you, no signup link
+        // Industry demo — simple thank you with business name
         const displayName = industryKey.replace('_', ' ');
-        await sendTelnyxSMS(callerPhone, `Thanks for trying the ${displayName} AI receptionist demo! If you have any questions or want to learn more, feel free to give us a call back anytime.`);
-        console.log('✅ Industry demo follow-up SMS sent (simple thank you)');
+        const nameNote = callerBusinessName ? ` for ${callerBusinessName}` : '';
+        await sendTelnyxSMS(callerPhone,
+          `Thanks for trying the ${displayName} AI receptionist demo${nameNote}! If you have any questions or want to learn more, feel free to give us a call back anytime.`
+        );
+        console.log('✅ Industry demo follow-up SMS sent');
       } else if (agency.demo_followup_sms_override) {
         await sendTelnyxSMS(callerPhone, agency.demo_followup_sms_override);
         console.log('✅ Demo follow-up SMS sent (custom override)');
       } else {
-        await sendDemoCallFollowUpSMS(callerPhone, agency);
+        // Generic branded demo — signup link with business name
+        await sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName);
         console.log('✅ Demo follow-up SMS sent (with signup link)');
       }
     } catch (smsErr) { console.warn('⚠️ Demo follow-up SMS failed:', smsErr.message); }
@@ -157,11 +188,11 @@ async function handleDemoCall(agency, message, industryKey = null) {
     const durationDisplay = durationSeconds ? `${Math.round(durationSeconds / 60)}min ${durationSeconds % 60}s` : 'Unknown';
     try {
       const templateMsg = await getSmsTemplate('admin_demo_call', { agency_name: agency.name, caller: callerDisplay, duration: durationDisplay });
-      await sendTelnyxSMS(agency.phone, templateMsg || `🎤 Demo Call - ${agency.name}\nCaller: ${callerDisplay}\nDuration: ${durationDisplay}\nFollow-up SMS sent.`);
+      await sendTelnyxSMS(agency.phone, templateMsg || `🎤 Demo Call - ${agency.name}\nCaller: ${callerDisplay}\nDuration: ${durationDisplay}${callerBusinessName ? `\nBusiness: ${callerBusinessName}` : ''}\nFollow-up SMS sent.`);
     } catch (ownerSmsErr) { console.warn('⚠️ Agency owner notification failed:', ownerSmsErr.message); }
   }
 
-  return { type: 'demo', agency: agency.name, callerPhone, durationSeconds, followUpSent: !!callerPhone };
+  return { type: 'demo', agency: agency.name, callerPhone, callerBusinessName, durationSeconds, followUpSent: !!callerPhone };
 }
 
 const _demoSmsSent = new Map();
@@ -261,7 +292,7 @@ async function handleAssistantRequest(req, res, message) {
           console.log(`✅ Industry demo config built in ${Date.now() - startTime}ms`);
           return res.status(200).json({ assistant: demoConfig });
         } catch (indErr) {
-          console.error(`❌ Industry demo config failed:`, indErr.message, indErr.stack);
+          console.error(`❌ Industry demo config failed:`, indErr.message);
         }
       }
 
@@ -306,7 +337,7 @@ async function handleAssistantRequest(req, res, message) {
     if (callLimit !== -1 && currentCallCount >= callLimit) {
       return res.status(200).json({ assistant: {
         model: { provider: 'openai', model: 'gpt-3.5-turbo', temperature: 0.1,
-          messages: [{ role: 'system', content: `Say: "Thank you for calling ${client.business_name}. We're currently unable to take your call. Please try again later. Goodbye." Then end the call.` }],
+          messages: [{ role: 'system', content: `Say: "Thank you for calling ${client.business_name}. We're currently unable to take your call. Goodbye." Then end the call.` }],
           tools: [{ type: 'endCall' }] },
         voice: { provider: 'openai', voiceId: 'alloy' },
         firstMessage: `Thank you for calling ${client.business_name}. We're currently unable to take your call. Goodbye.`,

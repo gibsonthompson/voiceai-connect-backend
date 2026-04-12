@@ -5,17 +5,12 @@
 //   +1 (505) 594-5806 → CallBird generic demo (via agencies.demo_phone_number)
 //   +1 (470) 649-1985 → Dental demo (via INDUSTRY_DEMO_NUMBERS, unbranded)
 //
-// Config format matches buildDynamicAssistantConfig (8 fields only)
 // UPDATED: 2026-04-12 — Swapped numbers, expanded product knowledge
 // ============================================================================
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
 const DEMO_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL';
 
-// ============================================================================
-// INDUSTRY DEMO PHONE NUMBERS
-// 470 = dental demo (unbranded — no agency name mentioned)
-// ============================================================================
 const INDUSTRY_DEMO_NUMBERS = {
   '+14706491985': { industry: 'dental', agencyId: '00000000-0000-0000-0000-000000000001' },
 };
@@ -60,16 +55,13 @@ function getDemoTools() {
   ];
 }
 
-// ============================================================================
-// SHARED PRODUCT KNOWLEDGE — expanded FAQ
-// ============================================================================
 const PRODUCT_KNOWLEDGE = `# Product Knowledge
 
 Use this to answer questions after the roleplay. Keep answers to one or two sentences. Be conversational, not salesy.
 
 **How it works:** You get a dedicated AI phone number. Forward your existing business line to it, or use it as your main number. The AI answers every call, twenty four seven, three sixty five. After each call, you and your team get an instant text with the caller's name, phone number, what they need, and how urgent it is.
 
-**How the AI knows about the business:** When you sign up, you tell the AI about your business — your services, hours, location, insurance or payment info, and common questions. You can also give it your website URL and it will scan the whole site automatically. The more info you give it, the smarter it gets. You can update it anytime.
+**How the AI knows about the business:** When you sign up, you tell the AI about your business — your services, hours, location, insurance or payment info, and common questions. You can also give it your website URL and it will scan the whole site automatically. The more info you give it, the smarter it gets. You can update it anytime from the dashboard.
 
 **How it handles calls it doesn't know the answer to:** If someone asks something the AI doesn't have info on, it doesn't make stuff up. It says something like "Let me have the team follow up on that" and takes a message. If call transfer is set up, it can connect them to a real person instead.
 
@@ -110,12 +102,10 @@ Use this to answer questions after the roleplay. Keep answers to one or two sent
 **What if I already have a phone number?** You keep your existing number. Just set up call forwarding to the AI number. When you want to answer yourself, turn off forwarding. It takes about thirty seconds to set up.`;
 
 // ============================================================================
-// DENTAL DEMO PROMPT (unbranded — no agency name)
+// DENTAL DEMO PROMPT (unbranded)
 // ============================================================================
 const INDUSTRY_DEMO_PROMPTS = {
   dental: (agencyName, options = {}) => {
-    // NOTE: agencyName is available but NOT used in the greeting or reveal
-    // for the unbranded dental demo. It's only used internally.
     const goodbyeLine = `Thanks for trying the dental AI demo — really appreciate it. Have a great day!`;
 
     return `# Who You Are
@@ -173,7 +163,7 @@ ${PRODUCT_KNOWLEDGE}
 };
 
 // ============================================================================
-// BUILD INDUSTRY DEMO — 8 fields, matches working client config
+// BUILD INDUSTRY DEMO
 // ============================================================================
 function buildIndustryDemoConfig(industryKey, agency) {
   const agencyName = agency.name || 'AI Receptionist';
@@ -186,20 +176,15 @@ function buildIndustryDemoConfig(industryKey, agency) {
   const systemPrompt = promptBuilder(agencyName, { skipSignupMention });
   const voiceId = INDUSTRY_DEMO_VOICES[industryKey] || DEMO_VOICE_ID;
 
-  // Unbranded first message — no agency name
-  const firstMessage = `Hi there! Thanks for calling the ${displayName} AI receptionist demo. I'm going to show you exactly how I'd answer the phone for your practice — it only takes a couple minutes. What's your practice called?`;
-
   return {
     name: `${displayName} Demo`,
     model: {
-      provider: 'openai',
-      model: 'gpt-4o',
-      temperature: 0.6,
+      provider: 'openai', model: 'gpt-4o', temperature: 0.6,
       messages: [{ role: 'system', content: systemPrompt }],
       tools: getDemoTools(),
     },
     voice: { provider: '11labs', voiceId },
-    firstMessage,
+    firstMessage: `Hi there! Thanks for calling the ${displayName} AI receptionist demo. I'm going to show you exactly how I'd answer the phone for your practice — it only takes a couple minutes. What's your practice called?`,
     recordingEnabled: true,
     serverMessages: ['end-of-call-report', 'tool-calls'],
     serverUrl: `${BACKEND_URL}/webhook/vapi`,
@@ -217,8 +202,7 @@ function getIndustryDemoByPhone(phoneNumber) {
 }
 
 // ============================================================================
-// CALLBIRD GENERIC DEMO (branded — says "CallBird")
-// Routes via agencies.demo_phone_number for +15055945806
+// CALLBIRD GENERIC DEMO (branded)
 // ============================================================================
 function getDemoSystemPromptV2(agencyName, options = {}) {
   const { skipSignupMention = false } = options;
@@ -229,12 +213,12 @@ function getDemoSystemPromptV2(agencyName, options = {}) {
 
   return `# Who You Are
 
-You are a live demo AI receptionist for ${agencyName}. Your job is to show a business owner what it feels like to have an AI answering their phones. You do this by learning about their business, then roleplaying as their receptionist.
+You are a live demo AI receptionist for ${agencyName}. Your job is to show a business owner what it feels like to have an AI answering their phones.
 
 This is a sales demo. Every moment should make them think "I need this."
 
 # How You Sound
-Like a real person. Contractions, natural pacing, fillers like "gotcha," "sure thing," "oh nice." Short — one to two sentences per turn. Match their energy. One question at a time. Phone numbers digit by digit. Dates as words.
+Like a real person. Short — one to two sentences per turn. Match their energy. One question at a time. Phone numbers digit by digit. Dates as words.
 
 # The Demo
 
@@ -293,9 +277,7 @@ function buildDemoDynamicConfig(agency) {
   return {
     name: `${agencyName.slice(0, 25)} Demo`,
     model: {
-      provider: 'openai',
-      model: 'gpt-4o',
-      temperature: 0.6,
+      provider: 'openai', model: 'gpt-4o', temperature: 0.6,
       messages: [{ role: 'system', content: getDemoSystemPromptV2(agencyName, { skipSignupMention }) }],
       tools: getDemoTools(),
     },
