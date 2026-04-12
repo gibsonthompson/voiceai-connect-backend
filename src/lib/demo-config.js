@@ -3,38 +3,24 @@
 //
 // TWO DEMO MODES:
 //   1. GENERIC DEMO — buildDemoDynamicConfig(agency)
-//      Routes via agencies.demo_phone_number
-//      Caller dials agency demo number, AI asks industry + name, roleplays
-//
+//      Routes via agencies.demo_phone_number (+14706491985)
 //   2. INDUSTRY DEMO — buildIndustryDemoConfig(industryKey, agency)
-//      Routes via INDUSTRY_DEMO_NUMBERS mapping below
-//      Caller dials industry-specific number, AI asks practice name only,
-//      then immediately roleplays using FULL industry prompt quality
-//
-// PHONE NUMBER ROUTING:
-//   +1 (470) 649-1985 → CallBird generic demo (via agencies.demo_phone_number)
-//   +1 (505) 594-5806 → Dental demo (via INDUSTRY_DEMO_NUMBERS below)
+//      Routes via INDUSTRY_DEMO_NUMBERS (+15055945806 → dental)
 //
 // CREATED: 2026-03-23
-// UPDATED: 2026-04-12 — Industry-specific demos, exact number mapping
+// UPDATED: 2026-04-12 — Industry demos, tools moved to assistant level
 // ============================================================================
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
-const DEMO_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL'; // Sarah
+const DEMO_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL';
 
 // ============================================================================
 // INDUSTRY DEMO PHONE NUMBER MAPPING
-// Maps VAPI phone numbers → { industry, agencyId }
-// agencyId is required so the webhook can look up the full agency row
-// for SMS sending, follow-up, and branding
 // ============================================================================
 const INDUSTRY_DEMO_NUMBERS = {
   '+15055945806': { industry: 'dental', agencyId: '00000000-0000-0000-0000-000000000001' },
 };
 
-// ============================================================================
-// INDUSTRY DEMO VOICES
-// ============================================================================
 const INDUSTRY_DEMO_VOICES = {
   home_services: 'iP95p4xoKVk53GoZ742B',
   medical: 'EXAVITQu4vr4xnSDxMaL',
@@ -50,9 +36,6 @@ const INDUSTRY_DEMO_VOICES = {
   automotive: 'iP95p4xoKVk53GoZ742B',
 };
 
-// ============================================================================
-// INDUSTRY DEMO TRANSCRIBER KEYWORDS
-// ============================================================================
 const INDUSTRY_DEMO_KEYWORDS = {
   dental: [
     'CallBird:2', 'dental:2', 'dentist:2', 'orthodontics:1', 'orthodontist:1',
@@ -72,21 +55,11 @@ const INDUSTRY_DEMO_KEYWORDS = {
   ],
 };
 
-// ============================================================================
-// INDUSTRY DISPLAY NAMES
-// ============================================================================
 const INDUSTRY_DISPLAY_NAMES = {
-  dental: 'dental',
-  home_services: 'home services',
-  medical: 'medical',
-  professional_services: 'professional services',
-  restaurants: 'restaurant',
-  salon_spa: 'salon and spa',
-  retail: 'retail',
-  fitness: 'fitness',
-  legal: 'legal',
-  real_estate: 'real estate',
-  financial: 'financial services',
+  dental: 'dental', home_services: 'home services', medical: 'medical',
+  professional_services: 'professional services', restaurants: 'restaurant',
+  salon_spa: 'salon and spa', retail: 'retail', fitness: 'fitness',
+  legal: 'legal', real_estate: 'real estate', financial: 'financial services',
   automotive: 'automotive',
 };
 
@@ -210,25 +183,15 @@ Call exactly ONE time after they react to the reveal and answer your feedback qu
 # Product Knowledge
 
 How it works: Dedicated AI phone number. Forward your line or use directly. Answers every call twenty four seven. Instant text summary after each call.
-
 Setup: Five minutes. Add services, hours, insurance, common questions. No technical skills needed.
-
 Call transfers: AI transfers to real person when needed. If nobody picks up, AI stays on and takes a message.
-
 Appointment booking: Books directly into Google Calendar.
-
 Customization: Choose voice, greeting, services, hours, FAQs, after-hours behavior.
-
 Notifications: Instant text and email after every call. Multiple team members.
-
 Spam protection: Automatic. Doesn't count against usage.
-
 Patient recognition: Repeat callers greeted by name. AI remembers context.
-
 Pricing: "Plans start at an affordable monthly rate. Free trial, no credit card required."
-
 Contract: Month to month. Cancel anytime.
-
 Free trial: Full access. No features locked. Test with real calls.
 
 # Hard Rules
@@ -244,6 +207,7 @@ Free trial: Full access. No features locked. Test with real calls.
 
 // ============================================================================
 // BUILD INDUSTRY-SPECIFIC DEMO CONFIG
+// FIXED: tools at assistant level, not inside model
 // ============================================================================
 function buildIndustryDemoConfig(industryKey, agency) {
   const agencyName = agency.name || 'CallBird';
@@ -262,27 +226,6 @@ function buildIndustryDemoConfig(industryKey, agency) {
 
   const firstMessage = `Hi there! Thanks for calling ${agencyName}'s ${displayName} AI receptionist demo. I'm going to show you exactly how I'd answer the phone for your practice — it only takes a couple minutes. What's your practice called?`;
 
-  const tools = [
-    {
-      type: 'function',
-      function: {
-        name: 'send_demo_sms',
-        description: 'Send a post-call notification SMS to the caller showing what their team receives after every call. Call this once after breaking out of the receptionist roleplay and after asking for feedback.',
-        parameters: {
-          type: 'object',
-          properties: {
-            business_name: { type: 'string', description: 'The caller\'s practice name' },
-            business_type: { type: 'string', description: 'Type of business' },
-            service_requested: { type: 'string', description: 'Be specific — "cleaning and checkup, new patient, Thursday at 2pm"' },
-            customer_name: { type: 'string', description: 'The name the caller gave during roleplay' },
-          },
-          required: ['business_name', 'service_requested', 'customer_name'],
-        },
-      },
-    },
-    { type: 'endCall' },
-  ];
-
   return {
     name: `${agencyName.slice(0, 20)} ${displayName} Demo`,
     model: {
@@ -290,10 +233,29 @@ function buildIndustryDemoConfig(industryKey, agency) {
       model: 'gpt-4o',
       temperature: 0.6,
       messages: [{ role: 'system', content: systemPrompt }],
-      tools,
     },
     voice: { provider: '11labs', voiceId },
     firstMessage,
+    tools: [
+      {
+        type: 'function',
+        function: {
+          name: 'send_demo_sms',
+          description: 'Send a post-call notification SMS to the caller showing what their team receives after every call. Call this once after breaking out of the receptionist roleplay and after asking for feedback.',
+          parameters: {
+            type: 'object',
+            properties: {
+              business_name: { type: 'string', description: 'The caller\'s practice name' },
+              business_type: { type: 'string', description: 'Type of business' },
+              service_requested: { type: 'string', description: 'Be specific — "cleaning and checkup, new patient, Thursday at 2pm"' },
+              customer_name: { type: 'string', description: 'The name the caller gave during roleplay' },
+            },
+            required: ['business_name', 'service_requested', 'customer_name'],
+          },
+        },
+      },
+      { type: 'endCall' },
+    ],
     recordingEnabled: true,
     serverMessages: ['end-of-call-report', 'tool-calls'],
     serverUrl: `${BACKEND_URL}/webhook/vapi`,
@@ -324,13 +286,10 @@ function buildIndustryDemoConfig(industryKey, agency) {
       structuredDataSchema: {
         type: 'object',
         properties: {
-          industry: { type: 'string' },
-          business_name: { type: 'string' },
+          industry: { type: 'string' }, business_name: { type: 'string' },
           roleplay_quality: { type: 'string', enum: ['smooth', 'minor_issues', 'major_issues'] },
-          appointment_booked: { type: 'boolean' },
-          sms_sent: { type: 'boolean' },
-          caller_feedback: { type: 'string' },
-          caller_asked_questions: { type: 'boolean' },
+          appointment_booked: { type: 'boolean' }, sms_sent: { type: 'boolean' },
+          caller_feedback: { type: 'string' }, caller_asked_questions: { type: 'boolean' },
           caller_seemed_interested: { type: 'string', enum: ['yes', 'maybe', 'no', 'unclear'] },
           issues_noted: { type: 'string' },
         },
@@ -340,8 +299,7 @@ function buildIndustryDemoConfig(industryKey, agency) {
 }
 
 // ============================================================================
-// LOOKUP: Is this phone number an industry demo line?
-// Returns { industry, agencyId } if matched, null otherwise
+// LOOKUP
 // ============================================================================
 function getIndustryDemoByPhone(phoneNumber) {
   if (!phoneNumber) return null;
@@ -349,7 +307,7 @@ function getIndustryDemoByPhone(phoneNumber) {
 }
 
 // ============================================================================
-// GENERIC DEMO SYSTEM PROMPT v5 (unchanged)
+// GENERIC DEMO SYSTEM PROMPT v5
 // ============================================================================
 function getDemoSystemPromptV2(agencyName, options = {}) {
   const { skipSignupMention = false } = options;
@@ -401,16 +359,11 @@ Handle based on industry:
 
 ### Roleplay Rules
 
-BOOKING: Give times confidently. "How does tomorrow at ten work?" This is a demo — show the product can book.
-
+BOOKING: Give times confidently. "How does tomorrow at ten work?"
 SERVICES: Riff on plausible services for their industry.
-
 PRICING: Don't make up prices. "Someone from the team will go over pricing when they follow up."
-
-STT ERRORS: Ask them to repeat naturally. Never accept garbage data.
-
+STT ERRORS: Ask them to repeat naturally.
 CONFIRMING: Two to three sentences max. Confirm key points, ask if anything else.
-
 WRAPPING UP IN CHARACTER: Natural goodbye.
 
 ## Part 3 — The Reveal
@@ -483,35 +436,45 @@ function buildDemoSmsContent(params, agency) {
   return smsMessage;
 }
 
+// ============================================================================
+// GENERIC DEMO CONFIG
+// FIXED: tools at assistant level, not inside model
+// ============================================================================
 function buildDemoDynamicConfig(agency) {
   const agencyName = agency.name || 'CallBird';
   const skipSignupMention = !!agency.demo_followup_sms_override;
   const systemPrompt = getDemoSystemPromptV2(agencyName, { skipSignupMention });
   const firstMessage = getDemoFirstMessageV2(agencyName);
-  const tools = [
-    {
-      type: 'function',
-      function: {
-        name: 'send_demo_sms',
-        description: 'Send a post-call notification SMS to the caller. Call once after breaking out of roleplay.',
-        parameters: {
-          type: 'object',
-          properties: {
-            business_name: { type: 'string' }, business_type: { type: 'string' },
-            service_requested: { type: 'string' }, customer_name: { type: 'string' },
-          },
-          required: ['business_name', 'service_requested', 'customer_name'],
-        },
-      },
-    },
-    { type: 'endCall' },
-  ];
+
   return {
     name: `${agencyName.slice(0, 25)} Demo`,
-    model: { provider: 'openai', model: 'gpt-4o', temperature: 0.6,
-      messages: [{ role: 'system', content: systemPrompt }], tools },
+    model: {
+      provider: 'openai',
+      model: 'gpt-4o',
+      temperature: 0.6,
+      messages: [{ role: 'system', content: systemPrompt }],
+    },
     voice: { provider: '11labs', voiceId: DEMO_VOICE_ID },
-    firstMessage, recordingEnabled: true,
+    firstMessage,
+    tools: [
+      {
+        type: 'function',
+        function: {
+          name: 'send_demo_sms',
+          description: 'Send a post-call notification SMS to the caller. Call once after breaking out of roleplay.',
+          parameters: {
+            type: 'object',
+            properties: {
+              business_name: { type: 'string' }, business_type: { type: 'string' },
+              service_requested: { type: 'string' }, customer_name: { type: 'string' },
+            },
+            required: ['business_name', 'service_requested', 'customer_name'],
+          },
+        },
+      },
+      { type: 'endCall' },
+    ],
+    recordingEnabled: true,
     serverMessages: ['end-of-call-report', 'tool-calls'],
     serverUrl: `${BACKEND_URL}/webhook/vapi`,
     maxDurationSeconds: 300, silenceTimeoutSeconds: 30,
