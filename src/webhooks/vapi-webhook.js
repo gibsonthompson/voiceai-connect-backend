@@ -181,6 +181,36 @@ async function getAgencyByDemoPhone(phoneNumber) {
   } catch { return null; }
 }
 
+async function getAgencyById(agencyId) {
+  try {
+    const { data, error } = await supabase.from('agencies').select('*').eq('id', agencyId).single();
+    if (error || !data) return null;
+    return data;
+  } catch { return null; }
+}
+
+// ============================================================================
+// RESOLVE AGENCY FOR ANY DEMO CALL
+// Checks industry demo mapping first (by agencyId), then agency demo_phone_number
+// Returns { agency, industryKey } — industryKey is null for generic demos
+// ============================================================================
+async function resolveAgencyForDemo(phoneNumber) {
+  // 1. Check industry demo mapping
+  const industryMatch = getIndustryDemoByPhone(phoneNumber);
+  if (industryMatch) {
+    const agency = await getAgencyById(industryMatch.agencyId);
+    if (agency) return { agency, industryKey: industryMatch.industry };
+    // agencyId lookup failed — return minimal fallback
+    return { agency: { id: industryMatch.agencyId, name: 'CallBird AI', slug: 'callbird' }, industryKey: industryMatch.industry };
+  }
+
+  // 2. Check generic demo (agencies.demo_phone_number)
+  const agency = await getAgencyByDemoPhone(phoneNumber);
+  if (agency) return { agency, industryKey: null };
+
+  return { agency: null, industryKey: null };
+}
+
 // ============================================================================
 // DISCONNECTED NUMBER ASSISTANT CONFIG
 // ============================================================================
@@ -201,7 +231,6 @@ function buildDisconnectedAssistantConfig(businessName) {
 
 // ============================================================================
 // HANDLE DEMO CALL (end-of-call)
-// UPDATED: Agency owner notification uses getSmsTemplate()
 // ============================================================================
 async function handleDemoCall(agency, message) {
   const call = message.call;
@@ -225,7 +254,6 @@ async function handleDemoCall(agency, message) {
     }
   }
 
-  // Notify agency owner about demo call (TEMPLATE WIRED)
   if (agency.phone) {
     const { formatPhoneDisplay, sendTelnyxSMS } = require('../lib/notifications');
     const callerDisplay = callerPhone ? formatPhoneDisplay(callerPhone) : 'Unknown number';
@@ -297,16 +325,17 @@ async function handleDemoToolCall(req, res, message) {
       return res.status(200).json({ results: [{ toolCallId, result: "I wasn't able to send the text — I don't have your phone number. But after every real call, your team would get an instant summary just like that." }] });
     }
 
-    const vapiPhone = message.phoneNumber?.number || message.call?.phoneNumber?.number || null;
-    let agency = null;
-    if (vapiPhone) agency = await getAgencyByDemoPhone(vapiPhone);
-
-    if (!agency) {
+    // Resolve agency — works for both industry demo and generic demo numbers
+    let vapiPhone = message.phoneNumber?.number || message.call?.phoneNumber?.number || null;
+    if (!vapiPhone) {
       const phoneNumberId = message.call?.phoneNumberId || message.phoneNumber?.id;
-      if (phoneNumberId) {
-        const lookedUpNumber = await getPhoneNumberFromVapi(phoneNumberId);
-        if (lookedUpNumber) agency = await getAgencyByDemoPhone(lookedUpNumber);
-      }
+      if (phoneNumberId) vapiPhone = await getPhoneNumberFromVapi(phoneNumberId);
+    }
+
+    let agency = null;
+    if (vapiPhone) {
+      const resolved = await resolveAgencyForDemo(vapiPhone);
+      agency = resolved.agency;
     }
 
     if (!agency) {
@@ -340,7 +369,6 @@ async function handleDemoToolCall(req, res, message) {
 
 // ============================================================================
 // PHASE 2: ASSISTANT-REQUEST HANDLER
-// UPDATED: Industry-specific demo routing before generic demo fallback
 // ============================================================================
 async function handleAssistantRequest(req, res, message) {
   const startTime = Date.now();
@@ -372,20 +400,11 @@ async function handleAssistantRequest(req, res, message) {
     if (!client) {
       console.log('⚠️ No client found for:', vapiPhoneNumber);
 
-      // ── Check for industry-specific demo number FIRST ──────────────
-      const industryKey = getIndustryDemoByPhone(vapiPhoneNumber);
-      if (industryKey) {
-        // Industry demo numbers may or may not be stored as agency demo_phone_number.
-        // Try agency lookup, but build the industry config regardless.
-        let demoAgency = await getAgencyByDemoPhone(vapiPhoneNumber);
-        if (!demoAgency) {
-          // If industry demo number isn't in agencies.demo_phone_number,
-          // check if there's a known agency to associate (e.g., CallBird).
-          // For now, build a minimal agency object so the config can render.
-          console.log(`🎯 Industry demo call (${industryKey}) — no agency match, using defaults`);
-          demoAgency = { name: 'CallBird', slug: 'callbird' };
-        }
+      // Resolve: is this an industry demo or generic demo?
+      const { agency: demoAgency, industryKey } = await resolveAgencyForDemo(vapiPhoneNumber);
 
+      if (demoAgency && industryKey) {
+        // ── Industry-specific demo ──────────────────────────────────
         console.log(`🎯 Industry demo call (${industryKey}) — building config for: ${demoAgency.name}`);
         try {
           const demoConfig = buildIndustryDemoConfig(industryKey, demoAgency);
@@ -394,13 +413,12 @@ async function handleAssistantRequest(req, res, message) {
           return res.status(200).json({ assistant: demoConfig });
         } catch (indErr) {
           console.error(`❌ Industry demo config failed (${industryKey}):`, indErr.message);
-          // Fall through to generic demo check
+          // Fall through to generic demo attempt
         }
       }
 
-      // ── Generic demo check (existing behavior) ────────────────────
-      const demoAgency = await getAgencyByDemoPhone(vapiPhoneNumber);
       if (demoAgency) {
+        // ── Generic demo ────────────────────────────────────────────
         console.log(`🎤 Demo call — building dynamic demo config for: ${demoAgency.name}`);
         try {
           const demoConfig = buildDemoDynamicConfig(demoAgency);
@@ -416,6 +434,7 @@ async function handleAssistantRequest(req, res, message) {
           return res.status(200).json({ error: 'Demo config failed' });
         }
       }
+
       return res.status(200).json({ error: 'Client not found' });
     }
 
@@ -531,25 +550,23 @@ async function handleVapiWebhook(req, res) {
     if (message?.type === 'assistant-request') return handleAssistantRequest(req, res, message);
 
     if (message?.type === 'tool-calls' || message?.type === 'function-call') {
-      const vapiPhone = message.phoneNumber?.number || message.call?.phoneNumber?.number || null;
-      let isDemoCall = false;
-      if (vapiPhone) {
-        // Check industry demo numbers first, then agency demo numbers
-        const industryMatch = getIndustryDemoByPhone(vapiPhone);
-        if (industryMatch) { isDemoCall = true; }
-        else { const demoCheck = await getAgencyByDemoPhone(vapiPhone); isDemoCall = !!demoCheck; }
-      }
-      if (!isDemoCall && !vapiPhone) {
+      // Resolve phone number
+      let vapiPhone = message.phoneNumber?.number || message.call?.phoneNumber?.number || null;
+      if (!vapiPhone) {
         const phoneNumberId = message.call?.phoneNumberId || message.phoneNumber?.id;
         if (phoneNumberId) {
-          const lookedUpNumber = await getPhoneNumberFromVapi(phoneNumberId);
-          if (lookedUpNumber) {
-            const industryMatch = getIndustryDemoByPhone(lookedUpNumber);
-            if (industryMatch) { isDemoCall = true; message.phoneNumber = { ...(message.phoneNumber || {}), number: lookedUpNumber }; }
-            else { const demoCheck2 = await getAgencyByDemoPhone(lookedUpNumber); isDemoCall = !!demoCheck2; if (isDemoCall) message.phoneNumber = { ...(message.phoneNumber || {}), number: lookedUpNumber }; }
-          }
+          vapiPhone = await getPhoneNumberFromVapi(phoneNumberId);
+          if (vapiPhone) message.phoneNumber = { ...(message.phoneNumber || {}), number: vapiPhone };
         }
       }
+
+      // Check if this is any kind of demo call
+      let isDemoCall = false;
+      if (vapiPhone) {
+        const { agency } = await resolveAgencyForDemo(vapiPhone);
+        isDemoCall = !!agency;
+      }
+
       if (isDemoCall) return handleDemoToolCall(req, res, message);
       console.log(`🔧 Tool-call received (non-demo) — acknowledging`);
       return res.status(200).json({ received: true });
@@ -571,22 +588,15 @@ async function handleVapiWebhook(req, res) {
       console.log('⚠️ No client found for phone:', phoneNumber);
       console.log('🔍 Checking if this is a demo call...');
 
-      // Check industry demo numbers first
-      const industryKey = getIndustryDemoByPhone(phoneNumber);
-      if (industryKey) {
-        console.log(`✅ Industry demo call detected (${industryKey})`);
-        let demoAgency = await getAgencyByDemoPhone(phoneNumber);
-        if (!demoAgency) demoAgency = { name: 'CallBird', phone: null };
+      const { agency: demoAgency, industryKey } = await resolveAgencyForDemo(phoneNumber);
+
+      if (demoAgency) {
+        if (industryKey) console.log(`✅ Industry demo call detected (${industryKey}) for agency: ${demoAgency.name}`);
+        else console.log(`✅ Demo call detected for agency: ${demoAgency.name}`);
         const result = await handleDemoCall(demoAgency, message);
-        return res.status(200).json({ received: true, demo: true, industry: industryKey, ...result });
+        return res.status(200).json({ received: true, demo: true, industry: industryKey || null, ...result });
       }
 
-      const demoAgency = await getAgencyByDemoPhone(phoneNumber);
-      if (demoAgency) {
-        console.log(`✅ Demo call detected for agency: ${demoAgency.name}`);
-        const result = await handleDemoCall(demoAgency, message);
-        return res.status(200).json({ received: true, demo: true, ...result });
-      }
       console.log('⚠️ Not a demo call either — ignoring');
       return res.status(200).json({ received: true });
     }
