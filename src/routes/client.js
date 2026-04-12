@@ -153,11 +153,12 @@ router.get('/:id', async (req, res) => {
 router.put('/:id/settings', async (req, res) => {
   try {
     const { id } = req.params;
-    const { email, owner_phone } = req.body;
+    const { email, owner_phone, business_name } = req.body;
 
     const updates = {};
     if (email) updates.email = email;
     if (owner_phone) updates.owner_phone = owner_phone;
+    if (business_name !== undefined && business_name.trim()) updates.business_name = business_name.trim();
 
     const { data, error } = await supabase
       .from('clients')
