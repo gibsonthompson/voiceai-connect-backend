@@ -1,16 +1,6 @@
 // ============================================================================
 // VAPI WEBHOOK HANDLER - Multi-Tenant Aware
-// UPDATED: Transfer tracking (ended_reason, transfer_status)
-// UPDATED: Demo call detection + agency follow-up SMS
-// UPDATED: Email summaries gated by plan_features (Phase 5)
-// UPDATED: Unlimited calls support (-1 = no limit)
-// UPDATED: Contact upsert (Lead Capture) after call save
-// UPDATED: Spam detection — AI flags spam, different SMS, skip call count
-// UPDATED: Phase 2 — assistant-request handler (dynamic per-call config)
-// UPDATED: Team member notification routing
-// UPDATED: Demo upgrade — dynamic gpt-4o config + mid-call SMS tool
-// UPDATED: Admin demo call notification wired to getSmsTemplate()
-// UPDATED: Industry-specific demo routing (dental first)
+// UPDATED: Industry-specific demo routing + debug logging
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -21,22 +11,10 @@ const { notifyTeamMembers } = require('../lib/team-notifications');
 const { buildDemoDynamicConfig, buildDemoSmsContent, getIndustryDemoByPhone, buildIndustryDemoConfig } = require('../lib/demo-config');
 const { getSmsTemplate } = require('../lib/sms-templates');
 
-// ============================================================================
-// PLAN FEATURE CHECK HELPER
-// ============================================================================
 const DEFAULT_PLAN_FEATURES = {
-  starter: {
-    sms_notifications: true, email_summaries: false, custom_greeting: false, custom_voice: false,
-    knowledge_base: false, business_hours: false, advanced_analytics: false, priority_support: false,
-  },
-  pro: {
-    sms_notifications: true, email_summaries: true, custom_greeting: true, custom_voice: false,
-    knowledge_base: true, business_hours: true, advanced_analytics: true, priority_support: false,
-  },
-  growth: {
-    sms_notifications: true, email_summaries: true, custom_greeting: true, custom_voice: true,
-    knowledge_base: true, business_hours: true, advanced_analytics: true, priority_support: true,
-  },
+  starter: { sms_notifications: true, email_summaries: false, custom_greeting: false, custom_voice: false, knowledge_base: false, business_hours: false, advanced_analytics: false, priority_support: false },
+  pro: { sms_notifications: true, email_summaries: true, custom_greeting: true, custom_voice: false, knowledge_base: true, business_hours: true, advanced_analytics: true, priority_support: false },
+  growth: { sms_notifications: true, email_summaries: true, custom_greeting: true, custom_voice: true, knowledge_base: true, business_hours: true, advanced_analytics: true, priority_support: true },
 };
 
 function isFeatureEnabled(client, agency, featureKey) {
@@ -47,18 +25,13 @@ function isFeatureEnabled(client, agency, featureKey) {
   return planConfig[featureKey] !== false;
 }
 
-// ============================================================================
-// TRANSFER STATUS DETECTION
-// ============================================================================
 function detectTransferStatus(endedReason, transcript) {
   if (!endedReason) return { transferStatus: null, wasTransferred: false };
   if (endedReason === 'assistant-forwarded-call') return { transferStatus: 'transferred', wasTransferred: true };
   if (endedReason === 'pipeline-error') {
     const transferAttempted = transcript && (
-      transcript.toLowerCase().includes('let me connect you') ||
-      transcript.toLowerCase().includes('let me transfer') ||
-      transcript.toLowerCase().includes('let me get the team') ||
-      transcript.toLowerCase().includes('let me grab someone') ||
+      transcript.toLowerCase().includes('let me connect you') || transcript.toLowerCase().includes('let me transfer') ||
+      transcript.toLowerCase().includes('let me get the team') || transcript.toLowerCase().includes('let me grab someone') ||
       transcript.toLowerCase().includes('i\'ll connect you')
     );
     if (transferAttempted) return { transferStatus: 'transfer_failed', wasTransferred: false };
@@ -67,12 +40,8 @@ function detectTransferStatus(endedReason, transcript) {
   return { transferStatus: null, wasTransferred: false };
 }
 
-// ============================================================================
-// AI SUMMARY GENERATION (via Claude) — with spam detection
-// ============================================================================
 async function generateAISummary(transcript, industry, callerPhone) {
   console.log('🤖 Generating AI summary...');
-  
   const industryGuidance = {
     home_services: 'Focus on: the specific problem, property location, urgency level, and service needed.',
     medical: 'Focus on: appointment type, patient status, general reason (HIPAA-compliant), urgency.',
@@ -88,86 +57,31 @@ async function generateAISummary(transcript, industry, callerPhone) {
     automotive: 'Focus on: vehicle info, service needed, safety concerns, urgency.'
   };
 
-  const prompt = `Analyze this phone call transcript for a ${industry} business.
-
-Transcript:
-${transcript}
-
-Caller Phone: ${callerPhone}
-
-Extract and return ONLY valid JSON:
-{
-  "customerName": "string or 'Unknown'",
-  "customerPhone": "formatted (XXX) XXX-XXXX",
-  "customerEmail": "string or null",
-  "urgency": "emergency|high|medium|routine",
-  "summary": "2-3 sentence summary focusing on: ${industryGuidance[industry] || 'what the customer needs'}",
-  "isSpam": false,
-  "spamReason": null
-}
-
-SPAM DETECTION: Set isSpam to true and provide spamReason if ANY of these apply:
-- The caller is a telemarketer or robocall trying to sell something TO the business
-- The caller plays a pre-recorded message instead of having a real conversation
-- The caller asks for "the business owner" or "the person in charge of your Google listing" (common spam patterns)
-- The caller doesn't respond naturally to the AI's questions (one-sided, scripted)
-- The call is extremely short with no real interaction (silence, hang-up, automated message)
-- The caller is selling SEO services, Google Ads, insurance leads, credit card processing, or similar B2B solicitation
-
-If spam: set urgency to "routine", summary should briefly describe what the spam was about, and spamReason should be a short label like "telemarketer selling SEO" or "robocall - pre-recorded message" or "Google listing scam".`;
+  const prompt = `Analyze this phone call transcript for a ${industry} business.\n\nTranscript:\n${transcript}\n\nCaller Phone: ${callerPhone}\n\nExtract and return ONLY valid JSON:\n{\n  "customerName": "string or 'Unknown'",\n  "customerPhone": "formatted (XXX) XXX-XXXX",\n  "customerEmail": "string or null",\n  "urgency": "emergency|high|medium|routine",\n  "summary": "2-3 sentence summary focusing on: ${industryGuidance[industry] || 'what the customer needs'}",\n  "isSpam": false,\n  "spamReason": null\n}\n\nSPAM DETECTION: Set isSpam to true and provide spamReason if ANY of these apply:\n- The caller is a telemarketer or robocall trying to sell something TO the business\n- The caller plays a pre-recorded message\n- The caller asks for "the business owner" or "the person in charge of your Google listing"\n- The caller doesn't respond naturally (one-sided, scripted)\n- Extremely short with no real interaction\n- Selling SEO, Google Ads, insurance leads, credit card processing\n\nIf spam: set urgency to "routine", summary describes the spam, spamReason is a short label.`;
 
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01"
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 500,
-        temperature: 0.3,
-        messages: [{ role: "user", content: prompt }]
-      })
+      headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 500, temperature: 0.3, messages: [{ role: "user", content: prompt }] })
     });
-
     if (!response.ok) throw new Error(`Claude API failed: ${response.status}`);
-
     const data = await response.json();
-    let responseText = data.content[0].text.trim();
-    responseText = responseText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-    
+    let responseText = data.content[0].text.trim().replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
     const parsed = JSON.parse(responseText);
     parsed.isSpam = parsed.isSpam === true;
     if (!parsed.isSpam) parsed.spamReason = null;
-    
     return parsed;
   } catch (error) {
     console.error('❌ AI summary failed, using fallback:', error.message);
-    return {
-      customerName: 'Unknown', customerPhone: callerPhone, customerEmail: null,
-      urgency: 'routine',
-      summary: `Customer called regarding ${industry.replace('_', ' ')} services. Team should follow up.`,
-      isSpam: false, spamReason: null
-    };
+    return { customerName: 'Unknown', customerPhone: callerPhone, customerEmail: null, urgency: 'routine',
+      summary: `Customer called regarding ${industry.replace('_', ' ')} services. Team should follow up.`, isSpam: false, spamReason: null };
   }
 }
 
-// ============================================================================
-// USAGE WARNING EMAILS (STUBBED)
-// ============================================================================
-async function sendUsageWarningEmail(client, agency, currentCalls, limit) {
-  console.log(`📧 [EMAIL STUB] Would send 80% usage warning to ${client.email}`);
-}
+async function sendUsageWarningEmail(client, agency, currentCalls, limit) { console.log(`📧 [EMAIL STUB] 80% usage warning`); }
+async function sendLimitReachedEmail(client, agency, limit) { console.log(`📧 [EMAIL STUB] Limit reached`); }
 
-async function sendLimitReachedEmail(client, agency, limit) {
-  console.log(`📧 [EMAIL STUB] Would send limit reached email to ${client.email}`);
-}
-
-// ============================================================================
-// HELPERS
-// ============================================================================
 function isTrialExpired(trialEndsAt) {
   if (!trialEndsAt) return false;
   return new Date(trialEndsAt) < new Date();
@@ -189,39 +103,24 @@ async function getAgencyById(agencyId) {
   } catch { return null; }
 }
 
-// ============================================================================
-// RESOLVE AGENCY FOR ANY DEMO CALL
-// Checks industry demo mapping first (by agencyId), then agency demo_phone_number
-// Returns { agency, industryKey } — industryKey is null for generic demos
-// ============================================================================
 async function resolveAgencyForDemo(phoneNumber) {
-  // 1. Check industry demo mapping
   const industryMatch = getIndustryDemoByPhone(phoneNumber);
   if (industryMatch) {
     const agency = await getAgencyById(industryMatch.agencyId);
     if (agency) return { agency, industryKey: industryMatch.industry };
-    // agencyId lookup failed — return minimal fallback
     return { agency: { id: industryMatch.agencyId, name: 'CallBird AI', slug: 'callbird' }, industryKey: industryMatch.industry };
   }
-
-  // 2. Check generic demo (agencies.demo_phone_number)
   const agency = await getAgencyByDemoPhone(phoneNumber);
   if (agency) return { agency, industryKey: null };
-
   return { agency: null, industryKey: null };
 }
 
-// ============================================================================
-// DISCONNECTED NUMBER ASSISTANT CONFIG
-// ============================================================================
 function buildDisconnectedAssistantConfig(businessName) {
   return {
     assistant: {
-      model: {
-        provider: 'openai', model: 'gpt-3.5-turbo', temperature: 0.1,
-        messages: [{ role: 'system', content: `You are an automated message. Say exactly: "We're sorry, the number you have reached for ${businessName || 'this business'} is no longer in service. Please contact the business directly for assistance. Goodbye." Then end the call immediately using the endCall tool. Do not engage in any conversation. Do not answer any questions. Just deliver the message and end the call.` }],
-        tools: [{ type: 'endCall' }]
-      },
+      model: { provider: 'openai', model: 'gpt-3.5-turbo', temperature: 0.1,
+        messages: [{ role: 'system', content: `You are an automated message. Say exactly: "We're sorry, the number you have reached for ${businessName || 'this business'} is no longer in service. Please contact the business directly for assistance. Goodbye." Then end the call immediately using the endCall tool.` }],
+        tools: [{ type: 'endCall' }] },
       voice: { provider: 'openai', voiceId: 'alloy' },
       firstMessage: `We're sorry, the number you have reached for ${businessName || 'this business'} is no longer in service. Please contact the business directly for assistance. Goodbye.`,
       maxDurationSeconds: 15, recordingEnabled: false
@@ -229,14 +128,10 @@ function buildDisconnectedAssistantConfig(businessName) {
   };
 }
 
-// ============================================================================
-// HANDLE DEMO CALL (end-of-call)
-// ============================================================================
 async function handleDemoCall(agency, message) {
   const call = message.call;
   const callerPhone = call.customer?.number || null;
   const durationSeconds = call.duration || message.duration || null;
-
   console.log(`🎤 Demo call completed for agency: ${agency.name}`);
 
   if (callerPhone && callerPhone !== 'Unknown') {
@@ -249,126 +144,82 @@ async function handleDemoCall(agency, message) {
         await sendDemoCallFollowUpSMS(callerPhone, agency);
         console.log('✅ Demo follow-up SMS sent');
       }
-    } catch (smsErr) {
-      console.warn('⚠️ Demo follow-up SMS failed:', smsErr.message);
-    }
+    } catch (smsErr) { console.warn('⚠️ Demo follow-up SMS failed:', smsErr.message); }
   }
 
   if (agency.phone) {
     const { formatPhoneDisplay, sendTelnyxSMS } = require('../lib/notifications');
     const callerDisplay = callerPhone ? formatPhoneDisplay(callerPhone) : 'Unknown number';
     const durationDisplay = durationSeconds ? `${Math.round(durationSeconds / 60)}min ${durationSeconds % 60}s` : 'Unknown';
-    
     try {
-      const templateMsg = await getSmsTemplate('admin_demo_call', {
-        agency_name: agency.name,
-        caller: callerDisplay,
-        duration: durationDisplay,
-      });
-      await sendTelnyxSMS(agency.phone,
-        templateMsg || `🎤 Demo Call - ${agency.name}\nCaller: ${callerDisplay}\nDuration: ${durationDisplay}\nFollow-up SMS sent.`
-      );
-    } catch (ownerSmsErr) {
-      console.warn('⚠️ Agency owner demo notification failed:', ownerSmsErr.message);
-    }
+      const templateMsg = await getSmsTemplate('admin_demo_call', { agency_name: agency.name, caller: callerDisplay, duration: durationDisplay });
+      await sendTelnyxSMS(agency.phone, templateMsg || `🎤 Demo Call - ${agency.name}\nCaller: ${callerDisplay}\nDuration: ${durationDisplay}\nFollow-up SMS sent.`);
+    } catch (ownerSmsErr) { console.warn('⚠️ Agency owner demo notification failed:', ownerSmsErr.message); }
   }
 
   return { type: 'demo', agency: agency.name, callerPhone, durationSeconds, followUpSent: !!callerPhone };
 }
 
-// ============================================================================
-// DEMO SMS DEDUP
-// ============================================================================
 const _demoSmsSent = new Map();
 function hasDemoSmsSent(callId) {
   if (!callId) return false;
-  const sent = _demoSmsSent.get(callId);
-  if (sent) return true;
+  if (_demoSmsSent.get(callId)) return true;
   _demoSmsSent.set(callId, Date.now());
   for (const [k, v] of _demoSmsSent) { if (Date.now() - v > 5 * 60 * 1000) _demoSmsSent.delete(k); }
   return false;
 }
 
-// ============================================================================
-// HANDLE DEMO FUNCTION CALL (mid-call SMS)
-// ============================================================================
 async function handleDemoToolCall(req, res, message) {
   const startTime = Date.now();
-
   try {
     const callId = message.call?.id || message.callId || null;
     if (hasDemoSmsSent(callId)) {
-      console.log(`⚠️ Demo SMS already sent for call ${callId} — skipping duplicate`);
-      return res.status(200).json({ results: [{ toolCallId: message.toolCallList?.[0]?.id || 'dedup', result: 'Already sent the text — they should have it on their phone.' }] });
+      return res.status(200).json({ results: [{ toolCallId: message.toolCallList?.[0]?.id || 'dedup', result: 'Already sent the text.' }] });
     }
-
     const toolCallList = message.toolCallList || message.toolCalls || [];
     const toolCall = toolCallList[0];
-    if (!toolCall) { console.log('⚠️ Demo tool-call: no tool call data'); return res.status(200).json({ results: [{ result: 'No tool call found.' }] }); }
+    if (!toolCall) return res.status(200).json({ results: [{ result: 'No tool call found.' }] });
 
     const toolCallId = toolCall.id;
     const funcName = toolCall.function?.name || toolCall.name;
     const rawArgs = toolCall.function?.arguments || toolCall.arguments || '{}';
     const args = typeof rawArgs === 'string' ? JSON.parse(rawArgs) : rawArgs;
-
     console.log(`🔧 Demo tool-call: ${funcName}`);
 
-    if (funcName !== 'send_demo_sms') {
-      console.log(`⚠️ Unknown demo function: ${funcName}`);
-      return res.status(200).json({ results: [{ toolCallId, result: 'Unknown function.' }] });
-    }
+    if (funcName !== 'send_demo_sms') return res.status(200).json({ results: [{ toolCallId, result: 'Unknown function.' }] });
 
     const callerPhone = message.call?.customer?.number || message.customer?.number || null;
-
     if (!callerPhone || callerPhone === 'Unknown') {
-      console.log('⚠️ Demo SMS: no caller phone number available');
-      return res.status(200).json({ results: [{ toolCallId, result: "I wasn't able to send the text — I don't have your phone number. But after every real call, your team would get an instant summary just like that." }] });
+      return res.status(200).json({ results: [{ toolCallId, result: "I wasn't able to send the text — I don't have your phone number. But after every real call, your team would get an instant summary." }] });
     }
 
-    // Resolve agency — works for both industry demo and generic demo numbers
     let vapiPhone = message.phoneNumber?.number || message.call?.phoneNumber?.number || null;
     if (!vapiPhone) {
       const phoneNumberId = message.call?.phoneNumberId || message.phoneNumber?.id;
       if (phoneNumberId) vapiPhone = await getPhoneNumberFromVapi(phoneNumberId);
     }
-
     let agency = null;
-    if (vapiPhone) {
-      const resolved = await resolveAgencyForDemo(vapiPhone);
-      agency = resolved.agency;
-    }
-
-    if (!agency) {
-      console.log('⚠️ Demo SMS: could not identify agency');
-      return res.status(200).json({ results: [{ toolCallId, result: 'I just sent you a text with the call summary — check your phone!' }] });
-    }
+    if (vapiPhone) { const resolved = await resolveAgencyForDemo(vapiPhone); agency = resolved.agency; }
+    if (!agency) return res.status(200).json({ results: [{ toolCallId, result: 'I just sent you a text with the call summary — check your phone!' }] });
 
     const { formatPhoneDisplay, sendTelnyxSMS } = require('../lib/notifications');
     const callerDisplay = formatPhoneDisplay ? formatPhoneDisplay(callerPhone) : callerPhone;
-
     const smsContent = buildDemoSmsContent({
-      business_name: args.business_name || 'Your Business',
-      business_type: args.business_type || 'business',
-      service_requested: args.service_requested || 'General inquiry',
-      customer_name: args.customer_name || 'Customer',
+      business_name: args.business_name || 'Your Business', business_type: args.business_type || 'business',
+      service_requested: args.service_requested || 'General inquiry', customer_name: args.customer_name || 'Customer',
       caller_phone_display: callerDisplay,
     }, agency);
-
     await sendTelnyxSMS(callerPhone, smsContent);
-
-    const elapsed = Date.now() - startTime;
-    console.log(`✅ Demo SMS sent to ${callerPhone} in ${elapsed}ms`);
-
+    console.log(`✅ Demo SMS sent to ${callerPhone} in ${Date.now() - startTime}ms`);
     return res.status(200).json({ results: [{ toolCallId, result: 'Done! The text has been sent to their phone with the full call summary.' }] });
   } catch (error) {
-    const elapsed = Date.now() - startTime;
-    console.error(`❌ Demo tool-call failed after ${elapsed}ms:`, error.message);
-    return res.status(200).json({ results: [{ toolCallId: 'error', result: "I sent the text — check your phone! That's exactly what comes through after every call." }] });
+    console.error(`❌ Demo tool-call failed after ${Date.now() - startTime}ms:`, error.message);
+    return res.status(200).json({ results: [{ toolCallId: 'error', result: "I sent the text — check your phone!" }] });
   }
 }
 
 // ============================================================================
-// PHASE 2: ASSISTANT-REQUEST HANDLER
+// ASSISTANT-REQUEST HANDLER — with debug logging
 // ============================================================================
 async function handleAssistantRequest(req, res, message) {
   const startTime = Date.now();
@@ -391,7 +242,7 @@ async function handleAssistantRequest(req, res, message) {
           return handleAssistantRequest(req, res, message);
         }
       }
-      console.log('⚠️ No phone number in assistant-request — cannot identify client');
+      console.log('⚠️ No phone number in assistant-request');
       return res.status(200).json({ error: 'No phone number' });
     }
 
@@ -400,33 +251,49 @@ async function handleAssistantRequest(req, res, message) {
     if (!client) {
       console.log('⚠️ No client found for:', vapiPhoneNumber);
 
-      // Resolve: is this an industry demo or generic demo?
       const { agency: demoAgency, industryKey } = await resolveAgencyForDemo(vapiPhoneNumber);
 
       if (demoAgency && industryKey) {
-        // ── Industry-specific demo ──────────────────────────────────
         console.log(`🎯 Industry demo call (${industryKey}) — building config for: ${demoAgency.name}`);
         try {
           const demoConfig = buildIndustryDemoConfig(industryKey, demoAgency);
+          const responsePayload = { assistant: demoConfig };
           const elapsed = Date.now() - startTime;
+          
+          // DEBUG: Log the response structure
+          const jsonStr = JSON.stringify(responsePayload);
           console.log(`✅ Industry demo config built in ${elapsed}ms (${industryKey}, model: gpt-4o)`);
-          return res.status(200).json({ assistant: demoConfig });
+          console.log(`📦 Response size: ${jsonStr.length} bytes`);
+          console.log(`📦 Response keys: ${Object.keys(demoConfig).join(', ')}`);
+          console.log(`📦 Model keys: ${Object.keys(demoConfig.model || {}).join(', ')}`);
+          console.log(`📦 Has tools in model: ${!!(demoConfig.model?.tools?.length)}`);
+          console.log(`📦 Has tools at root: ${!!(demoConfig.tools?.length)}`);
+          console.log(`📦 Voice: ${JSON.stringify(demoConfig.voice)}`);
+          console.log(`📦 First 200 chars: ${jsonStr.substring(0, 200)}`);
+          
+          return res.status(200).json(responsePayload);
         } catch (indErr) {
-          console.error(`❌ Industry demo config failed (${industryKey}):`, indErr.message);
-          // Fall through to generic demo attempt
+          console.error(`❌ Industry demo config failed (${industryKey}):`, indErr.message, indErr.stack);
         }
       }
 
       if (demoAgency) {
-        // ── Generic demo ────────────────────────────────────────────
-        console.log(`🎤 Demo call — building dynamic demo config for: ${demoAgency.name}`);
+        console.log(`🎤 Generic demo call — building config for: ${demoAgency.name}`);
         try {
           const demoConfig = buildDemoDynamicConfig(demoAgency);
+          const responsePayload = { assistant: demoConfig };
           const elapsed = Date.now() - startTime;
-          console.log(`✅ Demo config built in ${elapsed}ms (model: gpt-4o)`);
-          return res.status(200).json({ assistant: demoConfig });
+          
+          // DEBUG
+          const jsonStr = JSON.stringify(responsePayload);
+          console.log(`✅ Generic demo config built in ${elapsed}ms`);
+          console.log(`📦 Response size: ${jsonStr.length} bytes`);
+          console.log(`📦 Response keys: ${Object.keys(demoConfig).join(', ')}`);
+          console.log(`📦 First 200 chars: ${jsonStr.substring(0, 200)}`);
+          
+          return res.status(200).json(responsePayload);
         } catch (demoErr) {
-          console.error('❌ Demo dynamic config failed:', demoErr.message);
+          console.error('❌ Demo dynamic config failed:', demoErr.message, demoErr.stack);
           if (demoAgency.demo_assistant_id) {
             console.log(`🔄 Falling back to static demo assistant: ${demoAgency.demo_assistant_id}`);
             return res.status(200).json({ assistantId: demoAgency.demo_assistant_id });
@@ -435,36 +302,33 @@ async function handleAssistantRequest(req, res, message) {
         }
       }
 
+      console.log('❌ No demo agency found either — returning error');
       return res.status(200).json({ error: 'Client not found' });
     }
 
     console.log(`✅ Client: ${client.business_name}`);
     const agency = client.agencies || null;
 
-    // ═══════════════════════════════════════════════════════════════════
-    // SUBSCRIPTION GATING
-    // ═══════════════════════════════════════════════════════════════════
     if (agency) {
       const agencyValidStatuses = ['active', 'trial', 'trialing'];
       if (!agencyValidStatuses.includes(agency.subscription_status)) {
-        console.log(`🚫 CALL BLOCKED (assistant-request): Agency ${agency.name} subscription not active (${agency.subscription_status})`);
+        console.log(`🚫 CALL BLOCKED: Agency ${agency.name} not active (${agency.subscription_status})`);
         return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
       }
-      if ((agency.subscription_status === 'trial' || agency.subscription_status === 'trialing') && isTrialExpired(agency.trial_ends_at)) {
-        console.log(`🚫 CALL BLOCKED (assistant-request): Agency ${agency.name} trial expired`);
+      if (['trial', 'trialing'].includes(agency.subscription_status) && isTrialExpired(agency.trial_ends_at)) {
+        console.log(`🚫 CALL BLOCKED: Agency ${agency.name} trial expired`);
         await supabase.from('agencies').update({ subscription_status: 'expired' }).eq('id', agency.id);
         return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
       }
     }
 
-    const clientValidStatuses = ['active', 'trial'];
-    if (!clientValidStatuses.includes(client.subscription_status)) {
-      console.log(`🚫 CALL BLOCKED (assistant-request): ${client.business_name} subscription not active (${client.subscription_status})`);
+    if (!['active', 'trial'].includes(client.subscription_status)) {
+      console.log(`🚫 CALL BLOCKED: ${client.business_name} not active (${client.subscription_status})`);
       return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
     }
 
     if (client.subscription_status === 'trial' && isTrialExpired(client.trial_ends_at)) {
-      console.log(`🚫 CALL BLOCKED (assistant-request): ${client.business_name} trial expired`);
+      console.log(`🚫 CALL BLOCKED: ${client.business_name} trial expired`);
       await supabase.from('clients').update({ subscription_status: 'trial_expired', status: 'suspended' }).eq('id', client.id);
       return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
     }
@@ -472,23 +336,19 @@ async function handleAssistantRequest(req, res, message) {
     const currentCallCount = client.calls_this_month || 0;
     const callLimit = client.monthly_call_limit ?? 50;
     if (callLimit !== -1 && currentCallCount >= callLimit) {
-      console.log(`🚫 CALL BLOCKED (assistant-request): ${client.business_name} reached call limit (${currentCallCount}/${callLimit})`);
+      console.log(`🚫 CALL BLOCKED: ${client.business_name} at limit (${currentCallCount}/${callLimit})`);
       return res.status(200).json({
         assistant: {
           model: { provider: 'openai', model: 'gpt-3.5-turbo', temperature: 0.1,
-            messages: [{ role: 'system', content: `You are answering the phone for ${client.business_name}. Say: "Thank you for calling ${client.business_name}. We're currently unable to take your call through our automated system. Please try again later or reach the business directly. Goodbye." Then end the call using the endCall tool.` }],
-            tools: [{ type: 'endCall' }]
-          },
+            messages: [{ role: 'system', content: `Say: "Thank you for calling ${client.business_name}. We're currently unable to take your call. Please try again later. Goodbye." Then end the call.` }],
+            tools: [{ type: 'endCall' }] },
           voice: { provider: 'openai', voiceId: 'alloy' },
-          firstMessage: `Thank you for calling ${client.business_name}. We're currently unable to take your call through our automated system. Please try again later or reach the business directly. Goodbye.`,
+          firstMessage: `Thank you for calling ${client.business_name}. We're currently unable to take your call. Please try again later. Goodbye.`,
           maxDurationSeconds: 15, recordingEnabled: false
         }
       });
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // CLIENT IS ACTIVE — Build the full dynamic assistant config
-    // ═══════════════════════════════════════════════════════════════════
     let callerContext = null;
     if (callerPhone && callerPhone !== 'Unknown') {
       try {
@@ -506,35 +366,29 @@ async function handleAssistantRequest(req, res, message) {
           callerContext = contact;
           console.log(`📇 Recognized caller: ${contact.name} (${contact.total_calls} previous calls)`);
         } else { console.log(`📇 Unknown caller: ${callerPhone}`); }
-      } catch (contactErr) { console.warn('⚠️ Contact lookup failed (non-fatal):', contactErr.message); }
+      } catch (contactErr) { console.warn('⚠️ Contact lookup failed:', contactErr.message); }
     }
 
     const assistantConfig = await buildDynamicAssistantConfig(client, agency, callerContext);
     const elapsed = Date.now() - startTime;
     console.log(`✅ Assistant config built in ${elapsed}ms`);
-    if (callerContext) console.log(`   🎯 Personalized greeting for ${callerContext.name}`);
-
     return res.status(200).json({ assistant: assistantConfig });
 
   } catch (error) {
     const elapsed = Date.now() - startTime;
-    console.error(`❌ Assistant-request failed after ${elapsed}ms:`, error.message);
+    console.error(`❌ Assistant-request CRASHED after ${elapsed}ms:`, error.message);
+    console.error(`❌ Stack:`, error.stack);
 
     try {
       const vapiPhoneNumber = message.phoneNumber?.number;
       if (vapiPhoneNumber) {
         const { data: fallbackClient } = await supabase.from('clients').select('vapi_assistant_id, subscription_status').eq('vapi_phone_number', vapiPhoneNumber).single();
-        if (fallbackClient?.vapi_assistant_id) {
-          const fallbackValidStatuses = ['active', 'trial'];
-          if (!fallbackValidStatuses.includes(fallbackClient.subscription_status)) {
-            console.log(`🚫 Fallback also blocked — client subscription: ${fallbackClient.subscription_status}`);
-            return res.status(200).json(buildDisconnectedAssistantConfig(null));
-          }
+        if (fallbackClient?.vapi_assistant_id && ['active', 'trial'].includes(fallbackClient.subscription_status)) {
           console.log(`🔄 Falling back to static assistant: ${fallbackClient.vapi_assistant_id}`);
           return res.status(200).json({ assistantId: fallbackClient.vapi_assistant_id });
         }
       }
-    } catch (fallbackErr) { console.error('❌ Even fallback failed:', fallbackErr.message); }
+    } catch (fallbackErr) { console.error('❌ Fallback failed:', fallbackErr.message); }
 
     return res.status(500).json({ error: 'Failed to build assistant config' });
   }
@@ -550,7 +404,6 @@ async function handleVapiWebhook(req, res) {
     if (message?.type === 'assistant-request') return handleAssistantRequest(req, res, message);
 
     if (message?.type === 'tool-calls' || message?.type === 'function-call') {
-      // Resolve phone number
       let vapiPhone = message.phoneNumber?.number || message.call?.phoneNumber?.number || null;
       if (!vapiPhone) {
         const phoneNumberId = message.call?.phoneNumberId || message.phoneNumber?.id;
@@ -559,132 +412,103 @@ async function handleVapiWebhook(req, res) {
           if (vapiPhone) message.phoneNumber = { ...(message.phoneNumber || {}), number: vapiPhone };
         }
       }
-
-      // Check if this is any kind of demo call
       let isDemoCall = false;
-      if (vapiPhone) {
-        const { agency } = await resolveAgencyForDemo(vapiPhone);
-        isDemoCall = !!agency;
-      }
-
+      if (vapiPhone) { const { agency } = await resolveAgencyForDemo(vapiPhone); isDemoCall = !!agency; }
       if (isDemoCall) return handleDemoToolCall(req, res, message);
       console.log(`🔧 Tool-call received (non-demo) — acknowledging`);
       return res.status(200).json({ received: true });
     }
 
     console.log('📞 VAPI webhook received');
-
     if (message?.type !== 'end-of-call-report') return res.status(200).json({ received: true });
-    
+
     const call = message.call;
     const phoneNumberId = call.phoneNumberId;
     const phoneNumber = await getPhoneNumberFromVapi(phoneNumberId);
-    if (!phoneNumber) { console.log('⚠️ Could not get phone number from VAPI'); return res.status(200).json({ received: true }); }
-    
+    if (!phoneNumber) { console.log('⚠️ Could not get phone number'); return res.status(200).json({ received: true }); }
+
     console.log('📱 Phone number:', phoneNumber);
     const client = await getClientByVapiPhoneNumber(phoneNumber);
-    
+
     if (!client) {
-      console.log('⚠️ No client found for phone:', phoneNumber);
-      console.log('🔍 Checking if this is a demo call...');
-
+      console.log('⚠️ No client found for:', phoneNumber);
       const { agency: demoAgency, industryKey } = await resolveAgencyForDemo(phoneNumber);
-
       if (demoAgency) {
-        if (industryKey) console.log(`✅ Industry demo call detected (${industryKey}) for agency: ${demoAgency.name}`);
-        else console.log(`✅ Demo call detected for agency: ${demoAgency.name}`);
+        if (industryKey) console.log(`✅ Industry demo end-of-call (${industryKey}): ${demoAgency.name}`);
+        else console.log(`✅ Demo end-of-call: ${demoAgency.name}`);
         const result = await handleDemoCall(demoAgency, message);
         return res.status(200).json({ received: true, demo: true, industry: industryKey || null, ...result });
       }
-
-      console.log('⚠️ Not a demo call either — ignoring');
+      console.log('⚠️ Not a demo call either');
       return res.status(200).json({ received: true });
     }
-    
+
     console.log('✅ Client found:', client.business_name);
-    console.log('🏢 Agency:', client.agencies?.name || 'Direct (no agency)');
     const agency = client.agencies;
-    
+
     if (agency) {
-      const agencyValidStatuses = ['active', 'trial', 'trialing'];
-      if (!agencyValidStatuses.includes(agency.subscription_status)) {
-        console.log(`🚫 CALL BLOCKED: Agency ${agency.name} subscription not active`);
-        return res.status(200).json({ received: true, blocked: true, reason: 'Agency subscription not active' });
+      if (!['active', 'trial', 'trialing'].includes(agency.subscription_status)) {
+        console.log(`🚫 CALL BLOCKED: Agency not active`);
+        return res.status(200).json({ received: true, blocked: true, reason: 'Agency not active' });
       }
-      if ((agency.subscription_status === 'trial' || agency.subscription_status === 'trialing') && isTrialExpired(agency.trial_ends_at)) {
-        console.log(`🚫 CALL BLOCKED: Agency ${agency.name} trial expired`);
+      if (['trial', 'trialing'].includes(agency.subscription_status) && isTrialExpired(agency.trial_ends_at)) {
         await supabase.from('agencies').update({ subscription_status: 'expired' }).eq('id', agency.id);
         return res.status(200).json({ received: true, blocked: true, reason: 'Agency trial expired' });
       }
     }
-    
-    const validStatuses = ['active', 'trial'];
-    if (!validStatuses.includes(client.subscription_status)) {
-      console.log(`🚫 CALL BLOCKED: ${client.business_name} subscription not active`);
+
+    if (!['active', 'trial'].includes(client.subscription_status)) {
       return res.status(200).json({ received: true, blocked: true, reason: 'Subscription not active' });
     }
-    
     if (client.subscription_status === 'trial' && isTrialExpired(client.trial_ends_at)) {
-      console.log(`🚫 CALL BLOCKED: ${client.business_name} trial expired`);
       await supabase.from('clients').update({ subscription_status: 'expired' }).eq('id', client.id);
       return res.status(200).json({ received: true, blocked: true, reason: 'Trial expired' });
     }
-    
+
     const currentCallCount = client.calls_this_month || 0;
     const callLimit = client.monthly_call_limit ?? 50;
-    
     if (callLimit !== -1 && currentCallCount >= callLimit) {
-      console.log(`🚫 CALL BLOCKED: ${client.business_name} reached limit`);
       if (currentCallCount === callLimit) await sendLimitReachedEmail(client, agency, callLimit);
       return res.status(200).json({ received: true, blocked: true, reason: 'Monthly call limit reached' });
     }
-    
-    if (callLimit === -1) console.log(`♾️ Unlimited plan — no call cap`);
+
+    if (callLimit === -1) console.log(`♾️ Unlimited plan`);
     else console.log(`📊 Usage: ${currentCallCount}/${callLimit} calls`);
-    
+
     const transcript = message.transcript || '';
     const callerPhone = call.customer?.number || 'Unknown';
     const aiData = await generateAISummary(transcript, client.industry || 'professional_services', callerPhone);
     const { customerName, customerPhone, customerEmail, urgency, summary: aiSummary, isSpam, spamReason } = aiData;
-    
+
     const recordingUrl = message.recordingUrl || message.artifact?.recordingUrl || call.recordingUrl || null;
-    const durationSeconds = call.duration || message.duration || message.call?.duration || message.artifact?.duration || null;
-    if (durationSeconds) console.log(`⏱️ Call duration: ${durationSeconds} seconds`);
-    
+    const durationSeconds = call.duration || message.duration || message.artifact?.duration || null;
     const endedReason = call.endedReason || message.endedReason || null;
     const { transferStatus, wasTransferred } = detectTransferStatus(endedReason, transcript);
-    if (wasTransferred) console.log(`📲 Call was TRANSFERRED (endedReason: ${endedReason})`);
-    else if (transferStatus === 'transfer_failed') console.log(`❌ Transfer FAILED (endedReason: ${endedReason})`);
-    else console.log(`📞 Call ended normally (endedReason: ${endedReason || 'unknown'})`);
-    
-    // SPAM FAST PATH
+
     if (isSpam) {
-      console.log(`🚫 SPAM DETECTED: ${spamReason || 'Unknown spam type'}`);
+      console.log(`🚫 SPAM DETECTED: ${spamReason}`);
       const spamCallRecord = {
-        client_id: client.id, customer_name: customerName || 'Spam Caller',
-        customer_phone: customerPhone || callerPhone, customer_email: null,
-        ai_summary: aiSummary, transcript, recording_url: recordingUrl,
+        client_id: client.id, customer_name: customerName || 'Spam Caller', customer_phone: customerPhone || callerPhone,
+        customer_email: null, ai_summary: aiSummary, transcript, recording_url: recordingUrl,
         duration_seconds: durationSeconds, urgency_level: 'spam', call_status: 'spam',
-        ended_reason: endedReason, transfer_status: null,
-        is_spam: true, spam_reason: spamReason, created_at: new Date().toISOString()
+        ended_reason: endedReason, transfer_status: null, is_spam: true, spam_reason: spamReason,
+        created_at: new Date().toISOString()
       };
       const { data: insertedSpamCall, error: spamInsertError } = await supabase.from('calls').insert([spamCallRecord]).select();
       if (spamInsertError) {
         if (spamInsertError.message && (spamInsertError.message.includes('is_spam') || spamInsertError.message.includes('spam_reason') || spamInsertError.message.includes('ended_reason') || spamInsertError.message.includes('transfer_status'))) {
           delete spamCallRecord.is_spam; delete spamCallRecord.spam_reason; delete spamCallRecord.ended_reason; delete spamCallRecord.transfer_status;
           await supabase.from('calls').insert([spamCallRecord]).select();
-        } else { console.error('❌ Error inserting spam call:', spamInsertError); }
+        }
       }
-      console.log('✅ Spam call saved (not counted against limit)');
       if (client.owner_phone) { try { await sendSpamBlockedSMS(client, agency, callerPhone, spamReason); } catch {} }
       return res.status(200).json({ received: true, saved: true, spam: true, spamReason, callId: insertedSpamCall?.[0]?.id || null });
     }
-    
-    // Save call (normal)
+
     const callRecord = {
       client_id: client.id, customer_name: customerName, customer_phone: customerPhone,
-      customer_email: customerEmail, ai_summary: aiSummary, transcript,
-      recording_url: recordingUrl, duration_seconds: durationSeconds, urgency_level: urgency,
+      customer_email: customerEmail, ai_summary: aiSummary, transcript, recording_url: recordingUrl,
+      duration_seconds: durationSeconds, urgency_level: urgency,
       call_status: wasTransferred ? 'transferred' : 'completed',
       ended_reason: endedReason, transfer_status: transferStatus,
       is_spam: false, spam_reason: null, created_at: new Date().toISOString()
@@ -699,7 +523,7 @@ async function handleVapiWebhook(req, res) {
     }
     const savedCall = insertedCall || insertedCallFinal;
     console.log('✅ Call saved successfully');
-    
+
     try {
       const { contact, isNew } = await upsertContactFromCall({
         clientId: client.id, agencyId: agency?.id, callId: savedCall?.[0]?.id,
@@ -707,39 +531,35 @@ async function handleVapiWebhook(req, res) {
         customerAddress: call.customer?.address || null,
         aiSummary, urgency, serviceRequested: call.customer?.serviceRequested || null,
       });
-      if (contact) console.log(`📇 Contact ${isNew ? 'created' : 'updated'}: ${contact.name} (${contact.phone})`);
-    } catch (contactErr) { console.warn('⚠️ Contact upsert failed (non-fatal):', contactErr.message); }
-    
+      if (contact) console.log(`📇 Contact ${isNew ? 'created' : 'updated'}: ${contact.name}`);
+    } catch (contactErr) { console.warn('⚠️ Contact upsert failed:', contactErr.message); }
+
     const newCallCount = currentCallCount + 1;
     const isFirstCall = newCallCount === 1;
     const updateData = { calls_this_month: newCallCount };
     if (isFirstCall) { updateData.first_call_received = true; updateData.first_call_received_at = new Date().toISOString(); console.log('🎉 FIRST CALL for:', client.business_name); }
     await supabase.from('clients').update(updateData).eq('id', client.id);
-    
+
     if (callLimit !== -1) {
       const usagePercent = (newCallCount / callLimit) * 100;
       if (usagePercent >= 80 && usagePercent < 100 && newCallCount === Math.floor(callLimit * 0.8)) await sendUsageWarningEmail(client, agency, newCallCount, callLimit);
       if (newCallCount >= callLimit && newCallCount === callLimit) await sendLimitReachedEmail(client, agency, callLimit);
     }
-    
-    let smsSent = false;
-    let emailSent = false;
-    
-    if (client.owner_phone) { smsSent = await sendCallNotificationSMS(client, agency, aiData); if (smsSent) console.log('✅ SMS notification sent'); }
+
+    let smsSent = false, emailSent = false;
+    if (client.owner_phone) { smsSent = await sendCallNotificationSMS(client, agency, aiData); }
     await notifyTeamMembers(client.id, aiData, agency);
-    
     if (isFeatureEnabled(client, agency, 'email_summaries') && client.email) {
       const emailResult = await sendCallSummaryEmail(client, agency, aiData, { duration_seconds: durationSeconds, transcript, created_at: savedCall?.[0]?.created_at || new Date().toISOString() });
       emailSent = emailResult?.success || false;
     }
-    
+
     return res.status(200).json({
       received: true, saved: true, callId: savedCall?.[0]?.id,
-      smsSent, emailSent, firstCall: isFirstCall,
-      agency: agency?.name || null, duration: durationSeconds,
-      endedReason, transferStatus, wasTransferred, spam: false
+      smsSent, emailSent, firstCall: isFirstCall, agency: agency?.name || null,
+      duration: durationSeconds, endedReason, transferStatus, wasTransferred, spam: false
     });
-    
+
   } catch (error) {
     console.error('❌ Webhook error:', error);
     return res.status(500).json({ error: error.message });
