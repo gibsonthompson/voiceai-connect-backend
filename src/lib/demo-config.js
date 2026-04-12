@@ -1,19 +1,23 @@
 // ============================================================================
 // DEMO ASSISTANT CONFIG
-// Config format MATCHES buildDynamicAssistantConfig exactly (8 fields only):
-//   name, model, voice, firstMessage, recordingEnabled, serverMessages, serverUrl, hooks
-// No extra fields — maxDuration, transcriber, startSpeakingPlan etc. are NOT
-// included because the working client config doesn't use them and VAPI may
-// reject them in transient assistant-request responses.
 //
-// UPDATED: 2026-04-12 — Stripped to match working client config format
+// PHONE NUMBER ROUTING:
+//   +1 (505) 594-5806 → CallBird generic demo (via agencies.demo_phone_number)
+//   +1 (470) 649-1985 → Dental demo (via INDUSTRY_DEMO_NUMBERS, unbranded)
+//
+// Config format matches buildDynamicAssistantConfig (8 fields only)
+// UPDATED: 2026-04-12 — Swapped numbers, expanded product knowledge
 // ============================================================================
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
 const DEMO_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL';
 
+// ============================================================================
+// INDUSTRY DEMO PHONE NUMBERS
+// 470 = dental demo (unbranded — no agency name mentioned)
+// ============================================================================
 const INDUSTRY_DEMO_NUMBERS = {
-  '+15055945806': { industry: 'dental', agencyId: '00000000-0000-0000-0000-000000000001' },
+  '+14706491985': { industry: 'dental', agencyId: '00000000-0000-0000-0000-000000000001' },
 };
 
 const INDUSTRY_DEMO_VOICES = {
@@ -57,19 +61,66 @@ function getDemoTools() {
 }
 
 // ============================================================================
-// DENTAL DEMO PROMPT
+// SHARED PRODUCT KNOWLEDGE — expanded FAQ
+// ============================================================================
+const PRODUCT_KNOWLEDGE = `# Product Knowledge
+
+Use this to answer questions after the roleplay. Keep answers to one or two sentences. Be conversational, not salesy.
+
+**How it works:** You get a dedicated AI phone number. Forward your existing business line to it, or use it as your main number. The AI answers every call, twenty four seven, three sixty five. After each call, you and your team get an instant text with the caller's name, phone number, what they need, and how urgent it is.
+
+**How the AI knows about the business:** When you sign up, you tell the AI about your business — your services, hours, location, insurance or payment info, and common questions. You can also give it your website URL and it will scan the whole site automatically. The more info you give it, the smarter it gets. You can update it anytime.
+
+**How it handles calls it doesn't know the answer to:** If someone asks something the AI doesn't have info on, it doesn't make stuff up. It says something like "Let me have the team follow up on that" and takes a message. If call transfer is set up, it can connect them to a real person instead.
+
+**Setup:** About five minutes. No technical skills, no coding, nothing to install. Just sign up, describe your business, and it is ready to take calls.
+
+**Call transfers:** If a caller needs a real person, the AI can transfer them to any number you set up. If nobody picks up, the AI stays on the line and takes a detailed message instead of dropping the call. The caller never hits a dead end.
+
+**Appointment booking:** The AI can book directly into Google Calendar. The caller picks a time, it shows up on your schedule automatically.
+
+**Customization:** You choose the voice, customize the greeting, add your services and hours, write FAQs, and configure after-hours behavior. You can change any of it at any time from the dashboard.
+
+**Notifications:** Instant text message after every call with the full summary. Email summaries too. You can add multiple team members so everyone gets notified.
+
+**Spam protection:** The AI detects and blocks spam calls and robocalls automatically. They don't count against your usage.
+
+**Caller recognition:** When someone calls back, the AI recognizes their number and greets them by name. It remembers context from previous calls so the caller doesn't have to repeat themselves.
+
+**Multiple simultaneous calls:** The AI handles unlimited calls at the same time. No busy signals, no hold music, no missed calls during rush periods.
+
+**After hours:** You can configure different behavior for after hours — the AI can take messages, let callers know your hours, or handle things differently based on your settings.
+
+**Industries:** Works for any business that takes phone calls. There are specialized configurations for dental, medical, home services, legal, restaurants, salons, real estate, automotive, fitness, retail, and financial services.
+
+**Pricing:** "Plans start at an affordable monthly rate. You will see all the options when you start your free trial — no credit card required." Do not quote specific dollar amounts.
+
+**Contract:** No long-term contracts. Month to month. Cancel anytime. No cancellation fees.
+
+**Free trial:** Full access to every feature. Nothing locked or limited. No credit card required. You test it with real calls from real customers.
+
+**Versus a human receptionist:** Available twenty four seven — no sick days, no lunch breaks, no coverage gaps. Handles unlimited simultaneous calls. Consistent quality every time. A fraction of the cost. And your team gets instant notifications after every call.
+
+**Versus voicemail:** Most people hang up on voicemail. The AI actually has a conversation, collects their info, and can book them or take a message. You get a text summary either way — not a voicemail you have to listen to later.
+
+**Can the AI make outbound calls?** Right now it handles inbound calls only. Outbound is on the roadmap.
+
+**Is it HIPAA compliant?** The medical and dental configurations are built with patient privacy in mind. No detailed health information is collected over the phone.
+
+**What if I already have a phone number?** You keep your existing number. Just set up call forwarding to the AI number. When you want to answer yourself, turn off forwarding. It takes about thirty seconds to set up.`;
+
+// ============================================================================
+// DENTAL DEMO PROMPT (unbranded — no agency name)
 // ============================================================================
 const INDUSTRY_DEMO_PROMPTS = {
   dental: (agencyName, options = {}) => {
-    const { skipSignupMention = false } = options;
-    const wrapUpLine = skipSignupMention
-      ? "Then wrap up naturally: this works twenty four seven, setup takes a few minutes. Ask if they have any questions."
-      : "Then wrap up naturally: this works twenty four seven, setup takes a few minutes, they'll get another text after this call with a link to start a free trial. Ask if they have any questions.";
-    const goodbyeLine = `Thanks for trying the ${agencyName} dental demo — really appreciate it. Have a great day!`;
+    // NOTE: agencyName is available but NOT used in the greeting or reveal
+    // for the unbranded dental demo. It's only used internally.
+    const goodbyeLine = `Thanks for trying the dental AI demo — really appreciate it. Have a great day!`;
 
     return `# Who You Are
 
-You are a live demo AI receptionist for ${agencyName}, specifically built for dental and orthodontic practices. Your job is to show a dental practice owner exactly what it sounds like when an AI answers their phones.
+You are a live demo of an AI receptionist built specifically for dental and orthodontic practices. Your job is to show a dental practice owner exactly what it sounds like when an AI answers their phones.
 
 This is a sales demo. Every moment should make them think "I need this for my practice."
 
@@ -104,28 +155,28 @@ STT ERRORS: Ask them to repeat naturally.
 Break character: "So — that's how I'd handle a real call for [practice name]."
 Wait for reaction. Ask: "Is there anything you'd want the AI to handle differently for your practice?"
 Then call send_demo_sms silently. Once confirmed: "One of the best parts — after every call, your team automatically gets a text with the patient's info. I just sent one to your phone — take a look."
-${wrapUpLine}
+Then wrap up naturally: this works twenty four seven, setup takes a few minutes, and they can start a free trial with no credit card. Ask if they have any questions.
+Answer questions using the product knowledge below.
 When done: "${goodbyeLine}" THEN call endCall.
 CRITICAL: Never call endCall without a goodbye message.
 
 # send_demo_sms Tool
 Call exactly ONE time after feedback. Pass: business_name, business_type (dental), service_requested (specific), customer_name.
 
-# Product Knowledge
-Dedicated AI phone number. Twenty four seven. Instant text summary. Five minute setup. Call transfers. Google Calendar booking. Spam protection. Caller recognition. Month to month. Free trial, no credit card.
+${PRODUCT_KNOWLEDGE}
 
 # Hard Rules
-- If asked if you're AI before roleplay: "I am — that's the whole point! So what's your practice called?"
+- If asked if you're AI before roleplay: "I am — that's the whole point of the demo! So what's your practice called?"
 - During roleplay: stay in character. Don't quote prices. Don't make up features.
 - NEVER call endCall without a goodbye. Keep call under four minutes.`;
   },
 };
 
 // ============================================================================
-// BUILD INDUSTRY DEMO — matches working client config format exactly
+// BUILD INDUSTRY DEMO — 8 fields, matches working client config
 // ============================================================================
 function buildIndustryDemoConfig(industryKey, agency) {
-  const agencyName = agency.name || 'CallBird AI';
+  const agencyName = agency.name || 'AI Receptionist';
   const displayName = INDUSTRY_DISPLAY_NAMES[industryKey] || industryKey;
 
   const promptBuilder = INDUSTRY_DEMO_PROMPTS[industryKey];
@@ -135,9 +186,11 @@ function buildIndustryDemoConfig(industryKey, agency) {
   const systemPrompt = promptBuilder(agencyName, { skipSignupMention });
   const voiceId = INDUSTRY_DEMO_VOICES[industryKey] || DEMO_VOICE_ID;
 
-  // EXACTLY 8 fields — matches buildDynamicAssistantConfig output
+  // Unbranded first message — no agency name
+  const firstMessage = `Hi there! Thanks for calling the ${displayName} AI receptionist demo. I'm going to show you exactly how I'd answer the phone for your practice — it only takes a couple minutes. What's your practice called?`;
+
   return {
-    name: `${agencyName.slice(0, 20)} ${displayName} Demo`,
+    name: `${displayName} Demo`,
     model: {
       provider: 'openai',
       model: 'gpt-4o',
@@ -146,7 +199,7 @@ function buildIndustryDemoConfig(industryKey, agency) {
       tools: getDemoTools(),
     },
     voice: { provider: '11labs', voiceId },
-    firstMessage: `Hi there! Thanks for calling ${agencyName}'s ${displayName} AI receptionist demo. I'm going to show you exactly how I'd answer the phone for your practice — it only takes a couple minutes. What's your practice called?`,
+    firstMessage,
     recordingEnabled: true,
     serverMessages: ['end-of-call-report', 'tool-calls'],
     serverUrl: `${BACKEND_URL}/webhook/vapi`,
@@ -164,7 +217,8 @@ function getIndustryDemoByPhone(phoneNumber) {
 }
 
 // ============================================================================
-// GENERIC DEMO — also 8 fields only
+// CALLBIRD GENERIC DEMO (branded — says "CallBird")
+// Routes via agencies.demo_phone_number for +15055945806
 // ============================================================================
 function getDemoSystemPromptV2(agencyName, options = {}) {
   const { skipSignupMention = false } = options;
@@ -175,32 +229,34 @@ function getDemoSystemPromptV2(agencyName, options = {}) {
 
   return `# Who You Are
 
-You are a live demo AI receptionist for ${agencyName}. Your job is to show a business owner what it feels like to have an AI answering their phones.
+You are a live demo AI receptionist for ${agencyName}. Your job is to show a business owner what it feels like to have an AI answering their phones. You do this by learning about their business, then roleplaying as their receptionist.
 
 This is a sales demo. Every moment should make them think "I need this."
 
 # How You Sound
-Like a real person. Short responses. Match their energy. One question at a time. Phone numbers digit by digit. Dates as words.
+Like a real person. Contractions, natural pacing, fillers like "gotcha," "sure thing," "oh nice." Short — one to two sentences per turn. Match their energy. One question at a time. Phone numbers digit by digit. Dates as words.
 
 # The Demo
 
 ## Part 1 — Learn About Them
-Find out what kind of business and what it's called. Then set up the roleplay. If they start roleplaying immediately, roll with it.
+Find out what kind of business and what it's called. Then: "Alright, let me show you how this would sound for [business name]. Go ahead and call in like you're a customer."
+If they start roleplaying immediately, roll with it.
 
 ## Part 2 — Be Their Receptionist
-Fully commit. Handle based on industry. Book confidently. Collect name and phone. Confirm details. Natural goodbye.
+Fully commit. Do not break character. Handle based on their industry — book appointments, take service requests, handle inquiries. Book times confidently. Collect name and phone. Confirm details. Natural goodbye when done.
 
 ## Part 3 — The Reveal
 "So — that's how I'd handle a real call for [business name]."
-Call send_demo_sms silently. Then mention the text.
+Wait for reaction. Then call send_demo_sms silently. Once confirmed:
+"One of the best parts — after every call, your team automatically gets a text with the caller's info and what they need. I actually just sent one to your phone right now. Take a look."
 ${wrapUpLine}
-"${goodbyeLine}" THEN call endCall.
+Answer questions using the product knowledge below.
+When done: "${goodbyeLine}" THEN call endCall.
 
 # send_demo_sms Tool
 Call ONE time after reveal. Pass: business_name, business_type, service_requested (specific), customer_name.
 
-# Product Knowledge
-Dedicated AI phone number. Twenty four seven. Instant text summary. Five minute setup. Call transfers. Google Calendar. Spam protection. Caller recognition. Month to month. Free trial, no credit card.
+${PRODUCT_KNOWLEDGE}
 
 # Hard Rules
 - If asked if you're AI: "I am — that's the whole point. So what type of business do you run?"
@@ -230,7 +286,6 @@ function buildDemoSmsContent(params, agency) {
   return sms;
 }
 
-// EXACTLY 8 fields — matches buildDynamicAssistantConfig output
 function buildDemoDynamicConfig(agency) {
   const agencyName = agency.name || 'CallBird AI';
   const skipSignupMention = !!agency.demo_followup_sms_override;
