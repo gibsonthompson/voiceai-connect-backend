@@ -1,6 +1,8 @@
 // ============================================================================
 // VAPI WEBHOOK HANDLER - Multi-Tenant Aware
 // UPDATED: Industry demo routing, business name in follow-up SMS
+// FIX: Spam detection prompt less aggressive — no longer flags "speak to owner"
+// FIX: Transferred calls override spam flag — if AI forwarded, it's not spam
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -53,7 +55,7 @@ async function generateAISummary(transcript, industry, callerPhone) {
     financial: 'Focus on: service type (tax, bookkeeping, planning), urgency, client status.',
     automotive: 'Focus on: vehicle info, service needed, safety concerns, urgency.'
   };
-  const prompt = `Analyze this phone call transcript for a ${industry} business.\n\nTranscript:\n${transcript}\n\nCaller Phone: ${callerPhone}\n\nExtract and return ONLY valid JSON:\n{"customerName":"string or Unknown","customerPhone":"formatted (XXX) XXX-XXXX","customerEmail":"string or null","urgency":"emergency|high|medium|routine","summary":"2-3 sentence summary focusing on: ${industryGuidance[industry] || 'what the customer needs'}","isSpam":false,"spamReason":null}\n\nSPAM DETECTION: Set isSpam true if: telemarketer, robocall, pre-recorded message, selling SEO/Google Ads/insurance, asks for "business owner" or "Google listing person", no natural interaction.`;
+  const prompt = `Analyze this phone call transcript for a ${industry} business.\n\nTranscript:\n${transcript}\n\nCaller Phone: ${callerPhone}\n\nExtract and return ONLY valid JSON:\n{"customerName":"string or Unknown","customerPhone":"formatted (XXX) XXX-XXXX","customerEmail":"string or null","urgency":"emergency|high|medium|routine","summary":"2-3 sentence summary focusing on: ${industryGuidance[industry] || 'what the customer needs'}","isSpam":false,"spamReason":null}\n\nSPAM DETECTION: Set isSpam true ONLY if the caller is clearly a telemarketer, robocall, or solicitor. Indicators: plays a pre-recorded message or sales pitch, tries to sell a product or service TO the business (SEO, Google Ads, insurance leads, credit card processing, etc.), opens the call by asking for "the business owner" or "the person in charge of your Google listing" with no prior natural conversation, the line goes silent after connecting, or uses high-pressure sales tactics. Do NOT mark as spam if: the caller is a real customer asking a question, requesting service, or asking to speak with someone — even if the interaction is short. When in doubt, set isSpam to false.`;
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -446,11 +448,21 @@ async function handleVapiWebhook(req, res) {
     const transcript = message.transcript || '';
     const callerPhone = call.customer?.number || 'Unknown';
     const aiData = await generateAISummary(transcript, client.industry || 'professional_services', callerPhone);
-    const { customerName, customerPhone, customerEmail, urgency, summary: aiSummary, isSpam, spamReason } = aiData;
+    const { customerName, customerPhone, customerEmail, urgency, summary: aiSummary } = aiData;
+    let { isSpam, spamReason } = aiData;
     const recordingUrl = message.recordingUrl || message.artifact?.recordingUrl || call.recordingUrl || null;
     const durationSeconds = call.duration || message.duration || message.artifact?.duration || null;
     const endedReason = call.endedReason || message.endedReason || null;
     const { transferStatus, wasTransferred } = detectTransferStatus(endedReason, transcript);
+
+    // ── Spam override for transferred calls ──────────────────────────────
+    // A transferred call is by definition not spam — the AI decided it was
+    // legitimate enough to forward. Override Claude's spam flag.
+    if (wasTransferred && isSpam) {
+      console.log(`⚠️ Spam flag overridden — call was successfully transferred (${endedReason})`);
+      isSpam = false;
+      spamReason = null;
+    }
 
     if (isSpam) {
       console.log(`🚫 SPAM: ${spamReason}`);
