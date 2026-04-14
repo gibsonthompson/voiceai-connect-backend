@@ -7,6 +7,7 @@
 //   2. Create new query tool pointing to new file (POST /tool)
 //   3. PATCH assistant model.toolIds to swap old tool for new
 //   4. Cache content + IDs in Supabase
+//   5. Sync vapi_query_tool_id so dynamic config builder uses current tool
 //
 // VAPI structure (from live assistant):
 //   model.toolIds = ["<query-tool-id>"]     ← KB query tool (what we swap)
@@ -363,6 +364,82 @@ router.post('/:agencyId/clients/:clientId/knowledge-base/reset', async (req, res
     });
   } catch (error) {
     console.error('Error resetting knowledge base:', error);
+    res.status(500).json({ success: false, error: error.message || 'Server error' });
+  }
+});
+
+// ============================================================================
+// POST /:agencyId/clients/:clientId/knowledge-base/rescrape
+// Re-scrapes the client's website, combines with industry KB, swaps tool
+// ============================================================================
+router.post('/:agencyId/clients/:clientId/knowledge-base/rescrape', async (req, res) => {
+  try {
+    const { agencyId, clientId } = req.params;
+
+    const { data: client, error } = await supabase
+      .from('clients')
+      .select('id, vapi_assistant_id, industry, business_name, business_website')
+      .eq('id', clientId)
+      .eq('agency_id', agencyId)
+      .single();
+
+    if (error || !client) {
+      return res.status(404).json({ success: false, error: 'Client not found' });
+    }
+
+    if (!client.vapi_assistant_id) {
+      return res.status(400).json({ success: false, error: 'Client has no AI assistant configured' });
+    }
+
+    if (!client.business_website) {
+      return res.status(400).json({ success: false, error: 'Client has no website URL on file' });
+    }
+
+    console.log(`🌐 Re-scraping website for ${client.business_name}: ${client.business_website}`);
+
+    // 1. Scrape website (multi-page)
+    const { createKnowledgeBaseFromWebsite } = require('../lib/website-scraper');
+    const scrapeResult = await createKnowledgeBaseFromWebsite(client.business_website, client.business_name);
+
+    if (!scrapeResult?.websiteContent) {
+      return res.status(422).json({ success: false, error: 'Website scrape returned no content. The site may be down or blocking scrapers.' });
+    }
+
+    // 2. Combine with industry KB template
+    const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
+    const industryDoc = INDUSTRY_KNOWLEDGE_BASES
+      ? (INDUSTRY_KNOWLEDGE_BASES[industryKey] || INDUSTRY_KNOWLEDGE_BASES['professional_services'])(client.business_name)
+      : '';
+
+    const combinedContent = industryDoc
+      ? `${industryDoc}\n\n${scrapeResult.websiteContent}`
+      : scrapeResult.websiteContent;
+
+    // 3. Upload + create tool + swap on assistant
+    const { fileId, toolId } = await uploadFileAndCreateTool(combinedContent, client.business_name);
+    await swapToolOnAssistant(client.vapi_assistant_id, toolId);
+
+    // 4. Update all DB fields — cache + sync query tool ID for dynamic config builder
+    await supabase
+      .from('clients')
+      .update({
+        knowledge_base_content: combinedContent,
+        knowledge_base_data: { fileId, toolId },
+        knowledge_base_updated_at: new Date().toISOString(),
+        vapi_query_tool_id: toolId,
+      })
+      .eq('id', clientId);
+
+    console.log(`✅ Website re-scraped for ${client.business_name} — ${combinedContent.length} chars`);
+
+    res.json({
+      success: true,
+      content: combinedContent,
+      pages_scraped: scrapeResult.structuredData ? 'multi-page' : 'single-page',
+      content_length: combinedContent.length,
+    });
+  } catch (error) {
+    console.error('Error re-scraping website:', error);
     res.status(500).json({ success: false, error: error.message || 'Server error' });
   }
 });
