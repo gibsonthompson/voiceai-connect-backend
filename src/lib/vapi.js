@@ -23,6 +23,7 @@ try {
 }
 
 const { INDUSTRY_KNOWLEDGE_BASES } = require('./industry-knowledge-bases');
+const { createKnowledgeBaseFromWebsite } = require('./website-scraper');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
@@ -1966,47 +1967,7 @@ async function provisionLocalPhone(city, state, assistantId, businessName, owner
 // ============================================================================
 // KNOWLEDGE BASE (Website scraping)
 // ============================================================================
-async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
-  try {
-    console.log(`🌐 Scraping: ${websiteUrl}`);
-    const scrapeResponse = await fetch(`https://r.jina.ai/${websiteUrl}`);
-    if (!scrapeResponse.ok) throw new Error('Failed to scrape');
-    
-    const websiteContent = await scrapeResponse.text();
-    const content = `# ${businessName} - Knowledge Base\n\n${websiteContent.substring(0, 15000)}`;
-    
-    const form = new FormData();
-    form.append('file', Buffer.from(content, 'utf-8'), {
-      filename: `${businessName.replace(/\s+/g, '_')}_knowledge.txt`,
-      contentType: 'text/plain'
-    });
-    
-    const uploadResponse = await fetch('https://api.vapi.ai/file', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, ...form.getHeaders() },
-      body: form
-    });
-    if (!uploadResponse.ok) throw new Error('Failed to upload');
-    const uploadData = await uploadResponse.json();
-    
-    const kbResponse = await fetch('https://api.vapi.ai/knowledge-base', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${VAPI_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ provider: 'canonical', fileIds: [uploadData.id] })
-    });
-    if (!kbResponse.ok) throw new Error('Failed to create KB');
-    const kbData = await kbResponse.json();
-    
-    console.log(`✅ Knowledge base created: ${kbData.id}`);
-    return { knowledgeBaseId: kbData.id, fileId: uploadData.id, websiteContent };
-  } catch (error) {
-    console.error('❌ KB creation failed:', error.message);
-    return null;
-  }
-}
+
 
 // ============================================================================
 // UTILITY FUNCTIONS

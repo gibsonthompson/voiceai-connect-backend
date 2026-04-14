@@ -295,13 +295,14 @@ router.put('/:agencyId/clients/:clientId/knowledge-base', async (req, res) => {
     const { fileId, toolId } = await uploadFileAndCreateTool(trimmed, client.business_name);
     await swapToolOnAssistant(client.vapi_assistant_id, toolId);
 
-    // Cache in Supabase
+    // Cache in Supabase + sync query tool ID for dynamic config builder
     await supabase
       .from('clients')
       .update({
         knowledge_base_content: trimmed,
         knowledge_base_data: { fileId, toolId },
         knowledge_base_updated_at: new Date().toISOString(),
+        vapi_query_tool_id: toolId,
       })
       .eq('id', clientId);
 
@@ -343,13 +344,14 @@ router.post('/:agencyId/clients/:clientId/knowledge-base/reset', async (req, res
     const { fileId, toolId } = await uploadFileAndCreateTool(defaultContent, client.business_name);
     await swapToolOnAssistant(client.vapi_assistant_id, toolId);
 
-    // Cache
+    // Cache + sync query tool ID for dynamic config builder
     await supabase
       .from('clients')
       .update({
         knowledge_base_content: defaultContent,
         knowledge_base_data: { fileId, toolId },
         knowledge_base_updated_at: new Date().toISOString(),
+        vapi_query_tool_id: toolId,
       })
       .eq('id', clientId);
 
