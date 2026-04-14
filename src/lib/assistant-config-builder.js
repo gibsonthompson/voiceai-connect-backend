@@ -10,9 +10,10 @@
 //          businessHours, transferFallback, speechTimeout)
 // Phase 5: Business hours routing, transfer fallback to message-taking
 // UPDATED: Transfer keywords block — "representative", "live agent", etc.
-// FIX: Moved built-in tools (transferCall, endCall) from model.tools to
-//      assistant-level tools array — VAPI requires this for dynamic configs
-//      returned via assistant-request. (2026-04-14)
+// FIX: Added `function` blocks to transferCall and endCall tools so the LLM
+//      registers them as callable functions. Without `function`, the AI sees
+//      transfer instructions in the prompt but has no function to invoke.
+//      Tools stay in model.tools for assistant-request compatibility. (2026-04-14)
 // ============================================================================
 
 const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, TRANSFER_KEYWORDS_BLOCK, VOICES,
@@ -279,10 +280,10 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
 
 // ============================================================================
 // BUILD TOOLS ARRAY
-// Returns VAPI built-in tools (transferCall, endCall) for assistant-level.
-// These MUST be at assistant.tools, NOT inside model.tools.
-// model.tools is for custom LLM function definitions.
-// model.toolIds is for VAPI-created tools (query tools, etc).
+// Returns VAPI tools array for model.tools.
+// Each built-in tool (transferCall, endCall) needs a `function` block so the
+// LLM registers it as a callable function. Without `function`, the LLM sees
+// the tool in the prompt but has no function definition to invoke.
 // ============================================================================
 function buildTools(client, toolConfig, isAfterHours) {
   const tools = [];
@@ -295,6 +296,10 @@ function buildTools(client, toolConfig, isAfterHours) {
       if (formattedPhone && isValidE164(formattedPhone)) {
         tools.push({
           type: 'transferCall',
+          function: {
+            name: 'transferCall',
+            description: 'Transfer the call to the business team. Use this when the caller needs to speak with someone directly, has an emergency, billing question, existing account issue, or when you cannot fully help them.',
+          },
           destinations: [{
             type: 'number',
             number: formattedPhone,
@@ -307,7 +312,13 @@ function buildTools(client, toolConfig, isAfterHours) {
   }
 
   // End call tool — always included
-  tools.push({ type: 'endCall' });
+  tools.push({
+    type: 'endCall',
+    function: {
+      name: 'endCall',
+      description: 'End the call. Use this when the conversation is complete and the caller has confirmed they have no more questions.',
+    },
+  });
 
   return tools;
 }
@@ -385,10 +396,10 @@ function enforceAgencyPlanFeatures(toolConfig, client, agency) {
 // ============================================================================
 // MAIN: Build complete VAPI assistant config for a single call
 //
-// IMPORTANT: Built-in tools (transferCall, endCall) go at assistant.tools.
+// IMPORTANT: Built-in tools (transferCall, endCall) go in model.tools WITH
+// `function` blocks so the LLM can invoke them. Without `function`, the LLM
+// has no callable definition and will just say transfer words without acting.
 // Custom VAPI tool IDs (query tools) go at model.toolIds.
-// Do NOT put built-in tools inside model.tools — VAPI won't register them
-// for dynamic configs returned via assistant-request.
 // ============================================================================
 async function buildDynamicAssistantConfig(client, agency, callerContext) {
   const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
@@ -442,8 +453,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
 
   // ── Assemble final config ────────────────────────────────────────────
   // toolIds → model.toolIds (references to VAPI-created query tools)
-  // tools   → assistant.tools (built-in: transferCall, endCall)
-  // These are DIFFERENT slots. Mixing them up breaks transfers.
+  // tools   → model.tools (built-in tools WITH function blocks so LLM can call them)
   const toolIds = [];
   if (client.vapi_query_tool_id) toolIds.push(client.vapi_query_tool_id);
 
@@ -455,9 +465,8 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
       temperature,
       messages: [{ role: 'system', content: systemPrompt }],
       ...(toolIds.length > 0 && { toolIds }),
-      // NOTE: Do NOT put built-in tools here. They go at assistant level.
+      ...(tools.length > 0 && { tools }),
     },
-    tools,  // ← Built-in tools (transferCall, endCall) at ASSISTANT level
     voice: { provider: '11labs', voiceId },
     firstMessage,
     recordingEnabled: true,
