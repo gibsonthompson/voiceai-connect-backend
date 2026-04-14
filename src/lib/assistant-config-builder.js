@@ -10,6 +10,9 @@
 //          businessHours, transferFallback, speechTimeout)
 // Phase 5: Business hours routing, transfer fallback to message-taking
 // UPDATED: Transfer keywords block — "representative", "live agent", etc.
+// FIX: Moved built-in tools (transferCall, endCall) from model.tools to
+//      assistant-level tools array — VAPI requires this for dynamic configs
+//      returned via assistant-request. (2026-04-14)
 // ============================================================================
 
 const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, TRANSFER_KEYWORDS_BLOCK, VOICES,
@@ -276,6 +279,10 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
 
 // ============================================================================
 // BUILD TOOLS ARRAY
+// Returns VAPI built-in tools (transferCall, endCall) for assistant-level.
+// These MUST be at assistant.tools, NOT inside model.tools.
+// model.tools is for custom LLM function definitions.
+// model.toolIds is for VAPI-created tools (query tools, etc).
 // ============================================================================
 function buildTools(client, toolConfig, isAfterHours) {
   const tools = [];
@@ -377,6 +384,11 @@ function enforceAgencyPlanFeatures(toolConfig, client, agency) {
 
 // ============================================================================
 // MAIN: Build complete VAPI assistant config for a single call
+//
+// IMPORTANT: Built-in tools (transferCall, endCall) go at assistant.tools.
+// Custom VAPI tool IDs (query tools) go at model.toolIds.
+// Do NOT put built-in tools inside model.tools — VAPI won't register them
+// for dynamic configs returned via assistant-request.
 // ============================================================================
 async function buildDynamicAssistantConfig(client, agency, callerContext) {
   const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
@@ -428,6 +440,10 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   const tools = buildTools(client, toolConfig, isAfterHours);
   const hooks = buildHooks(client, toolConfig, isAfterHours);
 
+  // ── Assemble final config ────────────────────────────────────────────
+  // toolIds → model.toolIds (references to VAPI-created query tools)
+  // tools   → assistant.tools (built-in: transferCall, endCall)
+  // These are DIFFERENT slots. Mixing them up breaks transfers.
   const toolIds = [];
   if (client.vapi_query_tool_id) toolIds.push(client.vapi_query_tool_id);
 
@@ -439,8 +455,9 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
       temperature,
       messages: [{ role: 'system', content: systemPrompt }],
       ...(toolIds.length > 0 && { toolIds }),
-      ...(tools.length > 0 && { tools })
+      // NOTE: Do NOT put built-in tools here. They go at assistant level.
     },
+    tools,  // ← Built-in tools (transferCall, endCall) at ASSISTANT level
     voice: { provider: '11labs', voiceId },
     firstMessage,
     recordingEnabled: true,
