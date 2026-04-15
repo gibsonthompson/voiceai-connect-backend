@@ -13,6 +13,7 @@
 // Drop-in replacement: same function signature and return shape.
 //
 // Destination: src/lib/website-scraper.js
+// FIXED: knownLength on VAPI file upload for large KB documents (2026-04-15)
 // ============================================================================
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
@@ -63,24 +64,19 @@ function extractInternalLinks(markdown, baseUrl) {
     const urlObj = new URL(baseUrl);
     const baseHost = urlObj.hostname.replace(/^www\./, '');
 
-    // Match markdown links: [text](url)
     const linkRegex = /\[([^\]]*)\]\(([^)]+)\)/g;
     let match;
     while ((match = linkRegex.exec(markdown)) !== null) {
       let href = match[2].trim();
 
-      // Skip anchors, mailto, tel, javascript
       if (href.startsWith('#') || href.startsWith('mailto:') ||
           href.startsWith('tel:') || href.startsWith('javascript:')) continue;
 
-      // Resolve relative URLs
       try {
         const resolved = new URL(href, baseUrl);
         const resolvedHost = resolved.hostname.replace(/^www\./, '');
 
-        // Only internal links
         if (resolvedHost === baseHost) {
-          // Clean: remove hash, remove trailing slash
           resolved.hash = '';
           let clean = resolved.href.replace(/\/$/, '');
           links.add(clean);
@@ -88,7 +84,6 @@ function extractInternalLinks(markdown, baseUrl) {
       } catch { /* skip malformed URLs */ }
     }
 
-    // Also look for raw URLs in text
     const rawUrlRegex = /https?:\/\/[^\s<>"{}|\\^`\[\])(]+/g;
     while ((match = rawUrlRegex.exec(markdown)) !== null) {
       try {
@@ -127,7 +122,6 @@ async function fetchSitemapUrls(baseUrl) {
 
     const xml = await response.text();
 
-    // Simple regex extraction of <loc> tags
     const locRegex = /<loc>\s*(.*?)\s*<\/loc>/gi;
     let match;
     while ((match = locRegex.exec(xml)) !== null) {
@@ -149,7 +143,6 @@ async function fetchSitemapUrls(baseUrl) {
 // PAGE CLASSIFICATION — Score URLs by business relevance
 // ============================================================================
 
-// High-value page patterns (services, about, contact, pricing, etc.)
 const HIGH_VALUE_PATTERNS = [
   { pattern: /\/(about|about-us|our-story|who-we-are|our-team|the-team|our-company)/i, type: 'about', priority: 10 },
   { pattern: /\/(services|our-services|what-we-do|solutions|treatments|procedures)/i, type: 'services', priority: 10 },
@@ -167,10 +160,9 @@ const HIGH_VALUE_PATTERNS = [
   { pattern: /\/(appointment|book|schedule|booking)/i, type: 'booking', priority: 7 },
 ];
 
-// Low-value patterns to skip
 const SKIP_PATTERNS = [
-  /\/(blog|news|articles|press|media)\//i,     // Blog posts (individual)
-  /\/(blog|news|articles|press|media)$/i,       // Blog index is borderline — skip for now
+  /\/(blog|news|articles|press|media)\//i,
+  /\/(blog|news|articles|press|media)$/i,
   /\/(privacy|terms|tos|legal|disclaimer|cookie|gdpr|accessibility)/i,
   /\/(sitemap|feed|rss|xml|wp-admin|wp-login|wp-content|wp-includes)/i,
   /\/(cart|checkout|account|login|signup|register|my-account|password)/i,
@@ -180,7 +172,6 @@ const SKIP_PATTERNS = [
 ];
 
 function classifyUrl(url, baseUrl) {
-  // Skip the homepage itself (we already have it)
   try {
     const urlObj = new URL(url);
     const baseObj = new URL(baseUrl);
@@ -188,19 +179,16 @@ function classifyUrl(url, baseUrl) {
     if (urlObj.href.replace(/\/$/, '') === baseObj.href.replace(/\/$/, '')) return { skip: true };
   } catch { return { skip: true }; }
 
-  // Check skip patterns
   for (const pattern of SKIP_PATTERNS) {
     if (pattern.test(url)) return { skip: true };
   }
 
-  // Check high-value patterns
   for (const { pattern, type, priority } of HIGH_VALUE_PATTERNS) {
     if (pattern.test(url)) {
       return { skip: false, type, priority };
     }
   }
 
-  // Unknown page — include with low priority if path is short (likely a main page)
   try {
     const pathSegments = new URL(url).pathname.split('/').filter(Boolean);
     if (pathSegments.length === 1) {
@@ -211,7 +199,6 @@ function classifyUrl(url, baseUrl) {
     }
   } catch {}
 
-  // Deep paths — skip
   return { skip: true };
 }
 
@@ -354,9 +341,7 @@ function formatStructuredSection(data) {
 
 // ============================================================================
 // MAIN: createKnowledgeBaseFromWebsite
-//
-// Drop-in replacement for the old single-page scraper.
-// Same signature, same return shape: { knowledgeBaseId, fileId, websiteContent }
+// FIXED: knownLength on Buffer upload prevents "Unexpected end of form"
 // ============================================================================
 async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
   const startTime = Date.now();
@@ -376,7 +361,6 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
     const internalLinks = extractInternalLinks(homepageContent, websiteUrl);
     const sitemapLinks = await fetchSitemapUrls(websiteUrl);
 
-    // Merge and deduplicate
     const allLinks = new Set([...internalLinks, ...sitemapLinks]);
     console.log(`   🔗 Discovered ${allLinks.size} unique internal links (${internalLinks.length} from page, ${sitemapLinks.length} from sitemap)`);
 
@@ -389,10 +373,8 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
       }
     }
 
-    // Sort by priority (highest first), deduplicate by type (keep highest priority per type)
     scoredLinks.sort((a, b) => b.priority - a.priority);
 
-    // Take best URL per type, then fill remaining slots with 'other' type
     const seenTypes = new Set();
     const pagesToScrape = [];
     const MAX_PAGES = 15;
@@ -400,7 +382,6 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
     for (const link of scoredLinks) {
       if (pagesToScrape.length >= MAX_PAGES) break;
 
-      // For typed pages, keep only the best URL per type
       if (link.type !== 'other') {
         if (seenTypes.has(link.type)) continue;
         seenTypes.add(link.type);
@@ -412,7 +393,7 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
     console.log(`   📄 Will scrape ${pagesToScrape.length} subpages: ${pagesToScrape.map(p => p.type).join(', ')}`);
 
     // ── Step 4: Scrape subpages (parallel, batched) ──────────────────────
-    const BATCH_SIZE = 5; // Respect Jina rate limits
+    const BATCH_SIZE = 5;
     const pageContents = [{ url: websiteUrl, type: 'homepage', content: homepageContent }];
 
     for (let i = 0; i < pagesToScrape.length; i += BATCH_SIZE) {
@@ -431,7 +412,6 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
         }
       }
 
-      // Small delay between batches to be kind to Jina
       if (i + BATCH_SIZE < pagesToScrape.length) {
         await new Promise(resolve => setTimeout(resolve, 500));
       }
@@ -442,7 +422,6 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
     // ── Step 5: Combine raw content ──────────────────────────────────────
     let combinedRaw = '';
     for (const page of pageContents) {
-      // Limit each page to ~8k chars to keep total manageable
       const trimmed = page.content.substring(0, 8000);
       combinedRaw += `\n\n--- PAGE: ${page.type.toUpperCase()} (${page.url}) ---\n\n${trimmed}`;
     }
@@ -461,7 +440,6 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
     }
 
     // ── Step 7: Assemble final KB content ────────────────────────────────
-    // Structured data first (most important for the AI), raw content second
     const MAX_CONTENT_LENGTH = 100000;
     let websiteContent = '';
 
@@ -471,7 +449,6 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
 
     websiteContent += `# ${businessName} — Website Content\n\n`;
 
-    // Add raw page content (most important pages first — they're already sorted)
     for (const page of pageContents) {
       const pageHeader = `## ${page.type.charAt(0).toUpperCase() + page.type.slice(1)} Page\n`;
       const trimmed = page.content.substring(0, 8000);
@@ -487,10 +464,15 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
     console.log(`   📊 Final KB: ${websiteContent.length} chars from ${pageContents.length} pages`);
 
     // ── Step 8: Upload to VAPI ───────────────────────────────────────────
+    // FIXED: knownLength prevents "Multipart: Unexpected end of form" on large files
+    const contentBuffer = Buffer.from(websiteContent, 'utf-8');
+    console.log(`   📤 Uploading KB file: ${contentBuffer.length} bytes`);
+
     const form = new FormData();
-    form.append('file', Buffer.from(websiteContent, 'utf-8'), {
+    form.append('file', contentBuffer, {
       filename: `${businessName.replace(/\s+/g, '_')}_knowledge.txt`,
       contentType: 'text/plain',
+      knownLength: contentBuffer.length,
     });
 
     const uploadResponse = await fetch('https://api.vapi.ai/file', {
@@ -501,7 +483,7 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
 
     if (!uploadResponse.ok) {
       const errText = await uploadResponse.text();
-      console.error('❌ VAPI file upload failed:', errText);
+      console.error(`❌ VAPI file upload failed (HTTP ${uploadResponse.status}):`, errText);
       // Fall back to content-only return (createIndustryKnowledgeBase will re-upload)
       return { knowledgeBaseId: null, fileId: null, websiteContent };
     }
@@ -513,10 +495,10 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
     console.log(`🌐 Website scrape complete in ${elapsed}s — ${pageContents.length} pages, ${websiteContent.length} chars`);
 
     return {
-      knowledgeBaseId: null, // Not creating a separate KB — createIndustryKnowledgeBase handles this
+      knowledgeBaseId: null,
       fileId: uploadData.id,
       websiteContent,
-      structuredData, // Bonus: caller can use this for other purposes
+      structuredData,
     };
 
   } catch (error) {
