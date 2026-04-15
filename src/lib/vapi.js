@@ -1851,7 +1851,7 @@ async function provisionPhoneNumber(areaCode) {
       'Authorization': `Bearer ${VAPI_API_KEY}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ provider: 'vapi', areaCode })
+    body: JSON.stringify({ provider: 'vapi', numberDesiredAreaCode: areaCode })
   });
 
   if (!buyResponse.ok) {
@@ -1860,12 +1860,14 @@ async function provisionPhoneNumber(areaCode) {
     let errData = {};
     try { errData = JSON.parse(rawBody); } catch {}
 
-    const errMessage = errData.message || rawBody.slice(0, 300) || 'Failed to buy phone number';
+    // VAPI's new endpoint can return message as a string OR an array
+    const rawMessage = errData.message;
+    const errMessage = Array.isArray(rawMessage) ? rawMessage.join('; ') : (typeof rawMessage === 'string' ? rawMessage : rawBody.slice(0, 300) || 'Failed to provision phone number');
     const error = new Error(`[HTTP ${statusCode}] ${errMessage}`);
     error.statusCode = statusCode;
 
     // Parse VAPI's suggested area codes hint
-    const hintMatch = (errData.message || '').match(/Try one of ([0-9, ]+)/);
+    const hintMatch = errMessage.match(/Try one of ([0-9, ]+)/);
     if (hintMatch) {
       error.suggestedCodes = hintMatch[1].split(',').map(c => c.trim()).filter(c => /^\d{3}$/.test(c));
     }
