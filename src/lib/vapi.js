@@ -10,6 +10,8 @@
 // UPDATED: Transfer keywords block — "representative", "live agent" (2026-03-19)
 // UPDATED: Demo provisioning — serverUrl only, no assistantId (dynamic mode)
 // UPDATED: disablePhoneNumber/enablePhoneNumber for trial expiry gating
+// FIXED: KB upload knownLength for large files (2026-04-15)
+// FIXED: Phone provisioning error logging + early bail on account errors (2026-04-15)
 // ============================================================================
 const fetch = require('node-fetch');
 const FormData = require('form-data');
@@ -83,14 +85,9 @@ const VOICES = {
 
 // ============================================================================
 // INDUSTRY CONFIGURATIONS — Transfer-first, conversational prompts v4
-// Every prompt: transfer as default action, conversational tone, natural
-// language, one question at a time, digit-by-digit phone confirmation
 // ============================================================================
 const INDUSTRY_CONFIGS = {
 
-  // ════════════════════════════════════════════════════════════════════════
-  // HOME SERVICES
-  // ════════════════════════════════════════════════════════════════════════
   home_services: {
     voiceId: VOICES.chris,
     temperature: 0.7,
@@ -205,9 +202,6 @@ Use for: hours, service areas, services offered, payment methods, general info. 
     firstMessage: (businessName) => `Hi, you've reached ${businessName}. This call may be recorded. What can I help you with?`
   },
 
-  // ════════════════════════════════════════════════════════════════════════
-  // MEDICAL
-  // ════════════════════════════════════════════════════════════════════════
   medical: {
     voiceId: VOICES.sarah,
     temperature: 0.7,
@@ -313,9 +307,6 @@ Use for hours, location, insurance, services, new patient info. If no result, tr
     firstMessage: (businessName) => `Hello, you've reached ${businessName}. This call may be recorded. Are you a current patient or would this be your first visit?`
   },
 
-  // ════════════════════════════════════════════════════════════════════════
-  // DENTAL & ORTHODONTICS
-  // ════════════════════════════════════════════════════════════════════════
   dental: {
     voiceId: VOICES.sarah,
     temperature: 0.7,
@@ -441,9 +432,6 @@ Use for hours, location, insurance, services, first visit info. If no result or 
     firstMessage: (businessName) => `Hello, you've reached ${businessName}. This call may be recorded. Are you calling to schedule a visit or do you have a question?`
   },
 
-  // ════════════════════════════════════════════════════════════════════════
-  // PROFESSIONAL SERVICES
-  // ════════════════════════════════════════════════════════════════════════
   professional_services: {
     voiceId: VOICES.brian,
     temperature: 0.7,
@@ -534,9 +522,6 @@ Hours, location, services, company info. If no result, transfer.
     firstMessage: (businessName) => `Hello, you've reached ${businessName}. This call may be recorded. How can I help you?`
   },
 
-  // ════════════════════════════════════════════════════════════════════════
-  // RESTAURANTS
-  // ════════════════════════════════════════════════════════════════════════
   restaurants: {
     voiceId: VOICES.matilda,
     temperature: 0.7,
@@ -632,9 +617,6 @@ Menu, hours, location, dietary info, parking, specials. If no result, transfer.
     firstMessage: (businessName) => `Hi, thanks for calling ${businessName}! This call may be recorded. Are you calling about a reservation, takeout, or do you have a question?`
   },
 
-  // ════════════════════════════════════════════════════════════════════════
-  // SALON & SPA
-  // ════════════════════════════════════════════════════════════════════════
   salon_spa: {
     voiceId: VOICES.matilda,
     temperature: 0.7,
@@ -723,9 +705,6 @@ Services, hours, general pricing, staff, policies. If no result, transfer.
     firstMessage: (businessName) => `Hi, thanks for calling ${businessName}! This call may be recorded. Are you looking to book an appointment?`
   },
 
-  // ════════════════════════════════════════════════════════════════════════
-  // RETAIL
-  // ════════════════════════════════════════════════════════════════════════
   retail: {
     voiceId: VOICES.matilda,
     temperature: 0.7,
@@ -800,9 +779,6 @@ Products, hours, location, policies. If no result, offer callback or transfer.
     firstMessage: (businessName) => `Hi, thanks for calling ${businessName}! This call may be recorded. How can I help you?`
   },
 
-  // ════════════════════════════════════════════════════════════════════════
-  // FITNESS
-  // ════════════════════════════════════════════════════════════════════════
   fitness: {
     voiceId: VOICES.matilda,
     temperature: 0.7,
@@ -886,9 +862,6 @@ Classes, schedules, hours, amenities, membership info, trainers.
     firstMessage: (businessName) => `Hey, thanks for calling ${businessName}! This call may be recorded. Are you a current member or interested in joining?`
   },
 
-  // ════════════════════════════════════════════════════════════════════════
-  // LEGAL
-  // ════════════════════════════════════════════════════════════════════════
   legal: {
     voiceId: VOICES.brian,
     temperature: 0.6,
@@ -979,9 +952,6 @@ Practice areas, hours, location, attorney bios only. Never for legal advice.
     firstMessage: (businessName) => `Hello, you've reached ${businessName}. This call may be recorded and is confidential. Are you a current client or calling about a new matter?`
   },
 
-  // ════════════════════════════════════════════════════════════════════════
-  // REAL ESTATE
-  // ════════════════════════════════════════════════════════════════════════
   real_estate: {
     voiceId: VOICES.matilda,
     temperature: 0.7,
@@ -1061,9 +1031,6 @@ Areas served, agents, services, general process.
     firstMessage: (businessName) => `Hi, thanks for calling ${businessName}! This call may be recorded. Are you looking to buy, sell, or rent?`
   },
 
-  // ════════════════════════════════════════════════════════════════════════
-  // FINANCIAL SERVICES
-  // ════════════════════════════════════════════════════════════════════════
   financial: {
     voiceId: VOICES.brian,
     temperature: 0.6,
@@ -1146,9 +1113,6 @@ Services, hours, documents needed, deadlines, general process.
     firstMessage: (businessName) => `Hello, you've reached ${businessName}. This call may be recorded. Are you a current client or looking to schedule a consultation?`
   },
 
-  // ════════════════════════════════════════════════════════════════════════
-  // AUTOMOTIVE
-  // ════════════════════════════════════════════════════════════════════════
   automotive: {
     voiceId: VOICES.chris,
     temperature: 0.7,
@@ -1239,9 +1203,6 @@ Hours, services, location, payment methods, shuttle/loaner info.
     firstMessage: (businessName) => `Hey, thanks for calling ${businessName}! This call may be recorded. Are you calling to schedule service or do you have a question about your vehicle?`
   }
 };
-// ============================================================================
-// HELPER FUNCTIONS
-// ============================================================================
 
 // ============================================================================
 // SPAM DETECTION BLOCK — Appended to every assistant's system prompt
@@ -1272,6 +1233,10 @@ If the caller says any of the following, transfer them immediately — no questi
 - "I want to talk to a person" / "can I speak with a human" / "transfer me"
 
 Say something natural like "Sure, let me connect you with someone." Then call the transferCall tool immediately. Do not ask why, do not try to help first.`;
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
 
 function sanitizeAssistantName(businessName) {
   const suffix = ' AI Receptionist';
@@ -1381,6 +1346,7 @@ async function createQueryTool(fileId, businessName) {
 
 // ============================================================================
 // CREATE INDUSTRY KNOWLEDGE BASE
+// FIXED: knownLength for large Buffer uploads (prevents "Unexpected end of form")
 // ============================================================================
 async function createIndustryKnowledgeBase(businessName, industryKey, websiteKnowledgeBase = null) {
   try {
@@ -1393,12 +1359,14 @@ async function createIndustryKnowledgeBase(businessName, industryKey, websiteKno
       fullContent += `\n\n# ${businessName} — Website Information\n\n${websiteKnowledgeBase.websiteContent}`;
     }
 
-    console.log(`📚 Uploading knowledge base for ${businessName} (${industryKey}): ${fullContent.length} chars`);
+    const contentBuffer = Buffer.from(fullContent, 'utf-8');
+    console.log(`📚 Uploading knowledge base for ${businessName} (${industryKey}): ${fullContent.length} chars, ${contentBuffer.length} bytes`);
 
     const form = new FormData();
-    form.append('file', Buffer.from(fullContent, 'utf-8'), {
+    form.append('file', contentBuffer, {
       filename: `${businessName.replace(/\s+/g, '_')}_knowledge.txt`,
       contentType: 'text/plain',
+      knownLength: contentBuffer.length,
     });
 
     const uploadResponse = await fetch('https://api.vapi.ai/file', {
@@ -1409,7 +1377,7 @@ async function createIndustryKnowledgeBase(businessName, industryKey, websiteKno
 
     if (!uploadResponse.ok) {
       const errText = await uploadResponse.text();
-      console.error('❌ KB file upload failed:', errText);
+      console.error(`❌ KB file upload failed (HTTP ${uploadResponse.status}):`, errText);
       return null;
     }
 
@@ -1429,6 +1397,7 @@ async function createIndustryKnowledgeBase(businessName, industryKey, websiteKno
 
 // ============================================================================
 // CREATE INDUSTRY ASSISTANT (Client-level)
+// FIXED: Warns when KB creation fails (assistant will have no knowledge base)
 // ============================================================================
 async function createIndustryAssistant(businessName, industry, knowledgeBaseData = null, ownerPhone = null, clientId = null, agencyId = null) {
   try {
@@ -1494,6 +1463,11 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
     } else if (finalKnowledgeBase.fileId) {
       console.log(`📚 Creating combined knowledge base (industry doc + website)`);
       finalKnowledgeBase = await createIndustryKnowledgeBase(businessName, industryKey, knowledgeBaseData);
+    }
+
+    // Warn if KB failed — assistant will work but can't answer business questions
+    if (!finalKnowledgeBase || !finalKnowledgeBase.fileId) {
+      console.warn(`⚠️ Knowledge base creation failed for ${businessName} — assistant will have NO knowledge base`);
     }
 
     let queryToolId = null;
@@ -1659,8 +1633,6 @@ function getDemoFirstMessage(agencyName) {
 
 // ============================================================================
 // CREATE DEMO ASSISTANT (Agency-level — static fallback assistant)
-// The dynamic demo config is now built by demo-config.js via assistant-request.
-// This static assistant is kept as a crash fallback.
 // ============================================================================
 async function createDemoAssistant(agencyName) {
   try {
@@ -1709,27 +1681,23 @@ async function createDemoAssistant(agencyName) {
 
 // ============================================================================
 // PROVISION DEMO PHONE FOR AGENCY
-// UPDATED: serverUrl only, no assistantId — forces dynamic assistant-request
+// FIXED: Error logging in catch blocks + early bail on account-level errors
 // ============================================================================
 async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
   try {
     console.log(`📞 Provisioning demo phone for agency: ${agencyName} (area code: ${areaCode})`);
 
-    // Still create static assistant as fallback
     const assistant = await createDemoAssistant(agencyName);
 
-    // Try requested area code first, then fallbacks
     let phoneData = null;
     const triedCodes = new Set();
     const codesToTry = [areaCode];
 
-    // Add nearby Georgia codes as fallback if starting with GA area code
     const GA_CODES = ['404', '470', '678', '770', '229', '478', '706', '912'];
     if (GA_CODES.includes(areaCode)) {
       GA_CODES.forEach(c => { if (c !== areaCode) codesToTry.push(c); });
     }
 
-    // Find the state for the requested area code and add all state codes
     for (const [state, codes] of Object.entries(STATE_AREA_CODES)) {
       if (codes.includes(areaCode)) {
         codes.forEach(c => { if (!codesToTry.includes(c)) codesToTry.push(c); });
@@ -1747,14 +1715,17 @@ async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
         console.log(`✅ Demo phone provisioned: ${phoneData.number} (area code: ${code})`);
         break;
       } catch (err) {
-        console.log(`   ❌ Area code ${code} unavailable, trying next...`);
+        console.log(`   ❌ Area code ${code}: ${err.message}`);
+        if (err.isAccountLevel) {
+          console.error(`   🚫 Account-level error — aborting demo provisioning`);
+          throw err;
+        }
         if (err.suggestedCodes) {
           err.suggestedCodes.forEach(c => { if (!triedCodes.has(c)) suggestedCodes.add(c); });
         }
       }
     }
 
-    // Try VAPI-suggested codes as last resort
     if (!phoneData && suggestedCodes.size > 0) {
       console.log(`   🔄 Trying ${suggestedCodes.size} VAPI-suggested codes...`);
       for (const code of suggestedCodes) {
@@ -1763,7 +1734,11 @@ async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
           console.log(`✅ Demo phone provisioned (suggested): ${phoneData.number} (area code: ${code})`);
           break;
         } catch (err) {
-          console.log(`   ❌ ${code} (suggested) unavailable`);
+          console.log(`   ❌ ${code} (suggested): ${err.message}`);
+          if (err.isAccountLevel) {
+            console.error(`   🚫 Account-level error — aborting`);
+            throw err;
+          }
         }
       }
     }
@@ -1772,9 +1747,6 @@ async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
       throw new Error(`No available phone numbers — tried ${triedCodes.size} area codes + ${suggestedCodes.size} suggested`);
     }
 
-    // Configure phone: serverUrl ONLY (no assistantId)
-    // This forces VAPI to send assistant-request, enabling dynamic demo config.
-    // The static assistant is still stored in demo_assistant_id as a fallback.
     try {
       const webhookResponse = await fetch(`https://api.vapi.ai/phone-number/${phoneData.id}`, {
         method: 'PATCH',
@@ -1784,9 +1756,6 @@ async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
         },
         body: JSON.stringify({
           serverUrl: `${BACKEND_URL}/webhook/vapi`
-          // No assistantId — VAPI will send assistant-request to our server,
-          // which builds a dynamic gpt-4o demo config on the fly.
-          // The static assistant (demo_assistant_id) is kept as crash fallback.
         })
       });
       if (webhookResponse.ok) {
@@ -1866,6 +1835,7 @@ async function updateDemoAssistantName(assistantId, newAgencyName) {
 
 // ============================================================================
 // PHONE PROVISIONING
+// FIXED: Full error logging with HTTP status, raw body, account-level detection
 // ============================================================================
 const STATE_AREA_CODES = {"AL":["205","251","256","334","938"],"AK":["907"],"AZ":["480","520","602","623","928"],"AR":["479","501","870"],"CA":["213","310","323","408","415","510","530","559","619","626","650","661","707","714","760","805","818","831","858","909","916","925","949","951"],"CO":["303","719","720","970"],"CT":["203","475","860"],"DE":["302"],"DC":["202"],"FL":["239","305","321","352","386","407","561","727","754","772","786","813","850","863","904","941","954"],"GA":["229","404","470","478","678","706","770","912"],"HI":["808"],"ID":["208","986"],"IL":["217","224","309","312","331","618","630","708","773","815","847"],"IN":["219","260","317","463","574","765","812"],"IA":["319","515","563","641","712"],"KS":["316","620","785","913"],"KY":["270","364","502","606","859"],"LA":["225","318","337","504","985"],"ME":["207"],"MD":["240","301","410","443","667"],"MA":["339","351","413","508","617","774","781","857","978"],"MI":["231","248","269","313","517","586","616","734","810","906","947","989"],"MN":["218","320","507","612","651","763","952"],"MS":["228","601","662","769"],"MO":["314","417","573","636","660","816"],"MT":["406"],"NE":["308","402","531"],"NV":["702","725","775"],"NH":["603"],"NJ":["201","551","609","732","848","856","862","908","973"],"NM":["505","575"],"NY":["212","315","347","516","518","585","607","631","646","716","718","845","914","917","929"],"NC":["252","336","704","743","828","910","919","980","984"],"ND":["701"],"OH":["216","234","330","380","419","440","513","567","614","740","937"],"OK":["405","539","580","918"],"OR":["458","503","541","971"],"PA":["215","267","272","412","484","570","610","717","724","814","878"],"RI":["401"],"SC":["803","843","854","864"],"SD":["605"],"TN":["423","615","629","731","865","901","931"],"TX":["210","214","254","281","325","346","361","409","430","432","469","512","682","713","726","737","806","817","830","832","903","915","936","940","956","972","979"],"UT":["385","435","801"],"VT":["802"],"VA":["276","434","540","571","703","757","804"],"WA":["206","253","360","425","509","564"],"WV":["304","681"],"WI":["262","414","534","608","715","920"],"WY":["307"],"AB":["403","587","780","825"],"BC":["236","250","604","672","778"],"MB":["204","431"],"NB":["506"],"NL":["709"],"NS":["782","902"],"NT":["867"],"NU":["867"],"ON":["226","249","289","343","365","382","416","437","519","548","613","647","705","742","807","905"],"PE":["782","902"],"QC":["354","367","418","438","450","468","514","579","581","819","873"],"SK":["306","639"],"YT":["867"]};
 
@@ -1880,12 +1850,26 @@ async function provisionPhoneNumber(areaCode) {
   });
 
   if (!buyResponse.ok) {
-    const errData = await buyResponse.json().catch(() => ({}));
-    const error = new Error(errData.message || 'Failed to buy phone number');
+    const statusCode = buyResponse.status;
+    const rawBody = await buyResponse.text().catch(() => '');
+    let errData = {};
+    try { errData = JSON.parse(rawBody); } catch {}
+
+    const errMessage = errData.message || rawBody.slice(0, 300) || 'Failed to buy phone number';
+    const error = new Error(`[HTTP ${statusCode}] ${errMessage}`);
+    error.statusCode = statusCode;
+
+    // Parse VAPI's suggested area codes hint
     const hintMatch = (errData.message || '').match(/Try one of ([0-9, ]+)/);
     if (hintMatch) {
       error.suggestedCodes = hintMatch[1].split(',').map(c => c.trim()).filter(c => /^\d{3}$/.test(c));
     }
+
+    // Flag account-level errors so callers can bail early instead of retrying
+    if ([402, 403, 429].includes(statusCode)) {
+      error.isAccountLevel = true;
+    }
+
     throw error;
   }
 
@@ -1897,6 +1881,10 @@ async function provisionPhoneNumber(areaCode) {
 // ============================================================================
 const CITY_AREA_CODES = {"atlanta":["404","470","678","770"],"savannah":["912"],"augusta":["706","762"],"macon":["478"],"los angeles":["213","323","310","424","818","747"],"san francisco":["415","628"],"san diego":["619","858"],"san jose":["408","669"],"sacramento":["916"],"oakland":["510"],"fresno":["559"],"long beach":["562"],"anaheim":["714","657"],"irvine":["949"],"riverside":["951"],"bakersfield":["661"],"houston":["713","281","832","346"],"dallas":["214","972","469"],"san antonio":["210"],"austin":["512","737"],"fort worth":["817","682"],"el paso":["915"],"miami":["305","786"],"orlando":["407","321","689"],"tampa":["813","656"],"jacksonville":["904"],"fort lauderdale":["954","754"],"st petersburg":["727"],"west palm beach":["561"],"new york":["212","646","917","718","347","929"],"brooklyn":["718","347","929"],"queens":["718","347","929"],"bronx":["718","347","929"],"buffalo":["716"],"chicago":["312","773","872","708","630"],"philadelphia":["215","267","445"],"pittsburgh":["412","878"],"phoenix":["602","480","623"],"tucson":["520"],"scottsdale":["480"],"charlotte":["704","980"],"raleigh":["919","984"],"denver":["303","720"],"colorado springs":["719"],"seattle":["206","253"],"boston":["617","857"],"portland":["503","971"],"las vegas":["702","725"],"nashville":["615","629"],"memphis":["901"],"detroit":["313","248"],"minneapolis":["612","763"],"new orleans":["504"],"baltimore":["410","443"],"virginia beach":["757"],"richmond":["804"],"columbus":["614"],"cleveland":["216"],"cincinnati":["513"],"indianapolis":["317","463"],"kansas city":["816"],"st louis":["314"],"milwaukee":["414"],"newark":["973","862"],"jersey city":["201","551"],"charleston":["843"],"columbia":["803"],"birmingham":["205"],"salt lake city":["801","385"],"oklahoma city":["405"],"hartford":["860"],"honolulu":["808"],"toronto":["416","437","647"],"mississauga":["905","289","365"],"brampton":["905","289","365"],"hamilton":["905","289","365"],"ottawa":["613","343"],"markham":["905","289","365"],"vaughan":["905","289","365"],"oakville":["905","289","365"],"burlington":["905","289","365"],"oshawa":["905","289","365"],"whitby":["905","289","365"],"ajax":["905","289","365"],"pickering":["905","289","365"],"st catharines":["905","289","365"],"niagara falls":["905","289","365"],"barrie":["705","249"],"guelph":["519","226","548"],"kitchener":["519","226","548"],"waterloo":["519","226","548"],"london ontario":["519","226","548"],"windsor ontario":["519","226","548"],"sudbury":["705","249"],"thunder bay":["807"],"peterborough":["705","249"],"belleville":["613","343"],"sarnia":["519","226"],"north bay":["705","249"],"sault ste marie":["705","249"],"brantford":["519","226","548"],"newmarket":["905","289","365"],"aurora":["905","289","365"],"stouffville":["905","289","365"],"milton":["905","289","365"],"georgetown":["905","289","365"],"orangeville":["519","226"],"orillia":["705","249"],"welland":["905","289","365"],"st thomas":["519","226","548"],"woodstock ontario":["519","226","548"],"stratford ontario":["519","226","548"],"chatham":["519","226"],"cornwall":["613","343"],"brockville":["613","343"],"pembroke":["613","343"],"kenora":["807"],"timmins":["705","249"],"bowmanville":["905","289","365"],"cobourg":["905","289"],"lindsay":["705","249"],"montreal":["514","438"],"quebec city":["418","581"],"laval":["450","579"],"gatineau":["819","873"],"longueuil":["450","579"],"sherbrooke":["819","873"],"levis":["418","581"],"saguenay":["418","581"],"trois-rivieres":["819","873"],"terrebonne":["450","579"],"repentigny":["450","579"],"brossard":["450","579"],"drummondville":["819","873"],"saint-jean-sur-richelieu":["450","579"],"granby":["450","579"],"blainville":["450","579"],"saint-hyacinthe":["450","579"],"rimouski":["418","581"],"victoriaville":["819","873"],"chicoutimi":["418","581"],"shawinigan":["819","873"],"dollard-des-ormeaux":["514","438"],"pointe-claire":["514","438"],"saint-laurent":["514","438"],"joliette":["450","579"],"val-dor":["819","873"],"rouyn-noranda":["819","873"],"sept-iles":["418","581"],"alma":["418","581"],"magog":["819","873"],"vancouver":["604","778","236"],"surrey":["604","778","236"],"burnaby":["604","778","236"],"richmond bc":["604","778","236"],"coquitlam":["604","778","236"],"langley":["604","778","236"],"delta":["604","778","236"],"north vancouver":["604","778","236"],"west vancouver":["604","778","236"],"new westminster":["604","778","236"],"maple ridge":["604","778","236"],"port coquitlam":["604","778","236"],"abbotsford":["604","778","236"],"chilliwack":["604","778","236"],"victoria":["250","778"],"nanaimo":["250","778"],"kamloops":["250","778"],"kelowna":["250","778"],"prince george":["250","778"],"vernon":["250","778"],"courtenay":["250","778"],"penticton":["250","778"],"campbell river":["250","778"],"cranbrook":["250","778"],"duncan":["250","778"],"powell river":["604","778"],"white rock":["604","778","236"],"mission":["604","778","236"],"calgary":["403","587"],"edmonton":["780","587","825"],"red deer":["403","587"],"lethbridge":["403","587"],"medicine hat":["403","587"],"grande prairie":["780","587"],"airdrie":["403","587"],"spruce grove":["780","587"],"st albert":["780","587"],"leduc":["780","587"],"fort mcmurray":["780","587"],"okotoks":["403","587"],"cochrane":["403","587"],"lloydminster":["780","587"],"camrose":["780","587"],"brooks":["403","587"],"canmore":["403","587"],"banff":["403","587"],"winnipeg":["204","431"],"brandon":["204","431"],"steinbach":["204","431"],"portage la prairie":["204","431"],"thompson":["204","431"],"selkirk":["204","431"],"winkler":["204","431"],"regina":["306","639"],"saskatoon":["306","639"],"prince albert":["306","639"],"moose jaw":["306","639"],"swift current":["306","639"],"north battleford":["306","639"],"yorkton":["306","639"],"estevan":["306","639"],"halifax":["902","782"],"dartmouth":["902","782"],"sydney":["902","782"],"truro":["902","782"],"new glasgow":["902","782"],"yarmouth":["902","782"],"kentville":["902","782"],"bridgewater":["902","782"],"antigonish":["902","782"],"fredericton":["506"],"moncton":["506"],"saint john":["506"],"miramichi":["506"],"bathurst":["506"],"edmundston":["506"],"dieppe":["506"],"riverview":["506"],"st johns":["709"],"st john's":["709"],"mount pearl":["709"],"corner brook":["709"],"conception bay south":["709"],"paradise":["709"],"grand falls-windsor":["709"],"gander":["709"],"labrador city":["709"],"charlottetown":["902","782"],"summerside":["902","782"],"stratford pei":["902","782"],"whitehorse":["867"],"yellowknife":["867"],"iqaluit":["867"],"dawson city":["867"],"hay river":["867"],"inuvik":["867"]};
 
+// ============================================================================
+// PROVISION LOCAL PHONE
+// FIXED: Logs actual error messages, bails early on account-level errors
+// ============================================================================
 async function provisionLocalPhone(city, state, assistantId, businessName, ownerPhone = null) {
   console.log(`📞 Provisioning phone for ${businessName} in ${city}, ${state}`);
   
@@ -1939,7 +1927,14 @@ async function provisionLocalPhone(city, state, assistantId, businessName, owner
       console.log(`✅ Phone provisioned: ${phoneData.number} (area code: ${areaCode})`);
       return phoneData;
     } catch (error) {
-      console.log(`   ❌ ${areaCode} unavailable, trying next...`);
+      console.log(`   ❌ ${areaCode}: ${error.message}`);
+
+      // Account-level error (billing, limit, rate limit) — stop wasting API calls
+      if (error.isAccountLevel) {
+        console.error(`   🚫 Account-level error (HTTP ${error.statusCode}) — aborting all ${areaCodesToTry.length - areaCodesToTry.indexOf(areaCode) - 1} remaining retries`);
+        throw new Error(`Phone provisioning blocked: ${error.message}. Check VAPI dashboard for billing or phone number limits.`);
+      }
+
       if (error.suggestedCodes) {
         error.suggestedCodes.forEach(c => {
           if (!seen.has(c)) suggestedCodes.add(c);
@@ -1956,7 +1951,11 @@ async function provisionLocalPhone(city, state, assistantId, businessName, owner
         console.log(`✅ Phone provisioned (suggested): ${phoneData.number} (area code: ${areaCode})`);
         return phoneData;
       } catch (error) {
-        console.log(`   ❌ ${areaCode} (suggested) unavailable`);
+        console.log(`   ❌ ${areaCode} (suggested): ${error.message}`);
+        if (error.isAccountLevel) {
+          console.error(`   🚫 Account-level error — aborting`);
+          throw new Error(`Phone provisioning blocked: ${error.message}. Check VAPI dashboard for billing or phone number limits.`);
+        }
       }
     }
   }
@@ -2006,16 +2005,8 @@ async function enableAssistant(assistantId) {
 
 // ============================================================================
 // PHONE NUMBER ENABLE/DISABLE
-// Since Phase 2 dynamic assistant-request, the PHONE NUMBER's serverUrl is
-// what controls whether calls are routed to the backend — not the assistant's.
-// These functions are the PRIMARY mechanism for enabling/disabling call routing.
 // ============================================================================
 
-/**
- * Disable a VAPI phone number by removing its serverUrl and assistantId.
- * This prevents VAPI from routing calls to the backend for this number.
- * The phone number stays purchased and can be re-enabled later.
- */
 async function disablePhoneNumber(phoneId) {
   if (!phoneId) return false;
   try {
@@ -2043,11 +2034,6 @@ async function disablePhoneNumber(phoneId) {
   }
 }
 
-/**
- * Re-enable a VAPI phone number by restoring its serverUrl.
- * This allows VAPI to route calls back to the backend's assistant-request handler.
- * No assistantId is set — forces dynamic mode via assistant-request.
- */
 async function enablePhoneNumber(phoneId) {
   if (!phoneId) return false;
   try {
@@ -2059,7 +2045,6 @@ async function enablePhoneNumber(phoneId) {
       },
       body: JSON.stringify({
         serverUrl: `${BACKEND_URL}/webhook/vapi`
-        // No assistantId — forces assistant-request (dynamic mode)
       })
     });
     if (response.ok) {
