@@ -6,6 +6,7 @@
 // WITH AGENCY TEMPLATE KB INHERITANCE
 // UPDATED: Phase 2 — Phone numbers use serverUrl only (no assistantId)
 // UPDATED: Extract and store vapi_query_tool_id for dynamic config builder
+// UPDATED: New clients inherit nav_bg/nav_text from agency defaults (2026-04-17)
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -370,7 +371,10 @@ async function handleClientSignup(req, res) {
         monthly_call_limit: callLimit,
         calls_this_month: 0,
         business_website: websiteUrl || null,
-        provisioning_method: phoneResult.provisioningMethod || 'platform'
+        provisioning_method: phoneResult.provisioningMethod || 'platform',
+        // Inherit nav defaults from agency so new clients match agency's preferred nav style
+        nav_bg: agency.default_client_nav_bg || null,
+        nav_text: agency.default_client_nav_text || null,
       })
       .select()
       .single();
@@ -623,7 +627,10 @@ async function handleAgencyAddClient(req, res) {
         monthly_call_limit: callLimit,
         calls_this_month: 0,
         business_website: websiteUrl || null,
-        provisioning_method: phoneResult.provisioningMethod || 'platform'
+        provisioning_method: phoneResult.provisioningMethod || 'platform',
+        // Inherit nav defaults from agency
+        nav_bg: agency.default_client_nav_bg || null,
+        nav_text: agency.default_client_nav_text || null,
       })
       .select()
       .single();
@@ -757,7 +764,10 @@ async function provisionClient(clientId) {
         knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
         knowledge_base_data: templateKB || client.knowledge_base_data || null,
         status: 'active',
-        provisioning_method: phoneResult.provisioningMethod || 'platform'
+        provisioning_method: phoneResult.provisioningMethod || 'platform',
+        // Inherit nav defaults if not already set
+        nav_bg: client.nav_bg || agency.default_client_nav_bg || null,
+        nav_text: client.nav_text || agency.default_client_nav_text || null,
       })
       .eq('id', clientId)
       .select()
