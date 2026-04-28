@@ -403,10 +403,18 @@ const TEMPLATES = {
  * @param {string} templateId - Template type identifier
  * @param {object} content    - AI-generated content JSON
  * @param {object} business   - Full business profile with design_system
- * @returns {string}          - Complete HTML document at 1080×1350
+ * @param {string} photoDataUrl - Optional photo URL/base64
+ * @param {object} options      - Optional { platform: 'instagram'|'linkedin' }
+ * @returns {string}            - Complete HTML document
  */
-function renderTemplate(templateId, content, business, photoDataUrl) {
+function renderTemplate(templateId, content, business, photoDataUrl, options) {
   const tokens = resolveTokens(business);
+  const platform = options?.platform || 'instagram';
+  
+  // Store photo and platform on tokens so templates can access if needed
+  tokens.photoDataUrl = photoDataUrl || null;
+  tokens.platform = platform;
+  
   const tpl = TEMPLATES[templateId];
   if (!tpl) return fullGraphic(content, tokens); // Fallback
   return tpl.render(content, tokens);
