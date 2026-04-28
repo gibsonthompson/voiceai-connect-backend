@@ -1,630 +1,415 @@
 /**
- * HTML Template Rendering System v2
+ * Unified Multi-Tenant Template Engine
  * 
- * 12 template types with varied layouts:
- * - photo_hero, full_graphic, checklist, review_showcase
- * - process_steps, stat_callout, service_highlight, offer_coupon
- * - warning_signs, did_you_know, brand_intro, split_feature
+ * ONE file renders all template types for ANY business.
+ * Visual tokens come from the business's design_system JSONB.
+ * Handles both white-background (CallBird) and dark-background (VoiceAI, RSA, GTC) businesses.
+ * 
+ * Template types:
+ *   1. stat_callout    — Large stat number hero
+ *   2. checklist       — Headline + checkmark items
+ *   3. full_graphic    — Centered headline + pills
+ *   4. process_steps   — Numbered "How It Works"
+ *   5. faq_card        — Question/answer card
+ *   6. cta_card        — Action-oriented with benefits
+ *   7. review_showcase — Star rating + testimonials
+ * 
+ * Usage:
+ *   const html = renderTemplate('stat_callout', content, business);
+ *   // → complete HTML at 1080×1350, ready for Puppeteer screenshot
  */
 
-const { RSA_LOGO, BBB_BADGE, IICRC_BADGE, GOOGLE_LOGO, GREENSKY_BADGE } = require('./assets');
+// ═══════════════════════════════════════════════════════════════════
+// DESIGN TOKEN RESOLVER
+// Reads from business.design_system, falls back to sensible defaults
+// ═══════════════════════════════════════════════════════════════════
 
-// ── SVG Icons ──────────────────────────────────────────────────────
-const ICONS = {
-  check: (c,s) => `<svg width="${s||20}" height="${s||20}" viewBox="0 0 24 24" fill="none" stroke="${c||'#fff'}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`,
-  shield: (c,s) => `<svg width="${s||20}" height="${s||20}" viewBox="0 0 24 24" fill="none" stroke="${c||'#fff'}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
-  home: (c,s) => `<svg width="${s||20}" height="${s||20}" viewBox="0 0 24 24" fill="none" stroke="${c||'#fff'}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>`,
-  star: (c,s) => `<svg width="${s||20}" height="${s||20}" viewBox="0 0 24 24" fill="${c||'#FBBC04'}" xmlns="http://www.w3.org/2000/svg"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>`,
-  alert: (c,s) => `<svg width="${s||20}" height="${s||20}" viewBox="0 0 24 24" fill="none" stroke="${c||'#fff'}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
-  droplet: (c,s) => `<svg width="${s||20}" height="${s||20}" viewBox="0 0 24 24" fill="none" stroke="${c||'#fff'}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.69l5.66 5.66a8 8 0 11-11.31 0z"/></svg>`,
-  clock: (c,s) => `<svg width="${s||20}" height="${s||20}" viewBox="0 0 24 24" fill="none" stroke="${c||'#fff'}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,
-  phone: (c,s) => `<svg width="${s||20}" height="${s||20}" viewBox="0 0 24 24" fill="none" stroke="${c||'#fff'}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>`,
-  tool: (c,s) => `<svg width="${s||20}" height="${s||20}" viewBox="0 0 24 24" fill="none" stroke="${c||'#fff'}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg>`,
-  award: (c,s) => `<svg width="${s||20}" height="${s||20}" viewBox="0 0 24 24" fill="none" stroke="${c||'#fff'}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="7"/><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88"/></svg>`,
-  zap: (c,s) => `<svg width="${s||20}" height="${s||20}" viewBox="0 0 24 24" fill="${c||'#FBBC04'}" stroke="${c||'#FBBC04'}" stroke-width="1"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
-  cloud: (c,s) => `<svg width="${s||20}" height="${s||20}" viewBox="0 0 24 24" fill="none" stroke="${c||'#fff'}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 109 20h9a5 5 0 000-10z"/></svg>`,
-};
-
-const ICON_ROTATION = ['shield', 'home', 'star', 'award', 'tool', 'clock'];
-
-function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
-function hl(text, words, cls) {
-  if (!words?.length || !text) return esc(text||'');
-  let r = esc(text);
-  words.forEach(w => { r = r.replace(new RegExp(`(${esc(w)})`, 'gi'), `<span class="${cls||'hl'}">$1</span>`); });
-  return r;
-}
-
-function starsRow(n, sz) {
-  return Array(n||5).fill(0).map(()=>ICONS.star('#FBBC04', sz||24)).join('');
-}
-
-function getAssets(biz) {
-  const id = biz.id || biz.slug || '';
-  if (id === 'rsa') return { logo: RSA_LOGO, bbb: BBB_BADGE, iicrc: IICRC_BADGE, google: GOOGLE_LOGO, greensky: GREENSKY_BADGE };
-  return { logo: biz.design_system?.logo_url || '', bbb: '', iicrc: '', google: GOOGLE_LOGO, greensky: '' };
-}
-
-// ── Base shell ─────────────────────────────────────────────────────
-
-function shell(biz, body) {
+function resolveTokens(biz) {
   const ds = biz.design_system || {};
-  const f = ds.fonts || {};
-  const hf = f.headline?.family || 'Bebas Neue';
-  const bf = f.body?.family || 'Montserrat';
-  const ht = f.headline?.transform || 'uppercase';
-  const hls = f.headline?.letter_spacing || '2px';
-  const accent = ds.colors_extended?.accent_light || biz.accent_color || '#84d2f2';
-  const urgency = ds.colors_extended?.urgency || '#C62828';
+  const fonts = ds.fonts || {};
+  const colors = ds.colors_extended || {};
+  const gradients = ds.gradients || {};
+  const ctaBar = ds.cta_bar || {};
 
-  const fams = [];
-  if (hf) fams.push(hf.replace(/ /g, '+') + ':wght@400;500;600;700;800;900');
-  if (bf && bf !== hf) fams.push(bf.replace(/ /g, '+') + ':wght@400;500;600;700;800;900');
-  fams.push('Space+Mono:wght@400;700');
+  // Detect background mode: white if bg_color is light, dark otherwise
+  const bg = biz.bg_color || '#ffffff';
+  const isLight = isLightColor(bg);
 
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
-@import url('https://fonts.googleapis.com/css2?family=${fams.join('&family=')}&display=swap');
-*{margin:0;padding:0;box-sizing:border-box;}
-body{width:1080px;height:1350px;overflow:hidden;}
-.post{width:1080px;height:1350px;display:flex;flex-direction:column;overflow:hidden;position:relative;}
-.hf{font-family:'${hf}','Bebas Neue','Impact',sans-serif;text-transform:${ht};letter-spacing:${hls};}
-.bf{font-family:'${bf}','Montserrat','Segoe UI',sans-serif;}
-.hl{color:${accent};}
-.ur{color:${urgency};}
-.mono{font-family:'Space Mono',monospace;letter-spacing:0.03em;}
-.glass{background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);}
-</style></head><body>${body}</body></html>`;
+  return {
+    // Mode
+    isLight,
+
+    // Fonts
+    headlineFamily: fonts.headline?.family || 'Inter',
+    headlineWeight: fonts.headline?.weight || '700',
+    headlineTransform: fonts.headline?.transform || 'none',
+    headlineLetterSpacing: fonts.headline?.letter_spacing || '-0.02em',
+    bodyFamily: fonts.body?.family || 'Inter',
+    bodyWeight: fonts.body?.weight || '400',
+
+    // Colors
+    primary: biz.primary_color || '#3B82F6',
+    secondary: biz.secondary_color || biz.primary_color || '#3B82F6',
+    accent: biz.accent_color || '#F59E0B',
+    bgColor: bg,
+    textPrimary: isLight ? '#1f2937' : (biz.text_color || '#F1F5F9'),
+    textSecondary: isLight ? '#4b5563' : 'rgba(255,255,255,0.7)',
+    textTertiary: isLight ? '#6b7280' : 'rgba(255,255,255,0.5)',
+    urgency: colors.urgency || '#ef4444',
+    success: colors.success || '#10b981',
+    border: isLight ? '#e5e7eb' : 'rgba(255,255,255,0.08)',
+    cardBg: isLight ? '#f9f9f7' : 'rgba(255,255,255,0.04)',
+    cardBorder: isLight ? '#e5e7eb' : 'rgba(255,255,255,0.08)',
+    highlightColor: colors.accent_light || biz.accent_color || '#F6B828',
+
+    // Gradients
+    headerGradient: gradients.header || (isLight
+      ? `linear-gradient(160deg, ${biz.primary_color || '#3B82F6'}, ${biz.secondary_color || '#2563EB'})`
+      : `linear-gradient(160deg, ${bg}, ${biz.primary_color || '#1a2744'})`),
+    ctaGradient: gradients.cta || ctaBar.bg_gradient || `linear-gradient(135deg, ${biz.primary_color}, ${biz.secondary_color || biz.primary_color})`,
+    accentGradient: gradients.accent || `linear-gradient(135deg, ${biz.primary_color}, ${biz.secondary_color || biz.primary_color})`,
+
+    // CTA Bar
+    ctaEnabled: ctaBar.enabled !== false,
+    ctaPhone: ctaBar.phone || '',
+    ctaVariations: ctaBar.cta_variations || [],
+
+    // Trust badges
+    trustBadges: ds.trust_badges || [],
+
+    // Brand
+    name: biz.name || '',
+    website: biz.website || '',
+    slug: biz.slug || '',
+  };
 }
 
-// ── Shared components ──────────────────────────────────────────────
-
-function ctaBar(biz, c) {
-  const ds = biz.design_system || {};
-  if (!ds.cta_bar?.enabled) return '';
-  const grad = ds.cta_bar?.bg_gradient || ds.gradients?.cta || 'linear-gradient(135deg,#C62828,#B71C1C)';
-  const phone = ds.cta_bar?.phone || '';
-  const l1 = esc(c.cta_line1||''); const l2 = esc(c.cta_line2||c.cta||'FREE ESTIMATE');
-  return `<div style="background:${grad};padding:30px 52px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;min-height:110px;">
-    <div style="flex:1;min-width:0;">
-      ${l1?`<div class="bf" style="font-size:22px;font-weight:800;color:#fff;text-transform:uppercase;letter-spacing:2px;">${l1}</div>`:''}
-      <div class="hf" style="font-size:52px;color:#fff;line-height:1;">${l2}</div>
-    </div>
-    ${phone?`<div class="hf" style="font-size:52px;color:#fff;margin-left:40px;">${esc(phone)}</div>`:''}
-  </div>`;
-}
-
-function badgeImgs(biz, pos) {
-  const a = getAssets(biz); const imgs = [];
-  if (a.bbb) imgs.push(a.bbb); if (a.iicrc) imgs.push(a.iicrc);
-  if (!imgs.length) return '';
-  const h = pos==='corner'?'42':'50';
-  return `<div style="display:flex;gap:${pos==='corner'?'6':'14'}px;align-items:center;${pos==='corner'?'':'justify-content:center;'}">${imgs.map(i=>`<img src="${i}" style="height:${h}px;border-radius:4px;"/>`).join('')}</div>`;
-}
-
-function brandBar(biz) {
-  const a = getAssets(biz);
-  const accent = biz.design_system?.colors_extended?.accent_light || biz.accent_color || '#84d2f2';
-  return `<div style="background:${biz.primary_color||'#273373'};padding:22px 48px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
-    <div style="display:flex;align-items:center;gap:14px;">
-      ${a.logo?`<div style="width:48px;height:48px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 10px rgba(0,0,0,0.2);"><img src="${a.logo}" style="width:36px;height:36px;object-fit:contain;"/></div>`:''}
-      <div class="hf" style="font-size:24px;color:#fff;letter-spacing:3px;">${esc(biz.name.toUpperCase())}</div>
-    </div>
-    ${biz.website?`<div class="bf" style="font-size:14px;color:${accent};font-weight:600;">@${esc(biz.website.replace('www.','').replace('.com',''))}</div>`:''}
-  </div>`;
-}
-
-function accentStrip(biz, h) {
-  const accent = biz.design_system?.colors_extended?.accent_light || biz.accent_color || '#84d2f2';
-  const sec = biz.secondary_color || biz.primary_color;
-  return `<div style="height:${h||6}px;background:linear-gradient(90deg,${accent},${sec},${biz.primary_color});flex-shrink:0;"></div>`;
-}
-
-function logoCircle(biz, size) {
-  const a = getAssets(biz);
-  const s = size||68;
-  // Image logo
-  if (a.logo) {
-    const is = Math.round(s*0.72);
-    return `<div style="width:${s}px;height:${s}px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 20px rgba(0,0,0,0.3);"><img src="${a.logo}" style="width:${is}px;height:${is}px;object-fit:contain;"/></div>`;
-  }
-  // Text logo fallback for brands without image logos
-  const accent = biz.design_system?.colors_extended?.accent_light || biz.accent_color || '#10b981';
-  const initial = (biz.name||'V').charAt(0);
-  return `<div style="width:${s}px;height:${s}px;border-radius:${s<70?'12':'16'}px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;">
-    <span class="bf" style="font-size:${Math.round(s*0.4)}px;font-weight:800;color:${accent};">${initial}</span>
-  </div>`;
-}
-
-function decorCircles(color, opacity, biz) {
-  // For dark SaaS brands — emerald radial glow orb instead of solid circles
-  if (biz && (biz.industry === 'saas_tech' || biz.industry === 'saas_smb')) {
-    const accent = biz.design_system?.colors_extended?.accent_light || biz.accent_color || '#10b981';
-    return `<div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:600px;height:600px;border-radius:50%;background:radial-gradient(circle,${accent}12 0%,transparent 70%);pointer-events:none;"></div>`;
-  }
-  const c = color || 'rgba(255,255,255,0.03)';
-  return `<div style="position:absolute;top:-80px;right:-80px;width:300px;height:300px;border-radius:50%;background:${c};opacity:${opacity||1};"></div>
-  <div style="position:absolute;bottom:-120px;left:-60px;width:240px;height:240px;border-radius:50%;background:${c};opacity:${opacity||1};"></div>`;
+function isLightColor(hex) {
+  if (!hex || !hex.startsWith('#')) return true;
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return (r * 299 + g * 587 + b * 114) / 1000 > 128;
 }
 
 
 // ═══════════════════════════════════════════════════════════════════
-// 1. PHOTO HERO
+// SHARED HTML COMPONENTS
 // ═══════════════════════════════════════════════════════════════════
 
-function photoHero(content, biz, photo) {
-  const ds = biz.design_system || {};
-  const primary = biz.primary_color || '#273373';
-  const accent = ds.colors_extended?.accent_light || biz.accent_color || '#84d2f2';
-  const stats = content.stats || [];
+function esc(s) {
+  return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function highlight(text, words, color) {
+  if (!words || !words.length || !text) return esc(text || '');
+  let result = esc(text);
+  words.forEach(w => {
+    const escaped = esc(w);
+    const regex = new RegExp(`(${escaped})`, 'gi');
+    result = result.replace(regex, `<span style="color:${color}">$1</span>`);
+  });
+  return result;
+}
+
+function shell(t, bodyHTML) {
+  // Build Google Fonts URL for both headline and body families
+  const families = new Set();
+  if (t.headlineFamily) families.add(t.headlineFamily.replace(/ /g, '+') + ':wght@400;600;700;800;900');
+  if (t.bodyFamily && t.bodyFamily !== t.headlineFamily) families.add(t.bodyFamily.replace(/ /g, '+') + ':wght@400;500;600;700');
+  const fontUrl = families.size > 0
+    ? `https://fonts.googleapis.com/css2?family=${[...families].join('&family=')}&display=swap`
+    : '';
+
+  return `<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+${fontUrl ? `<link href="${fontUrl}" rel="stylesheet">` : ''}
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{width:1080px;height:1350px;overflow:hidden;font-family:'${t.bodyFamily}',sans-serif;background:${t.bgColor}}
+  .post{width:1080px;height:1350px;display:flex;flex-direction:column;overflow:hidden;position:relative;background:${t.bgColor}}
+  .hf{font-family:'${t.headlineFamily}',sans-serif;font-weight:${t.headlineWeight};text-transform:${t.headlineTransform};letter-spacing:${t.headlineLetterSpacing}}
+  .bf{font-family:'${t.bodyFamily}',sans-serif;font-weight:${t.bodyWeight}}
+</style></head><body>${bodyHTML}</body></html>`;
+}
+
+function ctaBarHTML(t, content) {
+  if (!t.ctaEnabled) return '';
+  const line1 = content.cta_line1 || '';
+  const line2 = content.cta_line2 || 'LEARN MORE';
+
+  return `<div style="background:${t.ctaGradient};padding:32px 56px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
+    <div>
+      ${line1 ? `<div class="bf" style="font-size:16px;font-weight:600;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:3px;margin-bottom:6px">${esc(line1)}</div>` : ''}
+      <div class="hf" style="font-size:36px;color:${t.accent};line-height:1.1">${esc(line2)}</div>
+    </div>
+    ${t.ctaPhone ? `<div style="text-align:right">
+      <div class="bf" style="font-size:12px;font-weight:600;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:2px;margin-bottom:4px">Call now</div>
+      <div class="hf" style="font-size:28px;color:white">${esc(t.ctaPhone)}</div>
+    </div>` : ''}
+  </div>`;
+}
+
+function grainSVG(t) {
+  const opacity = t.isLight ? 0.025 : 0.05;
+  return `<svg style="opacity:${opacity};position:absolute;width:100%;height:100%;top:0;left:0;pointer-events:none;z-index:999"><filter id="g"><feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/></filter><rect width="100%" height="100%" filter="url(#g)"/></svg>`;
+}
+
+function brandWatermark(t) {
+  return `<div style="display:flex;align-items:center;gap:10px;opacity:0.35">
+    <div style="width:8px;height:8px;border-radius:50%;background:${t.primary}"></div>
+    <span class="bf" style="font-size:13px;font-weight:600;color:${t.isLight ? t.primary : 'white'};text-transform:uppercase;letter-spacing:3px">${esc(t.website || t.name)}</span>
+  </div>`;
+}
+
+function trustBadgesHTML(t) {
+  if (!t.trustBadges.length) return '';
+  return `<div style="display:flex;gap:12px;align-items:center;justify-content:center;flex-wrap:wrap">
+    ${t.trustBadges.map(b => `<div style="background:${t.isLight ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.06)'};border:1px solid ${t.cardBorder};border-radius:6px;padding:6px 14px;font-size:11px;font-weight:700;color:${t.textTertiary};text-transform:uppercase;letter-spacing:1px">${esc(b)}</div>`).join('')}
+  </div>`;
+}
+
+// Check icon SVG
+function checkSVG(color = 'white', size = 20) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>`;
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// TEMPLATE 1: STAT CALLOUT
+// ═══════════════════════════════════════════════════════════════════
+
+function statCallout(content, t) {
+  const stat = content.headline || '';
+  const isDollar = stat.includes('$');
+  const isNeg = (content.content_type || '').includes('miss') || (content.content_type || '').includes('pain');
+  const statColor = isDollar ? t.accent : isNeg ? t.urgency : t.primary;
   const items = content.items || [];
 
-  const top = photo
-    ? `<div style="flex:0 0 52%;position:relative;overflow:hidden;">
-        <img src="${photo}" style="width:100%;height:100%;object-fit:cover;display:block;"/>
-        <div style="position:absolute;bottom:0;left:0;right:0;height:70%;background:linear-gradient(0deg,${primary} 0%,${primary}DD 25%,transparent 100%);"></div>
-        <div style="position:absolute;top:28px;left:28px;">${logoCircle(biz,68)}</div>
-        <div style="position:absolute;top:24px;right:24px;">${badgeImgs(biz,'corner')}</div>
-        <div style="position:absolute;bottom:32px;left:0;right:0;text-align:center;padding:0 52px;">
-          <div class="hf" style="font-size:88px;color:#fff;line-height:0.9;">${hl(content.headline, content.highlight_words)}</div>
-        </div>
-      </div>`
-    : `<div style="flex:0 0 40%;background:linear-gradient(160deg,${biz.bg_color||'#1a2a6c'},${primary});display:flex;align-items:center;justify-content:center;padding:40px 52px;text-align:center;position:relative;overflow:hidden;">
-        ${decorCircles(primary+'30',1,biz)}
-        <div style="position:absolute;top:28px;left:28px;">${logoCircle(biz,68)}</div>
-        <div style="position:absolute;top:24px;right:24px;">${badgeImgs(biz,'corner')}</div>
-        <div class="hf" style="font-size:92px;color:#fff;line-height:0.9;position:relative;z-index:1;">${hl(content.headline, content.highlight_words)}</div>
-      </div>`;
-
-  return shell(biz, `<div class="post">${top}
-    <div style="flex:1;background:${primary};padding:36px 48px;display:flex;flex-direction:column;justify-content:center;">
-      ${content.subtext?`<div style="text-align:center;margin-bottom:24px;">
-        <div style="width:50px;height:3px;background:${accent};margin:0 auto 14px;"></div>
-        <div class="bf" style="font-size:20px;color:rgba(255,255,255,0.8);line-height:1.5;font-weight:500;">${esc(content.subtext)}</div>
-      </div>`:''}
-      ${stats.length?`<div style="display:flex;justify-content:space-around;margin-top:8px;">
-        ${stats.map(s=>`<div style="text-align:center;">
-          <div class="hf" style="font-size:68px;color:${accent};line-height:1;">${esc(s.value)}</div>
-          <div class="bf" style="font-size:14px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:2px;margin-top:6px;font-weight:700;">${esc(s.label)}</div>
-        </div>`).join('')}
-      </div>`:''}
-      ${items.length&&!stats.length?`<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px 32px;margin-top:12px;">
-        ${items.map((it,i)=>{const t=typeof it==='string'?it:it.title||it;const sub=typeof it==='object'?it.subtitle:'';const ic=ICON_ROTATION[i%ICON_ROTATION.length];
-        return`<div style="display:flex;align-items:center;gap:14px;">
-          <div style="width:42px;height:42px;border-radius:50%;border:1.5px solid rgba(255,255,255,0.15);display:flex;align-items:center;justify-content:center;flex-shrink:0;">${ICONS[ic]('rgba(255,255,255,0.7)',20)}</div>
-          <div><div class="bf" style="font-size:17px;font-weight:800;color:#fff;text-transform:uppercase;">${esc(t)}</div>
-          ${sub?`<div class="bf" style="font-size:12px;color:rgba(255,255,255,0.4);font-weight:500;">${esc(sub)}</div>`:''}</div>
-        </div>`;}).join('')}
-      </div>`:''}
-    </div>${ctaBar(biz,content)}</div>`);
+  return shell(t, `<div class="post">${grainSVG(t)}
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:80px 72px;text-align:center;position:relative">
+      <div style="position:absolute;width:600px;height:600px;border-radius:50%;background:radial-gradient(circle,${statColor}08 0%,transparent 70%);top:50%;left:50%;transform:translate(-50%,-60%)"></div>
+      ${content.eyebrow ? `<div class="bf" style="font-size:15px;font-weight:700;color:${t.textTertiary};text-transform:uppercase;letter-spacing:5px;margin-bottom:24px;position:relative">${esc(content.eyebrow)}</div>` : ''}
+      <div class="hf" style="font-size:180px;color:${statColor};line-height:0.9;position:relative">${esc(stat)}</div>
+      <div style="width:80px;height:4px;background:linear-gradient(90deg,${t.primary},${t.accent});margin:36px auto;border-radius:2px"></div>
+      <div class="bf" style="font-size:28px;font-weight:500;color:${t.textSecondary};line-height:1.5;max-width:720px">${esc(content.subtext)}</div>
+      ${items.length ? `<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:12px;margin-top:40px">${items.map(i => `<div style="background:${t.isLight ? `${t.primary}0D` : 'rgba(255,255,255,0.06)'};border:1px solid ${t.isLight ? `${t.primary}1F` : 'rgba(255,255,255,0.1)'};border-radius:100px;padding:12px 28px"><span class="bf" style="font-size:15px;font-weight:600;color:${t.isLight ? t.primary : t.accent};text-transform:uppercase;letter-spacing:1px">${esc(typeof i === 'string' ? i : i.title || i)}</span></div>`).join('')}</div>` : ''}
+      ${t.trustBadges.length ? `<div style="margin-top:28px">${trustBadgesHTML(t)}</div>` : ''}
+      <div style="position:absolute;bottom:32px;left:50%;transform:translateX(-50%)">${brandWatermark(t)}</div>
+    </div>
+    ${ctaBarHTML(t, content)}
+  </div>`);
 }
 
 
 // ═══════════════════════════════════════════════════════════════════
-// 2. FULL GRAPHIC
+// TEMPLATE 2: CHECKLIST
 // ═══════════════════════════════════════════════════════════════════
 
-function fullGraphic(content, biz) {
-  const ds = biz.design_system || {};
-  const primary = biz.primary_color || '#273373';
-  const accent = ds.colors_extended?.accent_light || biz.accent_color || '#84d2f2';
+function checklist(content, t) {
   const items = content.items || [];
   const badge = content.badge_label || '';
 
-  return shell(biz, `<div class="post">
-    ${badge?`<div style="background:${ds.colors_extended?.urgency||'#C62828'};padding:22px;text-align:center;flex-shrink:0;">
-      <div class="bf" style="font-size:20px;font-weight:800;color:#fff;text-transform:uppercase;letter-spacing:6px;">${esc(badge)}</div>
-    </div>`:''}
-    <div style="flex:1;background:linear-gradient(160deg,${biz.bg_color||'#1a2a6c'},${primary});display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 56px;text-align:center;position:relative;overflow:hidden;">
-      ${decorCircles(accent+'10',1,biz)}
-      <div style="position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;">
-        ${logoCircle(biz,88)}
-        <div class="hf" style="font-size:96px;color:#fff;line-height:0.92;margin-top:32px;">${hl(content.headline, content.highlight_words)}</div>
-        ${content.subtext?`<div class="bf" style="font-size:22px;color:rgba(255,255,255,0.65);margin-top:18px;line-height:1.5;max-width:780px;font-weight:500;">${esc(content.subtext)}</div>`:''}
-        ${items.length?`<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:12px;margin-top:36px;">
-          ${items.map(it=>{const l=typeof it==='string'?it:it.title||it;
-          return`<div class="bf glass" style="border-radius:24px;padding:12px 28px;font-size:17px;font-weight:700;color:${accent};text-transform:uppercase;letter-spacing:1px;">${esc(l)}</div>`;}).join('')}
-        </div>`:''}
-        <div style="margin-top:32px;">${badgeImgs(biz,'center')}</div>
+  return shell(t, `<div class="post">${grainSVG(t)}
+    ${badge ? `<div style="background:${t.urgency};padding:16px 56px;text-align:center;flex-shrink:0"><span class="bf" style="font-size:14px;font-weight:800;color:white;text-transform:uppercase;letter-spacing:6px">${esc(badge)}</span></div>` : ''}
+    <div style="flex:1;padding:64px 64px 40px;display:flex;flex-direction:column">
+      <div style="width:48px;height:5px;background:${t.primary};border-radius:3px;margin-bottom:28px"></div>
+      <div class="hf" style="font-size:64px;color:${t.textPrimary};line-height:1.1;margin-bottom:12px">${highlight(content.headline, content.highlight_words, t.primary)}</div>
+      ${content.subtext ? `<div class="bf" style="font-size:21px;color:${t.textTertiary};line-height:1.5;margin-bottom:36px;max-width:800px">${esc(content.subtext)}</div>` : '<div style="margin-bottom:24px"></div>'}
+      <div style="flex:1;display:flex;flex-direction:column;justify-content:space-evenly;gap:4px">
+        ${items.map(i => {
+          const text = typeof i === 'string' ? i : i.title || i;
+          return `<div style="display:flex;align-items:center;gap:22px;padding:20px 28px;background:${t.cardBg};border-radius:16px;border:1px solid ${t.cardBorder}">
+            <div style="width:44px;height:44px;border-radius:12px;flex-shrink:0;background:${t.accentGradient};display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px ${t.primary}33">${checkSVG('white', 20)}</div>
+            <span class="bf" style="font-size:24px;font-weight:600;color:${t.textPrimary};line-height:1.3">${esc(text)}</span>
+          </div>`;
+        }).join('')}
       </div>
-    </div>${ctaBar(biz,content)}</div>`);
+      <div style="margin-top:24px;display:flex;justify-content:center">${brandWatermark(t)}</div>
+    </div>
+    ${ctaBarHTML(t, content)}
+  </div>`);
 }
 
 
 // ═══════════════════════════════════════════════════════════════════
-// 3. CHECKLIST — with weather icon for seasonal, accent checkboxes
+// TEMPLATE 3: FULL GRAPHIC
 // ═══════════════════════════════════════════════════════════════════
 
-function checklist(content, biz) {
-  const ds = biz.design_system || {};
-  const urgency = ds.colors_extended?.urgency || '#C62828';
-  const accent = ds.colors_extended?.accent_light || biz.accent_color || '#84d2f2';
+function fullGraphic(content, t) {
   const items = content.items || [];
   const badge = content.badge_label || '';
-  const isSeasonal = badge.toLowerCase().includes('season') || badge.toLowerCase().includes('storm') || badge.toLowerCase().includes('alert');
 
-  return shell(biz, `<div class="post">
-    ${brandBar(biz)}
-    <div style="flex:1;background:${biz.bg_color||'#0d1b2a'};padding:44px 56px;display:flex;flex-direction:column;position:relative;overflow:hidden;">
-      ${decorCircles('rgba(255,255,255,0.015)',1,biz)}
-      ${badge?`<div style="position:absolute;top:-62px;right:48px;background:${urgency};border-radius:6px;padding:8px 18px;z-index:2;">
-        <div class="bf" style="font-size:14px;font-weight:800;color:#fff;text-transform:uppercase;letter-spacing:2px;">${esc(badge)}</div>
-      </div>`:''}
-      <div style="text-align:center;margin-bottom:28px;position:relative;z-index:1;">
-        ${isSeasonal?`<div style="margin-bottom:16px;">${ICONS.cloud('rgba(255,255,255,0.6)',48)}${ICONS.zap('#FBBC04',32)}</div>`:''}
-        <div class="hf" style="font-size:82px;color:#fff;line-height:0.92;">${hl(content.headline, content.highlight_words, 'ur')}</div>
-        ${content.subtext?`<div class="bf" style="font-size:18px;color:rgba(255,255,255,0.55);margin-top:16px;line-height:1.5;font-weight:500;max-width:700px;margin-left:auto;margin-right:auto;">${esc(content.subtext)}</div>`:''}
+  return shell(t, `<div class="post">${grainSVG(t)}
+    <div style="flex:1;display:flex;flex-direction:column;position:relative">
+      <div style="position:absolute;top:0;left:0;right:0;bottom:0;background:radial-gradient(circle at 30% 20%,${t.primary}08 0%,transparent 50%),radial-gradient(circle at 70% 80%,${t.accent}08 0%,transparent 50%)"></div>
+      ${badge ? `<div style="position:absolute;top:48px;left:50%;transform:translateX(-50%);z-index:2"><div style="background:${t.primary};border-radius:100px;padding:10px 32px"><span class="bf" style="font-size:13px;font-weight:700;color:${t.accent};text-transform:uppercase;letter-spacing:4px">${esc(badge)}</span></div></div>` : ''}
+      <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:80px 72px;text-align:center;position:relative;z-index:1">
+        <div class="hf" style="font-size:76px;color:${t.textPrimary};line-height:1.08;max-width:900px;margin-bottom:20px">${highlight(content.headline, content.highlight_words, t.primary)}</div>
+        ${content.subtext ? `<div class="bf" style="font-size:24px;color:${t.textTertiary};line-height:1.5;max-width:720px;margin-bottom:40px">${esc(content.subtext)}</div>` : ''}
+        ${items.length ? `<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:14px;max-width:800px">${items.map(i => `<div style="background:${t.isLight ? 'white' : 'rgba(255,255,255,0.04)'};border:1.5px solid ${t.cardBorder};border-radius:14px;padding:14px 28px;box-shadow:${t.isLight ? '0 2px 8px rgba(0,0,0,0.04)' : 'none'}"><span class="bf" style="font-size:17px;font-weight:600;color:${t.textPrimary}">${esc(typeof i === 'string' ? i : i.title || i)}</span></div>`).join('')}</div>` : ''}
+        <div style="position:absolute;bottom:32px">${brandWatermark(t)}</div>
       </div>
-      <div style="flex:1;display:flex;flex-direction:column;justify-content:space-evenly;position:relative;z-index:1;">
-        ${items.map(it=>{const l=typeof it==='string'?it:it.title||it;
-        return`<div style="display:flex;align-items:center;gap:20px;padding:18px 24px;background:rgba(255,255,255,0.03);border-radius:12px;border:1px solid rgba(255,255,255,0.04);">
-          <div style="width:40px;height:40px;border-radius:8px;background:${accent};display:flex;align-items:center;justify-content:center;flex-shrink:0;">${ICONS.check(biz.bg_color||'#0d1b2a',20)}</div>
-          <div class="bf" style="font-size:23px;font-weight:700;color:#fff;">${esc(l)}</div>
-        </div>`;}).join('')}
-      </div>
-      <div style="text-align:center;margin-top:20px;position:relative;z-index:1;">${badgeImgs(biz,'center')}</div>
-    </div>${ctaBar(biz,content)}</div>`);
+    </div>
+    ${ctaBarHTML(t, content)}
+  </div>`);
 }
 
 
 // ═══════════════════════════════════════════════════════════════════
-// 4. REVIEW SHOWCASE — darker cards, real Google logo, SVG stars
+// TEMPLATE 4: PROCESS STEPS
 // ═══════════════════════════════════════════════════════════════════
 
-function reviewShowcase(content, biz) {
-  const accent = biz.design_system?.colors_extended?.accent_light || biz.accent_color || '#84d2f2';
+function processSteps(content, t) {
+  const items = content.items || [];
+
+  return shell(t, `<div class="post">${grainSVG(t)}
+    <div style="flex:1;padding:64px 64px 40px;display:flex;flex-direction:column">
+      <div style="margin-bottom:40px">
+        <div class="bf" style="font-size:14px;font-weight:700;color:${t.accent};text-transform:uppercase;letter-spacing:5px;margin-bottom:14px">${esc(content.eyebrow || 'How It Works')}</div>
+        <div class="hf" style="font-size:60px;color:${t.textPrimary};line-height:1.1">${highlight(content.headline, content.highlight_words, t.primary)}</div>
+        ${content.subtext ? `<div class="bf" style="font-size:20px;color:${t.textTertiary};margin-top:14px;line-height:1.4">${esc(content.subtext)}</div>` : ''}
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;justify-content:space-evenly;gap:8px">
+        ${items.map((item, i) => {
+          const title = typeof item === 'string' ? item : item.title || item;
+          const subtitle = typeof item === 'object' ? item.subtitle : '';
+          const isFirst = i === 0;
+          return `<div style="display:flex;align-items:flex-start;gap:24px;padding:24px 28px;background:${isFirst ? (t.isLight ? `${t.primary}0A` : 'rgba(255,255,255,0.06)') : t.cardBg};border-radius:20px;border:1px solid ${isFirst ? (t.isLight ? `${t.primary}1F` : 'rgba(255,255,255,0.12)') : t.cardBorder}">
+            <div style="width:56px;height:56px;border-radius:16px;flex-shrink:0;background:${isFirst ? t.accentGradient : (t.isLight ? 'white' : 'rgba(255,255,255,0.06)')};border:${isFirst ? 'none' : `2px solid ${t.cardBorder}`};display:flex;align-items:center;justify-content:center;box-shadow:${isFirst ? `0 4px 12px ${t.primary}40` : `0 1px 3px rgba(0,0,0,0.06)`}">
+              <span class="hf" style="font-size:24px;color:${isFirst ? 'white' : t.primary}">${String(i + 1).padStart(2, '0')}</span>
+            </div>
+            <div style="flex:1;padding-top:4px">
+              <div class="hf" style="font-size:24px;font-weight:700;color:${t.textPrimary};margin-bottom:${subtitle ? '6px' : '0'}">${esc(title)}</div>
+              ${subtitle ? `<div class="bf" style="font-size:17px;color:${t.textTertiary};line-height:1.4">${esc(subtitle)}</div>` : ''}
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+      <div style="margin-top:24px;display:flex;justify-content:center">${brandWatermark(t)}</div>
+    </div>
+    ${ctaBarHTML(t, content)}
+  </div>`);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// TEMPLATE 5: FAQ CARD
+// ═══════════════════════════════════════════════════════════════════
+
+function faqCard(content, t) {
+  return shell(t, `<div class="post">${grainSVG(t)}
+    <div style="flex:1;background:${t.cardBg};display:flex;flex-direction:column;align-items:center;justify-content:center;padding:80px 56px;position:relative">
+      <div style="position:absolute;top:-40px;right:-40px;width:280px;height:280px;border-radius:50%;background:${t.primary}08"></div>
+      <div style="position:absolute;bottom:-60px;left:-60px;width:320px;height:320px;border-radius:50%;background:${t.accent}08"></div>
+      <div style="margin-bottom:32px;z-index:1"><div style="background:${t.primary};border-radius:100px;padding:10px 28px;display:inline-block"><span class="bf" style="font-size:13px;font-weight:700;color:white;text-transform:uppercase;letter-spacing:4px">${esc(content.eyebrow || 'FAQ')}</span></div></div>
+      <div style="background:${t.isLight ? 'white' : 'rgba(255,255,255,0.04)'};border-radius:28px;padding:64px 56px;box-shadow:${t.isLight ? '0 4px 6px -1px rgba(0,0,0,0.05),0 20px 50px -12px rgba(0,0,0,0.08)' : '0 8px 32px rgba(0,0,0,0.3)'};border:1px solid ${t.cardBorder};max-width:920px;width:100%;position:relative;z-index:1">
+        <div style="position:absolute;top:28px;right:36px;font-size:100px;font-weight:800;color:${t.primary}0A;font-family:'${t.headlineFamily}',sans-serif;line-height:1">?</div>
+        <div class="hf" style="font-size:48px;color:${t.textPrimary};line-height:1.15;margin-bottom:28px;position:relative">${highlight(content.headline, content.highlight_words, t.primary)}</div>
+        <div style="width:60px;height:4px;background:linear-gradient(90deg,${t.primary},${t.accent});border-radius:2px;margin-bottom:28px"></div>
+        <div class="bf" style="font-size:24px;color:${t.textSecondary};line-height:1.6">${esc(content.subtext)}</div>
+      </div>
+      <div style="margin-top:40px;z-index:1">${brandWatermark(t)}</div>
+    </div>
+    ${ctaBarHTML(t, content)}
+  </div>`);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// TEMPLATE 6: CTA CARD
+// ═══════════════════════════════════════════════════════════════════
+
+function ctaCard(content, t) {
+  const items = content.items || [];
+
+  return shell(t, `<div class="post">${grainSVG(t)}
+    <div style="flex:1;display:flex;flex-direction:column;position:relative;overflow:hidden">
+      <div style="flex:0 0 45%;background:${t.headerGradient};display:flex;flex-direction:column;justify-content:flex-end;padding:56px 64px;position:relative">
+        <div style="position:absolute;top:-60px;right:-60px;width:300px;height:300px;border-radius:50%;background:${t.accent}14"></div>
+        <div class="hf" style="font-size:64px;color:${t.isLight ? 'white' : t.textPrimary};line-height:1.08;position:relative;z-index:1">${highlight(content.headline, content.highlight_words, t.accent)}</div>
+        ${content.subtext ? `<div class="bf" style="font-size:22px;color:rgba(255,255,255,0.75);line-height:1.4;margin-top:16px;position:relative;z-index:1">${esc(content.subtext)}</div>` : ''}
+      </div>
+      <div style="flex:1;padding:40px 64px;background:${t.isLight ? 'white' : t.bgColor};display:flex;flex-direction:column;justify-content:center">
+        ${items.length ? `<div style="display:flex;flex-direction:column;gap:18px">${items.map(i => `<div style="display:flex;align-items:center;gap:18px">
+          <div style="width:36px;height:36px;border-radius:50%;background:${t.success}1A;display:flex;align-items:center;justify-content:center;flex-shrink:0">${checkSVG(t.success, 18)}</div>
+          <span class="bf" style="font-size:22px;font-weight:600;color:${t.textPrimary}">${esc(typeof i === 'string' ? i : i.title || i)}</span>
+        </div>`).join('')}</div>` : ''}
+        ${t.ctaPhone ? `<div style="margin-top:32px;padding:24px 32px;background:${t.accent}14;border:1.5px solid ${t.accent}33;border-radius:16px;text-align:center">
+          <div class="bf" style="font-size:15px;font-weight:600;color:${t.textTertiary};text-transform:uppercase;letter-spacing:2px;margin-bottom:6px">Try it right now</div>
+          <div class="hf" style="font-size:32px;color:${t.primary}">Call ${esc(t.ctaPhone)}</div>
+        </div>` : ''}
+        <div style="margin-top:20px;display:flex;justify-content:center">${brandWatermark(t)}</div>
+      </div>
+    </div>
+    ${ctaBarHTML(t, content)}
+  </div>`);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// TEMPLATE 7: REVIEW SHOWCASE
+// ═══════════════════════════════════════════════════════════════════
+
+function reviewShowcase(content, t) {
   const reviews = content.reviews || [];
-  const a = getAssets(biz);
+  const stars = '★★★★★';
 
-  return shell(biz, `<div class="post">
-    ${brandBar(biz)}
-    <div style="flex:1;background:linear-gradient(180deg,${biz.bg_color||'#0d1b2a'},${biz.primary_color||'#273373'}15);padding:40px 52px;display:flex;flex-direction:column;">
-      <div style="text-align:center;margin-bottom:28px;">
-        <div style="display:flex;justify-content:center;gap:4px;margin-bottom:10px;">${starsRow(5,28)}</div>
-        <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:6px;">
-          ${a.google?`<img src="${a.google}" style="width:28px;height:28px;border-radius:50%;"/>`:''}
-          <span class="bf" style="font-size:16px;font-weight:700;color:rgba(255,255,255,0.45);text-transform:uppercase;letter-spacing:4px;">Google Reviews</span>
-        </div>
-        <div class="hf" style="font-size:96px;color:#fff;line-height:1;">${esc(content.headline||'5.0')}</div>
-        <div class="bf" style="font-size:15px;font-weight:600;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:4px;margin-top:6px;">Perfect Rating</div>
+  return shell(t, `<div class="post">${grainSVG(t)}
+    <div style="flex:1;padding:56px 56px 32px;display:flex;flex-direction:column">
+      <div style="text-align:center;margin-bottom:32px">
+        <div class="bf" style="font-size:13px;font-weight:700;color:${t.textTertiary};text-transform:uppercase;letter-spacing:5px;margin-bottom:10px">What Customers Say</div>
+        <div style="font-size:36px;color:${t.accent};letter-spacing:4px;margin-bottom:8px">${stars}</div>
+        <div class="hf" style="font-size:56px;color:${t.textPrimary};line-height:1">${esc(content.headline || '5.0')}</div>
       </div>
-      <div style="flex:1;display:flex;flex-direction:column;justify-content:space-evenly;gap:14px;">
-        ${reviews.map(r=>`<div style="background:rgba(20,30,60,0.85);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:24px 28px;">
-          <div style="display:flex;gap:3px;margin-bottom:10px;">${starsRow(5,16)}</div>
-          <div class="bf" style="font-size:17px;font-weight:500;color:rgba(255,255,255,0.88);line-height:1.5;font-style:italic;">"${esc(r.text)}"</div>
-          <div style="margin-top:12px;">
-            <span class="bf" style="font-size:14px;font-weight:800;color:${accent};text-transform:uppercase;">— ${esc(r.author||'Homeowner')}</span>
-            <span class="bf" style="font-size:12px;color:rgba(255,255,255,0.25);margin-left:8px;">Google Review</span>
+      <div style="flex:1;display:flex;flex-direction:column;justify-content:space-evenly;gap:16px">
+        ${reviews.map(r => `<div style="background:${t.cardBg};border:1px solid ${t.cardBorder};border-radius:20px;padding:28px 32px;position:relative">
+          <div style="position:absolute;top:16px;right:24px;font-size:48px;color:${t.primary}0F;font-family:Georgia,serif;line-height:1">"</div>
+          <div style="font-size:16px;color:${t.accent};margin-bottom:12px">★★★★★</div>
+          <div class="bf" style="font-size:19px;color:${t.textPrimary};line-height:1.5;font-style:italic">"${esc(r.text)}"</div>
+          <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
+            <div style="width:32px;height:32px;border-radius:50%;background:${t.accentGradient};display:flex;align-items:center;justify-content:center">
+              <span style="color:white;font-size:14px;font-weight:700">${esc((r.author || 'A')[0].toUpperCase())}</span>
+            </div>
+            <span class="bf" style="font-size:15px;font-weight:700;color:${t.primary}">${esc(r.author || 'Customer')}</span>
           </div>
         </div>`).join('')}
       </div>
-    </div>${ctaBar(biz,content)}</div>`);
-}
-
-
-// ═══════════════════════════════════════════════════════════════════
-// 5. PROCESS STEPS — numbered gradient pills
-// ═══════════════════════════════════════════════════════════════════
-
-function processSteps(content, biz, photo) {
-  const primary = biz.primary_color || '#273373';
-  const secondary = biz.secondary_color || '#115997';
-  const accent = biz.accent_color || '#2692cc';
-  const items = content.items || [];
-
-  const top = photo
-    ? `<div style="flex:0 0 35%;position:relative;overflow:hidden;">
-        <img src="${photo}" style="width:100%;height:100%;object-fit:cover;display:block;"/>
-        <div style="position:absolute;bottom:0;left:0;right:0;height:75%;background:linear-gradient(0deg,#fff 0%,rgba(255,255,255,0.8) 40%,transparent 100%);"></div>
-        <div style="position:absolute;top:24px;left:24px;">${logoCircle(biz,56)}</div>
-        <div style="position:absolute;bottom:20px;left:0;right:0;text-align:center;padding:0 48px;">
-          ${content.eyebrow?`<div class="bf" style="font-size:16px;font-weight:600;color:${accent};text-transform:uppercase;letter-spacing:4px;margin-bottom:4px;">${esc(content.eyebrow)}</div>`:''}
-          <div class="hf" style="font-size:68px;color:${primary};line-height:0.92;">${hl(content.headline, content.highlight_words)}</div>
-        </div>
-      </div>`
-    : `<div style="flex:0 0 18%;background:${primary};display:flex;align-items:center;justify-content:center;padding:32px 48px;text-align:center;">
-        <div class="hf" style="font-size:72px;color:#fff;line-height:0.92;">${hl(content.headline, content.highlight_words)}</div>
-      </div>`;
-
-  return shell(biz, `<div class="post">${top}
-    <div style="flex:1;background:#fff;padding:36px 56px;display:flex;flex-direction:column;">
-      ${content.subtext?`<div class="hf" style="font-size:28px;color:${primary};text-align:center;margin-bottom:32px;letter-spacing:3px;">${esc(content.subtext)}</div>`:''}
-      <div style="flex:1;display:flex;flex-direction:column;justify-content:space-evenly;">
-        ${items.map((it,i)=>{const t=typeof it==='string'?it:it.title||it;const sub=typeof it==='object'?it.subtitle:'';
-        return`<div style="display:flex;align-items:flex-start;gap:20px;">
-          <div style="width:56px;height:56px;border-radius:14px;flex-shrink:0;background:linear-gradient(135deg,${secondary},${accent});display:flex;align-items:center;justify-content:center;">
-            <span class="hf" style="font-size:28px;color:#fff;">${String(i+1).padStart(2,'0')}</span>
-          </div>
-          <div style="padding-top:6px;">
-            <div class="bf" style="font-size:24px;font-weight:800;color:${primary};text-transform:uppercase;">${esc(t)}</div>
-            ${sub?`<div class="bf" style="font-size:16px;color:#777;font-weight:500;margin-top:4px;line-height:1.4;">${esc(sub)}</div>`:''}
-          </div>
-        </div>`;}).join('')}
-      </div>
-    </div>${ctaBar(biz,content)}</div>`);
-}
-
-
-// ═══════════════════════════════════════════════════════════════════
-// 6. STAT CALLOUT — radial glow, massive number
-// ═══════════════════════════════════════════════════════════════════
-
-function statCallout(content, biz) {
-  const ds = biz.design_system || {};
-  const primary = biz.primary_color || '#273373';
-  const accent = ds.colors_extended?.accent_light || biz.accent_color || '#84d2f2';
-  const items = content.items || [];
-
-  return shell(biz, `<div class="post">
-    <div style="flex:1;background:linear-gradient(160deg,${biz.bg_color||'#0d1b2a'},${primary});display:flex;flex-direction:column;align-items:center;justify-content:center;padding:56px;text-align:center;position:relative;overflow:hidden;">
-      <div style="position:absolute;top:0;left:0;right:0;bottom:0;background:radial-gradient(circle at 50% 40%,${primary}50 0%,transparent 50%);"></div>
-      <div style="position:absolute;top:28px;left:28px;z-index:2;">${logoCircle(biz,64)}</div>
-      <div style="position:absolute;top:24px;right:24px;z-index:2;">${badgeImgs(biz,'corner')}</div>
-      <div style="position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;width:100%;">
-        ${content.eyebrow?`<div class="bf" style="font-size:20px;font-weight:700;color:rgba(255,255,255,0.45);text-transform:uppercase;letter-spacing:5px;margin-bottom:20px;">${esc(content.eyebrow)}</div>`:''}
-        <div class="hf" style="font-size:180px;color:${accent};line-height:0.95;text-align:center;">${esc(content.headline)}</div>
-        <div style="width:100px;height:4px;background:${accent};margin:28px auto;opacity:0.4;"></div>
-        <div class="bf" style="font-size:28px;color:rgba(255,255,255,0.85);font-weight:600;line-height:1.4;max-width:720px;text-align:center;margin:0 auto;">${esc(content.subtext)}</div>
-        ${items.length?`<div style="display:flex;justify-content:center;gap:12px;margin-top:32px;flex-wrap:wrap;">
-          ${items.map(it=>{const l=typeof it==='string'?it:it.title||it;
-          return`<div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);border-radius:24px;padding:11px 24px;">
-            <span class="bf" style="font-size:16px;font-weight:700;color:rgba(255,255,255,0.65);text-transform:uppercase;">${esc(l)}</span>
-          </div>`;}).join('')}
-        </div>`:''}
-        <div style="margin-top:32px;">${badgeImgs(biz,'center')}</div>
-      </div>
-    </div>${ctaBar(biz,content)}</div>`);
-}
-
-
-// ═══════════════════════════════════════════════════════════════════
-// 7. SERVICE HIGHLIGHT — accent gradient bar, service dot list
-// ═══════════════════════════════════════════════════════════════════
-
-function serviceHighlight(content, biz) {
-  const primary = biz.primary_color || '#273373';
-  const accent = biz.design_system?.colors_extended?.accent_light || biz.accent_color || '#84d2f2';
-  const items = content.items || [];
-
-  return shell(biz, `<div class="post">
-    ${accentStrip(biz, 8)}
-    <div style="flex:1;background:${primary};padding:48px 56px;display:flex;flex-direction:column;text-align:center;position:relative;overflow:hidden;">
-      ${decorCircles(accent+'08',1,biz)}
-      <div style="position:relative;z-index:1;">
-        ${logoCircle(biz,80)}
-        ${content.eyebrow?`<div class="bf" style="font-size:18px;font-weight:700;color:${accent};text-transform:uppercase;letter-spacing:5px;margin:24px 0 8px;">${esc(content.eyebrow)}</div>`:''}
-        <div class="hf" style="font-size:88px;color:#fff;line-height:0.92;margin:12px 0 20px;">${hl(content.headline, content.highlight_words)}</div>
-        ${content.subtext?`<div class="bf" style="font-size:20px;color:rgba(255,255,255,0.6);line-height:1.5;font-weight:500;max-width:700px;margin:0 auto 28px;">${esc(content.subtext)}</div>`:''}
-      </div>
-      ${items.length?`<div style="flex:1;display:flex;flex-direction:column;justify-content:center;gap:18px;max-width:700px;margin:0 auto;position:relative;z-index:1;">
-        ${items.map(it=>{const l=typeof it==='string'?it:it.title||it;
-        return`<div style="display:flex;align-items:center;gap:16px;text-align:left;">
-          <div style="width:14px;height:14px;border-radius:50%;background:${accent};flex-shrink:0;"></div>
-          <div class="bf" style="font-size:24px;font-weight:800;color:#fff;text-transform:uppercase;">${esc(l)}</div>
-        </div>`;}).join('')}
-      </div>`:''}
-      <div style="margin-top:28px;position:relative;z-index:1;">${badgeImgs(biz,'center')}</div>
-    </div>${ctaBar(biz,content)}</div>`);
-}
-
-
-// ═══════════════════════════════════════════════════════════════════
-// 8. OFFER/COUPON — dashed border, urgency banner
-// ═══════════════════════════════════════════════════════════════════
-
-function offerCoupon(content, biz) {
-  const ds = biz.design_system || {};
-  const primary = biz.primary_color || '#273373';
-  const urgency = ds.colors_extended?.urgency || '#C62828';
-  const accent = ds.colors_extended?.accent_light || biz.accent_color || '#84d2f2';
-  const items = content.items || [];
-  const a = getAssets(biz);
-
-  return shell(biz, `<div class="post">
-    <div style="background:${urgency};padding:22px;text-align:center;flex-shrink:0;">
-      <div class="bf" style="font-size:22px;font-weight:800;color:#fff;text-transform:uppercase;letter-spacing:6px;">${esc(content.badge_label||'LIMITED TIME OFFER')}</div>
+      <div style="margin-top:20px;display:flex;justify-content:center">${brandWatermark(t)}</div>
     </div>
-    <div style="flex:1;background:linear-gradient(160deg,${biz.bg_color||'#1a2a6c'},${primary});display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 56px;text-align:center;">
-      ${logoCircle(biz,88)}
-      <div style="border:3px dashed rgba(255,255,255,0.2);border-radius:20px;padding:40px 60px;margin:28px 0;">
-        <div class="hf" style="font-size:144px;color:#fff;line-height:0.85;">${hl(content.headline, content.highlight_words, 'ur')}</div>
-        ${content.subtext?`<div class="hf" style="font-size:40px;color:rgba(255,255,255,0.6);margin-top:12px;letter-spacing:4px;">${esc(content.subtext)}</div>`:''}
-      </div>
-      ${items.length?`<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:12px;margin-bottom:20px;">
-        ${items.map(it=>{const l=typeof it==='string'?it:it.title||it;
-        return`<div style="background:rgba(132,210,242,0.12);border:1px solid rgba(132,210,242,0.25);border-radius:24px;padding:11px 26px;font-size:16px;font-weight:700;color:${accent};text-transform:uppercase;letter-spacing:1px;font-family:'Montserrat',sans-serif;">${esc(l)}</div>`;}).join('')}
-      </div>`:''}
-      ${a.greensky?`<div class="bf" style="font-size:16px;color:rgba(255,255,255,0.5);font-weight:600;">Financing through <span style="color:#4CAF50;">GreenSky</span> — plans starting at <span style="color:#4CAF50;">0% interest</span></div>`:''} 
-      <div style="margin-top:16px;">${badgeImgs(biz,'center')}</div>
-    </div>${ctaBar(biz,content)}</div>`);
+    ${ctaBarHTML(t, content)}
+  </div>`);
 }
 
 
 // ═══════════════════════════════════════════════════════════════════
-// 9. WARNING SIGNS — numbered danger list (dark, red accents)
+// TEMPLATE REGISTRY + PUBLIC API
 // ═══════════════════════════════════════════════════════════════════
-
-function warningSigns(content, biz) {
-  const ds = biz.design_system || {};
-  const urgency = ds.colors_extended?.urgency || '#C62828';
-  const primary = biz.primary_color || '#273373';
-  const items = content.items || [];
-
-  return shell(biz, `<div class="post">
-    ${brandBar(biz)}
-    ${accentStrip(biz, 4)}
-    <div style="flex:1;background:${biz.bg_color||'#0d1b2a'};padding:44px 56px;display:flex;flex-direction:column;position:relative;overflow:hidden;">
-      ${decorCircles('rgba(198,40,40,0.04)',1,biz)}
-      <div style="text-align:center;margin-bottom:32px;position:relative;z-index:1;">
-        <div style="margin-bottom:12px;">${ICONS.alert(urgency, 44)}</div>
-        <div class="hf" style="font-size:78px;color:#fff;line-height:0.92;">${hl(content.headline, content.highlight_words, 'ur')}</div>
-        ${content.subtext?`<div class="bf" style="font-size:17px;color:rgba(255,255,255,0.5);margin-top:14px;line-height:1.5;font-weight:500;">${esc(content.subtext)}</div>`:''}
-      </div>
-      <div style="flex:1;display:flex;flex-direction:column;justify-content:space-evenly;position:relative;z-index:1;">
-        ${items.map((it,i)=>{const l=typeof it==='string'?it:it.title||it;const sub=typeof it==='object'?it.subtitle:'';
-        return`<div style="display:flex;align-items:flex-start;gap:18px;padding:14px 20px;border-left:3px solid ${urgency};background:rgba(198,40,40,0.06);border-radius:0 10px 10px 0;">
-          <div style="width:44px;height:44px;border-radius:50%;background:linear-gradient(135deg,${urgency},#EF5350);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
-            <span class="hf" style="font-size:22px;color:#fff;">${i+1}</span>
-          </div>
-          <div style="padding-top:4px;">
-            <div class="bf" style="font-size:20px;font-weight:800;color:#fff;text-transform:uppercase;">${esc(l)}</div>
-            ${sub?`<div class="bf" style="font-size:14px;color:rgba(255,255,255,0.4);font-weight:500;margin-top:3px;">${esc(sub)}</div>`:''}
-          </div>
-        </div>`;}).join('')}
-      </div>
-      <div style="text-align:center;margin-top:16px;position:relative;z-index:1;">${badgeImgs(biz,'center')}</div>
-    </div>${ctaBar(biz,content)}</div>`);
-}
-
-
-// ═══════════════════════════════════════════════════════════════════
-// 10. DID YOU KNOW — educational fact with big icon
-// ═══════════════════════════════════════════════════════════════════
-
-function didYouKnow(content, biz, photo) {
-  const primary = biz.primary_color || '#273373';
-  const accent = biz.design_system?.colors_extended?.accent_light || biz.accent_color || '#84d2f2';
-  const items = content.items || [];
-
-  const top = photo
-    ? `<div style="flex:0 0 40%;position:relative;overflow:hidden;">
-        <img src="${photo}" style="width:100%;height:100%;object-fit:cover;display:block;"/>
-        <div style="position:absolute;bottom:0;left:0;right:0;height:50%;background:linear-gradient(0deg,${primary} 0%,transparent 100%);"></div>
-        <div style="position:absolute;top:24px;left:24px;">${logoCircle(biz,56)}</div>
-        <div style="position:absolute;bottom:20px;left:0;right:0;text-align:center;">
-          <div class="bf" style="font-size:20px;font-weight:800;color:${accent};text-transform:uppercase;letter-spacing:6px;">Did You Know?</div>
-        </div>
-      </div>`
-    : `<div style="flex:0 0 22%;background:linear-gradient(90deg,${accent},${biz.secondary_color||primary},${primary});display:flex;align-items:center;justify-content:center;position:relative;">
-        <div style="position:absolute;left:48px;">${logoCircle(biz,56)}</div>
-        <div class="bf" style="font-size:22px;font-weight:800;color:#fff;text-transform:uppercase;letter-spacing:6px;">Did You Know?</div>
-      </div>`;
-
-  return shell(biz, `<div class="post">${top}
-    <div style="flex:1;background:${primary};padding:48px 56px;display:flex;flex-direction:column;justify-content:center;text-align:center;">
-      <div class="hf" style="font-size:80px;color:#fff;line-height:0.92;margin-bottom:24px;">${hl(content.headline, content.highlight_words)}</div>
-      ${content.subtext?`<div class="bf" style="font-size:22px;color:rgba(255,255,255,0.7);line-height:1.6;font-weight:500;max-width:740px;margin:0 auto 28px;">${esc(content.subtext)}</div>`:''}
-      ${items.length?`<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:10px;">
-        ${items.map(it=>{const l=typeof it==='string'?it:it.title||it;
-        return`<div style="background:rgba(132,210,242,0.1);border:1px solid rgba(132,210,242,0.2);border-radius:20px;padding:10px 22px;font-size:15px;font-weight:700;color:${accent};text-transform:uppercase;font-family:'Montserrat',sans-serif;">${esc(l)}</div>`;}).join('')}
-      </div>`:''}
-      <div style="margin-top:28px;">${badgeImgs(biz,'center')}</div>
-    </div>${ctaBar(biz,content)}</div>`);
-}
-
-
-// ═══════════════════════════════════════════════════════════════════
-// 11. BRAND INTRO — full service overview, all trust signals
-// ═══════════════════════════════════════════════════════════════════
-
-function brandIntro(content, biz) {
-  const primary = biz.primary_color || '#273373';
-  const accent = biz.design_system?.colors_extended?.accent_light || biz.accent_color || '#84d2f2';
-  const secondary = biz.secondary_color || '#115997';
-  const items = content.items || [];
-  const stats = content.stats || [];
-  const a = getAssets(biz);
-
-  return shell(biz, `<div class="post">
-    <div style="flex:0 0 8%;background:linear-gradient(90deg,${accent},${secondary},${primary});flex-shrink:0;"></div>
-    <div style="flex:1;background:${primary};padding:48px 56px;display:flex;flex-direction:column;align-items:center;text-align:center;position:relative;overflow:hidden;">
-      ${decorCircles(accent+'06',1,biz)}
-      <div style="position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;width:100%;">
-        ${logoCircle(biz,96)}
-        <div class="hf" style="font-size:86px;color:#fff;line-height:0.92;margin:24px 0 12px;">${hl(content.headline, content.highlight_words)}</div>
-        ${content.subtext?`<div class="bf" style="font-size:20px;color:rgba(255,255,255,0.6);line-height:1.5;font-weight:500;max-width:700px;margin-bottom:24px;">${esc(content.subtext)}</div>`:''}
-        ${items.length?`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px 24px;text-align:left;margin-bottom:24px;width:100%;max-width:680px;">
-          ${items.map(it=>{const l=typeof it==='string'?it:it.title||it;
-          return`<div style="display:flex;align-items:center;gap:14px;">
-            <div style="width:12px;height:12px;border-radius:50%;background:${accent};flex-shrink:0;"></div>
-            <div class="bf" style="font-size:22px;font-weight:800;color:#fff;text-transform:uppercase;">${esc(l)}</div>
-          </div>`;}).join('')}
-        </div>`:''}
-        ${stats.length?`<div style="display:flex;justify-content:space-around;width:100%;margin:12px 0;">
-          ${stats.map(s=>`<div style="text-align:center;">
-            <div class="hf" style="font-size:56px;color:${accent};line-height:1;">${esc(s.value)}</div>
-            <div class="bf" style="font-size:12px;color:rgba(255,255,255,0.45);text-transform:uppercase;letter-spacing:2px;margin-top:4px;font-weight:700;">${esc(s.label)}</div>
-          </div>`).join('')}
-        </div>`:''}
-        <div style="margin-top:20px;">${badgeImgs(biz,'center')}</div>
-      </div>
-    </div>${ctaBar(biz,content)}</div>`);
-}
-
-
-// ═══════════════════════════════════════════════════════════════════
-// 12. SPLIT FEATURE — two-tone layout, left accent + right content
-// ═══════════════════════════════════════════════════════════════════
-
-function splitFeature(content, biz, photo) {
-  const primary = biz.primary_color || '#273373';
-  const accent = biz.design_system?.colors_extended?.accent_light || biz.accent_color || '#84d2f2';
-  const items = content.items || [];
-
-  const left = photo
-    ? `<div style="flex:0 0 42%;position:relative;overflow:hidden;">
-        <img src="${photo}" style="width:100%;height:100%;object-fit:cover;display:block;"/>
-        <div style="position:absolute;top:0;left:0;right:0;bottom:0;background:${primary}88;"></div>
-        <div style="position:absolute;top:28px;left:28px;">${logoCircle(biz,56)}</div>
-        <div style="position:absolute;bottom:0;left:0;right:0;padding:32px;text-align:center;">
-          <div class="hf" style="font-size:72px;color:#fff;line-height:0.9;">${hl(content.headline, content.highlight_words)}</div>
-        </div>
-      </div>`
-    : `<div style="flex:0 0 42%;background:linear-gradient(180deg,${biz.bg_color||'#0d1b2a'},${primary});display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px;text-align:center;position:relative;overflow:hidden;">
-        ${decorCircles(accent+'10',1,biz)}
-        <div style="position:relative;z-index:1;">
-          ${logoCircle(biz,72)}
-          <div class="hf" style="font-size:72px;color:#fff;line-height:0.9;margin-top:24px;">${hl(content.headline, content.highlight_words)}</div>
-        </div>
-      </div>`;
-
-  return shell(biz, `<div class="post">${left}
-    <div style="flex:1;background:#fff;padding:40px 48px;display:flex;flex-direction:column;justify-content:center;">
-      ${content.subtext?`<div class="bf" style="font-size:20px;color:#555;line-height:1.6;font-weight:500;margin-bottom:28px;">${esc(content.subtext)}</div>`:''}
-      ${items.length?`<div style="display:flex;flex-direction:column;gap:16px;">
-        ${items.map((it,i)=>{const t=typeof it==='string'?it:it.title||it;const sub=typeof it==='object'?it.subtitle:'';const ic=ICON_ROTATION[i%ICON_ROTATION.length];
-        return`<div style="display:flex;align-items:flex-start;gap:16px;">
-          <div style="width:46px;height:46px;border-radius:12px;background:linear-gradient(135deg,${primary},${biz.secondary_color||primary});display:flex;align-items:center;justify-content:center;flex-shrink:0;">${ICONS[ic]('#fff',22)}</div>
-          <div style="padding-top:2px;">
-            <div class="bf" style="font-size:20px;font-weight:800;color:${primary};text-transform:uppercase;">${esc(t)}</div>
-            ${sub?`<div class="bf" style="font-size:14px;color:#888;font-weight:500;margin-top:3px;line-height:1.4;">${esc(sub)}</div>`:''}
-          </div>
-        </div>`;}).join('')}
-      </div>`:''}
-      <div style="margin-top:24px;">${badgeImgs(biz,'center')}</div>
-    </div>${ctaBar(biz,content)}</div>`);
-}
-
-
-// ═══════════════════════════════════════════════════════════════════
-// REGISTRY
-// ═══════════════════════════════════════════════════════════════════
-
-const { renderVacTemplate } = require('./vac-templates');
 
 const TEMPLATES = {
-  photo_hero:        { render: photoHero, photo: true },
-  full_graphic:      { render: fullGraphic, photo: false },
-  checklist:         { render: checklist, photo: false },
-  review_showcase:   { render: reviewShowcase, photo: false },
-  process_steps:     { render: processSteps, photo: true },
-  stat_callout:      { render: statCallout, photo: false },
-  service_highlight: { render: serviceHighlight, photo: false },
-  offer_coupon:      { render: offerCoupon, photo: false },
-  warning_signs:     { render: warningSigns, photo: false },
-  did_you_know:      { render: didYouKnow, photo: true },
-  brand_intro:       { render: brandIntro, photo: false },
-  split_feature:     { render: splitFeature, photo: true },
+  stat_callout:     { render: statCallout },
+  checklist:        { render: checklist },
+  full_graphic:     { render: fullGraphic },
+  process_steps:    { render: processSteps },
+  faq_card:         { render: faqCard },
+  cta_card:         { render: ctaCard },
+  review_showcase:  { render: reviewShowcase },
 };
 
-function renderTemplate(id, content, biz, photo, options = {}) {
-  // Route SaaS brands to their own template system
-  if (biz.industry === 'saas_tech') {
-    return renderVacTemplate(id, content, biz, options);
-  }
-  const tpl = TEMPLATES[id || 'full_graphic'];
-  if (!tpl) return fullGraphic(content, biz);
-  return tpl.render(content, biz, photo);
+/**
+ * Render any template for any business.
+ * Reads design tokens from business.design_system.
+ * 
+ * @param {string} templateId - Template type identifier
+ * @param {object} content    - AI-generated content JSON
+ * @param {object} business   - Full business profile with design_system
+ * @returns {string}          - Complete HTML document at 1080×1350
+ */
+function renderTemplate(templateId, content, business, photoDataUrl) {
+  const tokens = resolveTokens(business);
+  const tpl = TEMPLATES[templateId];
+  if (!tpl) return fullGraphic(content, tokens); // Fallback
+  return tpl.render(content, tokens);
 }
 
-module.exports = { TEMPLATES, renderTemplate };
+module.exports = { renderTemplate, resolveTokens, TEMPLATES, HTML_TEMPLATES: TEMPLATES };
