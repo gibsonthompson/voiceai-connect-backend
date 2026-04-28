@@ -2,32 +2,30 @@
  * Content Render Service
  * 
  * Express router that renders HTML templates to PNG via Puppeteer.
- * Mount on your VoiceAI Connect Express server:
+ * Now also saves PNGs to disk and returns public URLs for Meta API publishing.
  * 
+ * Mount on your VoiceAI Connect Express server:
  *   const contentRender = require('./content-render');
  *   app.use('/api/content-render', contentRender);
- * 
- * Then set RENDER_SERVICE_URL in Vercel env vars:
- *   NEXT_PUBLIC_RENDER_URL=https://your-do-server.com/api/content-render
  */
 
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const { renderHTML } = require('./browser');
 const { renderTemplate } = require('./html-templates');
 
 const router = express.Router();
 
+// Renders directory — served statically by server.js
+const RENDERS_DIR = process.env.RENDERS_DIR || '/workspace/renders';
+
 // ── Auth middleware ───────────────────────────────────────────────
 router.use((req, res, next) => {
   const key = req.headers['x-render-key'];
   const expected = process.env.RENDER_SERVICE_KEY;
-
-  // If no key is configured, skip auth (dev mode)
   if (!expected) return next();
-
-  if (key !== expected) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+  if (key !== expected) return res.status(401).json({ error: 'Unauthorized' });
   next();
 });
 
@@ -58,17 +56,40 @@ router.post('/render', async (req, res) => {
       options
     );
 
-    // Render to PNG (pass dimensions for LinkedIn)
+    // Render to PNG
     const dimensions = platform === 'linkedin' ? { width: 1200, height: 628 } : null;
     const buffer = await renderHTML(html, dimensions);
 
-    // Return as base64
+    // Return as base64 (backward compatible)
     const base64 = buffer.toString('base64');
+
+    // Also save to disk and generate public URL
+    let url = null;
+    try {
+      const slug = (business.slug || 'default').replace(/[^a-z0-9-]/gi, '');
+      const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`;
+      const dir = path.join(RENDERS_DIR, slug);
+
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      fs.writeFileSync(path.join(dir, filename), buffer);
+
+      const baseUrl = process.env.PUBLIC_URL || `https://urchin-app-bqb4i.ondigitalocean.app`;
+      url = `${baseUrl}/renders/${slug}/${filename}`;
+
+      console.log(`[content-render] Saved to disk: ${url}`);
+    } catch (fileErr) {
+      console.error(`[content-render] File save failed (non-fatal): ${fileErr.message}`);
+      // Non-fatal — base64 still works
+    }
 
     console.log(`[content-render] Rendered ${templateId || content.template} in ${Date.now() - start}ms`);
 
     res.json({
       image: `data:image/png;base64,${base64}`,
+      url, // Public URL for Meta API — null if file save failed
       renderTime: Date.now() - start,
     });
   } catch (error) {
@@ -99,7 +120,6 @@ router.post('/render-batch', async (req, res) => {
       }
 
       try {
-        // Determine photo
         let photoDataUrl = null;
         const pidx = item.result.photo_index;
         if (pidx >= 0 && photos && photos[pidx]) {

@@ -11,7 +11,9 @@ const { supabase } = require('./lib/supabase');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-
+const fs = require('fs');
+const RENDERS_DIR = '/workspace/renders';
+if (!fs.existsSync(RENDERS_DIR)) fs.mkdirSync(RENDERS_DIR, { recursive: true });
 // ============================================================================
 // MIDDLEWARE
 // ============================================================================
@@ -213,7 +215,7 @@ app.get('/health', (req, res) => {
 // ============================================================================
 // CONTENT RENDER SERVICE (Social Media Image Generation)
 // ============================================================================
-
+app.use('/renders', express.static(RENDERS_DIR, { maxAge: '1d' }));
 app.use('/api/content-render', contentRender);
 
 // ============================================================================
