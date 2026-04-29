@@ -1076,10 +1076,946 @@ function ctaCard(content) {
 
 
 // ═══════════════════════════════════════════════════════════════════
+// TEMPLATE: educate_stat_dark_01
+// Dark navy. Massive stat number with gold gradient, supporting headline,
+// 3 stat pills row, dense visual zones.
+// ═══════════════════════════════════════════════════════════════════
+
+function educateStatDark01(content) {
+  const highlights = content.highlight_words || [];
+  const statNum = content.headline || '62%';
+  const statLabel = content.subtext || "of callers won't leave a voicemail.";
+  const followUpHeadline = content.cta_line1 || 'They just call the next business.';
+  const bodyText = content.body_text || content.cta_line2_full || '';
+
+  const items = content.items || ['24/7|Every call answered', '2s|Average pickup', '40%|More booked'];
+  const statPills = items.slice(0, 3).map(item => {
+    if (typeof item === 'string' && item.includes('|')) {
+      const [num, label] = item.split('|');
+      return { num: num.trim(), label: label.trim() };
+    }
+    return { num: '', label: item };
+  });
+
+  const css = baseCSS('dark') + `
+    .post::before {
+      content: '';
+      position: absolute;
+      top: -200px;
+      right: -200px;
+      width: 600px;
+      height: 600px;
+      background: radial-gradient(circle, rgba(246,184,40,0.08) 0%, transparent 60%);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+    .post::after {
+      content: '';
+      position: absolute;
+      bottom: 220px;
+      left: -150px;
+      width: 400px;
+      height: 400px;
+      background: radial-gradient(circle, rgba(18,32,146,0.4) 0%, transparent 60%);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+    .badge {
+      display: inline-block;
+      background: rgba(246,184,40,0.12);
+      border: 1px solid rgba(246,184,40,0.35);
+      color: #F6B828;
+      font-family: 'Sora', sans-serif;
+      font-size: 16px;
+      font-weight: 700;
+      padding: 10px 20px;
+      border-radius: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+    .stat-zone {
+      padding: 36px 64px 0;
+      text-align: center;
+      position: relative;
+      z-index: 1;
+    }
+    .stat-zone .badge { margin-bottom: 32px; }
+    .stat-mega {
+      font-family: 'Sora', sans-serif;
+      font-size: 280px;
+      font-weight: 800;
+      line-height: 0.92;
+      letter-spacing: -0.05em;
+      background: linear-gradient(135deg, #F6B828 0%, #FFD96A 50%, #F6B828 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 18px;
+    }
+    .stat-mega-label {
+      font-family: 'Sora', sans-serif;
+      font-size: 28px;
+      font-weight: 500;
+      color: rgba(255,255,255,0.7);
+      letter-spacing: 0.01em;
+      max-width: 760px;
+      margin: 0 auto;
+      line-height: 1.4;
+    }
+    .followup {
+      padding: 44px 64px 0;
+      position: relative;
+      z-index: 1;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .followup-headline {
+      font-family: 'Sora', sans-serif;
+      font-size: 60px;
+      font-weight: 800;
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+      color: #ffffff;
+      margin-bottom: 20px;
+    }
+    .followup-body {
+      font-size: 23px;
+      line-height: 1.5;
+      color: rgba(255,255,255,0.65);
+      max-width: 880px;
+    }
+    .insight-quote {
+      margin-top: 20px;
+      padding: 22px 28px;
+      background: rgba(18,32,146,0.35);
+      border-left: 4px solid #F6B828;
+      border-radius: 4px 14px 14px 4px;
+      font-family: 'Sora', sans-serif;
+      font-size: 20px;
+      font-weight: 600;
+      color: rgba(255,255,255,0.92);
+      line-height: 1.4;
+    }
+    .stat-pills {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+      padding: 32px 64px 36px;
+      position: relative;
+      z-index: 1;
+    }
+    .stat-pill {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 16px;
+      padding: 24px 18px;
+      text-align: center;
+    }
+    .pill-num {
+      font-family: 'Sora', sans-serif;
+      font-size: 40px;
+      font-weight: 800;
+      color: #F6B828;
+      line-height: 1;
+      margin-bottom: 8px;
+      letter-spacing: -0.02em;
+    }
+    .pill-label {
+      font-size: 15px;
+      color: rgba(255,255,255,0.6);
+      font-weight: 500;
+      line-height: 1.3;
+    }
+  `;
+
+  const insightLine = bodyText || 'Voicemail used to be polite. Now it costs you the job.';
+
+  const html = `
+    <div class="post">
+      ${headerHTML()}
+      <div class="stat-zone">
+        <div class="badge">Did You Know?</div>
+        <div class="stat-mega">${statNum}</div>
+        <div class="stat-mega-label">${statLabel}</div>
+      </div>
+      <div class="followup">
+        <div class="followup-headline">${highlightText(followUpHeadline, highlights)}</div>
+        <div class="insight-quote">${insightLine}</div>
+      </div>
+      <div class="stat-pills">
+        ${statPills.map(p => `
+          <div class="stat-pill">
+            <div class="pill-num">${p.num}</div>
+            <div class="pill-label">${p.label}</div>
+          </div>
+        `).join('')}
+      </div>
+      ${footerHTML(content.cta_line2 || 'Stop losing jobs to voicemail')}
+    </div>
+  `;
+
+  return wrapHTML(css, html);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// TEMPLATE: educate_stat_light_01
+// White bg. Big blue stat card up top, bold dark headline, body text,
+// 3 stat pills row at bottom.
+// ═══════════════════════════════════════════════════════════════════
+
+function educateStatLight01(content) {
+  const highlights = content.highlight_words || [];
+  const statNum = content.headline || '62%';
+  const statLabel = content.subtext || "of callers won't leave a voicemail.";
+  const followUp = content.cta_line1 || 'They just call the next business.';
+  const insight = content.body_text || 'Voicemail used to be polite. Now it costs you the job.';
+
+  const items = content.items || ['24/7|Every call answered', '2s|Average pickup', '40%|More booked'];
+  const statPills = items.slice(0, 3).map(item => {
+    if (typeof item === 'string' && item.includes('|')) {
+      const [num, label] = item.split('|');
+      return { num: num.trim(), label: label.trim() };
+    }
+    return { num: '', label: item };
+  });
+
+  const css = baseCSS('light') + `
+    .header { padding: 36px 64px 0; }
+    .header-brand { color: #122092; }
+    .stat-card {
+      margin: 28px 64px 0;
+      background: linear-gradient(135deg, #122092 0%, #1a35b8 100%);
+      border-radius: 28px;
+      padding: 48px 48px;
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 30px 60px rgba(18,32,146,0.25);
+    }
+    .stat-card::before {
+      content: '';
+      position: absolute;
+      top: -30%;
+      right: -10%;
+      width: 380px;
+      height: 380px;
+      background: radial-gradient(circle, rgba(246,184,40,0.18) 0%, transparent 65%);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+    .stat-card::after {
+      content: '';
+      position: absolute;
+      bottom: -50%;
+      left: -20%;
+      width: 300px;
+      height: 300px;
+      background: radial-gradient(circle, rgba(255,255,255,0.08) 0%, transparent 60%);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+    .stat-card-inner {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      align-items: center;
+      gap: 48px;
+    }
+    .stat-number {
+      font-family: 'Sora', sans-serif;
+      font-size: 180px;
+      font-weight: 800;
+      color: #F6B828;
+      line-height: 0.92;
+      letter-spacing: -0.04em;
+      flex-shrink: 0;
+    }
+    .stat-text {
+      flex: 1;
+    }
+    .stat-eyebrow {
+      font-family: 'Sora', sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: rgba(246,184,40,0.85);
+      margin-bottom: 10px;
+    }
+    .stat-desc {
+      font-family: 'Sora', sans-serif;
+      font-size: 26px;
+      font-weight: 600;
+      color: #ffffff;
+      line-height: 1.25;
+      letter-spacing: -0.01em;
+    }
+    .body-section {
+      padding: 36px 64px 0;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 22px;
+    }
+    .body-extras {
+      margin-top: auto;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+    .insight-tile {
+      background: #ffffff;
+      border: 1px solid #e0e7ff;
+      border-radius: 16px;
+      padding: 20px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      box-shadow: 0 4px 12px rgba(18,32,146,0.05);
+    }
+    .insight-tile-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      background: #122092;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #F6B828;
+      font-family: 'Sora', sans-serif;
+      font-size: 18px;
+      font-weight: 800;
+    }
+    .insight-tile-text {
+      font-family: 'Sora', sans-serif;
+      font-size: 15px;
+      font-weight: 600;
+      color: #1a1a2e;
+      line-height: 1.35;
+    }
+    .body-headline {
+      font-family: 'Sora', sans-serif;
+      font-size: 60px;
+      font-weight: 800;
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+      color: #1a1a2e;
+      margin-bottom: 16px;
+    }
+    .body-headline .hl {
+      background: linear-gradient(180deg, transparent 60%, rgba(246,184,40,0.4) 60%, rgba(246,184,40,0.4) 92%, transparent 92%);
+      color: #1a1a2e;
+      padding: 0 4px;
+    }
+    .body-quote {
+      padding: 18px 26px;
+      background: #f0f4ff;
+      border-left: 4px solid #122092;
+      border-radius: 4px 14px 14px 4px;
+      font-family: 'Sora', sans-serif;
+      font-size: 22px;
+      font-weight: 600;
+      color: #2a3050;
+      line-height: 1.4;
+    }
+    .stat-pills {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+      padding: 32px 64px 36px;
+    }
+    .stat-pill {
+      background: linear-gradient(180deg, #f0f4ff 0%, #e6edff 100%);
+      border: 1px solid #d4ddff;
+      border-radius: 18px;
+      padding: 22px 16px;
+      text-align: center;
+    }
+    .pill-num {
+      font-family: 'Sora', sans-serif;
+      font-size: 38px;
+      font-weight: 800;
+      color: #122092;
+      line-height: 1;
+      margin-bottom: 6px;
+      letter-spacing: -0.02em;
+    }
+    .pill-label {
+      font-size: 14px;
+      color: #6b7280;
+      font-weight: 500;
+      line-height: 1.3;
+    }
+  `;
+
+  const html = `
+    <div class="post">
+      ${headerHTML()}
+      <div class="stat-card">
+        <div class="stat-card-inner">
+          <div class="stat-number">${statNum}</div>
+          <div class="stat-text">
+            <div class="stat-eyebrow">Did You Know</div>
+            <div class="stat-desc">${statLabel}</div>
+          </div>
+        </div>
+      </div>
+      <div class="body-section">
+        <div class="body-headline">${highlightText(followUp, highlights)}</div>
+        <div class="body-quote">${insight}</div>
+        <div class="body-extras">
+          <div class="insight-tile">
+            <div class="insight-tile-icon">$</div>
+            <div class="insight-tile-text">$8,400 in lost jobs every month</div>
+          </div>
+          <div class="insight-tile">
+            <div class="insight-tile-icon">⚠</div>
+            <div class="insight-tile-text">12 missed calls per week, on average</div>
+          </div>
+          <div class="insight-tile">
+            <div class="insight-tile-icon">→</div>
+            <div class="insight-tile-text">87% of callers go to a competitor</div>
+          </div>
+        </div>
+      </div>
+      <div class="stat-pills">
+        ${statPills.map(p => `
+          <div class="stat-pill">
+            <div class="pill-num">${p.num}</div>
+            <div class="pill-label">${p.label}</div>
+          </div>
+        `).join('')}
+      </div>
+      ${footerHTML(content.cta_line2 || 'Stop losing jobs to voicemail')}
+    </div>
+  `;
+
+  return wrapHTML(css, html);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// TEMPLATE: educate_comparison_dark_01
+// 2-column "Without CallBird vs With CallBird" comparison with cards.
+// ═══════════════════════════════════════════════════════════════════
+
+function educateComparisonDark01(content) {
+  const highlights = content.highlight_words || [];
+  const headline = content.headline || 'Without vs With CallBird';
+  const subtext = content.subtext || '';
+
+  const items = content.items || [];
+  // Items expected as alternating "without|with" pairs OR 4 bullets (first 2 = without, last 2 = with)
+  let withoutItems = [];
+  let withItems = [];
+
+  items.forEach((item) => {
+    if (typeof item === 'string' && item.startsWith('without:')) {
+      withoutItems.push(item.replace(/^without:\s*/i, ''));
+    } else if (typeof item === 'string' && item.startsWith('with:')) {
+      withItems.push(item.replace(/^with:\s*/i, ''));
+    }
+  });
+  if (withoutItems.length === 0 && withItems.length === 0) {
+    const half = Math.ceil(items.length / 2);
+    withoutItems = items.slice(0, half);
+    withItems = items.slice(half);
+  }
+  if (withoutItems.length === 0) withoutItems = ['Calls go to voicemail', '62% of callers hang up', 'Lost revenue daily'];
+  if (withItems.length === 0) withItems = ['Every call answered', 'Booked in 60 seconds', 'More jobs per week'];
+
+  const css = baseCSS('dark') + `
+    .content {
+      padding: 32px 64px 24px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+    .headline {
+      font-size: 60px;
+      margin-bottom: 14px;
+    }
+    .subtext {
+      font-size: 22px;
+      margin-bottom: 28px;
+    }
+    .compare-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      flex: 1;
+    }
+    .compare-card {
+      border-radius: 20px;
+      padding: 32px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .compare-card.bad {
+      background: linear-gradient(180deg, rgba(180,40,40,0.12), rgba(180,40,40,0.04));
+      border: 1px solid rgba(220,80,80,0.25);
+    }
+    .compare-card.good {
+      background: linear-gradient(180deg, rgba(246,184,40,0.12), rgba(18,32,146,0.18));
+      border: 1px solid rgba(246,184,40,0.35);
+    }
+    .compare-label {
+      font-family: 'Sora', sans-serif;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+    }
+    .compare-card.bad .compare-label { color: rgba(255,140,140,0.85); }
+    .compare-card.good .compare-label { color: #F6B828; }
+    .compare-title {
+      font-family: 'Sora', sans-serif;
+      font-size: 32px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: #ffffff;
+      line-height: 1.1;
+      margin-bottom: 6px;
+    }
+    .compare-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      flex: 1;
+    }
+    .compare-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      font-size: 20px;
+      line-height: 1.4;
+      color: rgba(255,255,255,0.88);
+    }
+    .compare-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: 'Sora', sans-serif;
+      font-size: 15px;
+      font-weight: 800;
+      margin-top: 2px;
+    }
+    .compare-stat {
+      margin-top: auto;
+      padding-top: 16px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .compare-stat-num {
+      font-family: 'Sora', sans-serif;
+      font-size: 36px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1;
+    }
+    .compare-card.bad .compare-stat-num { color: #ff8888; }
+    .compare-card.good .compare-stat-num { color: #F6B828; }
+    .compare-stat-label {
+      font-size: 14px;
+      letter-spacing: 0.06em;
+      color: rgba(255,255,255,0.55);
+      font-weight: 500;
+      text-transform: uppercase;
+    }
+    .compare-card.bad .compare-icon {
+      background: rgba(220,80,80,0.2);
+      color: #ff8888;
+    }
+    .compare-card.good .compare-icon {
+      background: rgba(246,184,40,0.25);
+      color: #F6B828;
+    }
+    .conclusion {
+      margin-top: 20px;
+      background: linear-gradient(90deg, rgba(18,32,146,0.6), rgba(18,32,146,0.3));
+      border: 1px solid rgba(246,184,40,0.3);
+      border-radius: 14px;
+      padding: 20px 28px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+    }
+    .conclusion-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: #F6B828;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .conclusion-text {
+      font-family: 'Sora', sans-serif;
+      font-size: 22px;
+      font-weight: 700;
+      color: #ffffff;
+      line-height: 1.3;
+    }
+  `;
+
+  const conclusionLine = content.cta_line1 || 'Same calls. Different outcomes.';
+
+  const html = `
+    <div class="post">
+      ${headerHTML()}
+      <div class="content">
+        <div class="headline">${highlightText(headline, highlights)}</div>
+        ${subtext ? `<div class="subtext">${subtext}</div>` : ''}
+        <div class="compare-grid">
+          <div class="compare-card bad">
+            <div class="compare-label">Without CallBird</div>
+            <div class="compare-title">Calls slip through</div>
+            <ul class="compare-list">
+              ${withoutItems.slice(0, 4).map(item => `
+                <li class="compare-item">
+                  <span class="compare-icon">✕</span>
+                  <span>${item}</span>
+                </li>`).join('')}
+            </ul>
+            <div class="compare-stat">
+              <div class="compare-stat-num">$8,400</div>
+              <div class="compare-stat-label">Lost per month</div>
+            </div>
+          </div>
+          <div class="compare-card good">
+            <div class="compare-label">With CallBird</div>
+            <div class="compare-title">Every call captured</div>
+            <ul class="compare-list">
+              ${withItems.slice(0, 4).map(item => `
+                <li class="compare-item">
+                  <span class="compare-icon">✓</span>
+                  <span>${item}</span>
+                </li>`).join('')}
+            </ul>
+            <div class="compare-stat">
+              <div class="compare-stat-num">$8,400</div>
+              <div class="compare-stat-label">Recovered per month</div>
+            </div>
+          </div>
+        </div>
+        <div class="conclusion">
+          <div class="conclusion-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+              <path d="M5 13l4 4L19 7" stroke="#122092" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <div class="conclusion-text">${highlightText(conclusionLine, highlights)}</div>
+        </div>
+      </div>
+      ${footerHTML(content.cta_line2 || 'Same calls. Better outcomes.')}
+    </div>
+  `;
+
+  return wrapHTML(css, html);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// TEMPLATE: educate_feature_dark_01
+// Mock product UI: realistic call summary card showing what CallBird
+// captures. Feels like a real product screenshot.
+// ═══════════════════════════════════════════════════════════════════
+
+function educateFeatureDark01(content) {
+  const highlights = content.highlight_words || [];
+  const headline = content.headline || 'Every call. Captured.';
+  const subtext = content.subtext || 'Caller details, intent, and booking — sent to your phone in 30 seconds.';
+  const items = content.items || [];
+
+  // Sensible defaults for the mock card
+  const callerName = items[0] || 'Sarah Mitchell';
+  const callerPhone = items[1] || '+1 (505) 555-0142';
+  const callerNeed = items[2] || 'AC unit not cooling. Wants service today.';
+  const bookingTime = items[3] || 'Tomorrow, 2:00 PM';
+
+  const css = baseCSS('dark') + `
+    .content {
+      padding: 32px 64px 20px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+    .headline {
+      font-size: 64px;
+      margin-bottom: 14px;
+    }
+    .subtext {
+      font-size: 22px;
+      margin-bottom: 28px;
+      max-width: 880px;
+    }
+    .call-card {
+      background: linear-gradient(180deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0.02) 100%);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 22px;
+      padding: 28px 30px;
+      box-shadow: 0 30px 80px rgba(0,0,0,0.4);
+      flex: 1;
+    }
+    .call-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 18px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      margin-bottom: 20px;
+    }
+    .call-tag {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-family: 'Sora', sans-serif;
+      font-size: 14px;
+      font-weight: 700;
+      color: rgba(246,184,40,0.95);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+    .live-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #F6B828;
+      box-shadow: 0 0 0 4px rgba(246,184,40,0.2);
+    }
+    .call-time {
+      font-size: 14px;
+      color: rgba(255,255,255,0.5);
+      font-family: 'Inter', sans-serif;
+      font-weight: 500;
+    }
+    .caller-row {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      margin-bottom: 22px;
+    }
+    .avatar {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #F6B828, #e8a810);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: 'Sora', sans-serif;
+      font-size: 26px;
+      font-weight: 800;
+      color: #122092;
+      flex-shrink: 0;
+    }
+    .caller-info {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .caller-name {
+      font-family: 'Sora', sans-serif;
+      font-size: 26px;
+      font-weight: 700;
+      color: #ffffff;
+    }
+    .caller-phone {
+      font-size: 17px;
+      color: rgba(255,255,255,0.6);
+      font-family: 'Inter', sans-serif;
+    }
+    .field {
+      margin-bottom: 18px;
+    }
+    .field-label {
+      font-family: 'Sora', sans-serif;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.4);
+      margin-bottom: 6px;
+    }
+    .field-value {
+      font-size: 21px;
+      line-height: 1.4;
+      color: rgba(255,255,255,0.92);
+      font-weight: 500;
+    }
+    .booking-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      background: rgba(246,184,40,0.08);
+      border: 1px solid rgba(246,184,40,0.25);
+      border-radius: 14px;
+      padding: 18px 22px;
+      margin-top: 6px;
+    }
+    .booking-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      background: rgba(246,184,40,0.18);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .booking-info {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .booking-label {
+      font-family: 'Sora', sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      color: #F6B828;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .booking-time {
+      font-family: 'Sora', sans-serif;
+      font-size: 22px;
+      font-weight: 700;
+      color: #ffffff;
+    }
+    .tags-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 22px;
+    }
+    .tag {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 999px;
+      padding: 6px 14px;
+      font-family: 'Inter', sans-serif;
+      font-size: 14px;
+      font-weight: 500;
+      color: rgba(255,255,255,0.75);
+      letter-spacing: 0.02em;
+    }
+    .tag.priority {
+      background: rgba(246,184,40,0.12);
+      border-color: rgba(246,184,40,0.35);
+      color: #F6B828;
+      font-weight: 600;
+    }
+    .actions-row {
+      margin-top: 20px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .action {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      padding: 12px 16px;
+      font-family: 'Sora', sans-serif;
+      font-size: 15px;
+      font-weight: 600;
+      color: rgba(255,255,255,0.85);
+    }
+    .action-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #10b981;
+      flex-shrink: 0;
+    }
+  `;
+
+  const html = `
+    <div class="post">
+      ${headerHTML()}
+      <div class="content">
+        <div class="headline">${highlightText(headline, highlights)}</div>
+        <div class="subtext">${subtext}</div>
+        <div class="call-card">
+          <div class="call-header">
+            <div class="call-tag">
+              <span class="live-dot"></span>
+              <span>Call Summary</span>
+            </div>
+            <div class="call-time">Just now · 1m 42s</div>
+          </div>
+          <div class="caller-row">
+            <div class="avatar">${callerName.split(' ').map(p => p[0]).join('').slice(0,2).toUpperCase()}</div>
+            <div class="caller-info">
+              <div class="caller-name">${callerName}</div>
+              <div class="caller-phone">${callerPhone}</div>
+            </div>
+          </div>
+          <div class="tags-row">
+            <span class="tag priority">High Priority</span>
+            <span class="tag">New Customer</span>
+            <span class="tag">Service Request</span>
+          </div>
+          <div class="field">
+            <div class="field-label">Reason for call</div>
+            <div class="field-value">${callerNeed}</div>
+          </div>
+          <div class="field">
+            <div class="field-label">Booking confirmed</div>
+            <div class="booking-row">
+              <div class="booking-icon">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                  <rect x="3" y="5" width="18" height="16" rx="2" stroke="#F6B828" stroke-width="2"/>
+                  <path d="M3 10h18" stroke="#F6B828" stroke-width="2"/>
+                  <path d="M8 3v4M16 3v4" stroke="#F6B828" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+              </div>
+              <div class="booking-info">
+                <div class="booking-label">Appointment</div>
+                <div class="booking-time">${bookingTime}</div>
+              </div>
+            </div>
+          </div>
+          <div class="actions-row">
+            <div class="action">
+              <span class="action-dot"></span>
+              <span>Text summary sent</span>
+            </div>
+            <div class="action">
+              <span class="action-dot"></span>
+              <span>Calendar updated</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      ${footerHTML(content.cta_line2 || 'Every detail. Captured.')}
+    </div>
+  `;
+
+  return wrapHTML(css, html);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
 // ROUTER
 // ═══════════════════════════════════════════════════════════════════
 
 const TEMPLATES = {
+  // Legacy generic IDs (kept for backwards compatibility)
   stat_callout: statCallout,
   checklist: checklist,
   full_graphic: fullGraphic,
@@ -1087,6 +2023,26 @@ const TEMPLATES = {
   process_steps: processSteps,
   faq_card: faqCard,
   cta_card: ctaCard,
+
+  // Pillar-based IDs
+  // EDUCATE
+  educate_stat_dark_01: educateStatDark01,
+  educate_stat_light_01: educateStatLight01,
+  educate_checklist_dark_01: checklist,
+  educate_comparison_dark_01: educateComparisonDark01,
+  educate_comparison_dark_02: fullGraphic,
+  educate_process_dark_01: processSteps,
+  educate_faq_dark_01: faqCard,
+  educate_didyouknow_dark_01: educateStatDark01,
+  educate_feature_dark_01: educateFeatureDark01,
+
+  // INSPIRE
+  inspire_review_dark_01: reviewShowcase,
+  inspire_review_dark_02: reviewShowcase,
+
+  // PROMOTE
+  promote_demo_light_01: ctaCard,
+  promote_cta_light_01: ctaCard,
 };
 
 function render(templateId, content, business, photoDataUrl, options) {
