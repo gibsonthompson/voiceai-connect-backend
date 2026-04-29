@@ -1,5 +1,8 @@
 // ============================================================================
 // AGENCY SIGNUP & ONBOARDING
+// UPDATED: Removed premature signup notification SMS (fires with temp name).
+//          The real notification now only fires in handleAgencyOnboarding step 1
+//          after the agency sets their actual name and phone.
 // ============================================================================
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
@@ -98,7 +101,6 @@ const DEFAULT_PLAN_FEATURES = {
     google_calendar: false,
     advanced_analytics: false,
     priority_support: false,
-    // AI Tools
     caller_recognition: false,
     spam_detection: true,
     call_transfer: false,
@@ -115,7 +117,6 @@ const DEFAULT_PLAN_FEATURES = {
     google_calendar: true,
     advanced_analytics: true,
     priority_support: false,
-    // AI Tools
     caller_recognition: true,
     spam_detection: true,
     call_transfer: true,
@@ -132,7 +133,6 @@ const DEFAULT_PLAN_FEATURES = {
     google_calendar: true,
     advanced_analytics: true,
     priority_support: true,
-    // AI Tools
     caller_recognition: true,
     spam_detection: true,
     call_transfer: true,
@@ -352,16 +352,12 @@ async function handleAgencySignup(req, res) {
       console.warn('⚠️ Welcome email failed (non-blocking):', emailError.message);
     }
     
-    // Notify platform owner (non-blocking)
-    console.log('📱 Notifying platform owner of new agency signup...');
-    try {
-      await sendAgencySignupNotificationSMS(agency);
-    } catch (smsError) {
-      console.warn('⚠️ Agency signup SMS notification failed (non-blocking):', smsError.message);
-    }
+    // REMOVED: sendAgencySignupNotificationSMS here.
+    // It was firing with temp name ("firstName's Agency") causing a duplicate SMS.
+    // The real notification now only fires in handleAgencyOnboarding step 1,
+    // after the agency sets their actual name and phone number.
     
     // Welcome SMS to agency owner (non-blocking)
-    // UPDATED: Pass password token so SMS links to /auth/set-password instead of /agency/login
     console.log('📱 Sending welcome SMS to agency owner...');
     try {
       await sendAgencyWelcomeSMS(agency, token);
@@ -395,12 +391,15 @@ async function handleAgencySignup(req, res) {
 // ============================================================================
 // AGENCY ONBOARDING HANDLER
 // ============================================================================
-// STEP MAP (aligned with frontend onboarding page):
+// STEP MAP (aligned with trimmed frontend onboarding page):
 //   1 = Agency Details (name, phone, referral source)
+//   2 = Password (handled client-side via /auth/set-password, not this handler)
+//
+// Legacy steps 2-6 still handled for backwards compatibility:
 //   2 = Pricing (prices + call limits)
-//   3 = Logo upload (base64 data URL saved directly to logo_url)
-//   4 = Brand colors (primary, secondary, accent) + theme from logo bg detection
-//   5 = Password (handled client-side via /auth/set-password, not this handler)
+//   3 = Logo upload
+//   4 = Brand colors + theme
+//   5 = Password step
 //   6 = Complete
 // ============================================================================
 async function handleAgencyOnboarding(req, res) {
@@ -462,7 +461,6 @@ async function handleAgencyOnboarding(req, res) {
         if (data.logo_url !== undefined) {
           updateData.logo_url = data.logo_url || null;
         }
-        // Accept logo background color detected by frontend
         if (data.logo_background_color !== undefined) {
           updateData.logo_background_color = data.logo_background_color || null;
         }
@@ -472,12 +470,10 @@ async function handleAgencyOnboarding(req, res) {
         if (data.primary_color) updateData.primary_color = data.primary_color;
         if (data.secondary_color) updateData.secondary_color = data.secondary_color;
         if (data.accent_color) updateData.accent_color = data.accent_color;
-        // Accept website_theme auto-detected from logo background
         if (data.website_theme && (data.website_theme === 'light' || data.website_theme === 'dark')) {
           updateData.website_theme = data.website_theme;
           console.log(`🎨 Theme set from logo: ${data.website_theme}`);
         }
-        // Also accept logo_background_color here (in case sent with colors step)
         if (data.logo_background_color !== undefined) {
           updateData.logo_background_color = data.logo_background_color || null;
         }
@@ -497,7 +493,7 @@ async function handleAgencyOnboarding(req, res) {
       .update(updateData)
       .eq('id', agency_id);
     
-    // If step 1 completed, send updated SMS
+    // If step 1 completed, send admin notification with real name + phone
     if (step === 1 && data.name) {
       try {
         const { data: updatedAgency } = await supabase

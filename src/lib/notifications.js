@@ -2,6 +2,7 @@
 // NOTIFICATIONS - SMS (Telnyx) & Email (Brevo)
 // Multi-tenant aware with agency branding
 // UPDATED: sendDemoCallFollowUpSMS accepts callerBusinessName parameter
+// UPDATED: sendAgencySignupNotificationSMS adds phone, removes plan type
 // ============================================================================
 const fetch = require('node-fetch');
 
@@ -97,11 +98,12 @@ async function sendPlatformNotificationSMS(message) {
   return sendTelnyxSMS(PLATFORM_OWNER_PHONE, `🔔 VoiceAI Connect\n${message}`);
 }
 
+// UPDATED: Added phone number, removed plan type (not chosen yet at signup)
 async function sendAgencySignupNotificationSMS(agency) {
   let message = `🎉 New Agency Signup!\nName: ${agency.name}\nEmail: ${agency.email}`;
+  if (agency.phone) message += `\nPhone: ${formatPhoneDisplay(agency.phone) || agency.phone}`;
   const referralLabel = getReferralSourceLabel(agency.referral_source);
   if (referralLabel) message += `\nSource: ${referralLabel}`;
-  message += `\nPlan: ${agency.plan_type || 'Starter'}`;
   if (agency.country && agency.country !== 'US') message += `\n🌍 Country: ${agency.country}`;
   return sendPlatformNotificationSMS(message);
 }
@@ -149,7 +151,6 @@ async function sendAgencyPaymentSucceededSMS(agency) {
 
 // ============================================================================
 // DEMO CALL FOLLOW-UP SMS
-// UPDATED: Accepts optional callerBusinessName to personalize the message
 // ============================================================================
 async function sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName = null) {
   if (!callerPhone || callerPhone === 'Unknown') {
