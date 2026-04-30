@@ -1,8 +1,10 @@
 // ============================================================================
 // AGENCY ONBOARDING ENGAGEMENT SMS - Cron Handler
-// 9-step conditional drip for agencies that have signed up (pending, trialing, trial)
-// UPDATED: Uses getSmsTemplate() for editable messages
-// Skips agencies still in abandoned cart sequence (pending && abandoned_cart_step < 5)
+// 9-step conditional drip for agencies that ABANDONED onboarding.
+// UPDATED: Only targets agencies with onboarding_completed = false.
+//          Agencies that finished onboarding are in the dashboard and
+//          don't need text nudges — the dashboard guides them instead.
+//          Trial expiry warnings are handled by warnExpiringAgencyTrials.
 // ============================================================================
 
 const express = require('express');
@@ -100,7 +102,6 @@ async function getStepMessage(step, agency, urls) {
       return msg || `${name}, your client signup page is live:\n${urls.signupUrl}\n\nShare it in your outreach, add it to your website, or DM it directly to a prospect.\n\nEvery business that signs up gets their own AI receptionist — and pays YOU monthly.`;
     }
     case 6: {
-      // Dynamic — check what's missing
       const { data: clients } = await supabase.from('clients').select('id').eq('agency_id', agency.id).limit(1);
       const clientCount = clients?.length || 0;
       const missing = [];
@@ -158,10 +159,17 @@ router.post('/agency-onboarding-sms', async (req, res) => {
   try {
     console.log('📨 Running onboarding engagement SMS check...');
 
+    // ========================================================================
+    // KEY FIX: Only target agencies that HAVEN'T completed onboarding.
+    // Once onboarding_completed = true, the agency is in the dashboard and
+    // gets guided by inline prompts instead of text messages.
+    // Trial expiry warnings are handled separately by warnExpiringAgencyTrials.
+    // ========================================================================
     const { data: agencies, error } = await supabase
       .from('agencies')
       .select('*')
       .in('subscription_status', ['pending', 'trialing', 'trial'])
+      .eq('onboarding_completed', false)
       .lt('onboarding_sms_step', 9)
       .not('phone', 'is', null)
       .order('created_at', { ascending: true });

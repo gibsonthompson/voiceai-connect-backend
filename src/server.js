@@ -14,6 +14,8 @@ const PORT = process.env.PORT || 8080;
 const fs = require('fs');
 const RENDERS_DIR = '/workspace/renders';
 if (!fs.existsSync(RENDERS_DIR)) fs.mkdirSync(RENDERS_DIR, { recursive: true });
+const MEDIA_DIR = '/workspace/media';
+if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR, { recursive: true });
 // ============================================================================
 // MIDDLEWARE
 // ============================================================================
@@ -216,6 +218,11 @@ app.get('/health', (req, res) => {
 // CONTENT RENDER SERVICE (Social Media Image Generation)
 // ============================================================================
 app.use('/renders', express.static(RENDERS_DIR, { maxAge: '1d' }));
+app.use('/media', express.static(MEDIA_DIR, { maxAge: '30d' }));
+
+const mediaUpload = require('./media-upload');
+app.use('/api/media', mediaUpload);
+
 app.use('/api/content-render', contentRender);
 
 // ============================================================================
