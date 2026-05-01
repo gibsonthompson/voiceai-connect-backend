@@ -219,7 +219,7 @@ app.get('/health', (req, res) => {
 // ============================================================================
 app.use('/renders', express.static(RENDERS_DIR, { maxAge: '1d' }));
 app.use('/media', express.static(MEDIA_DIR, { maxAge: '30d' }));
-
+app.use('/thumbnails', express.static('/workspace/thumbnails', { maxAge: '1d' }));
 const mediaUpload = require('./media-upload');
 app.use('/api/media', mediaUpload);
 
