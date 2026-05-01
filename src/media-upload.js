@@ -141,26 +141,33 @@ router.post('/thumbnail', async (req, res) => {
 
     const thumbFilename = `thumb-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.jpg`;
     const thumbPath = path.join(thumbDir, thumbFilename);
-    const seekTime = timestamp || '5'; // Default 5 seconds in
+    const seekTime = timestamp || '1'; // Default 1 second in (safe for short videos)
 
-    await new Promise((resolve, reject) => {
+    // Try extraction, fall back to 0 if seek fails (video shorter than seek time)
+    const tryExtract = (time) => new Promise((resolve, reject) => {
       const ffmpeg = spawn('ffmpeg', [
-        '-ss', seekTime,
+        '-ss', time,
         '-i', videoFile,
         '-vframes', '1',
         '-q:v', '2',
         '-y',
         thumbPath,
       ]);
-
       let stderr = '';
       ffmpeg.stderr.on('data', d => stderr += d.toString());
       ffmpeg.on('close', code => {
-        if (code === 0 && fs.existsSync(thumbPath)) resolve();
-        else reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(-200)}`));
+        if (code === 0 && fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0) resolve();
+        else reject(new Error(`ffmpeg exited ${code}`));
       });
       ffmpeg.on('error', reject);
     });
+
+    try {
+      await tryExtract(seekTime);
+    } catch {
+      // Fallback: try frame at 0 seconds
+      await tryExtract('0');
+    }
 
     // Return as base64
     const thumbBuffer = fs.readFileSync(thumbPath);
