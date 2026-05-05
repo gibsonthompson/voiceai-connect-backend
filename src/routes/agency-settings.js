@@ -74,6 +74,7 @@ async function getAgencyByHost(req, res) {
         
         // Plan type (for feature gating)
         plan_type: agency.plan_type,
+        subscription_status: agency.subscription_status,
         
         // Pricing (for client signup + marketing website)
         price_starter: agency.price_starter,
