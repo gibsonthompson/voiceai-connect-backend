@@ -1,6 +1,6 @@
 // ============================================================================
 // DEMO PHONE ROUTES
-// POST /api/agency/:agencyId/demo-phone — Create demo phone (paid plans only)
+// POST /api/agency/:agencyId/demo-phone — Create demo phone
 // DELETE /api/agency/:agencyId/demo-phone — Remove demo phone
 // ============================================================================
 const express = require('express');
@@ -11,11 +11,11 @@ const { provisionAgencyDemo, updateDemoAssistantName } = require('../lib/vapi');
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 
 // ============================================================================
-// HELPER: Check if agency is on a paid plan (not trial, not pending)
+// HELPER: Check if agency has access (paid or trial)
 // ============================================================================
-function isPaidPlan(agency) {
+function hasAccess(agency) {
   const allowedStatuses = ['active', 'trial', 'trialing'];
-  return paidStatuses.includes(agency.subscription_status);
+  return allowedStatuses.includes(agency.subscription_status);
 }
 
 // ============================================================================
@@ -39,11 +39,11 @@ router.post('/:agencyId/demo-phone', async (req, res) => {
       return res.status(404).json({ error: 'Agency not found' });
     }
 
-    // 2. Check plan — must be on a paid plan
-    if (!isPaidPlan(agency)) {
+    // 2. Check access — paid or trial
+    if (!hasAccess(agency)) {
       return res.status(403).json({
-        error: 'Paid plan required',
-        message: 'Demo phone numbers are available on paid plans. Please subscribe to create your demo line.'
+        error: 'Subscription required',
+        message: 'Demo phone numbers require an active subscription or trial. Please subscribe to create your demo line.'
       });
     }
 
