@@ -14,7 +14,7 @@ const VAPI_API_KEY = process.env.VAPI_API_KEY;
 // HELPER: Check if agency is on a paid plan (not trial, not pending)
 // ============================================================================
 function isPaidPlan(agency) {
-  const paidStatuses = ['active'];
+  const allowedStatuses = ['active', 'trial', 'trialing'];
   return paidStatuses.includes(agency.subscription_status);
 }
 
