@@ -5,7 +5,7 @@
 //   +1 (505) 594-5806 → CallBird generic demo (via agencies.demo_phone_number)
 //   +1 (470) 649-1985 → Dental demo (via INDUSTRY_DEMO_NUMBERS, unbranded)
 //
-// UPDATED: 2026-04-12 — Swapped numbers, expanded product knowledge
+// UPDATED: 2026-05-05 — Added analysisPlan for structured data extraction
 // ============================================================================
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
@@ -30,6 +30,58 @@ const INDUSTRY_DISPLAY_NAMES = {
   salon_spa: 'salon and spa', retail: 'retail', fitness: 'fitness',
   legal: 'legal', real_estate: 'real estate', financial: 'financial services',
   automotive: 'automotive',
+};
+
+// ============================================================================
+// VAPI ANALYSIS PLAN — auto-extracts structured data from demo calls
+// Results land in message.analysis.structuredData in end-of-call-report
+// ============================================================================
+const DEMO_ANALYSIS_PLAN = {
+  summaryPlan: {
+    messages: [
+      {
+        role: 'system',
+        content: 'Summarize this AI receptionist demo call in 2-3 sentences. Include: what type of business the caller runs, what scenario the AI demonstrated for them, and whether the caller seemed genuinely interested in the product or was just browsing.'
+      }
+    ],
+  },
+  structuredDataPlan: {
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'Extract the following from this AI receptionist demo call transcript.',
+          'Return ONLY valid JSON with these fields:',
+          '- business_name: the caller\'s business name (string or null)',
+          '- business_type: type of business like "dental", "plumbing", "restaurant", "law firm" (string or null)',
+          '- caller_name: the caller\'s personal name if mentioned (string or null)',
+          '- interest_level: "high" if they asked about pricing, signup, features, or seemed excited; "medium" if engaged but noncommittal; "low" if disinterested or ended quickly',
+          '- service_discussed: the specific service or scenario roleplayed, e.g. "emergency dental appointment booking" or "plumbing leak repair intake" (string or null)',
+          '- asked_questions: true if the caller asked follow-up questions about the product after the roleplay',
+        ].join('\n'),
+      }
+    ],
+    schema: {
+      type: 'object',
+      properties: {
+        business_name: { type: 'string' },
+        business_type: { type: 'string' },
+        caller_name: { type: 'string' },
+        interest_level: { type: 'string', enum: ['high', 'medium', 'low'] },
+        service_discussed: { type: 'string' },
+        asked_questions: { type: 'boolean' },
+      },
+    },
+  },
+  successEvaluationPlan: {
+    messages: [
+      {
+        role: 'system',
+        content: 'Evaluate whether this demo call was successful as a sales demo. A successful demo means the caller experienced the AI roleplay, seemed engaged, and left with a positive impression. Score 1-10.'
+      }
+    ],
+    rubric: 'NumericScale',
+  },
 };
 
 function getDemoTools() {
@@ -186,6 +238,7 @@ function buildIndustryDemoConfig(industryKey, agency) {
     voice: { provider: '11labs', voiceId },
     firstMessage: `Hi there! Thanks for calling the ${displayName} AI receptionist demo. I'm going to show you exactly how I'd answer the phone for your practice — it only takes a couple minutes. What's your practice called?`,
     recordingEnabled: true,
+    analysisPlan: DEMO_ANALYSIS_PLAN,
     serverMessages: ['end-of-call-report', 'tool-calls'],
     serverUrl: `${BACKEND_URL}/webhook/vapi`,
     hooks: [{
@@ -285,6 +338,7 @@ function buildDemoDynamicConfig(agency) {
     voice: { provider: '11labs', voiceId: DEMO_VOICE_ID },
     firstMessage: getDemoFirstMessageV2(agencyName),
     recordingEnabled: true,
+    analysisPlan: DEMO_ANALYSIS_PLAN,
     serverMessages: ['end-of-call-report', 'tool-calls'],
     serverUrl: `${BACKEND_URL}/webhook/vapi`,
     hooks: [{
@@ -296,7 +350,7 @@ function buildDemoDynamicConfig(agency) {
 }
 
 module.exports = {
-  INDUSTRY_DEMO_NUMBERS, INDUSTRY_DEMO_PROMPTS,
+  INDUSTRY_DEMO_NUMBERS, INDUSTRY_DEMO_PROMPTS, DEMO_ANALYSIS_PLAN,
   buildIndustryDemoConfig, getIndustryDemoByPhone,
   getDemoSystemPromptV2, getDemoFirstMessageV2,
   buildDemoDynamicConfig, buildDemoSmsContent, buildSignupUrl,

@@ -1,8 +1,7 @@
 // ============================================================================
 // VAPI WEBHOOK HANDLER - Multi-Tenant Aware
-// UPDATED: Industry demo routing, business name in follow-up SMS
-// FIX: Spam detection prompt less aggressive — no longer flags "speak to owner"
-// FIX: Transferred calls override spam flag — if AI forwarded, it's not spam
+// UPDATED: 2026-05-05 — Comprehensive demo call summary with AI extraction,
+//   fixed duration extraction, personalized SMS
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -128,17 +127,14 @@ function buildDisconnectedAssistantConfig(businessName) {
 // Tries multiple locations where VAPI stores analysis results
 // ============================================================================
 function extractBusinessNameFromCall(message) {
-  // Try structured data from analysis
   const structured = message.analysis?.structuredData
     || message.artifact?.structuredData
     || message.call?.analysis?.structuredData
     || null;
   if (structured?.business_name) return structured.business_name;
 
-  // Try to extract from transcript as fallback — look for common patterns
   const transcript = message.transcript || message.artifact?.transcript || '';
   if (transcript) {
-    // Look for "practice called X" or "business called X" patterns
     const match = transcript.match(/(?:practice|business|company|office)\s+(?:is\s+)?(?:called\s+)?["']?([A-Z][A-Za-z\s&'.]+?)["']?\s*[.,!?]/);
     if (match?.[1]) return match[1].trim();
   }
@@ -147,54 +143,250 @@ function extractBusinessNameFromCall(message) {
 }
 
 // ============================================================================
+// GENERATE DEMO CALL SUMMARY (AI extraction via Claude)
+// Falls back gracefully — returns null if transcript too short or API fails.
+// ============================================================================
+async function generateDemoSummary(transcript, callerPhone, industryKey) {
+  if (!transcript || transcript.length < 50) return null;
+
+  console.log('🤖 Generating demo call summary...');
+
+  const industryHint = industryKey ? `\nDemo Type: ${industryKey} industry demo` : '';
+  const prompt = `Analyze this AI receptionist DEMO call transcript. This is a sales demo where the AI showed a business owner how it would answer their phones.
+
+Transcript:
+${transcript}
+
+Caller Phone: ${callerPhone || 'Unknown'}${industryHint}
+
+Extract and return ONLY valid JSON — no backticks, no extra text:
+{
+  "businessName": "the caller's business name, or null if not mentioned",
+  "businessType": "type of business like dental, plumbing, restaurant, law firm — or null",
+  "callerName": "the caller's personal name if mentioned, or null",
+  "interestLevel": "high if they asked about pricing, signup, features, or seemed excited; medium if engaged but noncommittal; low if disinterested or ended quickly",
+  "serviceDiscussed": "the specific scenario roleplayed in one short phrase, e.g. 'emergency dental appointment booking' or 'plumbing leak repair intake' — or null",
+  "askedQuestions": true or false — did the caller ask follow-up questions about the product after the roleplay,
+  "summary": "2-3 sentence summary covering: what business they run, what the AI demonstrated for them, and their reaction/interest level"
+}`;
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 500,
+        temperature: 0.3,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+
+    if (!response.ok) throw new Error(`Claude API failed: ${response.status}`);
+
+    const data = await response.json();
+    let text = data.content[0].text.trim()
+      .replace(/```json\n?/g, '')
+      .replace(/```\n?/g, '')
+      .trim();
+
+    const parsed = JSON.parse(text);
+
+    return {
+      businessName: parsed.businessName || null,
+      businessType: parsed.businessType || null,
+      callerName: parsed.callerName || null,
+      interestLevel: parsed.interestLevel || 'medium',
+      serviceDiscussed: parsed.serviceDiscussed || null,
+      askedQuestions: parsed.askedQuestions === true,
+      summary: parsed.summary || null,
+    };
+  } catch (error) {
+    console.error('❌ Demo AI summary failed:', error.message);
+    return null;
+  }
+}
+
+// ============================================================================
 // HANDLE DEMO CALL (end-of-call)
 // industryKey: set = industry demo (simple follow-up)
 // industryKey: null = generic branded demo (signup link)
+//
+// REWRITTEN: 2026-05-05
+// - Duration extracted from all VAPI locations
+// - Structured data from VAPI analysisPlan + Claude fallback
+// - Comprehensive admin SMS with business info, summary, interest level
+// - Personalized caller follow-up SMS
 // ============================================================================
 async function handleDemoCall(agency, message, industryKey = null) {
   const call = message.call;
   const callerPhone = call.customer?.number || null;
-  const durationSeconds = call.duration || message.duration || null;
+
+  // ── Duration: check ALL VAPI locations ─────────────────────────────────
+  let durationSeconds = call.duration
+    || message.duration
+    || message.artifact?.duration
+    || message.durationSeconds
+    || null;
+
+  // Compute from timestamps as last resort
+  if (!durationSeconds && call.startedAt && call.endedAt) {
+    durationSeconds = Math.round(
+      (new Date(call.endedAt).getTime() - new Date(call.startedAt).getTime()) / 1000
+    );
+  }
+
   console.log(`🎤 Demo call completed for agency: ${agency.name}${industryKey ? ` (${industryKey} demo)` : ''}`);
 
-  // Extract business name from VAPI analysis
-  const callerBusinessName = extractBusinessNameFromCall(message);
-  if (callerBusinessName) console.log(`   📋 Caller's business: ${callerBusinessName}`);
+  // ── Extract VAPI analysis (from analysisPlan) ─────────────────────────
+  const vapiAnalysis = message.analysis || {};
+  const vapiStructured = vapiAnalysis.structuredData
+    || message.artifact?.structuredData
+    || call.analysis?.structuredData
+    || null;
+  const vapiSummary = vapiAnalysis.summary
+    || message.artifact?.summary
+    || call.analysis?.summary
+    || null;
+  const vapiSuccessScore = vapiAnalysis.successEvaluation
+    || call.analysis?.successEvaluation
+    || null;
 
+  // ── Merge: VAPI structured data > extractBusinessNameFromCall > AI ────
+  let businessName = vapiStructured?.business_name || extractBusinessNameFromCall(message) || null;
+  let businessType = vapiStructured?.business_type || industryKey || null;
+  let interestLevel = vapiStructured?.interest_level || null;
+  let serviceDiscussed = vapiStructured?.service_discussed || null;
+  let callerName = vapiStructured?.caller_name || null;
+  let askedQuestions = vapiStructured?.asked_questions || false;
+  let summary = vapiSummary || null;
+
+  // ── Claude fallback if VAPI analysis incomplete ───────────────────────
+  const transcript = message.transcript || message.artifact?.transcript || '';
+  if (transcript && (!businessName || !summary)) {
+    try {
+      const demoSummary = await generateDemoSummary(transcript, callerPhone, industryKey);
+      if (demoSummary) {
+        businessName = businessName || demoSummary.businessName;
+        businessType = businessType || demoSummary.businessType;
+        interestLevel = interestLevel || demoSummary.interestLevel;
+        serviceDiscussed = serviceDiscussed || demoSummary.serviceDiscussed;
+        callerName = callerName || demoSummary.callerName;
+        askedQuestions = askedQuestions || demoSummary.askedQuestions;
+        summary = summary || demoSummary.summary;
+      }
+    } catch (err) {
+      console.warn('⚠️ Demo AI summary failed:', err.message);
+    }
+  }
+
+  // ── Format for display ────────────────────────────────────────────────
+  const { formatPhoneDisplay, sendTelnyxSMS } = require('../lib/notifications');
+  const callerDisplay = callerPhone ? formatPhoneDisplay(callerPhone) : 'Unknown';
+  const durationDisplay = durationSeconds
+    ? `${Math.floor(durationSeconds / 60)}m ${durationSeconds % 60}s`
+    : null;
+  const businessLabel = businessName
+    ? (businessType ? `${businessName} (${businessType.replace(/_/g, ' ')})` : businessName)
+    : (businessType ? businessType.replace(/_/g, ' ') : null);
+
+  if (businessName) console.log(`   📋 Business: ${businessLabel}`);
+  if (interestLevel) console.log(`   📊 Interest: ${interestLevel}`);
+  if (durationDisplay) console.log(`   ⏱ Duration: ${durationDisplay}`);
+
+  // ════════════════════════════════════════════════════════════════════════
+  // CALLER FOLLOW-UP SMS
+  // ════════════════════════════════════════════════════════════════════════
   if (callerPhone && callerPhone !== 'Unknown') {
     try {
-      const { sendTelnyxSMS } = require('../lib/notifications');
-
       if (industryKey) {
-        // Industry demo — simple thank you with business name
-        const displayName = industryKey.replace('_', ' ');
-        const nameNote = callerBusinessName ? ` for ${callerBusinessName}` : '';
-        await sendTelnyxSMS(callerPhone,
-          `Thanks for trying the ${displayName} AI receptionist demo${nameNote}! If you have any questions or want to learn more, feel free to give us a call back anytime.`
-        );
+        // Industry demo — personalized thank you
+        const displayName = industryKey.replace(/_/g, ' ');
+        const nameNote = businessName ? ` for ${businessName}` : '';
+        const lines = [
+          `Thanks for trying the ${displayName} AI receptionist demo${nameNote}! 🎉`,
+          '',
+        ];
+        if (serviceDiscussed) {
+          lines.push(`Here's what we covered:`);
+          lines.push(`✅ ${serviceDiscussed}`);
+          lines.push(`✅ Instant text summaries after every call`);
+          lines.push(`✅ 24/7 coverage, unlimited simultaneous calls`);
+          lines.push('');
+        }
+        lines.push(`Questions? Give us a call back anytime.`);
+        await sendTelnyxSMS(callerPhone, lines.join('\n'));
         console.log('✅ Industry demo follow-up SMS sent');
+
       } else if (agency.demo_followup_sms_override) {
         await sendTelnyxSMS(callerPhone, agency.demo_followup_sms_override);
         console.log('✅ Demo follow-up SMS sent (custom override)');
+
       } else {
-        // Generic branded demo — signup link with business name
-        await sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName);
-        console.log('✅ Demo follow-up SMS sent (with signup link)');
+        // Generic branded demo — personalized signup link
+        await sendDemoCallFollowUpSMS(callerPhone, agency, businessName, businessType, serviceDiscussed);
+        console.log('✅ Demo follow-up SMS sent');
       }
-    } catch (smsErr) { console.warn('⚠️ Demo follow-up SMS failed:', smsErr.message); }
+    } catch (smsErr) {
+      console.warn('⚠️ Demo follow-up SMS failed:', smsErr.message);
+    }
   }
 
+  // ════════════════════════════════════════════════════════════════════════
+  // ADMIN NOTIFICATION SMS (to agency owner)
+  // ════════════════════════════════════════════════════════════════════════
   if (agency.phone) {
-    const { formatPhoneDisplay, sendTelnyxSMS } = require('../lib/notifications');
-    const callerDisplay = callerPhone ? formatPhoneDisplay(callerPhone) : 'Unknown number';
-    const durationDisplay = durationSeconds ? `${Math.round(durationSeconds / 60)}min ${durationSeconds % 60}s` : 'Unknown';
     try {
-      const templateMsg = await getSmsTemplate('admin_demo_call', { agency_name: agency.name, caller: callerDisplay, duration: durationDisplay });
-      await sendTelnyxSMS(agency.phone, templateMsg || `🎤 Demo Call - ${agency.name}\nCaller: ${callerDisplay}\nDuration: ${durationDisplay}${callerBusinessName ? `\nBusiness: ${callerBusinessName}` : ''}\nFollow-up SMS sent.`);
-    } catch (ownerSmsErr) { console.warn('⚠️ Agency owner notification failed:', ownerSmsErr.message); }
+      const lines = [];
+      lines.push(`🎤 Demo Call — ${agency.name}`);
+      lines.push(`━━━━━━━━━━━━━━━━━━`);
+      lines.push(`📞 ${callerDisplay}`);
+      if (businessLabel) lines.push(`🏢 ${businessLabel}`);
+      if (callerName && callerName !== 'Unknown') lines.push(`👤 ${callerName}`);
+      if (durationDisplay) lines.push(`⏱ ${durationDisplay}`);
+      if (interestLevel) {
+        const emoji = interestLevel === 'high' ? '🔥' : interestLevel === 'medium' ? '👀' : '❄️';
+        lines.push(`${emoji} Interest: ${interestLevel.toUpperCase()}`);
+      }
+      if (askedQuestions) lines.push(`❓ Asked follow-up questions`);
+      if (vapiSuccessScore) lines.push(`📊 Demo score: ${vapiSuccessScore}/10`);
+      if (summary) {
+        lines.push(`━━━━━━━━━━━━━━━━━━`);
+        const truncSummary = summary.length > 250 ? summary.slice(0, 247) + '...' : summary;
+        lines.push(truncSummary);
+      }
+      lines.push(`━━━━━━━━━━━━━━━━━━`);
+      lines.push(callerPhone && callerPhone !== 'Unknown'
+        ? `✅ Follow-up SMS sent`
+        : `⚠️ No caller phone — follow-up not sent`
+      );
+
+      await sendTelnyxSMS(agency.phone, lines.join('\n'));
+      console.log('✅ Admin demo notification sent');
+    } catch (ownerSmsErr) {
+      console.warn('⚠️ Agency owner notification failed:', ownerSmsErr.message);
+    }
   }
 
-  return { type: 'demo', agency: agency.name, callerPhone, callerBusinessName, durationSeconds, followUpSent: !!callerPhone };
+  return {
+    type: 'demo',
+    agency: agency.name,
+    callerPhone,
+    callerName,
+    callerBusinessName: businessName,
+    businessType,
+    interestLevel,
+    serviceDiscussed,
+    askedQuestions,
+    durationSeconds,
+    summary,
+    vapiSuccessScore,
+    followUpSent: !!(callerPhone && callerPhone !== 'Unknown'),
+  };
 }
 
 const _demoSmsSent = new Map();
@@ -434,7 +626,7 @@ async function handleVapiWebhook(req, res) {
     if (!['active', 'trial'].includes(client.subscription_status))
       return res.status(200).json({ received: true, blocked: true, reason: 'Not active' });
     if (client.subscription_status === 'trial' && isTrialExpired(client.trial_ends_at)) {
-      await supabase.from('clients').update({ subscription_status: 'expired' }).eq('id', client.id);
+      await supabase.from('clients').update({ subscription_status: 'trial_expired', status: 'suspended' }).eq('id', client.id);
       return res.status(200).json({ received: true, blocked: true, reason: 'Trial expired' });
     }
 
@@ -451,13 +643,10 @@ async function handleVapiWebhook(req, res) {
     const { customerName, customerPhone, customerEmail, urgency, summary: aiSummary } = aiData;
     let { isSpam, spamReason } = aiData;
     const recordingUrl = message.recordingUrl || message.artifact?.recordingUrl || call.recordingUrl || null;
-    const durationSeconds = call.duration || message.duration || message.artifact?.duration || null;
+    const durationSeconds = call.duration || message.duration || message.artifact?.duration || message.durationSeconds || null;
     const endedReason = call.endedReason || message.endedReason || null;
     const { transferStatus, wasTransferred } = detectTransferStatus(endedReason, transcript);
 
-    // ── Spam override for transferred calls ──────────────────────────────
-    // A transferred call is by definition not spam — the AI decided it was
-    // legitimate enough to forward. Override Claude's spam flag.
     if (wasTransferred && isSpam) {
       console.log(`⚠️ Spam flag overridden — call was successfully transferred (${endedReason})`);
       isSpam = false;

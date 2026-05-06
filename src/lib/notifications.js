@@ -1,8 +1,7 @@
 // ============================================================================
 // NOTIFICATIONS - SMS (Telnyx) & Email (Brevo)
 // Multi-tenant aware with agency branding
-// UPDATED: sendDemoCallFollowUpSMS accepts callerBusinessName parameter
-// UPDATED: sendAgencySignupNotificationSMS adds phone, removes plan type
+// UPDATED: 2026-05-05 — sendDemoCallFollowUpSMS personalized with business info
 // ============================================================================
 const fetch = require('node-fetch');
 
@@ -98,7 +97,6 @@ async function sendPlatformNotificationSMS(message) {
   return sendTelnyxSMS(PLATFORM_OWNER_PHONE, `🔔 VoiceAI Connect\n${message}`);
 }
 
-// UPDATED: Added phone number, removed plan type (not chosen yet at signup)
 async function sendAgencySignupNotificationSMS(agency) {
   let message = `🎉 New Agency Signup!\nName: ${agency.name}\nEmail: ${agency.email}`;
   if (agency.phone) message += `\nPhone: ${formatPhoneDisplay(agency.phone) || agency.phone}`;
@@ -151,8 +149,9 @@ async function sendAgencyPaymentSucceededSMS(agency) {
 
 // ============================================================================
 // DEMO CALL FOLLOW-UP SMS
+// UPDATED: 2026-05-05 — personalized with business name, type, service
 // ============================================================================
-async function sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName = null) {
+async function sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName, businessType, serviceDiscussed) {
   if (!callerPhone || callerPhone === 'Unknown') {
     console.log('⚠️ No caller phone for demo follow-up SMS');
     return false;
@@ -172,14 +171,26 @@ async function sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName =
   const agencyName = agency.name || 'our';
   const nameNote = callerBusinessName ? ` for ${callerBusinessName}` : '';
 
-  const message =
-    `Thanks for trying ${agencyName}'s AI receptionist demo${nameNote}! 🎉\n\n` +
-    `Ready to get one for your business? Start your free trial:\n` +
-    `${signupUrl}\n\n` +
-    `Setup takes under 10 minutes. No credit card required.`;
+  const lines = [
+    `Thanks for trying ${agencyName}'s AI receptionist demo${nameNote}! 🎉`,
+    '',
+  ];
+
+  if (serviceDiscussed || callerBusinessName) {
+    lines.push(`Here's what we showed you:`);
+    if (serviceDiscussed) lines.push(`✅ ${serviceDiscussed}`);
+    lines.push(`✅ Instant text summaries after every call`);
+    lines.push(`✅ 24/7 coverage — never miss a call`);
+    lines.push('');
+  }
+
+  lines.push(`Ready to get one${callerBusinessName ? ` for ${callerBusinessName}` : ' for your business'}? Start your free trial:`);
+  lines.push(signupUrl);
+  lines.push('');
+  lines.push(`No credit card required. Setup takes 5 minutes.`);
 
   console.log(`📱 Sending demo follow-up SMS to ${callerPhone} for agency: ${agencyName}`);
-  return sendTelnyxSMS(callerPhone, message);
+  return sendTelnyxSMS(callerPhone, lines.join('\n'));
 }
 
 // ============================================================================
@@ -194,7 +205,7 @@ async function sendCallNotificationSMS(client, agency, callData) {
   return sendTelnyxSMS(client.owner_phone, smsMessage);
 }
 
-async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency = null) {
+async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency) {
   const brandName = agency?.name || 'VoiceAI Connect';
   return sendTelnyxSMS(phone, `🎉 Welcome to ${brandName}!\nYour AI receptionist for ${businessName} is ready!\n📞 Your AI Phone: ${formatPhoneDisplay(aiPhoneNumber)}`);
 }
