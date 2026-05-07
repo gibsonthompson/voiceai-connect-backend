@@ -2,6 +2,7 @@
 // VAPI WEBHOOK HANDLER - Multi-Tenant Aware
 // UPDATED: 2026-05-05 — Comprehensive demo call summary with AI extraction,
 //   fixed duration extraction, personalized SMS
+// UPDATED: 2026-05-06 — Usage record tracking for metered billing (Phase 1)
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -11,6 +12,7 @@ const { buildDynamicAssistantConfig } = require('../lib/assistant-config-builder
 const { notifyTeamMembers } = require('../lib/team-notifications');
 const { buildDemoDynamicConfig, buildDemoSmsContent, getIndustryDemoByPhone, buildIndustryDemoConfig } = require('../lib/demo-config');
 const { getSmsTemplate } = require('../lib/sms-templates');
+const { insertUsageRecord } = require('../lib/usage-tracker');
 
 const DEFAULT_PLAN_FEATURES = {
   starter: { sms_notifications: true, email_summaries: false, custom_greeting: false, custom_voice: false, knowledge_base: false, business_hours: false, advanced_analytics: false, priority_support: false },
@@ -661,6 +663,22 @@ async function handleVapiWebhook(req, res) {
         ended_reason: endedReason, transfer_status: null, is_spam: true, spam_reason: spamReason, created_at: new Date().toISOString() };
       const { data: inserted, error } = await supabase.from('calls').insert([rec]).select();
       if (error) { delete rec.is_spam; delete rec.spam_reason; delete rec.ended_reason; delete rec.transfer_status; await supabase.from('calls').insert([rec]).select(); }
+
+      // ── Record usage even for spam calls (they still cost VAPI minutes) ──
+      try {
+        const agencyId = agency?.id || client.agency_id;
+        if (agencyId && durationSeconds && durationSeconds > 0) {
+          await insertUsageRecord({
+            agencyId,
+            clientId: client.id,
+            callId: inserted?.[0]?.id || null,
+            durationSeconds,
+          });
+        }
+      } catch (usageErr) {
+        console.warn('⚠️ Usage record failed (non-fatal):', usageErr.message);
+      }
+
       if (client.owner_phone) { try { await sendSpamBlockedSMS(client, agency, callerPhone, spamReason); } catch {} }
       return res.status(200).json({ received: true, saved: true, spam: true, spamReason, callId: inserted?.[0]?.id });
     }
@@ -681,6 +699,22 @@ async function handleVapiWebhook(req, res) {
     }
     const savedCall = insertedCall || insertedCallFinal;
     console.log('✅ Call saved');
+
+    // ── Record voice usage for metered billing ──────────────────────────
+    try {
+      const agencyId = agency?.id || client.agency_id;
+      if (agencyId && durationSeconds && durationSeconds > 0) {
+        await insertUsageRecord({
+          agencyId,
+          clientId: client.id,
+          callId: savedCall?.[0]?.id || null,
+          durationSeconds,
+        });
+      }
+    } catch (usageErr) {
+      // Non-fatal — don't block call processing if usage tracking fails
+      console.warn('⚠️ Usage record failed (non-fatal):', usageErr.message);
+    }
 
     try {
       const { contact, isNew } = await upsertContactFromCall({ clientId: client.id, agencyId: agency?.id, callId: savedCall?.[0]?.id,

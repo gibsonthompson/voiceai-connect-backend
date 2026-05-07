@@ -3,6 +3,8 @@
 // UPDATED: Removed premature signup notification SMS (fires with temp name).
 //          The real notification now only fires in handleAgencyOnboarding step 1
 //          after the agency sets their actual name and phone.
+// UPDATED: 2026-05-07 — Default plan_type changed to 'free', signup status
+//          changed to 'active' (free tier requires no payment to start).
 // ============================================================================
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
@@ -278,9 +280,9 @@ async function handleAgencySignup(req, res) {
         phone: phone || null,
         country: resolvedCountry,
         currency: resolvedCurrency,
-        status: 'pending_payment',
-        subscription_status: 'pending',
-        plan_type: 'starter',
+        status: 'active',
+        subscription_status: 'active',
+        plan_type: 'free',
         onboarding_step: 1,
         onboarding_completed: false,
         primary_color: '#10b981',

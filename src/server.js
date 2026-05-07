@@ -1,6 +1,7 @@
 // ============================================================================
 // VOICEAI CONNECT - MULTI-TENANT BACKEND SERVER
 // UPDATED: Team member routes mounted, Content render service mounted
+// UPDATED: 2026-05-07 — Usage tracking cron + usage summary endpoint (Phase 1)
 // Destination: src/server.js (or src/index.js) — FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -142,6 +143,10 @@ const supportRoutes = require('./routes/support');
 const teamRoutes = require('./routes/team');
 const contentRender = require('./content-render');  // Content render service
 
+// Usage tracking (Phase 1 — metered billing)
+const usageReporterRoutes = require('./cron/usage-reporter');
+const { getAgencyUsageSummary } = require('./lib/usage-tracker');
+
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 
@@ -204,12 +209,14 @@ app.get('/health', (req, res) => {
       aiPlayground: true,
       byot: true,
       teamMembers: true,
-      contentRender: true
+      contentRender: true,
+      usageBilling: true
     },
     cron: {
       expireTrials: true,
       abandonedCart: true,
-      agencyOnboardingSms: true
+      agencyOnboardingSms: true,
+      usageReporter: true
     }
   });
 });
@@ -561,6 +568,24 @@ app.get('/api/agency/:agencyId/analytics', async (req, res) => {
 });
 
 // ============================================================================
+// AGENCY USAGE SUMMARY (Phase 1 — metered billing)
+// ============================================================================
+
+app.get('/api/agency/:agencyId/usage', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const summary = await getAgencyUsageSummary(agencyId);
+    if (!summary) {
+      return res.status(404).json({ error: 'Agency not found or no usage data' });
+    }
+    res.json({ success: true, usage: summary });
+  } catch (error) {
+    console.error('Error fetching usage:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
 // REFERRAL PROGRAM ROUTES
 // ============================================================================
 
@@ -730,6 +755,9 @@ app.use('/api/cron', abandonedCartRoutes);
 
 // Agency onboarding engagement SMS (called by cron-job.org every hour)
 app.use('/api/cron', agencyOnboardingSmsRoutes);
+
+// Usage reporting cron (reports voice minutes to Stripe metered billing)
+app.use('/api/cron', usageReporterRoutes);
 
 // ============================================================================
 // WEBHOOK ROUTES
