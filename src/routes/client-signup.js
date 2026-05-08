@@ -252,9 +252,13 @@ async function handleClientSignup(req, res) {
     if (!limitCheck.allowed) {
       const isBilling = limitCheck.reason === 'billing_required';
       console.log(`🚫 ${isBilling ? 'Billing required' : 'Client limit reached'} for agency ${agency.name}: ${limitCheck.reason}`);
+      // For marketing site signups, business owners see a user-facing message
+      // (they can't fix the agency's billing — only the agency owner can)
       return res.status(403).json({ 
-        error: isBilling ? 'billing_required' : 'Client limit reached',
-        message: limitCheck.message || limitCheck.reason,
+        error: isBilling ? 'not_accepting' : 'Client limit reached',
+        message: isBilling 
+          ? 'This agency is not currently accepting new signups. Please contact them directly.'
+          : (limitCheck.message || limitCheck.reason),
         limit: limitCheck.limit,
         current: limitCheck.current
       });
