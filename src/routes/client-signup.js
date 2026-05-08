@@ -250,10 +250,11 @@ async function handleClientSignup(req, res) {
 
     const limitCheck = await canAgencyAddClient(agencyId);
     if (!limitCheck.allowed) {
-      console.log(`🚫 Client limit reached for agency ${agency.name}: ${limitCheck.reason}`);
+      const isBilling = limitCheck.reason === 'billing_required';
+      console.log(`🚫 ${isBilling ? 'Billing required' : 'Client limit reached'} for agency ${agency.name}: ${limitCheck.reason}`);
       return res.status(403).json({ 
-        error: 'Client limit reached',
-        message: limitCheck.reason,
+        error: isBilling ? 'billing_required' : 'Client limit reached',
+        message: limitCheck.message || limitCheck.reason,
         limit: limitCheck.limit,
         current: limitCheck.current
       });
@@ -536,10 +537,11 @@ async function handleAgencyAddClient(req, res) {
 
     const limitCheck = await canAgencyAddClient(agencyId);
     if (!limitCheck.allowed) {
-      console.log(`🚫 Client limit reached for agency ${agency.name}: ${limitCheck.reason}`);
+      const isBilling = limitCheck.reason === 'billing_required';
+      console.log(`🚫 ${isBilling ? 'Billing required' : 'Client limit reached'} for agency ${agency.name}: ${limitCheck.reason}`);
       return res.status(403).json({
-        error: 'Client limit reached',
-        message: limitCheck.reason,
+        error: isBilling ? 'billing_required' : 'Client limit reached',
+        message: limitCheck.message || limitCheck.reason,
         limit: limitCheck.limit,
         current: limitCheck.current
       });

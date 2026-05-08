@@ -683,15 +683,29 @@ async function warnExpiringAgencyTrials() {
 }
 
 // ============================================================================
-// HELPER: CAN AGENCY ADD CLIENT (updated for usage-based — always yes if active)
+// HELPER: CAN AGENCY ADD CLIENT
+// - Free agencies must set up billing (add card) before adding clients
+// - Pro/Scale agencies with active subscription or trial can add freely
 // ============================================================================
 async function canAgencyAddClient(agencyId) {
   const { data: agency, error } = await supabase
-    .from('agencies').select('plan_type, subscription_status').eq('id', agencyId).single();
+    .from('agencies')
+    .select('plan_type, subscription_status, stripe_subscription_id')
+    .eq('id', agencyId).single();
 
   if (error || !agency) return { allowed: false, reason: 'Agency not found' };
   if (!['active', 'trialing', 'trial'].includes(agency.subscription_status))
     return { allowed: false, reason: 'Subscription not active' };
+
+  // Free agencies must have billing set up before adding clients
+  const plan = normalizePlan(agency.plan_type);
+  if (plan === 'free' && !agency.stripe_subscription_id) {
+    return { 
+      allowed: false, 
+      reason: 'billing_required',
+      message: 'Add a payment method to start adding clients. You will be charged per client and per minute of voice usage.',
+    };
+  }
 
   // No client limits in new pricing — all usage-based
   return { allowed: true, limit: 'unlimited' };

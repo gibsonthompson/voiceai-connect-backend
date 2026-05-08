@@ -4,6 +4,7 @@
 // UPDATED: reactivation re-enables VAPI phone number
 // UPDATED: Admin Stripe Connect notification wired to getSmsTemplate()
 // FIXED: expireTrials verifies status update persisted before sending SMS
+// UPDATED: 2026-05-08 — Per-client billing triggers on client status changes
 // ============================================================================
 const Stripe = require('stripe');
 const { 
@@ -22,6 +23,7 @@ const {
 } = require('../lib/notifications');
 const { enableAssistant, disableAssistant, disablePhoneNumber, enablePhoneNumber } = require('../lib/vapi');
 const { getSmsTemplate } = require('../lib/sms-templates');
+const { updateClientBillingQuantity } = require('../lib/usage-tracker');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -301,10 +303,6 @@ async function createClientPortal(req, res) {
 // ============================================================================
 // EXPIRE TRIALS
 // FIXED: Verifies status update actually persisted before sending SMS.
-// Supabase/PostgREST silently returns error:null when RLS blocks an UPDATE,
-// so the old code would send the "trial expired" SMS every day forever
-// without ever actually flipping the status. The verification read-back
-// catches this and logs the real failure.
 // ============================================================================
 async function expireTrials() {
   console.log('Checking for expired trials...');
@@ -345,12 +343,10 @@ async function expireTrials() {
       if (updateError) {
         console.error('❌ Failed to update client status:', client.business_name, updateError);
         results.push({ id: client.id, business_name: client.business_name, success: false, error: updateError.message });
-        continue; // SKIP SMS — don't notify if we couldn't actually expire them
+        continue;
       }
 
       // ── Verify the update actually took effect ──
-      // Supabase/PostgREST returns error:null even when RLS silently blocks
-      // an UPDATE, so we read back the row to confirm it changed.
       const { data: verifyClient } = await supabase
         .from('clients')
         .select('subscription_status')
@@ -362,12 +358,15 @@ async function expireTrials() {
           '— still:', verifyClient?.subscription_status,
           '(likely RLS policy blocking the update)');
         results.push({ id: client.id, business_name: client.business_name, success: false, error: 'Update did not persist — check RLS policies on clients table' });
-        continue; // SKIP SMS — row is still 'trial', would cause repeat SMS tomorrow
+        continue;
       }
 
       // ── Only send SMS after confirmed status change ──
       const agency = client.agencies;
       await sendClientTrialExpiredSMS(client, agency);
+
+      // ── Update agency per-client billing (decrease quantity) ──
+      try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
 
       console.log('✅ Trial expired for:', client.business_name);
       results.push({ id: client.id, business_name: client.business_name, success: true });
@@ -432,7 +431,6 @@ async function handleAccountUpdated(account) {
   if (account.charges_enabled && !agency.stripe_charges_enabled) {
     console.log('Agency can now accept payments:', agency.name);
     
-    // Notify platform owner — key conversion milestone (TEMPLATE WIRED)
     const stripeMsg = await getSmsTemplate('admin_agency_stripe_connected', {
       name: agency.name,
       email: agency.email || 'N/A',
@@ -466,6 +464,9 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
   if (updateError) { console.error('Failed to update client:', updateError); return; }
 
   console.log(`Client ${isUpgrade ? 'upgraded' : 'activated'}:`, client.business_name);
+
+  // Update agency per-client billing (client reactivated = increase quantity)
+  try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
 
   if (client.vapi_phone_id) {
     try { await enablePhoneNumber(client.vapi_phone_id); console.log('✅ VAPI phone number re-enabled:', client.vapi_phone_id); }
@@ -515,6 +516,9 @@ async function handleClientSubscriptionUpdated(subscription, stripeAccountId) {
     subscription_status: status, status: clientStatus,
     trial_ends_at: subscription.trial_end ? new Date(subscription.trial_end * 1000) : null
   }).eq('id', client.id);
+
+  // Update agency per-client billing when client status changes
+  try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
 }
 
 async function handleClientSubscriptionDeleted(subscription, stripeAccountId) {
@@ -532,6 +536,9 @@ async function handleClientSubscriptionDeleted(subscription, stripeAccountId) {
   }
 
   await supabase.from('clients').update({ subscription_status: 'canceled', status: 'cancelled' }).eq('id', client.id);
+
+  // Update agency per-client billing (decrease quantity)
+  try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
 }
 
 async function handleClientPaymentSucceeded(invoice, stripeAccountId) {
