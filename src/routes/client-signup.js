@@ -7,6 +7,7 @@
 // UPDATED: Phase 2 — Phone numbers use serverUrl only (no assistantId)
 // UPDATED: Extract and store vapi_query_tool_id for dynamic config builder
 // UPDATED: New clients inherit nav_bg/nav_text from agency defaults (2026-04-17)
+// UPDATED: 2026-05-07 — Per-client billing triggers on client add (pricing restructure)
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -29,6 +30,9 @@ const { canAgencyAddClient } = require('./stripe-platform');
 
 // Import BYOT provisioning
 const { provisionBYOTNumber } = require('./byot');
+
+// Import per-client billing update
+const { updateClientBillingQuantity } = require('../lib/usage-tracker');
 
 // ============================================================================
 // COUNTRY → PROVISIONING METHOD
@@ -386,6 +390,18 @@ async function handleClientSignup(req, res) {
 
     console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult.provisioningMethod})`);
 
+    // ── Update per-client billing for the agency (non-blocking) ─────
+    try {
+      const billingResult = await updateClientBillingQuantity(agencyId);
+      if (billingResult.updated) {
+        console.log(`💰 Agency billing updated: ${billingResult.billableCount} billable clients`);
+      } else {
+        console.log(`💰 Agency billing not updated: ${billingResult.reason}`);
+      }
+    } catch (billingErr) {
+      console.warn('⚠️ Per-client billing update failed (non-fatal):', billingErr.message);
+    }
+
     // ============================================
     // STEP 5: CREATE USER RECORD
     // ============================================
@@ -641,6 +657,18 @@ async function handleAgencyAddClient(req, res) {
     }
     console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult.provisioningMethod})`);
 
+    // ── Update per-client billing for the agency (non-blocking) ─────
+    try {
+      const billingResult = await updateClientBillingQuantity(agencyId);
+      if (billingResult.updated) {
+        console.log(`💰 Agency billing updated: ${billingResult.billableCount} billable clients`);
+      } else {
+        console.log(`💰 Agency billing not updated: ${billingResult.reason}`);
+      }
+    } catch (billingErr) {
+      console.warn('⚠️ Per-client billing update failed (non-fatal):', billingErr.message);
+    }
+
     // === STEP 5: Create User Record WITH password ===
     const { data: newUser, error: userError } = await supabase
       .from('users')
@@ -772,6 +800,13 @@ async function provisionClient(clientId) {
       .eq('id', clientId)
       .select()
       .single();
+
+    // ── Update per-client billing (non-blocking) ────────────────────
+    try {
+      await updateClientBillingQuantity(client.agency_id);
+    } catch (billingErr) {
+      console.warn('⚠️ Per-client billing update failed (non-fatal):', billingErr.message);
+    }
     
     const { data: existingUser } = await supabase
       .from('users')
