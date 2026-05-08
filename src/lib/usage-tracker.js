@@ -22,8 +22,8 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // PLAN RATES (for dashboard display + internal calculations)
 // ============================================================================
 const PLAN_RATES = {
-  free:  { platformFee: 0,     perClient: 39.99, perMinute: 0.12 },
-  pro:   { platformFee: 199,   perClient: 9.99,  perMinute: 0.10 },
+  free:  { platformFee: 0,     perClient: 29.99, perMinute: 0.12 },
+  pro:   { platformFee: 179,   perClient: 9.99,  perMinute: 0.10 },
   scale: { platformFee: 499,   perClient: 0,     perMinute: 0.05 },
 };
 

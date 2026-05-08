@@ -35,7 +35,7 @@ const PLAN_DETAILS = {
   free: {
     name: 'Free',
     platformFeeCents: 0,
-    perClientCents: 3999,    // $39.99
+    perClientCents: 2999,    // $29.99
     perMinuteCents: 12,      // $0.12
     trial: false,
     requiresCardAtSignup: false,
@@ -43,7 +43,7 @@ const PLAN_DETAILS = {
   },
   pro: {
     name: 'Pro',
-    platformFeeCents: 19900, // $199
+    platformFeeCents: 17900, // $179
     perClientCents: 999,     // $9.99
     perMinuteCents: 10,      // $0.10
     trial: true,
