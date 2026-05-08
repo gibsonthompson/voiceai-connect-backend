@@ -146,7 +146,7 @@ const contentRender = require('./content-render');  // Content render service
 // Usage tracking (Phase 1 — metered billing)
 const usageReporterRoutes = require('./cron/usage-reporter');
 const { getAgencyUsageSummary } = require('./lib/usage-tracker');
-
+const testClientRoutes = require('./routes/test-client');
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 
@@ -618,6 +618,7 @@ app.get('/api/domain-test', (req, res) => {
 // ============================================================================
 
 app.use('/api/agency', demoPhoneRoutes);
+app.use('/api/agency', testClientRoutes);
 app.use('/api/agency', agencyTemplatesRoutes);
 app.use('/api/agency', aiPlaygroundRoutes);
 app.use('/api/agency', byotRoutes);
