@@ -172,15 +172,14 @@ async function createAgencyCheckout(req, res) {
       lineItems.push({ price: priceIds.platform, quantity: 1 });
     }
 
-    // Per-client metered (Free & Pro only — Scale is $0)
-    if (priceIds.client) {
-      lineItems.push({ price: priceIds.client });
-    }
-
-    // Per-minute metered (all tiers)
+    // Per-minute: metered via voice_minutes Stripe Meter (all tiers)
     if (priceIds.minute) {
       lineItems.push({ price: priceIds.minute });
     }
+
+    // NOTE: Per-client price is NOT included in checkout.
+    // It gets added to the subscription when the first billable client is created.
+    // This avoids charging for 0 clients at signup.
 
     if (lineItems.length === 0) {
       return res.status(400).json({ error: 'No Stripe prices configured for this plan. Set STRIPE_PRICE_* env vars.' });
@@ -242,8 +241,8 @@ async function createFreeUsageSubscription(agencyId) {
   }
 
   const items = [];
-  if (priceIds.client) items.push({ price: priceIds.client });
-  if (priceIds.minute) items.push({ price: priceIds.minute });
+  if (priceIds.client) items.push({ price: priceIds.client, quantity: 1 }); // 1 billable client
+  if (priceIds.minute) items.push({ price: priceIds.minute }); // metered via meter — no quantity
 
   try {
     const subscription = await stripe.subscriptions.create({
