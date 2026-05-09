@@ -147,6 +147,7 @@ const contentRender = require('./content-render');  // Content render service
 const usageReporterRoutes = require('./cron/usage-reporter');
 const { getAgencyUsageSummary } = require('./lib/usage-tracker');
 const testClientRoutes = require('./routes/test-client');
+const bookingRoutes = require('./routes/booking');
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 
@@ -781,7 +782,10 @@ app.post('/webhook/stripe-connect',
   express.raw({ type: 'application/json' }), 
   handleConnectStripeWebhook
 );
-
+// ============================================================================
+// BOOKING SYSTEM (Custom scheduling — replaces Calendly)
+// ============================================================================
+app.use('/api/booking', bookingRoutes);
 // ============================================================================
 // KNOWLEDGE BASE ROUTES
 // ============================================================================
