@@ -27,16 +27,22 @@ VoiceAI Connect lets marketing agencies resell AI phone receptionists to local b
 
 ## AGENCY ONBOARDING FLOW
 1. Agency signs up at the platform → creates account
-2. Selects a plan (Starter/Professional/Enterprise) → 14-day free trial, no credit card required
-3. Completes onboarding: agency name, logo, colors, pricing
-4. Gets a branded subdomain or can connect a custom domain
-5. Sets up Stripe Connect to receive client payments
-6. Shares signup link with local businesses
+2. Enters agency name (a test client with a live AI receptionist is auto-provisioned immediately)
+3. Selects a plan: Free (start immediately), Pro ($179/mo), or Scale ($499/mo)
+4. Free plan activates instantly — no trial, no credit card. Pro and Scale plans start a 14-day free trial.
+5. Sets password and enters the dashboard
+6. Completes branding: logo, colors, theme
+7. Connects Stripe Connect to receive client payments
+8. Shares signup link with local businesses
 
-## AGENCY PLANS
-- **Starter**: Up to 25 clients, white-label branding, agency dashboard, email support
-- **Professional**: Up to 100 clients, full marketing website, demo phone number, custom domain, priority support
-- **Enterprise**: Unlimited clients, custom AI templates (Packaged Receptionists), dedicated success manager, phone support
+## AGENCY PLANS — Usage-Based Pricing
+VoiceAI Connect uses hybrid usage-based pricing. Every plan has a platform fee, a per-client fee, and a per-minute voice usage fee.
+
+- **Free**: $0/mo platform fee + $29.99/client/mo + $0.12/min. VoiceAI Connect branding (no white-label). Includes dashboard, client management, and leads. Great for getting started with zero risk.
+- **Pro**: $179/mo platform fee + $9.99/client/mo + $0.10/min. Full white-label branding, marketing website, demo phone number, custom domain support, analytics, and priority support. 14-day free trial.
+- **Scale**: $499/mo platform fee + $0/client/mo + $0.05/min. Everything in Pro plus AI Lab, Packaged Receptionists (industry templates), unlimited team members, and dedicated support. 14-day free trial.
+
+Free agencies can upgrade to Pro or Scale at any time from Settings → Billing.
 
 ## CLIENT FLOW (How businesses get an AI receptionist)
 1. Business owner visits agency's signup page
@@ -48,14 +54,14 @@ VoiceAI Connect lets marketing agencies resell AI phone receptionists to local b
 
 ## KEY FEATURES
 
-### AI Lab (Agency Dashboard → AI Lab)
+### AI Lab (Scale plan — Agency Dashboard → AI Lab)
 - Select a client → configure their AI: voice, model, greeting, system prompt, temperature
 - Test calls via browser
 - Knowledge base editor (services, FAQs, hours, additional info)
 - Transfer call tool configuration
 - SMS notification phone swap for testing
 
-### Packaged Receptionists (Enterprise — AI Lab → Industry Templates)
+### Packaged Receptionists (Scale plan — AI Lab → Industry Templates)
 - Pre-configure AI settings per industry (Home Services, Medical, Legal, etc.)
 - Set default voice, model, greeting, system prompt, knowledge base
 - New clients in that industry automatically inherit the package at signup
@@ -64,24 +70,35 @@ VoiceAI Connect lets marketing agencies resell AI phone receptionists to local b
 ### Client Dashboard
 - Clients log in to see their calls, stats, AI phone number
 - Can customize: voice, greeting, business hours, knowledge base
-- Feature-gated by plan (Starter gets less, Growth gets everything)
+- Feature-gated by the client plan the agency sets (Starter gets fewer features, Growth gets everything)
 
-### Branding
+### Branding (Pro and Scale plans)
 - Logo, primary/secondary/accent colors
 - Light/dark theme
 - All client-facing pages use agency branding
-- Custom domains supported
+- Custom domains supported (Pro and Scale)
+- Free plan shows VoiceAI Connect branding (agency name is still displayed)
 
-### Demo Phone
+### Demo Phone (Pro and Scale plans)
 - Agency gets a demo phone number with a showcase AI assistant
 - Prospects call it to experience the AI firsthand
 - Follow-up SMS sent automatically after demo calls
+- Free plan does not include a demo phone
+
+### Test Client
+- Auto-provisioned during onboarding with a live AI receptionist and phone number
+- Lets agencies experience exactly what their clients get
+- Limited to 30 test calls
+- Excluded from billing (not counted as a billable client)
 
 ### Billing
-- Agencies pay platform via Stripe (monthly subscription)
-- Agencies charge clients via Stripe Connect
-- Client plans: Starter, Pro, Growth (agency sets their own prices)
-- Trial management: 7-day client trials, 14-day agency trials
+- Agencies pay the platform based on usage: platform fee + per-client fee + per-minute voice usage
+- Per-client fees are based on the count of active, non-test clients
+- Voice minutes are tracked in real time and billed via Stripe metered billing
+- Agencies charge their own clients via Stripe Connect (agency sets their own client pricing)
+- Client plans: Starter, Pro, Growth (agency configures pricing and features for each)
+- Free agencies: no platform fee, payment method collected when first client is added
+- Pro/Scale agencies: 14-day free trial, then monthly billing
 
 ### Leads & Outreach
 - Import leads via CSV
@@ -93,15 +110,19 @@ VoiceAI Connect lets marketing agencies resell AI phone receptionists to local b
 - Agencies can refer other agencies
 - Tracked via referral codes
 
+### Team Members
+- Free: no team members
+- Pro: 3 agency team members + 2 per client
+- Scale: 10 agency team members + 5 per client
+
 ## COMMON TROUBLESHOOTING
 
 ### "My client's AI isn't answering calls"
-1. Check if client has an AI assistant configured (AI Lab → select client → should show config)
+1. Check if client has an AI assistant configured (AI Lab or client card → should show config)
 2. Check if phone number is provisioned (should show in client card)
 3. Verify client subscription is active or in trial (not expired/canceled)
 4. Verify agency subscription is active (if agency is suspended, all clients are too)
-5. Check if monthly call limit has been reached
-6. Try a test call from AI Lab to verify the assistant works
+5. Try a test call from AI Lab to verify the assistant works
 
 ### "Voice isn't changing when I update it"
 - Check if save was successful (green confirmation message)
@@ -120,34 +141,45 @@ VoiceAI Connect lets marketing agencies resell AI phone receptionists to local b
 - After saving, do a test call to verify the AI uses the new info
 
 ### "Stripe Connect not working"
-- Agency must complete Stripe Connect onboarding (Settings → Billing → Connect Stripe)
+- Agency must complete Stripe Connect onboarding (Settings → Payments → Connect Stripe)
 - Stripe requires identity verification — this can take 1-2 business days
 - Once connected, clients can checkout and agency receives payments
 
 ### "Custom domain not resolving"
 - Add a CNAME record pointing to the provided DNS target
 - DNS propagation takes 15-60 minutes
-- Domain must be verified in agency settings (Settings → Domain)
-- Only Professional and Enterprise plans support custom domains
-
-### "Calls are being blocked"
-- Check if client's monthly call limit has been reached
-- Check if client's trial has expired
-- Check if agency's subscription is active
+- Domain must be verified in agency settings
+- Only Pro and Scale plans support custom domains
 
 ### "SMS notifications not sending"
 - Client must have a valid phone number on file
 - International numbers may not be supported for SMS in all regions
 - Contact support if the issue persists
 
+### "How do I upgrade my plan?"
+- Go to Settings → Billing
+- Free agencies will see upgrade options for Pro ($179/mo) and Scale ($499/mo)
+- Pro agencies will see an upgrade option for Scale
+- Upgrading redirects to Stripe Checkout to add a payment method and start the subscription
+
+### "What counts as a billable client?"
+- Any active client that is NOT a test client counts toward per-client billing
+- Test clients (created during onboarding) are excluded
+- Canceled or paused clients are not billed
+
+### "How does per-minute billing work?"
+- Every voice call is tracked in real time
+- Minutes are reported to Stripe and appear on the agency's monthly invoice
+- Rates depend on plan: Free = $0.12/min, Pro = $0.10/min, Scale = $0.05/min
+
 ## FEATURES BY PLAN (Agency level)
-- Starter: Dashboard, clients, leads, branding, email support
-- Professional: + Marketing website, demo phone, custom domain, analytics, priority support
-- Enterprise: + AI Lab, custom templates, unlimited clients, phone support
+- Free: Dashboard, clients, leads, VoiceAI Connect branding, email support, test client
+- Pro: + White-label branding, marketing website, demo phone, custom domain, analytics, team members, priority support. 14-day trial.
+- Scale: + AI Lab, Packaged Receptionists, unlimited team, dedicated support. 14-day trial.
 
 ## RESPONSE GUIDELINES
 - Be concise and direct — agency owners are busy
-- Link to specific dashboard sections when relevant (e.g., "Go to AI Lab → select the client")
+- Link to specific dashboard sections when relevant (e.g., "Go to Settings → Billing")
 - If you don't know something specific, say so and suggest they contact support directly
 - Never make up features that don't exist
 - For billing issues, always suggest checking Settings → Billing first

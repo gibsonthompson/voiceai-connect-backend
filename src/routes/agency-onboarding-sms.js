@@ -35,6 +35,7 @@ function getAgencyUrls(agency) {
     clientsUrl: `${platformUrl}/agency/clients`,
     loginUrl: `${platformUrl}/agency/login`,
     signupUrl: `${baseUrl}/signup`,
+    dashboardUrl: `${platformUrl}/agency/dashboard`,
   };
 }
 
@@ -90,8 +91,8 @@ async function getStepMessage(step, agency, urls) {
       return msg || `${name}, one important setup step left: connect Stripe so you can collect payments from your clients.\n\nIt takes about 2 minutes and you'll be ready to start earning recurring revenue.\n\n${urls.settingsUrl}?tab=payments`;
     }
     case 3: {
-      const msg = await getSmsTemplate('onboarding_sms_3', { clients_url: urls.clientsUrl });
-      return msg || `Pro tip: add yourself as a test client to see exactly what your customers will experience.\n\nYou'll have a live AI receptionist answering calls for a real business in under 2 minutes — that's the same setup your clients get.\n\n${urls.clientsUrl}`;
+      const msg = await getSmsTemplate('onboarding_sms_3', { dashboard_url: urls.dashboardUrl });
+      return msg || `Pro tip: you already have a test client with a live AI receptionist in your dashboard.\n\nCall the test number to hear exactly what your clients will experience — then share your signup link to start landing real clients.\n\n${urls.dashboardUrl}`;
     }
     case 4: {
       const msg = await getSmsTemplate('onboarding_sms_4', { name, settings_url: urls.settingsUrl });
@@ -102,12 +103,12 @@ async function getStepMessage(step, agency, urls) {
       return msg || `${name}, your client signup page is live:\n${urls.signupUrl}\n\nShare it in your outreach, add it to your website, or DM it directly to a prospect.\n\nEvery business that signs up gets their own AI receptionist — and pays YOU monthly.`;
     }
     case 6: {
-      const { data: clients } = await supabase.from('clients').select('id').eq('agency_id', agency.id).limit(1);
+      const { data: clients } = await supabase.from('clients').select('id').eq('agency_id', agency.id).eq('is_test_client', false).limit(1);
       const clientCount = clients?.length || 0;
       const missing = [];
       if (!agency.logo_url) missing.push('• Upload your logo');
       if (!agency.stripe_charges_enabled) missing.push('• Connect Stripe');
-      if (clientCount === 0) missing.push('• Add your first client');
+      if (clientCount === 0) missing.push('• Land your first client');
 
       if (missing.length === 0) {
         const msg = await getSmsTemplate('onboarding_sms_6_complete', { name, signup_url: urls.signupUrl });
