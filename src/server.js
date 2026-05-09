@@ -148,6 +148,7 @@ const usageReporterRoutes = require('./cron/usage-reporter');
 const { getAgencyUsageSummary } = require('./lib/usage-tracker');
 const testClientRoutes = require('./routes/test-client');
 const bookingRoutes = require('./routes/booking');
+const cleanupOrphanedTestClients = require('./routes/cleanup-orphaned-test-clients');
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 
@@ -755,11 +756,16 @@ app.post('/api/cron/warn-agency-trials', async (req, res) => {
 
 app.use('/api/cron', abandonedCartRoutes);
 
+
 // Agency onboarding engagement SMS (called by cron-job.org every hour)
 app.use('/api/cron', agencyOnboardingSmsRoutes);
 
+app.use('/api/cron', cleanupOrphanedTestClients);
+
 // Usage reporting cron (reports voice minutes to Stripe metered billing)
 app.use('/api/cron', usageReporterRoutes);
+
+
 
 // ============================================================================
 // WEBHOOK ROUTES
