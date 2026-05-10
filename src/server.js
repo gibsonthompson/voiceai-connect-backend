@@ -9,6 +9,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { supabase } = require('./lib/supabase');
+const { expressErrorHandler, setupProcessErrorHandlers } = require('./lib/error-monitor');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -620,7 +621,7 @@ app.get('/api/domain-test', (req, res) => {
 // ============================================================================
 // DEMO PHONE, TEMPLATES, AI PLAYGROUND, BYOT, FEEDBACK, SUPPORT, LEADS
 // ============================================================================
-
+setupProcessErrorHandlers();
 app.use('/api/agency', demoPhoneRoutes);
 app.use('/api/agency', testClientRoutes);
 app.use('/api/agency', agencyTemplatesRoutes);
@@ -853,7 +854,7 @@ app.use((req, res) => {
 // ============================================================================
 // START SERVER
 // ============================================================================
-
+app.use(expressErrorHandler);
 app.listen(PORT, () => {
   console.log(`
 ╔═══════════════════════════════════════════════════════════════╗
