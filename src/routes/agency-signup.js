@@ -5,6 +5,8 @@
 //          after the agency sets their actual name and phone.
 // UPDATED: 2026-05-07 — Default plan_type changed to 'free', signup status
 //          changed to 'active' (free tier requires no payment to start).
+// UPDATED: 2026-05-09 — Set onboarding_completed_at timestamp when onboarding
+//          finishes, used by activation SMS sequence for timing.
 // ============================================================================
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
@@ -483,10 +485,12 @@ async function handleAgencyOnboarding(req, res) {
         
       case 5: // Password step
         updateData.onboarding_completed = true;
+        updateData.onboarding_completed_at = new Date().toISOString();
         break;
         
       case 6: // Complete
         updateData.onboarding_completed = true;
+        updateData.onboarding_completed_at = new Date().toISOString();
         break;
     }
     

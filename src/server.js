@@ -759,6 +759,7 @@ app.use('/api/cron', abandonedCartRoutes);
 
 // Agency onboarding engagement SMS (called by cron-job.org every hour)
 app.use('/api/cron', agencyOnboardingSmsRoutes);
+app.use('/api/cron', activationSmsRoutes);
 
 app.use('/api/cron', cleanupOrphanedTestClients);
 

@@ -1,16 +1,24 @@
 // ============================================================================
 // AGENCY ONBOARDING ENGAGEMENT SMS - Cron Handler
-// 9-step conditional drip for agencies that ABANDONED onboarding.
-// UPDATED: Only targets agencies with onboarding_completed = false.
-//          Agencies that finished onboarding are in the dashboard and
-//          don't need text nudges — the dashboard guides them instead.
-//          Trial expiry warnings are handled by warnExpiringAgencyTrials.
+// ⚠️ LEGACY — This file targets onboarding_completed = false.
+//    Since onboarding was shortened to 3 steps (name → plan → password),
+//    most agencies complete it in minutes and are never picked up by this cron.
+//
+//    The PRIMARY engagement system is now activation-sms.js which targets
+//    onboarding_completed = true (agencies that made it into the dashboard).
+//
+//    This file remains active for any edge-case agencies that stall during
+//    the 3-step signup itself. Do not add new features here — add them
+//    to activation-sms.js instead.
+//
+// UPDATED: 2026-05-09 — Added deprecation notice, switched to sendAndLogSMS
 // ============================================================================
 
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
-const { sendTelnyxSMS, formatPhoneE164 } = require('../lib/notifications');
+const { formatPhoneE164 } = require('../lib/notifications');
+const { sendAndLogSMS } = require('../lib/sms-logger');
 const { getSmsTemplate } = require('../lib/sms-templates');
 
 // ============================================================================
@@ -41,33 +49,29 @@ function getAgencyUrls(agency) {
 
 // ============================================================================
 // CHECK ELIGIBILITY & CONDITIONS FOR EACH STEP
-// Returns { eligible: bool, step: number } or null
 // ============================================================================
 async function getNextEligibleStep(agency) {
   const currentStep = agency.onboarding_sms_step || 0;
   const nextStep = currentStep + 1;
   if (nextStep > 9) return null;
 
-  // Check timing
   const signupTime = new Date(agency.created_at).getTime();
   const hoursSinceSignup = (Date.now() - signupTime) / (1000 * 60 * 60);
   if (hoursSinceSignup < STEP_HOURS[nextStep]) return null;
 
-  // Min 2 hour gap between messages
   if (agency.onboarding_sms_last_sent_at) {
     const hoursSinceLastSent = (Date.now() - new Date(agency.onboarding_sms_last_sent_at).getTime()) / (1000 * 60 * 60);
     if (hoursSinceLastSent < 2) return null;
   }
 
-  // Step-specific conditions (skip if already done)
   switch (nextStep) {
-    case 1: // Logo nudge — skip if already has logo
+    case 1:
       if (agency.logo_url) return getNextEligibleStep({ ...agency, onboarding_sms_step: nextStep });
       break;
-    case 2: // Stripe Connect — skip if already connected
+    case 2:
       if (agency.stripe_charges_enabled) return getNextEligibleStep({ ...agency, onboarding_sms_step: nextStep });
       break;
-    case 4: // Stripe reminder — skip if connected
+    case 4:
       if (agency.stripe_charges_enabled) return getNextEligibleStep({ ...agency, onboarding_sms_step: nextStep });
       break;
   }
@@ -76,7 +80,7 @@ async function getNextEligibleStep(agency) {
 }
 
 // ============================================================================
-// GET MESSAGE FOR STEP — Template first, fallback to hardcoded
+// GET MESSAGE FOR STEP
 // ============================================================================
 async function getStepMessage(step, agency, urls) {
   const name = agency.name || 'there';
@@ -121,7 +125,7 @@ async function getStepMessage(step, agency, urls) {
     }
     case 7: {
       const msg = await getSmsTemplate('onboarding_sms_7', { name, signup_url: urls.signupUrl });
-      return msg || `${name}, you're halfway through your free trial.\n\nAgencies that land their first client in week 1 are far more likely to build real recurring revenue.\n\nYour signup page is ready for prospects:\n${urls.signupUrl}\n\nNeed help? Call or text (678) 316-1454`;
+      return msg || `${name}, you're halfway through your free trial.\n\nAgencies that land their first client in week 1 are far more likely to build real recurring revenue.\n\nYour signup page is ready for prospects:\n${urls.signupUrl}\n\nNeed help? Reply to this text.`;
     }
     case 8: {
       const trialEndsAt = agency.trial_ends_at ? new Date(agency.trial_ends_at) : null;
@@ -158,14 +162,8 @@ router.post('/agency-onboarding-sms', async (req, res) => {
   }
 
   try {
-    console.log('📨 Running onboarding engagement SMS check...');
+    console.log('📨 Running legacy onboarding engagement SMS check...');
 
-    // ========================================================================
-    // KEY FIX: Only target agencies that HAVEN'T completed onboarding.
-    // Once onboarding_completed = true, the agency is in the dashboard and
-    // gets guided by inline prompts instead of text messages.
-    // Trial expiry warnings are handled separately by warnExpiringAgencyTrials.
-    // ========================================================================
     const { data: agencies, error } = await supabase
       .from('agencies')
       .select('*')
@@ -176,14 +174,13 @@ router.post('/agency-onboarding-sms', async (req, res) => {
       .order('created_at', { ascending: true });
 
     if (error) { console.error('❌ Onboarding SMS query error:', error); return res.status(500).json({ error: 'Database query failed' }); }
-    if (!agencies || agencies.length === 0) { console.log('✅ No onboarding SMS to process'); return res.json({ success: true, processed: 0, sent: 0 }); }
+    if (!agencies || agencies.length === 0) { console.log('✅ No legacy onboarding SMS to process'); return res.json({ success: true, processed: 0, sent: 0 }); }
 
-    console.log(`📋 Found ${agencies.length} agencies to check for onboarding SMS`);
+    console.log(`📋 Found ${agencies.length} agencies to check for legacy onboarding SMS`);
     let sent = 0, skipped = 0;
     const results = [];
 
     for (const agency of agencies) {
-      // Skip agencies still in abandoned cart sequence
       if (agency.subscription_status === 'pending' && (agency.abandoned_cart_step || 0) < 5) {
         skipped++;
         continue;
@@ -200,24 +197,35 @@ router.post('/agency-onboarding-sms', async (req, res) => {
       const message = await getStepMessage(step, agency, urls);
       if (!message) { skipped++; continue; }
 
-      console.log(`📱 Sending onboarding step ${step} to ${agency.name} (${formattedPhone})`);
-      const smsSent = await sendTelnyxSMS(formattedPhone, message);
+      console.log(`📱 Sending legacy onboarding step ${step} to ${agency.name} (${formattedPhone})`);
+
+      const smsSent = await sendAndLogSMS({
+        phone: agency.phone,
+        message,
+        agencyId: agency.id,
+        recipientType: 'agency_owner',
+        messageType: `onboarding_sms_${step}`,
+        metadata: { step, legacy: true },
+      });
 
       if (smsSent) {
-        await supabase.from('agencies').update({ onboarding_sms_step: step, onboarding_sms_last_sent_at: new Date().toISOString() }).eq('id', agency.id);
+        await supabase.from('agencies').update({
+          onboarding_sms_step: step,
+          onboarding_sms_last_sent_at: new Date().toISOString(),
+        }).eq('id', agency.id);
         sent++;
         results.push({ agency: agency.name, step, status: 'sent' });
-        console.log(`✅ Onboarding step ${step} sent to ${agency.name}`);
+        console.log(`✅ Legacy onboarding step ${step} sent to ${agency.name}`);
       } else {
         results.push({ agency: agency.name, step, status: 'failed' });
-        console.log(`❌ Failed onboarding step ${step} for ${agency.name}`);
+        console.log(`❌ Failed legacy onboarding step ${step} for ${agency.name}`);
       }
     }
 
-    console.log(`📨 Onboarding SMS complete: ${sent} sent, ${skipped} skipped out of ${agencies.length}`);
+    console.log(`📨 Legacy onboarding SMS complete: ${sent} sent, ${skipped} skipped out of ${agencies.length}`);
     res.json({ success: true, processed: agencies.length, sent, skipped, results });
   } catch (error) {
-    console.error('❌ Onboarding SMS cron error:', error);
+    console.error('❌ Legacy onboarding SMS cron error:', error);
     res.status(500).json({ error: 'Cron job failed', message: error.message });
   }
 });

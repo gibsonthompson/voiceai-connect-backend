@@ -24,6 +24,7 @@ const {
   sendPlatformNotificationSMS
 } = require('../lib/notifications');
 const { getSmsTemplate } = require('../lib/sms-templates');
+const { sendAndLogSMS } = require('../lib/sms-logger');
 const { getPlanRates } = require('../lib/usage-tracker');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -614,6 +615,8 @@ async function handleAgencyTrialEnding(subscription) {
 
 // ============================================================================
 // WARN NO-CARD TRIAL AGENCIES (3 days before expiry)
+// UPDATED: 2026-05-09 — Free plan guard, dedup via trial_warning_last_sent_at,
+//          sendAndLogSMS for full SMS logging
 // ============================================================================
 async function warnExpiringAgencyTrials() {
   console.log('Checking for expiring agency trials (no-card)...');
@@ -623,7 +626,7 @@ async function warnExpiringAgencyTrials() {
 
   const { data: expiringAgencies, error } = await supabase
     .from('agencies')
-    .select('id, name, email, phone, plan_type, trial_ends_at, country')
+    .select('id, name, email, phone, plan_type, trial_ends_at, country, trial_warning_last_sent_at')
     .in('subscription_status', ['trial', 'trialing'])
     .is('stripe_subscription_id', null)
     .lt('trial_ends_at', threeDaysFromNow.toISOString())
@@ -639,6 +642,22 @@ async function warnExpiringAgencyTrials() {
 
   for (const agency of expiringAgencies || []) {
     try {
+      // ── FREE PLAN GUARD: Free agencies don't have trials ──────────
+      const plan = agency.plan_type || 'free';
+      if (plan === 'free' || plan === 'starter') {
+        console.log(`⏭️ Skipping ${agency.name} — Free plan, no trial`);
+        continue;
+      }
+
+      // ── DEDUP: Don't send more than once per day ──────────────────
+      if (agency.trial_warning_last_sent_at) {
+        const hoursSinceLastWarning = (now.getTime() - new Date(agency.trial_warning_last_sent_at).getTime()) / (1000 * 60 * 60);
+        if (hoursSinceLastWarning < 20) {
+          console.log(`⏭️ Skipping ${agency.name} — already warned ${Math.round(hoursSinceLastWarning)}h ago`);
+          continue;
+        }
+      }
+
       const trialEnd = new Date(agency.trial_ends_at);
       const hoursLeft = (trialEnd.getTime() - now.getTime()) / (1000 * 60 * 60);
       const daysLeft = Math.ceil(hoursLeft / 24);
@@ -649,27 +668,39 @@ async function warnExpiringAgencyTrials() {
       if (daysLeft >= 3) {
         const templateMsg = await getSmsTemplate('agency_trial_warning_day3', { name: agency.name, trial_end_date: trialEndDate });
         agencyMessage = templateMsg ||
-          `Hey ${agency.name} — your VoiceAI Connect trial wraps up on ${trialEndDate}.\n\nSubscribe here:\nmyvoiceaiconnect.com/agency/settings?tab=billing\n\nQuestions? Reply to this text.`;
+          `Hey ${agency.name} — quick heads up, your VoiceAI Connect trial wraps up on ${trialEndDate}.\n\nYour agency is fully set up — branding, pricing, signup page, all of it. You're ready to start bringing on clients whenever you want.\n\nIf you'd like to keep everything as-is, you can subscribe here:\nmyvoiceaiconnect.com/agency/settings?tab=billing\n\nAny questions, just reply to this text.`;
       } else if (daysLeft === 2) {
         const templateMsg = await getSmsTemplate('agency_trial_warning_day2', { name: agency.name, trial_end_date: trialEndDate });
         agencyMessage = templateMsg ||
-          `Hey ${agency.name} — your trial ends ${trialEndDate}. After that your dashboard goes offline.\n\nSubscribe:\nmyvoiceaiconnect.com/agency/settings?tab=billing`;
+          `Hey ${agency.name} — just wanted to make sure this doesn't catch you off guard. Your VoiceAI Connect trial ends ${trialEndDate}.\n\nAfter that, your dashboard and client signup page will go offline, and any active AI receptionists will stop taking calls.\n\nIf you're planning to keep going, subscribing takes about 30 seconds:\nmyvoiceaiconnect.com/agency/settings?tab=billing\n\nAnd if it's not the right time, no worries at all.`;
       } else if (daysLeft <= 1) {
         const templateMsg = await getSmsTemplate('agency_trial_warning_day1', { name: agency.name });
         agencyMessage = templateMsg ||
-          `Hey ${agency.name} — your VoiceAI Connect trial ends tomorrow. Subscribe to keep running:\nmyvoiceaiconnect.com/agency/settings?tab=billing`;
+          `Hey ${agency.name} — your VoiceAI Connect trial ends tomorrow. After that your agency goes offline and any AI receptionists stop answering.\n\nIf you want to keep things running:\nmyvoiceaiconnect.com/agency/settings?tab=billing\n\nTakes less than a minute. Let me know if you need anything.`;
       }
 
       if (agency.phone && agencyMessage) {
-        const { sendTelnyxSMS } = require('../lib/notifications');
-        await sendTelnyxSMS(agency.phone, agencyMessage);
+        await sendAndLogSMS({
+          phone: agency.phone,
+          message: agencyMessage,
+          agencyId: agency.id,
+          recipientType: 'agency_owner',
+          messageType: `trial_warning_day${daysLeft}`,
+          metadata: { daysLeft, plan, trialEndDate },
+        });
+
+        // Update dedup timestamp
+        await supabase.from('agencies').update({
+          trial_warning_last_sent_at: now.toISOString(),
+        }).eq('id', agency.id);
       }
 
+      // Admin notification
       const adminTemplate = await getSmsTemplate('admin_agency_trial_expiring', {
-        days_left: daysLeft, name: agency.name, email: agency.email, plan: agency.plan_type || 'free',
+        days_left: daysLeft, name: agency.name, email: agency.email, plan: plan,
       });
       await sendPlatformNotificationSMS(
-        adminTemplate || `Agency Trial Expiring (${daysLeft}d)\n${agency.name}\n${agency.email}\nPlan: ${agency.plan_type || 'free'}`
+        adminTemplate || `Agency Trial Expiring (${daysLeft}d)\n${agency.name}\n${agency.email}\nPlan: ${plan}`
       );
 
       results.push({ id: agency.id, name: agency.name, daysLeft, success: true });

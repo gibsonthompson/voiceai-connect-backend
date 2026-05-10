@@ -1,13 +1,16 @@
 // ============================================================================
 // ABANDONED CART SMS - Cron Handler
 // Sends up to 5 nudge SMS to agencies who signed up but never subscribed.
-// UPDATED: Uses getSmsTemplate() for editable messages + password-aware recovery links
+// UPDATED: 2026-05-09 — Uses sendAndLogSMS for full SMS logging,
+//          updated messages to remove old pricing references,
+//          "start free" instead of "14-day free trial"
 // ============================================================================
 
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
-const { sendTelnyxSMS, formatPhoneE164 } = require('../lib/notifications');
+const { formatPhoneE164 } = require('../lib/notifications');
+const { sendAndLogSMS } = require('../lib/sms-logger');
 const { createPasswordToken } = require('./agency-signup');
 const { getSmsTemplate } = require('../lib/sms-templates');
 
@@ -50,15 +53,22 @@ async function getRecoveryLink(agency) {
 
 // ============================================================================
 // HARDCODED FALLBACKS (used only if DB template is missing)
+// UPDATED: 2026-05-09 — Removed "white-label", "14-day free trial" references
 // ============================================================================
 function getFallbackMessage(step, name, recoveryLink) {
   switch (step) {
-    case 1: return `Hey ${name}! 👋\n\nLooks like you didn't finish setting up your VoiceAI Connect account. Your white-label AI receptionist platform is waiting for you.\n\nPick up where you left off:\n${recoveryLink}\n\nTakes less than 5 minutes to finish!`;
-    case 2: return `Hi ${name},\n\nJust a quick reminder — your VoiceAI Connect setup is almost done.\n\nHere's what you're about to unlock:\n✅ Your own branded AI receptionist platform\n✅ Resell to unlimited businesses\n✅ Clients pay YOU directly via Stripe\n✅ Start free — no credit card needed\n\nFinish setup: ${recoveryLink}`;
-    case 3: return `Hey ${name},\n\nAgencies on VoiceAI Connect are already signing up clients and earning recurring revenue.\n\nEvery day without your AI receptionist platform is missed revenue from businesses that need 24/7 phone coverage.\n\nGet started free — no credit card needed:\n${recoveryLink}`;
-    case 4: return `${name}, quick question — was there something holding you back from finishing your VoiceAI Connect setup?\n\nIf you ran into any issues, reply to this text and we'll help you get set up personally.\n\nYour account is still waiting:\n${recoveryLink}`;
-    case 5: return `Hi ${name},\n\nThis is our last reminder about your VoiceAI Connect account.\n\nIf now isn't the right time, no worries at all. Your account will be here whenever you're ready.\n\nWhen you're ready to launch your AI receptionist agency:\n${recoveryLink}\n\nWe're here if you have any questions. 🙏`;
-    default: return null;
+    case 1:
+      return `Hey ${name}! 👋\n\nYou started setting up your AI receptionist agency on VoiceAI Connect — nice.\n\nPick up where you left off, it takes about 2 minutes to finish:\n${recoveryLink}`;
+    case 2:
+      return `${name}, quick question — what type of businesses are you planning to sell AI receptionists to?\n\nWe ask because agencies targeting home services, medical, and legal are seeing the fastest traction right now.\n\nFinish your setup and start free — no credit card needed:\n${recoveryLink}`;
+    case 3:
+      return `Hey ${name},\n\nThe average VoiceAI Connect agency charges their clients $149/mo per AI receptionist.\n\n10 clients = $1,490/mo in recurring revenue. And you keep 100% — we never take a cut.\n\nStart free, no credit card needed:\n${recoveryLink}`;
+    case 4:
+      return `${name}, quick question — was there something holding you back from finishing your VoiceAI Connect setup?\n\nIf you ran into any issues, reply to this text and we'll help you get set up personally.\n\nYour account is still waiting:\n${recoveryLink}`;
+    case 5:
+      return `Hi ${name},\n\nThis is our last reminder about your VoiceAI Connect account.\n\nIf now isn't the right time, no worries at all. Your account will be here whenever you're ready.\n\nWhen you're ready to launch your AI receptionist agency:\n${recoveryLink}\n\nWe're here if you have any questions. 🙏`;
+    default:
+      return null;
   }
 }
 
@@ -122,15 +132,29 @@ router.post('/abandoned-cart', async (req, res) => {
       if (!message) { skipped++; continue; }
 
       console.log(`📱 Sending abandoned cart step ${nextStep} to ${agency.name} (${formattedPhone})`);
-      const smsSent = await sendTelnyxSMS(formattedPhone, message);
+
+      const smsSent = await sendAndLogSMS({
+        phone: agency.phone,
+        message,
+        agencyId: agency.id,
+        recipientType: 'agency_owner',
+        messageType: `abandoned_cart_${nextStep}`,
+        metadata: {
+          step: nextStep,
+          linkType: recoveryLink.includes('set-password') ? 'set-password' : 'login',
+        },
+      });
 
       if (smsSent) {
-        await supabase.from('agencies').update({ abandoned_cart_step: nextStep, abandoned_cart_last_sent_at: new Date().toISOString() }).eq('id', agency.id);
+        await supabase.from('agencies').update({
+          abandoned_cart_step: nextStep,
+          abandoned_cart_last_sent_at: new Date().toISOString(),
+        }).eq('id', agency.id);
         sent++;
-        results.push({ agency: agency.name, step: nextStep, phone: formattedPhone, status: 'sent', linkType: recoveryLink.includes('set-password') ? 'set-password' : 'login' });
+        results.push({ agency: agency.name, step: nextStep, status: 'sent', linkType: recoveryLink.includes('set-password') ? 'set-password' : 'login' });
         console.log(`✅ Step ${nextStep} sent to ${agency.name}`);
       } else {
-        results.push({ agency: agency.name, step: nextStep, phone: formattedPhone, status: 'failed' });
+        results.push({ agency: agency.name, step: nextStep, status: 'failed' });
         console.log(`❌ Failed to send step ${nextStep} to ${agency.name}`);
       }
     }
@@ -168,13 +192,31 @@ router.post('/abandoned-cart/test/:agencyId', async (req, res) => {
     const message = templateMsg || getFallbackMessage(targetStep, name, recoveryLink);
 
     console.log(`🧪 Test sending step ${targetStep} to ${agency.name}`);
-    const smsSent = await sendTelnyxSMS(formattedPhone, message);
+
+    const smsSent = await sendAndLogSMS({
+      phone: agency.phone,
+      message,
+      agencyId: agency.id,
+      recipientType: 'agency_owner',
+      messageType: `abandoned_cart_${targetStep}`,
+      metadata: { step: targetStep, test: true },
+    });
 
     if (smsSent) {
-      await supabase.from('agencies').update({ abandoned_cart_step: targetStep, abandoned_cart_last_sent_at: new Date().toISOString() }).eq('id', agencyId);
+      await supabase.from('agencies').update({
+        abandoned_cart_step: targetStep,
+        abandoned_cart_last_sent_at: new Date().toISOString(),
+      }).eq('id', agencyId);
     }
 
-    res.json({ success: smsSent, agency: agency.name, step: targetStep, phone: formattedPhone, linkType: recoveryLink.includes('set-password') ? 'set-password' : 'login', message: smsSent ? `Step ${targetStep} sent` : 'SMS failed' });
+    res.json({
+      success: smsSent,
+      agency: agency.name,
+      step: targetStep,
+      phone: formattedPhone,
+      linkType: recoveryLink.includes('set-password') ? 'set-password' : 'login',
+      message: smsSent ? `Step ${targetStep} sent` : 'SMS failed',
+    });
   } catch (error) {
     console.error('❌ Test abandoned cart error:', error);
     res.status(500).json({ error: error.message });
