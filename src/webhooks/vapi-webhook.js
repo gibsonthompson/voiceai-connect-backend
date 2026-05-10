@@ -3,6 +3,8 @@
 // UPDATED: 2026-05-05 — Comprehensive demo call summary with AI extraction,
 //   fixed duration extraction, personalized SMS
 // UPDATED: 2026-05-06 — Usage record tracking for metered billing (Phase 1)
+// UPDATED: 2026-05-09 — Demo SMS: area code location, actionable follow-up,
+//   sendAndLogSMS for full SMS logging
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -12,6 +14,8 @@ const { buildDynamicAssistantConfig } = require('../lib/assistant-config-builder
 const { notifyTeamMembers } = require('../lib/team-notifications');
 const { buildDemoDynamicConfig, buildDemoSmsContent, getIndustryDemoByPhone, buildIndustryDemoConfig } = require('../lib/demo-config');
 const { getSmsTemplate } = require('../lib/sms-templates');
+const { sendAndLogSMS } = require('../lib/sms-logger');
+const { formatPhone, getPhoneLocation, formatDuration } = require('../lib/area-codes');
 const { insertUsageRecord } = require('../lib/usage-tracker');
 
 const DEFAULT_PLAN_FEATURES = {
@@ -218,11 +222,8 @@ Extract and return ONLY valid JSON — no backticks, no extra text:
 // industryKey: set = industry demo (simple follow-up)
 // industryKey: null = generic branded demo (signup link)
 //
-// REWRITTEN: 2026-05-05
-// - Duration extracted from all VAPI locations
-// - Structured data from VAPI analysisPlan + Claude fallback
-// - Comprehensive admin SMS with business info, summary, interest level
-// - Personalized caller follow-up SMS
+// REWRITTEN: 2026-05-05 — Duration, AI summary, comprehensive SMS
+// UPDATED: 2026-05-09 — Area code location, actionable follow-up, sendAndLogSMS
 // ============================================================================
 async function handleDemoCall(agency, message, industryKey = null) {
   const call = message.call;
@@ -235,7 +236,6 @@ async function handleDemoCall(agency, message, industryKey = null) {
     || message.durationSeconds
     || null;
 
-  // Compute from timestamps as last resort
   if (!durationSeconds && call.startedAt && call.endedAt) {
     durationSeconds = Math.round(
       (new Date(call.endedAt).getTime() - new Date(call.startedAt).getTime()) / 1000
@@ -286,12 +286,21 @@ async function handleDemoCall(agency, message, industryKey = null) {
     }
   }
 
-  // ── Format for display ────────────────────────────────────────────────
-  const { formatPhoneDisplay, sendTelnyxSMS } = require('../lib/notifications');
-  const callerDisplay = callerPhone ? formatPhoneDisplay(callerPhone) : 'Unknown';
+  // ── Format for display (using area-codes module) ──────────────────────
+  const { formatPhoneDisplay } = require('../lib/notifications');
+
+  // Caller display: formatted phone + area code location
+  const callerFormatted = callerPhone ? formatPhone(callerPhone) : 'Unknown';
+  const callerLocation = callerPhone ? getPhoneLocation(callerPhone) : null;
+  const callerDisplay = callerLocation
+    ? `${callerFormatted} · ${callerLocation}`
+    : callerFormatted;
+
+  // Duration: clean format via shared helper
   const durationDisplay = durationSeconds
-    ? `${Math.floor(durationSeconds / 60)}m ${durationSeconds % 60}s`
+    ? formatDuration(durationSeconds)
     : null;
+
   const businessLabel = businessName
     ? (businessType ? `${businessName} (${businessType.replace(/_/g, ' ')})` : businessName)
     : (businessType ? businessType.replace(/_/g, ' ') : null);
@@ -321,16 +330,67 @@ async function handleDemoCall(agency, message, industryKey = null) {
           lines.push('');
         }
         lines.push(`Questions? Give us a call back anytime.`);
-        await sendTelnyxSMS(callerPhone, lines.join('\n'));
+
+        await sendAndLogSMS({
+          phone: callerPhone,
+          message: lines.join('\n'),
+          agencyId: agency.id,
+          recipientType: 'prospect',
+          messageType: 'demo_followup_industry',
+          metadata: { industryKey, businessName, businessType },
+        });
         console.log('✅ Industry demo follow-up SMS sent');
 
       } else if (agency.demo_followup_sms_override) {
-        await sendTelnyxSMS(callerPhone, agency.demo_followup_sms_override);
+        await sendAndLogSMS({
+          phone: callerPhone,
+          message: agency.demo_followup_sms_override,
+          agencyId: agency.id,
+          recipientType: 'prospect',
+          messageType: 'demo_followup_custom',
+          metadata: { businessName, businessType, custom: true },
+        });
         console.log('✅ Demo follow-up SMS sent (custom override)');
 
       } else {
         // Generic branded demo — personalized signup link
-        await sendDemoCallFollowUpSMS(callerPhone, agency, businessName, businessType, serviceDiscussed);
+        const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
+        let signupUrl;
+        if (agency.marketing_domain && agency.domain_verified) {
+          signupUrl = `https://${agency.marketing_domain}/signup`;
+        } else if (agency.slug) {
+          signupUrl = `https://${agency.slug}.${platformDomain}/signup`;
+        } else {
+          signupUrl = `https://${platformDomain}/signup`;
+        }
+
+        const agencyName = agency.name || 'our';
+        const nameNote = businessName ? ` for ${businessName}` : '';
+
+        const lines = [];
+
+        if (businessName) {
+          lines.push(`Thanks for trying ${agencyName}'s AI receptionist${nameNote}! 🎉`);
+          lines.push('');
+          lines.push(`That demo showed exactly how AI would answer calls for ${businessName} — 24/7, with instant text summaries after every call.`);
+        } else {
+          lines.push(`Thanks for trying ${agencyName}'s AI receptionist! 🎉`);
+          lines.push('');
+          lines.push(`What you just experienced is exactly how AI would answer your business calls — 24/7, no missed calls, instant summaries.`);
+        }
+
+        lines.push('');
+        lines.push(`Ready to get this${businessName ? ` for ${businessName}` : ' for your business'}? Start free, no credit card needed:`);
+        lines.push(signupUrl);
+
+        await sendAndLogSMS({
+          phone: callerPhone,
+          message: lines.join('\n'),
+          agencyId: agency.id,
+          recipientType: 'prospect',
+          messageType: 'demo_followup',
+          metadata: { businessName, businessType, serviceDiscussed },
+        });
         console.log('✅ Demo follow-up SMS sent');
       }
     } catch (smsErr) {
@@ -340,6 +400,7 @@ async function handleDemoCall(agency, message, industryKey = null) {
 
   // ════════════════════════════════════════════════════════════════════════
   // ADMIN NOTIFICATION SMS (to agency owner)
+  // Improved: area code location, clean duration, actionable prompt
   // ════════════════════════════════════════════════════════════════════════
   if (agency.phone) {
     try {
@@ -350,24 +411,48 @@ async function handleDemoCall(agency, message, industryKey = null) {
       if (businessLabel) lines.push(`🏢 ${businessLabel}`);
       if (callerName && callerName !== 'Unknown') lines.push(`👤 ${callerName}`);
       if (durationDisplay) lines.push(`⏱ ${durationDisplay}`);
+
       if (interestLevel) {
         const emoji = interestLevel === 'high' ? '🔥' : interestLevel === 'medium' ? '👀' : '❄️';
         lines.push(`${emoji} Interest: ${interestLevel.toUpperCase()}`);
       }
       if (askedQuestions) lines.push(`❓ Asked follow-up questions`);
       if (vapiSuccessScore) lines.push(`📊 Demo score: ${vapiSuccessScore}/10`);
+
       if (summary) {
         lines.push(`━━━━━━━━━━━━━━━━━━`);
-        const truncSummary = summary.length > 250 ? summary.slice(0, 247) + '...' : summary;
+        const truncSummary = summary.length > 200 ? summary.slice(0, 197) + '...' : summary;
         lines.push(truncSummary);
       }
-      lines.push(`━━━━━━━━━━━━━━━━━━`);
-      lines.push(callerPhone && callerPhone !== 'Unknown'
-        ? `✅ Follow-up SMS sent`
-        : `⚠️ No caller phone — follow-up not sent`
-      );
 
-      await sendTelnyxSMS(agency.phone, lines.join('\n'));
+      // Actionable follow-up prompt based on interest level
+      lines.push(`━━━━━━━━━━━━━━━━━━`);
+      if (interestLevel === 'high') {
+        lines.push(`💡 Hot lead — follow up within the hour.`);
+      } else if (interestLevel === 'medium') {
+        lines.push(`💡 Warm lead — follow up within 24 hours.`);
+      } else {
+        lines.push(callerPhone && callerPhone !== 'Unknown'
+          ? `✅ Follow-up SMS sent to caller`
+          : `⚠️ No caller phone — follow-up not sent`
+        );
+      }
+
+      await sendAndLogSMS({
+        phone: agency.phone,
+        message: lines.join('\n'),
+        agencyId: agency.id,
+        recipientType: 'agency_owner',
+        messageType: 'demo_admin',
+        metadata: {
+          callerPhone,
+          callerLocation,
+          businessName,
+          businessType,
+          interestLevel,
+          durationSeconds,
+        },
+      });
       console.log('✅ Admin demo notification sent');
     } catch (ownerSmsErr) {
       console.warn('⚠️ Agency owner notification failed:', ownerSmsErr.message);

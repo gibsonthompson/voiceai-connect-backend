@@ -2,6 +2,7 @@
 // NOTIFICATIONS - SMS (Telnyx) & Email (Brevo)
 // Multi-tenant aware with agency branding
 // UPDATED: 2026-05-05 — sendDemoCallFollowUpSMS personalized with business info
+// UPDATED: 2026-05-09 — Fixed "free trial" → "start free" in demo follow-up
 // ============================================================================
 const fetch = require('node-fetch');
 
@@ -150,6 +151,9 @@ async function sendAgencyPaymentSucceededSMS(agency) {
 // ============================================================================
 // DEMO CALL FOLLOW-UP SMS
 // UPDATED: 2026-05-05 — personalized with business name, type, service
+// UPDATED: 2026-05-09 — "free trial" → "start free"
+// NOTE: handleDemoCall in vapi-webhook.js now inlines this logic and uses
+//       sendAndLogSMS. This function remains as a fallback export.
 // ============================================================================
 async function sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName, businessType, serviceDiscussed) {
   if (!callerPhone || callerPhone === 'Unknown') {
@@ -184,10 +188,8 @@ async function sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName, 
     lines.push('');
   }
 
-  lines.push(`Ready to get one${callerBusinessName ? ` for ${callerBusinessName}` : ' for your business'}? Start your free trial:`);
+  lines.push(`Ready to get one${callerBusinessName ? ` for ${callerBusinessName}` : ' for your business'}? Start free, no credit card needed:`);
   lines.push(signupUrl);
-  lines.push('');
-  lines.push(`No credit card required. Setup takes 5 minutes.`);
 
   console.log(`📱 Sending demo follow-up SMS to ${callerPhone} for agency: ${agencyName}`);
   return sendTelnyxSMS(callerPhone, lines.join('\n'));
