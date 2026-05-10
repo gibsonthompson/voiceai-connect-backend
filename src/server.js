@@ -138,6 +138,7 @@ const leadScraperRoutes = require('./routes/lead-scraper');
 const byotRoutes = require('./routes/byot');
 const abandonedCartRoutes = require('./routes/abandoned-cart');
 const agencyOnboardingSmsRoutes = require('./routes/agency-onboarding-sms');
+const activationSmsRoutes = require('./routes/activation-sms');
 const feedbackRoutes = require('./routes/feedback');
 const supportRoutes = require('./routes/support');
 const teamRoutes = require('./routes/team');
