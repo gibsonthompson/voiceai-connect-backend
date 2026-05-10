@@ -3,12 +3,15 @@
 // Location: src/lib/usage-tracker.js
 // Created: 2026-05-06 — Pricing Restructure Phase 1
 // Updated: 2026-05-07 — Migrated to Stripe Meters API (replaces legacy usage records)
+// Updated: 2026-05-10 — Fixed per-client billing for Free agencies (add client
+//          price item to subscription when missing)
 //
 // BILLING FLOW:
 //   Per-minute: Real-time meter events sent to Stripe on every call completion.
 //               Stripe aggregates via the voice_minutes meter and bills at period end.
 //   Per-client: Subscription quantity updated when clients are added/removed.
-//               Handled in client-signup routes, not here.
+//               If the client price item doesn't exist on the subscription yet
+//               (Free agencies that added card via checkout), it gets created here.
 //
 // The usage_records table remains our internal source of truth for the
 // dashboard billing tab, analytics, and debugging.
@@ -29,6 +32,19 @@ const PLAN_RATES = {
 
 function getPlanRates(planType) {
   return PLAN_RATES[planType] || PLAN_RATES.free;
+}
+
+// ============================================================================
+// CLIENT PRICE ENV VARS (inline to avoid circular dep with stripe-platform.js)
+// ============================================================================
+function getClientPriceId(planType) {
+  const map = {
+    free: process.env.STRIPE_PRICE_FREE_CLIENT,
+    starter: process.env.STRIPE_PRICE_FREE_CLIENT, // legacy alias
+    pro: process.env.STRIPE_PRICE_PRO_CLIENT,
+    professional: process.env.STRIPE_PRICE_PRO_CLIENT, // legacy alias
+  };
+  return map[planType] || null;
 }
 
 // ============================================================================
@@ -138,7 +154,12 @@ async function sendVoiceMinutesMeterEvent(agencyId, minutes, usageRecordId) {
 
 // ============================================================================
 // UPDATE CLIENT COUNT ON SUBSCRIPTION (per-client billing)
-// Called when clients are added or removed from an agency
+// Called when clients are added or removed from an agency.
+//
+// UPDATED: 2026-05-10 — If the subscription exists but the per-client price
+// item hasn't been added yet (Free agencies that added card via Stripe Checkout,
+// which only includes the minute price), this function now creates the client
+// price item on the subscription automatically.
 // ============================================================================
 async function updateClientBillingQuantity(agencyId) {
   try {
@@ -148,8 +169,8 @@ async function updateClientBillingQuantity(agencyId) {
       .eq('id', agencyId)
       .single();
 
-    if (!agency?.stripe_subscription_id || !agency?.stripe_client_meter_item_id) {
-      return { updated: false, reason: 'No subscription or client price item' };
+    if (!agency?.stripe_subscription_id) {
+      return { updated: false, reason: 'No subscription' };
     }
 
     if (!agency.usage_billing_enabled) {
@@ -171,19 +192,52 @@ async function updateClientBillingQuantity(agencyId) {
 
     const billableCount = count || 0;
 
-    // Update subscription item quantity
-    await stripe.subscriptionItems.update(agency.stripe_client_meter_item_id, {
+    // ── CASE 1: Client price item exists → update quantity ──────────
+    if (agency.stripe_client_meter_item_id) {
+      await stripe.subscriptionItems.update(agency.stripe_client_meter_item_id, {
+        quantity: billableCount,
+      });
+
+      await supabase
+        .from('agencies')
+        .update({ billable_clients_count: billableCount })
+        .eq('id', agencyId);
+
+      console.log(`📊 Client billing updated: ${billableCount} billable clients for agency ${agencyId.slice(0, 8)}`);
+      return { updated: true, billableCount };
+    }
+
+    // ── CASE 2: Client price item MISSING → add it to subscription ──
+    // This happens for Free agencies that added their card via Stripe Checkout.
+    // The checkout only included the per-minute price; the per-client price
+    // needs to be added now that they're actually adding a client.
+    const clientPriceId = getClientPriceId(agency.plan_type);
+
+    if (!clientPriceId) {
+      console.warn(`⚠️ No client price configured for plan ${agency.plan_type} — per-client billing skipped`);
+      return { updated: false, reason: `No client price for plan ${agency.plan_type}` };
+    }
+
+    console.log(`📊 Adding per-client price item to subscription for agency ${agencyId.slice(0, 8)}...`);
+
+    const newItem = await stripe.subscriptionItems.create({
+      subscription: agency.stripe_subscription_id,
+      price: clientPriceId,
       quantity: billableCount,
     });
 
-    // Update agency record
+    // Store the new item ID so future updates use the normal path
     await supabase
       .from('agencies')
-      .update({ billable_clients_count: billableCount })
+      .update({
+        stripe_client_meter_item_id: newItem.id,
+        billable_clients_count: billableCount,
+      })
       .eq('id', agencyId);
 
-    console.log(`📊 Client billing updated: ${billableCount} billable clients for agency ${agencyId.slice(0, 8)}`);
-    return { updated: true, billableCount };
+    console.log(`✅ Per-client price item created: ${newItem.id} | ${billableCount} billable clients`);
+    return { updated: true, billableCount, clientItemCreated: true };
+
   } catch (err) {
     console.error('❌ Client billing update error:', err.message);
     return { updated: false, reason: err.message };
