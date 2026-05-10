@@ -1,12 +1,18 @@
 // ============================================================================
 // NOTIFICATIONS - SMS (Telnyx) & Email (Brevo)
 // Multi-tenant aware with agency branding
-// UPDATED: 2026-05-05 — sendDemoCallFollowUpSMS personalized with business info
-// UPDATED: 2026-05-09 — Fixed "free trial" → "start free" in demo follow-up
+// UPDATED: 2026-05-10 — All SMS functions use sendAndLogSMS for centralized logging
+// UPDATED: 2026-05-10 — Welcome email plan-aware (Free vs Pro/Scale)
 // ============================================================================
 const fetch = require('node-fetch');
 
 const PLATFORM_OWNER_PHONE = process.env.PLATFORM_OWNER_PHONE || '+16783161454';
+
+// Lazy require to avoid circular dependency (sms-logger imports from this file)
+function _logSMS(params) {
+  try { return require('./sms-logger').sendAndLogSMS(params); }
+  catch { return sendTelnyxSMS(params.phone, params.message); }
+}
 
 const REFERRAL_SOURCE_LABELS = {
   'google_search': 'Google Search', 'ai_recommendation': 'AI (ChatGPT/Claude)',
@@ -71,7 +77,7 @@ function parseSender(fromString) {
 }
 
 // ============================================================================
-// SMS VIA TELNYX
+// SMS VIA TELNYX (low-level transport — kept for sms-logger.js to import)
 // ============================================================================
 async function sendTelnyxSMS(toPhone, message) {
   try {
@@ -94,8 +100,11 @@ async function sendTelnyxSMS(toPhone, message) {
   } catch (error) { console.error('❌ SMS error:', error.message); return false; }
 }
 
+// ============================================================================
+// PLATFORM NOTIFICATIONS
+// ============================================================================
 async function sendPlatformNotificationSMS(message) {
-  return sendTelnyxSMS(PLATFORM_OWNER_PHONE, `🔔 VoiceAI Connect\n${message}`);
+  return _logSMS({ phone: PLATFORM_OWNER_PHONE, message: `🔔 VoiceAI Connect\n${message}`, recipientType: 'admin', messageType: 'platform_notification' });
 }
 
 async function sendAgencySignupNotificationSMS(agency) {
@@ -104,7 +113,7 @@ async function sendAgencySignupNotificationSMS(agency) {
   const referralLabel = getReferralSourceLabel(agency.referral_source);
   if (referralLabel) message += `\nSource: ${referralLabel}`;
   if (agency.country && agency.country !== 'US') message += `\n🌍 Country: ${agency.country}`;
-  return sendPlatformNotificationSMS(message);
+  return _logSMS({ phone: PLATFORM_OWNER_PHONE, message: `🔔 VoiceAI Connect\n${message}`, agencyId: agency.id, recipientType: 'admin', messageType: 'admin_agency_signup', metadata: { agencyName: agency.name } });
 }
 
 async function sendAgencyWelcomeSMS(agency, passwordToken) {
@@ -117,69 +126,57 @@ async function sendAgencyWelcomeSMS(agency, passwordToken) {
     const returnTo = encodeURIComponent(`/onboarding?agency=${agency.id}`);
     setupLink = `${platformUrl}/auth/set-password?token=${passwordToken}&returnTo=${returnTo}`;
   } else { setupLink = `${platformUrl}/agency/login`; }
-  const message = `Welcome to VoiceAI Connect! 🚀\n\nYour agency is ready:\n${agencyUrl}\n\nFinish setting up — takes about 5 minutes:\n${setupLink}`;
-  return sendTelnyxSMS(formatPhoneE164(agency.phone, agency.country || 'US'), message);
+  const message = `Welcome to VoiceAI Connect! 🚀\n\nYour agency is ready:\n${agencyUrl}\n\nFinish setting up — takes about 2 minutes:\n${setupLink}`;
+  return _logSMS({ phone: formatPhoneE164(agency.phone, agency.country || 'US'), message, agencyId: agency.id, recipientType: 'agency_owner', messageType: 'agency_welcome' });
 }
 
 async function sendClientSignupNotificationSMS(client, agency) {
   if (!agency?.phone) { console.log(`⚠️ Agency ${agency?.name || 'Unknown'} has no phone`); return false; }
   const message = `🔔 ${agency.name}\n👤 New Client Signup!\nBusiness: ${client.business_name}\nPhone: ${formatPhoneDisplay(client.owner_phone || client.vapi_phone_number)}` +
     (client.country && client.country !== 'US' ? `\n🌍 ${client.country}` : '');
-  return sendTelnyxSMS(agency.phone, message);
+  return _logSMS({ phone: agency.phone, message, agencyId: agency.id, recipientType: 'agency_owner', messageType: 'agency_client_signup', metadata: { clientName: client.business_name } });
 }
 
 async function sendAgencyTrialEndingSMS(agency, daysLeft) {
   if (!agency.phone) return false;
-  return sendTelnyxSMS(agency.phone, `⏰ VoiceAI Connect Trial Ending\n\nHi ${agency.name}, your trial ends in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}.\n\nYour card will be charged automatically. Update payment at:\nmyvoiceaiconnect.com/agency/settings/billing`);
+  const message = `⏰ VoiceAI Connect Trial Ending\n\nHi ${agency.name}, your trial ends in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}.\n\nYour card will be charged automatically. Update payment at:\nmyvoiceaiconnect.com/agency/settings/billing`;
+  return _logSMS({ phone: agency.phone, message, agencyId: agency.id, recipientType: 'agency_owner', messageType: 'agency_trial_ending_stripe', metadata: { daysLeft } });
 }
 
 async function sendAgencyPaymentFailedSMS(agency) {
   if (!agency.phone) return false;
-  return sendTelnyxSMS(agency.phone, `🚨 Payment Failed - VoiceAI Connect\n\nHi ${agency.name}, your payment failed.\n\nUpdate your payment method:\nmyvoiceaiconnect.com/agency/settings/billing`);
+  const message = `🚨 Payment Failed - VoiceAI Connect\n\nHi ${agency.name}, your payment failed.\n\nUpdate your payment method:\nmyvoiceaiconnect.com/agency/settings/billing`;
+  return _logSMS({ phone: agency.phone, message, agencyId: agency.id, recipientType: 'agency_owner', messageType: 'agency_payment_failed' });
 }
 
 async function sendAgencySubscriptionCanceledSMS(agency) {
   if (!agency.phone) return false;
-  return sendTelnyxSMS(agency.phone, `❌ Subscription Canceled - VoiceAI Connect\n\nHi ${agency.name}, your subscription has been canceled.\n\nYour agency and all client AI assistants are now suspended.\n\nReactivate at: myvoiceaiconnect.com/agency/settings/billing`);
+  const message = `❌ Subscription Canceled - VoiceAI Connect\n\nHi ${agency.name}, your subscription has been canceled.\n\nYour agency and all client AI assistants are now suspended.\n\nReactivate at: myvoiceaiconnect.com/agency/settings/billing`;
+  return _logSMS({ phone: agency.phone, message, agencyId: agency.id, recipientType: 'agency_owner', messageType: 'agency_subscription_canceled' });
 }
 
 async function sendAgencyPaymentSucceededSMS(agency) {
   if (!agency.phone) return false;
-  return sendTelnyxSMS(agency.phone, `✅ Payment Successful - VoiceAI Connect\n\nHi ${agency.name}, your payment was processed successfully!\n\nYour agency is now active. Thank you!`);
+  const message = `✅ Payment Successful - VoiceAI Connect\n\nHi ${agency.name}, your payment was processed successfully!\n\nYour agency is now active. Thank you!`;
+  return _logSMS({ phone: agency.phone, message, agencyId: agency.id, recipientType: 'agency_owner', messageType: 'agency_payment_succeeded' });
 }
 
 // ============================================================================
 // DEMO CALL FOLLOW-UP SMS
-// UPDATED: 2026-05-05 — personalized with business name, type, service
-// UPDATED: 2026-05-09 — "free trial" → "start free"
-// NOTE: handleDemoCall in vapi-webhook.js now inlines this logic and uses
-//       sendAndLogSMS. This function remains as a fallback export.
+// NOTE: handleDemoCall in vapi-webhook.js now inlines this and uses sendAndLogSMS.
+//       This function remains as a fallback export.
 // ============================================================================
 async function sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName, businessType, serviceDiscussed) {
-  if (!callerPhone || callerPhone === 'Unknown') {
-    console.log('⚠️ No caller phone for demo follow-up SMS');
-    return false;
-  }
-
+  if (!callerPhone || callerPhone === 'Unknown') { console.log('⚠️ No caller phone for demo follow-up SMS'); return false; }
   const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
-
   let signupUrl;
-  if (agency.marketing_domain && agency.domain_verified) {
-    signupUrl = `https://${agency.marketing_domain}/signup`;
-  } else if (agency.slug) {
-    signupUrl = `https://${agency.slug}.${platformDomain}/signup`;
-  } else {
-    signupUrl = `https://${platformDomain}/signup`;
-  }
+  if (agency.marketing_domain && agency.domain_verified) signupUrl = `https://${agency.marketing_domain}/signup`;
+  else if (agency.slug) signupUrl = `https://${agency.slug}.${platformDomain}/signup`;
+  else signupUrl = `https://${platformDomain}/signup`;
 
   const agencyName = agency.name || 'our';
   const nameNote = callerBusinessName ? ` for ${callerBusinessName}` : '';
-
-  const lines = [
-    `Thanks for trying ${agencyName}'s AI receptionist demo${nameNote}! 🎉`,
-    '',
-  ];
-
+  const lines = [`Thanks for trying ${agencyName}'s AI receptionist demo${nameNote}! 🎉`, ''];
   if (serviceDiscussed || callerBusinessName) {
     lines.push(`Here's what we showed you:`);
     if (serviceDiscussed) lines.push(`✅ ${serviceDiscussed}`);
@@ -187,12 +184,11 @@ async function sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName, 
     lines.push(`✅ 24/7 coverage — never miss a call`);
     lines.push('');
   }
-
   lines.push(`Ready to get one${callerBusinessName ? ` for ${callerBusinessName}` : ' for your business'}? Start free, no credit card needed:`);
   lines.push(signupUrl);
 
   console.log(`📱 Sending demo follow-up SMS to ${callerPhone} for agency: ${agencyName}`);
-  return sendTelnyxSMS(callerPhone, lines.join('\n'));
+  return _logSMS({ phone: callerPhone, message: lines.join('\n'), agencyId: agency.id, recipientType: 'prospect', messageType: 'demo_followup', metadata: { businessName: callerBusinessName, businessType } });
 }
 
 // ============================================================================
@@ -204,36 +200,39 @@ async function sendCallNotificationSMS(client, agency, callData) {
   let smsMessage = `🔔 New Call - ${client.business_name}\nCustomer: ${customerName}\nPhone: ${customerPhone}\n`;
   if (urgency === 'high' || urgency === 'emergency') smsMessage += `⚠️ Urgency: HIGH\n`;
   smsMessage += `Summary: ${summary}\nPowered by ${brandName}`;
-  return sendTelnyxSMS(client.owner_phone, smsMessage);
+  return _logSMS({ phone: client.owner_phone, message: smsMessage, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_call_notification', metadata: { clientName: client.business_name, customerName, urgency } });
 }
 
 async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency) {
   const brandName = agency?.name || 'VoiceAI Connect';
-  return sendTelnyxSMS(phone, `🎉 Welcome to ${brandName}!\nYour AI receptionist for ${businessName} is ready!\n📞 Your AI Phone: ${formatPhoneDisplay(aiPhoneNumber)}`);
+  const message = `🎉 Welcome to ${brandName}!\nYour AI receptionist for ${businessName} is ready!\n📞 Your AI Phone: ${formatPhoneDisplay(aiPhoneNumber)}`;
+  return _logSMS({ phone, message, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_welcome', metadata: { businessName } });
 }
 
 async function sendClientTrialExpiredSMS(client, agency) {
   const brandName = agency?.name || 'AI Receptionist';
   let upgradeUrl = agency?.marketing_domain && agency?.domain_verified ? `${agency.marketing_domain}/client/upgrade` : agency?.slug ? `${agency.slug}.myvoiceaiconnect.com/client/upgrade` : `myvoiceaiconnect.com/client/upgrade`;
-  return sendTelnyxSMS(client.owner_phone, `⚠️ ${brandName} Trial Ended\n\nHi ${client.owner_name || client.business_name}, your 7-day trial has ended.\n\nYour AI receptionist is no longer answering calls.\n\nReactivate now: ${upgradeUrl}`);
+  const message = `⚠️ ${brandName} Trial Ended\n\nHi ${client.owner_name || client.business_name}, your 7-day trial has ended.\n\nYour AI receptionist is no longer answering calls.\n\nReactivate now: ${upgradeUrl}`;
+  return _logSMS({ phone: client.owner_phone, message, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_trial_expired', metadata: { clientName: client.business_name } });
 }
 
 async function sendClientPaymentFailedSMS(client, agency) {
   const brandName = agency?.name || 'AI Receptionist';
-  return sendTelnyxSMS(client.owner_phone, `🚨 ${brandName} Payment Failed\n\nHi ${client.owner_name || client.business_name}, your payment failed.\n\nUpdate your payment method to keep your AI receptionist active.`);
+  const message = `🚨 ${brandName} Payment Failed\n\nHi ${client.owner_name || client.business_name}, your payment failed.\n\nUpdate your payment method to keep your AI receptionist active.`;
+  return _logSMS({ phone: client.owner_phone, message, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_payment_failed', metadata: { clientName: client.business_name } });
 }
 
 async function sendClientSubscriptionActivatedSMS(client, agency, plan) {
   const brandName = agency?.name || 'AI Receptionist';
-  return sendTelnyxSMS(client.owner_phone, `✅ ${brandName} Subscription Active!\n\nHi ${client.owner_name || client.business_name}, your ${plan || 'Starter'} plan is now active!\n\nYour AI receptionist is answering calls 24/7 at:\n📞 ${formatPhoneDisplay(client.vapi_phone_number)}`);
+  const message = `✅ ${brandName} Subscription Active!\n\nHi ${client.owner_name || client.business_name}, your ${plan || 'Starter'} plan is now active!\n\nYour AI receptionist is answering calls 24/7 at:\n📞 ${formatPhoneDisplay(client.vapi_phone_number)}`;
+  return _logSMS({ phone: client.owner_phone, message, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_subscription_activated', metadata: { clientName: client.business_name, plan } });
 }
 
 async function sendSpamBlockedSMS(client, agency, callerPhone, spamReason) {
   if (!client.owner_phone) return false;
   const callerDisplay = formatPhoneDisplay(callerPhone) || callerPhone || 'Unknown';
-  return sendTelnyxSMS(client.owner_phone,
-    `🚫 Spam Blocked — ${client.business_name}\n\nYour AI receptionist detected and blocked a spam call.\n\nCaller: ${callerDisplay}\nType: ${spamReason || 'Robocall / telemarketer'}\n\nNo action needed — this call was not counted against your limit.`
-  );
+  const message = `🚫 Spam Blocked — ${client.business_name}\n\nYour AI receptionist detected and blocked a spam call.\n\nCaller: ${callerDisplay}\nType: ${spamReason || 'Robocall / telemarketer'}\n\nNo action needed — this call was not counted against your limit.`;
+  return _logSMS({ phone: client.owner_phone, message, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_spam_blocked', metadata: { clientName: client.business_name, callerPhone } });
 }
 
 // ============================================================================
@@ -266,12 +265,7 @@ async function sendCallSummaryEmail(client, agency, callData, callRecord) {
   const { customerName, customerPhone, customerEmail, urgency, summary } = callData;
   const duration = callRecord?.duration_seconds;
   const durationDisplay = duration ? `${Math.floor(duration / 60)}m ${duration % 60}s` : 'N/A';
-  const urgencyColors = {
-    emergency: { bg: '#fef2f2', text: '#dc2626', border: '#fecaca', label: '🚨 Emergency' },
-    high: { bg: '#fef2f2', text: '#dc2626', border: '#fecaca', label: '⚠️ High' },
-    medium: { bg: '#fffbeb', text: '#d97706', border: '#fde68a', label: 'Medium' },
-    routine: { bg: '#f0fdf4', text: '#16a34a', border: '#bbf7d0', label: 'Routine' },
-  };
+  const urgencyColors = { emergency: { bg: '#fef2f2', text: '#dc2626', border: '#fecaca', label: '🚨 Emergency' }, high: { bg: '#fef2f2', text: '#dc2626', border: '#fecaca', label: '⚠️ High' }, medium: { bg: '#fffbeb', text: '#d97706', border: '#fde68a', label: 'Medium' }, routine: { bg: '#f0fdf4', text: '#16a34a', border: '#bbf7d0', label: 'Routine' } };
   const urg = urgencyColors[urgency] || urgencyColors.routine;
   const transcript = callRecord?.transcript || '';
   const transcriptPreview = transcript.length > 500 ? transcript.substring(0, 500) + '...' : transcript;
@@ -285,6 +279,9 @@ async function sendCallSummaryEmail(client, agency, callData, callRecord) {
   });
 }
 
+// ============================================================================
+// WELCOME EMAILS — Plan-aware messaging
+// ============================================================================
 async function sendClientWelcomeEmail(client, agency, tempPassword, passwordToken) {
   const agencyName = agency?.name || 'VoiceAI Connect';
   const agencyLogo = agency?.logo_url || 'https://voiceaiconnect.com/logo.png';
@@ -302,10 +299,16 @@ async function sendClientWelcomeEmail(client, agency, tempPassword, passwordToke
 
 async function sendAgencyWelcomeEmail(agency, passwordToken) {
   const dashboardUrl = process.env.FRONTEND_URL || 'https://myvoiceaiconnect.com';
+  const isFree = !agency.plan_type || agency.plan_type === 'free' || agency.plan_type === 'starter';
+
+  const trialLine = isFree
+    ? `<p>Your <strong>free account</strong> is active. Add a payment method when you're ready to onboard your first client.</p>`
+    : `<p>Your <strong>14-day free trial</strong> starts when you finish setup. No credit card required.</p>`;
+
   return sendEmail({
     from: 'VoiceAI Connect <onboarding@myvoiceaiconnect.com>', to: agency.email,
     subject: 'Welcome to VoiceAI Connect - Start Your AI Agency!',
-    html: `<!DOCTYPE html><html><body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0;"><div style="max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;"><h1 style="color: #2563eb;">Welcome to VoiceAI Connect! 🚀</h1><p>Hi ${agency.name},</p><p>Your white-label AI agency platform is ready.</p><div style="background-color: #f0f4ff; border-left: 4px solid #2563eb; padding: 20px; margin: 20px 0;"><p style="margin: 0;"><strong>Your agency URL:</strong></p><p style="font-size: 18px; color: #2563eb; margin: 5px 0;">https://${agency.slug}.myvoiceaiconnect.com</p></div><p><strong>What to do next:</strong></p><ol><li>Set your password and access your dashboard</li><li>Upload your logo and customize your branding</li><li>Set your pricing</li><li>Connect your Stripe account</li><li>Share your signup link!</li></ol><div style="text-align: center; margin: 30px 0;"><a href="${dashboardUrl}/auth/set-password?token=${passwordToken}" style="display: inline-block; background-color: #2563eb; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold;">Set Password & Get Started →</a></div><p>Your <strong>14-day free trial</strong> starts when you finish setup. No credit card required.</p><hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;"><p style="color: #666; font-size: 14px;">Need help? Reply to this email.</p></div></body></html>`
+    html: `<!DOCTYPE html><html><body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0;"><div style="max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;"><h1 style="color: #2563eb;">Welcome to VoiceAI Connect! 🚀</h1><p>Hi ${agency.name},</p><p>Your AI agency platform is ready.</p><div style="background-color: #f0f4ff; border-left: 4px solid #2563eb; padding: 20px; margin: 20px 0;"><p style="margin: 0;"><strong>Your agency URL:</strong></p><p style="font-size: 18px; color: #2563eb; margin: 5px 0;">https://${agency.slug}.myvoiceaiconnect.com</p></div><p><strong>What to do next:</strong></p><ol><li>Set your password and access your dashboard</li><li>Upload your logo and customize your branding</li><li>Set your pricing</li><li>Connect your Stripe account</li><li>Share your signup link!</li></ol><div style="text-align: center; margin: 30px 0;"><a href="${dashboardUrl}/auth/set-password?token=${passwordToken}" style="display: inline-block; background-color: #2563eb; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold;">Set Password & Get Started →</a></div>${trialLine}<hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;"><p style="color: #666; font-size: 14px;">Need help? Reply to this email.</p></div></body></html>`
   });
 }
 

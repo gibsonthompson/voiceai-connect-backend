@@ -192,6 +192,7 @@ const { updateAssistantCalendar } = require('./lib/calendar-tools');
 const adminRoutes = require('./routes/admin');
 const adminAgencyDetail = require('./routes/admin-agency-detail');
 const smsLogRoutes = require('./routes/sms-log');
+const errorReportRoutes = require('./routes/error-report');
 // ============================================================================
 // HEALTH CHECK
 // ============================================================================
@@ -726,6 +727,7 @@ app.get('/api/auth/google/callback', googleCallback);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin', adminAgencyDetail);
 app.use('/api/admin', smsLogRoutes);
+app.use('/api/admin', errorReportRoutes);
 
 // ============================================================================
 // CRON ROUTES (Trial Expiration)
