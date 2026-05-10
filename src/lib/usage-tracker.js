@@ -3,21 +3,12 @@
 // Location: src/lib/usage-tracker.js
 // Created: 2026-05-06 — Pricing Restructure Phase 1
 // Updated: 2026-05-07 — Migrated to Stripe Meters API (replaces legacy usage records)
-// Updated: 2026-05-10 — Fixed per-client billing for Free agencies (add client
-//          price item to subscription when missing)
-//
-// BILLING FLOW:
-//   Per-minute: Real-time meter events sent to Stripe on every call completion.
-//               Stripe aggregates via the voice_minutes meter and bills at period end.
-//   Per-client: Subscription quantity updated when clients are added/removed.
-//               If the client price item doesn't exist on the subscription yet
-//               (Free agencies that added card via checkout), it gets created here.
-//
-// The usage_records table remains our internal source of truth for the
-// dashboard billing tab, analytics, and debugging.
+// Updated: 2026-05-10 — Fixed per-client billing for Free agencies
+// Updated: 2026-05-10 — Added alertError() to all catch blocks for SMS alerts
 // ============================================================================
 const Stripe = require('stripe');
 const { supabase } = require('./supabase');
+const { alertError } = require('./error-monitor');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -40,16 +31,15 @@ function getPlanRates(planType) {
 function getClientPriceId(planType) {
   const map = {
     free: process.env.STRIPE_PRICE_FREE_CLIENT,
-    starter: process.env.STRIPE_PRICE_FREE_CLIENT, // legacy alias
+    starter: process.env.STRIPE_PRICE_FREE_CLIENT,
     pro: process.env.STRIPE_PRICE_PRO_CLIENT,
-    professional: process.env.STRIPE_PRICE_PRO_CLIENT, // legacy alias
+    professional: process.env.STRIPE_PRICE_PRO_CLIENT,
   };
   return map[planType] || null;
 }
 
 // ============================================================================
 // INSERT USAGE RECORD + SEND STRIPE METER EVENT
-// Called from vapi-webhook on every end-of-call-report
 // ============================================================================
 async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds }) {
   if (!agencyId || !clientId) {
@@ -60,7 +50,6 @@ async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds }
   const seconds = Math.max(0, Math.round(durationSeconds || 0));
   if (seconds === 0) return null;
 
-  // Round UP to nearest minute for billing (industry standard)
   const billedMinutes = Math.ceil(seconds / 60);
 
   const billingMonth = new Date();
@@ -68,7 +57,6 @@ async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds }
   billingMonth.setHours(0, 0, 0, 0);
 
   try {
-    // ── 1. Save to our usage_records table (internal source of truth) ──
     const { data, error } = await supabase
       .from('usage_records')
       .insert({
@@ -84,59 +72,50 @@ async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds }
 
     if (error) {
       console.error('❌ Usage record insert failed:', error.message);
+      alertError('usage-record-insert', error, { agencyId, clientId, seconds });
       return null;
     }
 
     console.log(`📊 Usage recorded: ${seconds}s (${billedMinutes} billed min) | agency=${agencyId.slice(0, 8)} client=${clientId.slice(0, 8)}`);
 
-    // ── 2. Send meter event to Stripe (real-time billing) ──────────
     await sendVoiceMinutesMeterEvent(agencyId, billedMinutes, data.id);
 
     return data;
   } catch (err) {
     console.error('❌ Usage record error:', err.message);
+    alertError('usage-record', err, { agencyId, clientId, seconds });
     return null;
   }
 }
 
 // ============================================================================
 // SEND VOICE MINUTES METER EVENT TO STRIPE
-// Uses the Billing Meters API (replaces legacy subscriptionItems.createUsageRecord)
 // ============================================================================
 async function sendVoiceMinutesMeterEvent(agencyId, minutes, usageRecordId) {
   if (!minutes || minutes <= 0) return;
 
   try {
-    // Get agency's Stripe customer ID
     const { data: agency } = await supabase
       .from('agencies')
       .select('stripe_customer_id, usage_billing_enabled')
       .eq('id', agencyId)
       .single();
 
-    if (!agency?.stripe_customer_id) {
-      // No Stripe customer yet (free tier without card) — skip silently
-      // Minutes are tracked in usage_records, will be billed once subscription exists
-      return;
-    }
-
+    if (!agency?.stripe_customer_id) return;
     if (!agency.usage_billing_enabled) {
-      // Billing not enabled yet — skip but log
       console.log(`   ⏭ Meter event skipped — billing not enabled for agency ${agencyId.slice(0, 8)}`);
       return;
     }
 
-    // Send meter event — Stripe aggregates automatically
     await stripe.billing.meterEvents.create({
       event_name: 'voice_minutes',
       payload: {
         stripe_customer_id: agency.stripe_customer_id,
         value: String(minutes),
       },
-      identifier: usageRecordId || undefined, // Idempotency key — prevents double-billing on retries
+      identifier: usageRecordId || undefined,
     });
 
-    // Mark as reported
     if (usageRecordId) {
       await supabase
         .from('usage_records')
@@ -146,20 +125,13 @@ async function sendVoiceMinutesMeterEvent(agencyId, minutes, usageRecordId) {
 
     console.log(`   ⚡ Meter event sent: ${minutes} min → Stripe customer ${agency.stripe_customer_id.slice(0, 12)}...`);
   } catch (err) {
-    // Non-fatal — usage_record is our source of truth, meter event can be retried
     console.warn(`   ⚠️ Meter event failed (non-fatal): ${err.message}`);
-    // Don't mark as reported — retry logic can pick these up later
+    alertError('stripe-meter-event', err, { agencyId, minutes });
   }
 }
 
 // ============================================================================
 // UPDATE CLIENT COUNT ON SUBSCRIPTION (per-client billing)
-// Called when clients are added or removed from an agency.
-//
-// UPDATED: 2026-05-10 — If the subscription exists but the per-client price
-// item hasn't been added yet (Free agencies that added card via Stripe Checkout,
-// which only includes the minute price), this function now creates the client
-// price item on the subscription automatically.
 // ============================================================================
 async function updateClientBillingQuantity(agencyId) {
   try {
@@ -177,12 +149,10 @@ async function updateClientBillingQuantity(agencyId) {
       return { updated: false, reason: 'Billing not enabled' };
     }
 
-    // Scale tier has no per-client fee
     if (agency.plan_type === 'scale' || agency.plan_type === 'enterprise') {
       return { updated: false, reason: 'Scale tier — no per-client fee' };
     }
 
-    // Count billable clients (active, non-test)
     const { count } = await supabase
       .from('clients')
       .select('id', { count: 'exact', head: true })
@@ -208,9 +178,6 @@ async function updateClientBillingQuantity(agencyId) {
     }
 
     // ── CASE 2: Client price item MISSING → add it to subscription ──
-    // This happens for Free agencies that added their card via Stripe Checkout.
-    // The checkout only included the per-minute price; the per-client price
-    // needs to be added now that they're actually adding a client.
     const clientPriceId = getClientPriceId(agency.plan_type);
 
     if (!clientPriceId) {
@@ -226,7 +193,6 @@ async function updateClientBillingQuantity(agencyId) {
       quantity: billableCount,
     });
 
-    // Store the new item ID so future updates use the normal path
     await supabase
       .from('agencies')
       .update({
@@ -240,12 +206,13 @@ async function updateClientBillingQuantity(agencyId) {
 
   } catch (err) {
     console.error('❌ Client billing update error:', err.message);
+    alertError('client-billing-update', err, { agencyId });
     return { updated: false, reason: err.message };
   }
 }
 
 // ============================================================================
-// GET AGENCY USAGE SUMMARY (for dashboard display + billing tab)
+// GET AGENCY USAGE SUMMARY
 // ============================================================================
 async function getAgencyUsageSummary(agencyId) {
   const billingMonth = new Date();
@@ -264,7 +231,6 @@ async function getAgencyUsageSummary(agencyId) {
 
     const rates = getPlanRates(agency.plan_type);
 
-    // Count billable clients
     const { count: billableClients } = await supabase
       .from('clients')
       .select('id', { count: 'exact', head: true })
@@ -272,7 +238,6 @@ async function getAgencyUsageSummary(agencyId) {
       .eq('status', 'active')
       .eq('is_test_client', false);
 
-    // Sum minutes this billing period
     const { data: usageData } = await supabase
       .from('usage_records')
       .select('duration_seconds')
@@ -306,13 +271,13 @@ async function getAgencyUsageSummary(agencyId) {
     };
   } catch (err) {
     console.error('❌ Usage summary error:', err.message);
+    alertError('usage-summary', err, { agencyId });
     return null;
   }
 }
 
 // ============================================================================
-// RETRY UNREPORTED METER EVENTS (backup for failed real-time events)
-// Can be called from a cron if needed
+// RETRY UNREPORTED METER EVENTS
 // ============================================================================
 async function retryUnreportedMeterEvents() {
   try {
@@ -336,7 +301,7 @@ async function retryUnreportedMeterEvents() {
         await sendVoiceMinutesMeterEvent(record.agency_id, minutes, record.id);
         success++;
       } catch (err) {
-        // Will try again next run
+        // Will try again next run — alertError already called in sendVoiceMinutesMeterEvent
       }
     }
 
@@ -344,6 +309,7 @@ async function retryUnreportedMeterEvents() {
     return { retried: success, total: unreported.length };
   } catch (err) {
     console.error('❌ Retry unreported error:', err.message);
+    alertError('retry-meter-events', err);
     return { retried: 0, error: err.message };
   }
 }
