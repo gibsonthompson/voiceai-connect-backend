@@ -7,6 +7,9 @@
 //          changed to 'active' (free tier requires no payment to start).
 // UPDATED: 2026-05-09 — Set onboarding_completed_at timestamp when onboarding
 //          finishes, used by activation SMS sequence for timing.
+// UPDATED: 2026-05-10 — Default prices changed to $99/$149/$299, starter plan
+//          features updated (email summaries, caller recognition, business
+//          hours, after-hours mode now included).
 // ============================================================================
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
@@ -97,19 +100,19 @@ function getCurrencyForCountry(countryCode) {
 const DEFAULT_PLAN_FEATURES = {
   starter: {
     sms_notifications: true,
-    email_summaries: false,
+    email_summaries: true,
     custom_greeting: false,
     custom_voice: false,
     knowledge_base: false,
-    business_hours: false,
+    business_hours: true,
     google_calendar: false,
     advanced_analytics: false,
     priority_support: false,
-    caller_recognition: false,
+    caller_recognition: true,
     spam_detection: true,
     call_transfer: false,
     transfer_fallback: false,
-    after_hours_mode: false,
+    after_hours_mode: true,
   },
   pro: {
     sms_notifications: true,
@@ -290,9 +293,9 @@ async function handleAgencySignup(req, res) {
         primary_color: '#10b981',
         secondary_color: '#059669',
         accent_color: '#34d399',
-        price_starter: 4900,
-        price_pro: 9900,
-        price_growth: 14900,
+        price_starter: 9900,
+        price_pro: 14900,
+        price_growth: 29900,
         limit_starter: 50,
         limit_pro: 150,
         limit_growth: 500,
