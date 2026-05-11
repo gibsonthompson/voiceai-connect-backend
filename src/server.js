@@ -643,6 +643,7 @@ app.use('/api/leads', leadScraperRoutes);
 // POST       /api/agency/:agencyId/team/:memberId/reset-password
 // ============================================================================
 app.use('/api/agency', teamRoutes);
+app.use('/api/agency', previewTokenRoutes);
 
 // ============================================================================
 // CLIENT ROUTES (Agencies → Clients)
@@ -673,7 +674,7 @@ app.get('/api/client/:clientId/details', async (req, res) => {
       .from('clients')
       .select(`
         *,
-        agencies (
+        agencies!clients_agency_id_fkey (
           id, name, slug, logo_url, primary_color, secondary_color, accent_color,
           support_email, branding_overrides,
           price_starter, price_pro, price_growth,
@@ -854,7 +855,6 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
-app.use('/api/agency', previewTokenRoutes);
 // ============================================================================
 // START SERVER
 // ============================================================================
