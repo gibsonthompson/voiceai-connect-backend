@@ -481,6 +481,24 @@ app.get('/api/agency/:agencyId/clients/:clientId/calls/:callId', async (req, res
   }
 });
 
+app.put('/api/agency/:agencyId/clients/:clientId/industry', async (req, res) => {
+  try {
+    const { agencyId, clientId } = req.params;
+    const { industry } = req.body;
+    if (!industry) return res.status(400).json({ error: 'industry required' });
+    const { data: client } = await supabase.from('clients').select('id').eq('id', clientId).eq('agency_id', agencyId).single();
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    await supabase.from('clients').update({ industry, updated_at: new Date().toISOString() }).eq('id', clientId);
+    console.log('✅ Industry updated for client ' + clientId + ': ' + industry);
+    res.json({ success: true, industry });
+  } catch (error) {
+    console.error('Error updating industry:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
+
 app.get('/api/agency/:agencyId/analytics', async (req, res) => {
   try {
     const { agencyId } = req.params;
