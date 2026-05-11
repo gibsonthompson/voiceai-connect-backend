@@ -30,7 +30,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // ============================================================================
 const PLAN_DETAILS = {
   free: { name: 'Free', platformFeeCents: 0, perClientCents: 2999, perMinuteCents: 12, trial: false, requiresCardAtSignup: false, whiteLabel: false },
-  pro: { name: 'Pro', platformFeeCents: 17900, perClientCents: 999, perMinuteCents: 10, trial: true, trialDays: 14, requiresCardAtSignup: true, whiteLabel: true },
+  pro: { name: 'Pro', platformFeeCents: 9900, perClientCents: 999, perMinuteCents: 10, trial: true, trialDays: 14, requiresCardAtSignup: true, whiteLabel: true },
   scale: { name: 'Scale', platformFeeCents: 49900, perClientCents: 0, perMinuteCents: 5, trial: true, trialDays: 14, requiresCardAtSignup: true, whiteLabel: true },
 };
 
