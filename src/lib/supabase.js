@@ -82,7 +82,7 @@ async function getAgencyByStripeAccountId(accountId) {
 async function getClientById(clientId) {
   const { data, error } = await supabase
     .from('clients')
-    .select('*, agencies(*)')
+    .select('*, agencies!clients_agency_id_fkey(*)')
     .eq('id', clientId)
     .single();
   
@@ -93,7 +93,7 @@ async function getClientById(clientId) {
 async function getClientByVapiAssistantId(assistantId) {
   const { data, error } = await supabase
     .from('clients')
-    .select('*, agencies(*)')
+    .select('*, agencies!clients_agency_id_fkey(*)')
     .eq('vapi_assistant_id', assistantId)
     .single();
   
@@ -104,7 +104,7 @@ async function getClientByVapiAssistantId(assistantId) {
 async function getClientByVapiPhoneNumber(phoneNumber) {
   const { data, error } = await supabase
     .from('clients')
-    .select('*, agencies(*)')
+    .select('*, agencies!clients_agency_id_fkey(*)')
     .eq('vapi_phone_number', phoneNumber)
     .single();
   
@@ -144,7 +144,7 @@ async function getClientsByAgency(agencyId) {
 async function getClientByStripeConnectedCustomerId(customerId, agencyStripeAccountId) {
   const { data, error } = await supabase
     .from('clients')
-    .select('*, agencies(*)')
+    .select('*, agencies!clients_agency_id_fkey(*)')
     .eq('stripe_connected_customer_id', customerId)
     .single();
   
