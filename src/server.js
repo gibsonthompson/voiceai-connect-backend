@@ -193,6 +193,7 @@ const adminRoutes = require('./routes/admin');
 const adminAgencyDetail = require('./routes/admin-agency-detail');
 const smsLogRoutes = require('./routes/sms-log');
 const errorReportRoutes = require('./routes/error-report');
+const previewTokenRoutes = require('./routes/preview-token');
 // ============================================================================
 // HEALTH CHECK
 // ============================================================================
@@ -853,6 +854,7 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
+app.use('/api/agency', previewTokenRoutes);
 // ============================================================================
 // START SERVER
 // ============================================================================
