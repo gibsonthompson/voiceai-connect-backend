@@ -62,11 +62,15 @@ async function generateAISummary(transcript, industry, callerPhone) {
   };
   const prompt = `Analyze this phone call transcript for a ${industry} business.\n\nTranscript:\n${transcript}\n\nCaller Phone: ${callerPhone}\n\nExtract and return ONLY valid JSON:\n{"customerName":"string or Unknown","customerPhone":"formatted (XXX) XXX-XXXX","customerEmail":"string or null","urgency":"emergency|high|medium|routine","summary":"2-3 sentence summary focusing on: ${industryGuidance[industry] || 'what the customer needs'}","isSpam":false,"spamReason":null}\n\nSPAM DETECTION: Set isSpam true ONLY if the caller is clearly a telemarketer, robocall, or solicitor. Indicators: plays a pre-recorded message or sales pitch, tries to sell a product or service TO the business (SEO, Google Ads, insurance leads, credit card processing, etc.), opens the call by asking for "the business owner" or "the person in charge of your Google listing" with no prior natural conversation, the line goes silent after connecting, or uses high-pressure sales tactics. Do NOT mark as spam if: the caller is a real customer asking a question, requesting service, or asking to speak with someone — even if the interaction is short. When in doubt, set isSpam to false.`;
   try {
+    const _ac1 = new AbortController();
+    const _t1 = setTimeout(() => _ac1.abort(), 15000);
     const response = await fetch("https://api.anthropic.com/v1/messages", {
+      signal: _ac1.signal,
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 500, temperature: 0.3, messages: [{ role: "user", content: prompt }] })
     });
+    clearTimeout(_t1);
     if (!response.ok) throw new Error(`Claude API failed: ${response.status}`);
     const data = await response.json();
     let text = data.content[0].text.trim().replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
@@ -177,7 +181,10 @@ Extract and return ONLY valid JSON — no backticks, no extra text:
 }`;
 
   try {
+    const _ac2 = new AbortController();
+    const _t2 = setTimeout(() => _ac2.abort(), 15000);
     const response = await fetch('https://api.anthropic.com/v1/messages', {
+      signal: _ac2.signal,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -192,6 +199,7 @@ Extract and return ONLY valid JSON — no backticks, no extra text:
       }),
     });
 
+    clearTimeout(_t2);
     if (!response.ok) throw new Error(`Claude API failed: ${response.status}`);
 
     const data = await response.json();

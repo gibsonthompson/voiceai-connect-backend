@@ -310,7 +310,7 @@ async function expireTrials() {
   const now = new Date().toISOString();
 
   const { data: expiredClients, error } = await supabase
-    .from('clients').select('*, agencies(*)').eq('subscription_status', 'trial').lt('trial_ends_at', now);
+    .from('clients').select('*, agencies!clients_agency_id_fkey(*)').eq('subscription_status', 'trial').lt('trial_ends_at', now);
 
   if (error) { console.error('Error fetching expired trials:', error); return { success: false, error: error.message }; }
 
@@ -450,7 +450,7 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
   const callLimit = parseInt(session.metadata?.call_limit) || 50;
   if (!clientId) { console.error('No client_id in checkout metadata'); return; }
 
-  const { data: client, error } = await supabase.from('clients').select('*, agencies(*)').eq('id', clientId).single();
+  const { data: client, error } = await supabase.from('clients').select('*, agencies!clients_agency_id_fkey(*)').eq('id', clientId).single();
   if (error || !client) { console.error('Client not found:', clientId); return; }
 
   const isUpgrade = client.subscription_status === 'trial_expired' || client.subscription_status === 'canceled' || client.subscription_status === 'past_due';

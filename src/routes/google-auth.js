@@ -129,7 +129,7 @@ async function googleCallback(req, res) {
     // Check if user exists
     const { data: existingUser } = await supabase
       .from('users')
-      .select('*, agencies(*)')
+      .select('*, agencies!clients_agency_id_fkey(*)')
       .eq('email', email.toLowerCase())
       .single();
 

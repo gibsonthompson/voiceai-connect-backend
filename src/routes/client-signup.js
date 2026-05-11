@@ -743,7 +743,7 @@ async function provisionClient(clientId) {
     
     const { data: client, error } = await supabase
       .from('clients')
-      .select('*, agencies(*)')
+      .select('*, agencies!clients_agency_id_fkey(*)')
       .eq('id', clientId)
       .single();
     

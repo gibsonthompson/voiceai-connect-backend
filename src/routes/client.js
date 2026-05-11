@@ -122,7 +122,7 @@ router.get('/:id', async (req, res) => {
       .from('clients')
       .select(`
         *,
-        agency:agencies (
+        agency:agencies!clients_agency_id_fkey (
           id, name, slug, 
           primary_color, secondary_color, accent_color,
           logo_url, support_email, support_phone,

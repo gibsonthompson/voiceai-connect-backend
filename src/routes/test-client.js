@@ -57,7 +57,7 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
     // Step 1: Create VAPI assistant (general industry)
     const assistant = await createIndustryAssistant(
       testBusinessName,
-      'general',       // generic industry
+      'home_services', // default test client industry
       null,            // no knowledge base
       agency.phone ? formatPhoneE164(agency.phone, agencyCountry) : null,
       null,            // no client ID yet
@@ -112,7 +112,7 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
         owner_name: agency.name,
         owner_phone: agency.phone || null,
         email: agency.email,
-        industry: 'general',
+        industry: 'home_services',
         vapi_assistant_id: assistant.id,
         vapi_phone_number: phoneNumber,
         vapi_phone_id: vapiPhoneId,
