@@ -108,7 +108,10 @@ async function getClientByVapiPhoneNumber(phoneNumber) {
     .eq('vapi_phone_number', phoneNumber)
     .single();
   
-  if (error) return null;
+  if (error) {
+    console.error('❌ getClientByVapiPhoneNumber error:', error.message, error.code, error.details);
+    return null;
+  }
   return data;
 }
 
