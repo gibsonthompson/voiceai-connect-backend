@@ -82,11 +82,13 @@ async function createAgencyCheckout(req, res) {
 
     const lineItems = [];
     if (priceIds.platform) lineItems.push({ price: priceIds.platform, quantity: 1 });
+    if (priceIds.client) lineItems.push({ price: priceIds.client, quantity: 1 });
     if (priceIds.minute) lineItems.push({ price: priceIds.minute });
     if (lineItems.length === 0) return res.status(400).json({ error: 'No Stripe prices configured for this plan. Set STRIPE_PRICE_* env vars.' });
 
     const subscriptionData = { metadata: { agency_id, plan } };
-    if (planDetails.trial && !skipTrial) subscriptionData.trial_period_days = planDetails.trialDays || 14;
+    const alreadyTrialed = !!agency.trial_ends_at;
+    if (planDetails.trial && !skipTrial && !alreadyTrialed) subscriptionData.trial_period_days = planDetails.trialDays || 14;
 
     const session = await stripe.checkout.sessions.create({
       customer: customerId, mode: 'subscription', payment_method_types: ['card'],
@@ -169,7 +171,7 @@ async function createAgencyPortal(req, res) {
 
     const lineItems = [];
     if (priceIds.platform) lineItems.push({ price: priceIds.platform, quantity: 1 });
-    if (priceIds.client) lineItems.push({ price: priceIds.client });
+    if (priceIds.client) lineItems.push({ price: priceIds.client, quantity: 1 });
     if (priceIds.minute) lineItems.push({ price: priceIds.minute });
 
     const session = await stripe.checkout.sessions.create({
