@@ -1,7 +1,8 @@
 // ============================================================================
 // BYOT (Bring Your Own Twilio) ROUTES
-// Enterprise/Scale plan feature — agencies use their own Twilio account
+// Pro + Scale plan feature — agencies use their own Twilio account
 // for international number provisioning
+// UPDATED: 2026-05-10 — Lowered requirement from Scale-only to Pro+Scale
 // Destination: src/routes/byot.js
 // ============================================================================
 const express = require('express');
@@ -13,9 +14,9 @@ const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 
 // ============================================================================
-// MIDDLEWARE: Require Enterprise/Scale plan (with trial access)
+// MIDDLEWARE: Require Pro or Scale plan (with trial access)
 // ============================================================================
-async function requireScalePlan(req, res, next) {
+async function requireProPlan(req, res, next) {
   const { agencyId } = req.params;
 
   try {
@@ -25,9 +26,10 @@ async function requireScalePlan(req, res, next) {
     const isTrialing = ['trialing', 'trial'].includes(agency.subscription_status);
     const effectivePlan = isTrialing ? 'enterprise' : agency.plan_type;
 
-    if (effectivePlan !== 'enterprise') {
+    const allowed = ['pro', 'professional', 'enterprise', 'scale'];
+    if (!allowed.includes(effectivePlan)) {
       return res.status(403).json({
-        error: 'Scale plan required',
+        error: 'Pro plan required',
         feature: 'byot',
         current_plan: agency.plan_type,
         upgrade_url: '/agency/settings?tab=billing'
@@ -44,9 +46,8 @@ async function requireScalePlan(req, res, next) {
 
 // ============================================================================
 // GET /api/agency/:agencyId/byot/status
-// Check BYOT configuration status
 // ============================================================================
-router.get('/:agencyId/byot/status', requireScalePlan, async (req, res) => {
+router.get('/:agencyId/byot/status', requireProPlan, async (req, res) => {
   const { agency } = req;
 
   res.json({
@@ -59,9 +60,8 @@ router.get('/:agencyId/byot/status', requireScalePlan, async (req, res) => {
 
 // ============================================================================
 // POST /api/agency/:agencyId/byot/credentials
-// Save and validate Twilio credentials
 // ============================================================================
-router.post('/:agencyId/byot/credentials', requireScalePlan, async (req, res) => {
+router.post('/:agencyId/byot/credentials', requireProPlan, async (req, res) => {
   const { agencyId } = req.params;
   const { twilio_account_sid, twilio_api_key, twilio_api_secret } = req.body;
 
@@ -72,7 +72,6 @@ router.post('/:agencyId/byot/credentials', requireScalePlan, async (req, res) =>
     });
   }
 
-  // Basic format validation
   if (!twilio_account_sid.startsWith('AC') || twilio_account_sid.length !== 34) {
     return res.status(400).json({ error: 'Invalid Twilio Account SID format. Should start with AC and be 34 characters.' });
   }
@@ -81,20 +80,12 @@ router.post('/:agencyId/byot/credentials', requireScalePlan, async (req, res) =>
   }
 
   try {
-    // ============================================
-    // STEP 1: Validate credentials against Twilio API
-    // ============================================
     console.log(`🔑 Validating Twilio credentials for agency ${agencyId}...`);
 
     const twilioAuthHeader = Buffer.from(`${twilio_api_key}:${twilio_api_secret}`).toString('base64');
-    // Use IncomingPhoneNumbers endpoint for validation — Standard API keys
-    // cannot access /Accounts/{SID}.json (requires Main key), but can access
-    // sub-resource endpoints like IncomingPhoneNumbers
     const twilioResponse = await fetch(
       `https://api.twilio.com/2010-04-01/Accounts/${twilio_account_sid}/IncomingPhoneNumbers.json?PageSize=1`,
-      {
-        headers: { 'Authorization': `Basic ${twilioAuthHeader}` }
-      }
+      { headers: { 'Authorization': `Basic ${twilioAuthHeader}` } }
     );
 
     if (!twilioResponse.ok) {
@@ -108,9 +99,6 @@ router.post('/:agencyId/byot/credentials', requireScalePlan, async (req, res) =>
 
     console.log(`✅ Twilio credentials verified for account ${twilio_account_sid}`);
 
-    // ============================================
-    // STEP 2: Encrypt and store credentials
-    // ============================================
     const encryptedApiKey = encrypt(twilio_api_key);
     const encryptedApiSecret = encrypt(twilio_api_secret);
 
@@ -149,9 +137,8 @@ router.post('/:agencyId/byot/credentials', requireScalePlan, async (req, res) =>
 
 // ============================================================================
 // POST /api/agency/:agencyId/byot/test
-// Test that credentials can search for available phone numbers
 // ============================================================================
-router.post('/:agencyId/byot/test', requireScalePlan, async (req, res) => {
+router.post('/:agencyId/byot/test', requireProPlan, async (req, res) => {
   const { agency } = req;
   const { country_code = 'CA' } = req.body;
 
@@ -214,9 +201,8 @@ router.post('/:agencyId/byot/test', requireScalePlan, async (req, res) => {
 
 // ============================================================================
 // DELETE /api/agency/:agencyId/byot/credentials
-// Remove BYOT credentials and disable BYOT
 // ============================================================================
-router.delete('/:agencyId/byot/credentials', requireScalePlan, async (req, res) => {
+router.delete('/:agencyId/byot/credentials', requireProPlan, async (req, res) => {
   const { agencyId } = req.params;
 
   try {
@@ -250,11 +236,6 @@ router.delete('/:agencyId/byot/credentials', requireScalePlan, async (req, res) 
 // ============================================================================
 // BYOT PROVISIONING LOGIC (exported for use in client-signup.js)
 // ============================================================================
-
-/**
- * Provision a phone number using agency's Twilio credentials,
- * then import it into VAPI attached to the given assistant.
- */
 async function provisionBYOTNumber(agency, options) {
   const { countryCode, areaCode, assistantId, businessName } = options;
 
@@ -269,7 +250,6 @@ async function provisionBYOTNumber(agency, options) {
 
   console.log(`📞 BYOT: Provisioning ${countryCode} number for ${businessName} via agency's Twilio`);
 
-  // STEP 1: Search for available numbers
   let searchUrl = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/AvailablePhoneNumbers/${countryCode}/Local.json?Limit=5`;
   if (areaCode) {
     searchUrl += `&AreaCode=${areaCode}`;
@@ -297,7 +277,6 @@ async function provisionBYOTNumber(agency, options) {
   const selectedNumber = availableNumbers[0].phone_number;
   console.log(`   Found ${availableNumbers.length} numbers, selected: ${selectedNumber}`);
 
-  // STEP 2: Buy the number on agency's Twilio
   const buyResponse = await fetch(
     `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers.json`,
     {
@@ -321,7 +300,6 @@ async function provisionBYOTNumber(agency, options) {
   const purchasedNumber = await buyResponse.json();
   console.log(`   ✅ Purchased: ${purchasedNumber.phone_number} (SID: ${purchasedNumber.sid})`);
 
-  // STEP 3: Import into VAPI using agency's Twilio credentials
   const vapiResponse = await fetch('https://api.vapi.ai/phone-number', {
     method: 'POST',
     headers: {
@@ -359,8 +337,5 @@ async function provisionBYOTNumber(agency, options) {
   };
 }
 
-// ============================================================================
-// EXPORTS
-// ============================================================================
 module.exports = router;
 module.exports.provisionBYOTNumber = provisionBYOTNumber;
