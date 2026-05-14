@@ -6,6 +6,8 @@
 //   +1 (470) 649-1985 → Dental demo (via INDUSTRY_DEMO_NUMBERS, unbranded)
 //
 // UPDATED: 2026-05-05 — Added analysisPlan for structured data extraction
+// UPDATED: 2026-05-14 — Multilingual support: Deepgram Nova-2 transcriber
+//          with language='multi', language instruction in demo prompts
 // ============================================================================
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
@@ -33,15 +35,31 @@ const INDUSTRY_DISPLAY_NAMES = {
 };
 
 // ============================================================================
+// MULTILINGUAL TRANSCRIBER CONFIG — shared across all demo configs
+// ============================================================================
+const DEMO_TRANSCRIBER = {
+  provider: 'deepgram',
+  model: 'nova-2',
+  language: 'multi',
+};
+
+// ============================================================================
+// LANGUAGE BLOCK — appended to demo prompts
+// ============================================================================
+const DEMO_LANGUAGE_BLOCK = `
+
+# Language
+If the caller speaks Spanish, switch to Spanish immediately and continue the entire demo in Spanish — including the roleplay, the reveal, and any product questions. Match whatever language the caller uses. Do not ask for language preference.`;
+
+// ============================================================================
 // VAPI ANALYSIS PLAN — auto-extracts structured data from demo calls
-// Results land in message.analysis.structuredData in end-of-call-report
 // ============================================================================
 const DEMO_ANALYSIS_PLAN = {
   summaryPlan: {
     messages: [
       {
         role: 'system',
-        content: 'Summarize this AI receptionist demo call in 2-3 sentences. Include: what type of business the caller runs, what scenario the AI demonstrated for them, and whether the caller seemed genuinely interested in the product or was just browsing.'
+        content: 'Summarize this AI receptionist demo call in 2-3 sentences in English, regardless of the language spoken during the call. Include: what type of business the caller runs, what scenario the AI demonstrated for them, and whether the caller seemed genuinely interested in the product or was just browsing. If the call was conducted in a non-English language, note that at the start of the summary.'
       }
     ],
   },
@@ -58,6 +76,7 @@ const DEMO_ANALYSIS_PLAN = {
           '- interest_level: "high" if they asked about pricing, signup, features, or seemed excited; "medium" if engaged but noncommittal; "low" if disinterested or ended quickly',
           '- service_discussed: the specific service or scenario roleplayed, e.g. "emergency dental appointment booking" or "plumbing leak repair intake" (string or null)',
           '- asked_questions: true if the caller asked follow-up questions about the product after the roleplay',
+          '- call_language: the primary language spoken during the call, e.g. "en" for English, "es" for Spanish (string)',
         ].join('\n'),
       }
     ],
@@ -70,6 +89,7 @@ const DEMO_ANALYSIS_PLAN = {
         interest_level: { type: 'string', enum: ['high', 'medium', 'low'] },
         service_discussed: { type: 'string' },
         asked_questions: { type: 'boolean' },
+        call_language: { type: 'string' },
       },
     },
   },
@@ -135,6 +155,8 @@ Use this to answer questions after the roleplay. Keep answers to one or two sent
 
 **After hours:** You can configure different behavior for after hours — the AI can take messages, let callers know your hours, or handle things differently based on your settings.
 
+**Multilingual:** The AI automatically detects if a caller speaks Spanish and switches to Spanish for the entire call. No configuration needed — it just works. Supports English and Spanish out of the box.
+
 **Industries:** Works for any business that takes phone calls. There are specialized configurations for dental, medical, home services, legal, restaurants, salons, real estate, automotive, fitness, retail, and financial services.
 
 **Pricing:** "Plans start at an affordable monthly rate. You will see all the options when you start your free trial — no credit card required." Do not quote specific dollar amounts.
@@ -172,6 +194,7 @@ This is a sales demo. Every moment should make them think "I need this for my pr
 - Short. One to two sentences per turn.
 - Warm and upbeat. Match their energy. One question at a time.
 - Say phone numbers digit by digit. Say dates as words.
+${DEMO_LANGUAGE_BLOCK}
 
 # The Demo
 
@@ -230,6 +253,7 @@ function buildIndustryDemoConfig(industryKey, agency) {
 
   return {
     name: `${displayName} Demo`,
+    transcriber: DEMO_TRANSCRIBER,
     model: {
       provider: 'openai', model: 'gpt-4o', temperature: 0.6,
       messages: [{ role: 'system', content: systemPrompt }],
@@ -272,6 +296,7 @@ This is a sales demo. Every moment should make them think "I need this."
 
 # How You Sound
 Like a real person. Short — one to two sentences per turn. Match their energy. One question at a time. Phone numbers digit by digit. Dates as words.
+${DEMO_LANGUAGE_BLOCK}
 
 # The Demo
 
@@ -330,6 +355,7 @@ function buildDemoDynamicConfig(agency) {
 
   return {
     name: `${agencyName.slice(0, 25)} Demo`,
+    transcriber: DEMO_TRANSCRIBER,
     model: {
       provider: 'openai', model: 'gpt-4o', temperature: 0.6,
       messages: [{ role: 'system', content: getDemoSystemPromptV2(agencyName, { skipSignupMention }) }],

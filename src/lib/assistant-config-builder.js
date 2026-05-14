@@ -9,11 +9,15 @@
 // Phase 4: Tool config toggles (callerRecognition, spamDetection, 
 //          businessHours, transferFallback, speechTimeout)
 // Phase 5: Business hours routing, transfer fallback to message-taking
+
 // UPDATED: Transfer keywords block — "representative", "live agent", etc.
 // FIX: Added `function` blocks to transferCall and endCall tools so the LLM
 //      registers them as callable functions. Without `function`, the AI sees
 //      transfer instructions in the prompt but has no function to invoke.
 //      Tools stay in model.tools for assistant-request compatibility. (2026-04-14)
+// UPDATED: 2026-05-14 — Multilingual support: Deepgram Nova-2 transcriber
+//          with language='multi' for automatic Spanish/English code-switching.
+//          Language detection prompt block injected into all system prompts.
 // ============================================================================
 
 const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, TRANSFER_KEYWORDS_BLOCK, VOICES,
@@ -39,6 +43,15 @@ const DEFAULT_TOOL_CONFIG = {
   speechTimeoutSeconds: 12,
   transferFallbackToMessage: true,
 };
+
+// ============================================================================
+// LANGUAGE DETECTION BLOCK — Appended to every assistant's system prompt
+// Enables automatic Spanish/English code-switching without client config
+// ============================================================================
+const LANGUAGE_DETECTION_BLOCK = `
+
+# Language
+If the caller speaks Spanish, immediately switch to Spanish for the remainder of the call. Respond naturally in whatever language the caller uses. All information collection — name, phone number, address, reason for calling — should continue in the caller's language. Do not ask the caller what language they prefer. Just match them automatically. If the caller switches languages mid-conversation, follow them.`;
 
 // ============================================================================
 // BUSINESS HOURS CHECK
@@ -248,6 +261,9 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     systemPrompt = config.systemPrompt(businessName);
   }
 
+  // ── Language detection — always appended ─────────────────────────────
+  systemPrompt += LANGUAGE_DETECTION_BLOCK;
+
   // ── Conditional blocks based on tool_config ──────────────────────────
 
   // Spam detection
@@ -283,7 +299,7 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
 // Returns VAPI tools array for model.tools.
 // Each built-in tool (transferCall, endCall) needs a `function` block so the
 // LLM registers it as a callable function. Without `function`, the LLM sees
-// the tool in the prompt but has no function definition to invoke.
+// transfer instructions in the prompt but has no function definition to invoke.
 // ============================================================================
 function buildTools(client, toolConfig, isAfterHours) {
   const tools = [];
@@ -459,6 +475,11 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
 
   const assistantConfig = {
     name: sanitizeAssistantName(client.business_name),
+    transcriber: {
+      provider: 'deepgram',
+      model: 'nova-2',
+      language: 'multi',
+    },
     model: {
       provider: 'openai',
       model: modelId,
@@ -493,4 +514,5 @@ module.exports = {
   checkBusinessHours,
   enforceAgencyPlanFeatures,
   DEFAULT_TOOL_CONFIG,
+  LANGUAGE_DETECTION_BLOCK,
 };
