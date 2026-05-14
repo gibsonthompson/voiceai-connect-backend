@@ -90,58 +90,6 @@ Return a JSON array of idea objects. Each idea must have:
 
 Return ONLY the JSON array, no markdown formatting, no preamble.`;
 
-=== STORYBRAND POSITIONING ===
-
-The viewer is the hero. VoiceAI Connect is the tool the guide hands them. Never say "VoiceAI Connect is amazing." Say "here's how people your age are building $5-20k/month businesses by solving the missed call problem for local businesses."
-
-The founder (Gibson) is the guide — a builder who's sharing what he's learned, not a guru selling a dream. Tone is direct, honest, peer-to-peer. Never condescending. Never hype-y. The energy is "I figured something out and I think you should know about it."
-
-=== CONTENT PILLARS ===
-
-1. OPPORTUNITY — Why this business model exists now. The missed call economy, the cost gap between human receptionists and AI, timing advantage over established players. Appeals to viewers who don't know AI receptionists can be resold.
-
-2. PROOF & TRANSPARENCY — Real numbers, real dashboards, real client conversations. What it actually costs. What the margins actually are. Month-over-month updates. This pillar converts the hardest because the target viewer has been burned by opaque promises before.
-
-3. HOW-TO & TUTORIALS — Specific, actionable walkthroughs. How to set up the platform, how to demo to a business owner, how to get the first 3 clients, how to price the service. Screen recordings with face in corner.
-
-4. INDUSTRY BREAKDOWNS — Deep dives into specific verticals: HVAC, dental, legal, restaurants, home services. Each follows the same template: the problem in that industry → how the AI solves it → what the call sounds like → what the dashboard looks like. These capture high-intent search traffic — someone searching "AI receptionist for dentists" is ready to act.
-
-5. OBJECTION HANDLING — Directly addresses what stops people from starting. "Do callers know it's AI?" "Is the market saturated?" "Do I need technical skills?" "What happens when the AI gets something wrong?" Converts at the highest rate because viewers are already considering the idea.
-
-6. COMPARISON & POSITIONING — VoiceAI Connect vs GoHighLevel, AI receptionist vs human receptionist, white-label vs building your own. Captures high-intent search traffic from people comparing options.
-
-=== VIDEO STRUCTURE (4 blocks) ===
-
-Every video follows this structure:
-
-BLOCK 1 — HOOK (5-15 seconds): The tension. Current state vs desired state, stated as a gap the viewer feels. NOT a greeting. NOT "hey guys today we're gonna talk about..." The hook's only job is to earn the next 30 seconds.
-
-BLOCK 2 — CONTEXT (30-90 seconds): Why this matters and why the speaker is credible. Not a bio. Just enough to answer "why should I keep watching this person?" Quick reframe of how the viewer should think about the situation.
-
-BLOCK 3 — PAYLOAD (70-80% of the video): The actual value, delivered in segments with micro-hooks between each. "OK so that's how the economics work — but here's where most people mess this up." A chain of small promises kept, not one big lecture.
-
-BLOCK 4 — BRIDGE (15-30 seconds): The natural next step. Not a hard sell. "If you want to see what this looks like inside the platform, link's below." You're not closing a video — you're opening the next one.
-
-=== RECORDING MODES ===
-
-Each idea should suggest one of these three modes:
-
-- "figured_something_out" — sharing a genuine discovery or insight. Most natural for talking head.
-- "showing_screen" — screen recording with face in corner. Best for tutorials and proof content.
-- "telling_friend" — answering a question the way you'd answer a friend who texted you. Best for objection handling.
-
-=== OUTPUT FORMAT ===
-
-Return a JSON array of idea objects. Each idea must have:
-- pillar: one of "opportunity", "proof", "howto", "industry", "objection", "comparison"
-- title: YouTube-optimized title (compelling, specific, under 70 chars ideal)
-- hook: the exact opening 5-15 seconds the speaker would say on camera
-- talking_points: array of 4-6 strings, each a key point to hit in the payload
-- target_length: suggested video length (e.g. "8-12 min", "5-7 min", "60s short")
-- recording_mode: one of "figured_something_out", "showing_screen", "telling_friend"
-
-Return ONLY the JSON array, no markdown formatting, no preamble.`;
-
 // ════════════════════════════════════════════════════════════════════════
 // SCRIPT GENERATION PROMPT
 // ════════════════════════════════════════════════════════════════════════
