@@ -10,6 +10,12 @@
 // UPDATED: 2026-05-10 — Default prices changed to $99/$149/$299, starter plan
 //          features updated (email summaries, caller recognition, business
 //          hours, after-hours mode now included).
+// UPDATED: 2026-05-14 — REVERTED signup status back to pending/pending_payment.
+//          The May 7 change to active at signup broke ALL automated SMS
+//          sequences (abandoned cart, onboarding engagement) because those
+//          crons filter for subscription_status='pending'. Activation now
+//          happens in /api/agency/start-trial after onboarding completes,
+//          which correctly sets active + onboarding_completed=true.
 // ============================================================================
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
@@ -276,6 +282,10 @@ async function handleAgencySignup(req, res) {
     console.log(`🏢 Creating agency for: ${firstName} ${lastName || ''} (${email}) [${resolvedCountry}/${resolvedCurrency}]`);
     
     // Create agency record
+    // NOTE: Status starts as pending. Activation happens in /api/agency/start-trial
+    // after onboarding completes (handles both free and paid plans).
+    // This is critical — abandoned cart and onboarding engagement SMS crons
+    // filter for subscription_status='pending' to find agencies that need nudging.
     const { data: agency, error: agencyError } = await supabase
       .from('agencies')
       .insert({
@@ -285,8 +295,8 @@ async function handleAgencySignup(req, res) {
         phone: phone || null,
         country: resolvedCountry,
         currency: resolvedCurrency,
-        status: 'active',
-        subscription_status: 'active',
+        status: 'pending_payment',
+        subscription_status: 'pending',
         plan_type: 'free',
         onboarding_step: 1,
         onboarding_completed: false,
