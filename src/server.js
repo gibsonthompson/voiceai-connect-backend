@@ -143,6 +143,7 @@ const activationSmsRoutes = require('./routes/activation-sms');
 const feedbackRoutes = require('./routes/feedback');
 const supportRoutes = require('./routes/support');
 const helpRoutes = require('./routes/help');
+const ytContentRoutes = require('./routes/yt-content');
 const teamRoutes = require('./routes/team');
 const contentRender = require('./content-render');  // Content render service
 
@@ -651,6 +652,7 @@ app.use('/api/agency', byotRoutes);
 app.use('/api/agency', feedbackRoutes);
 app.use('/api/agency', supportRoutes);
 app.use('/api/help', helpRoutes);
+app.use('/api/yt', ytContentRoutes);
 app.use('/api/agency', leadRoutes);
 app.use('/api/agency', activityRoutes);
 app.use('/api/agency', outreachRoutes);

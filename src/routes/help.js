@@ -112,6 +112,15 @@ CALL HANDLING:
 - Compliance: include recording disclaimer in greeting.
 - AI can be configured to not mention it's AI.
 
+GOOGLE CALENDAR INTEGRATION:
+- Built-in Google Calendar integration — AI can check real-time availability and book appointments during calls.
+- Caller says they want an appointment → AI checks Google Calendar → offers available slots → books it automatically.
+- Calendar events include caller name, phone, and reason for appointment.
+- Agencies control which client plan tiers get calendar access (Settings > Pricing, toggle "Google Calendar" per plan).
+- Clients connect their own Google account via OAuth (secure, agency never sees credentials).
+- Works with shared team calendars — connect the Google account that owns the calendar.
+- Troubleshooting: verify Google account connected, correct calendar selected, feature enabled for client's plan tier.
+
 DEMO MODE:
 - Toggle in Settings > Demo Mode. Shows sample data (14 clients, calls, leads, revenue). Display only, doesn't affect real data.
 
