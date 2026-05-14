@@ -4,6 +4,9 @@
 // UPDATED: 2026-05-09 — Uses sendAndLogSMS for full SMS logging,
 //          updated messages to remove old pricing references,
 //          "start free" instead of "14-day free trial"
+// UPDATED: 2026-05-14 — Fixed phone formatting for international agencies
+//          (was defaulting to +1 for all), increment step on permanent
+//          failure to prevent infinite retry loops
 // ============================================================================
 
 const express = require('express');
@@ -18,6 +21,27 @@ const { getSmsTemplate } = require('../lib/sms-templates');
 // TIMING THRESHOLDS (minutes after signup)
 // ============================================================================
 const STEP_THRESHOLDS = { 1: 30, 2: 60, 3: 1440, 4: 4320, 5: 10080 };
+
+// Permanent Telnyx error codes — retrying will never succeed
+const PERMANENT_ERROR_CODES = new Set([
+  '40310', // Invalid 'to' address
+  '40300', // Blocked due to STOP message
+  '40306', // Alpha sender not configured (can't SMS this country)
+]);
+
+// ============================================================================
+// VALIDATE E.164 PHONE — catch obviously bad numbers before hitting Telnyx
+// ============================================================================
+function isValidE164(phone) {
+  if (!phone || !phone.startsWith('+')) return false;
+  const digits = phone.replace(/\D/g, '');
+  // E.164: 7-15 digits, no leading 0 after country code
+  if (digits.length < 7 || digits.length > 15) return false;
+  // Catch the +10... pattern (US code + non-US number = always invalid)
+  // Valid US/CA numbers after +1 are exactly 10 digits (total 11 with country code)
+  if (digits.startsWith('1') && digits.length !== 11) return false;
+  return true;
+}
 
 // ============================================================================
 // GET RECOVERY LINK — set-password for passwordless, login for password-set
@@ -53,7 +77,6 @@ async function getRecoveryLink(agency) {
 
 // ============================================================================
 // HARDCODED FALLBACKS (used only if DB template is missing)
-// UPDATED: 2026-05-09 — Removed "white-label", "14-day free trial" references
 // ============================================================================
 function getFallbackMessage(step, name, recoveryLink) {
   switch (step) {
@@ -103,7 +126,7 @@ router.post('/abandoned-cart', async (req, res) => {
 
     const { data: agencies, error } = await supabase
       .from('agencies')
-      .select('id, name, email, phone, created_at, abandoned_cart_step, abandoned_cart_last_sent_at')
+      .select('id, name, email, phone, country, created_at, abandoned_cart_step, abandoned_cart_last_sent_at')
       .eq('subscription_status', 'pending')
       .lt('abandoned_cart_step', 5)
       .not('phone', 'is', null)
@@ -120,8 +143,21 @@ router.post('/abandoned-cart', async (req, res) => {
       const nextStep = getNextStep(agency);
       if (!nextStep) { skipped++; continue; }
 
-      const formattedPhone = formatPhoneE164(agency.phone);
-      if (!formattedPhone) { console.log(`⚠️ Invalid phone for ${agency.name}: ${agency.phone}`); skipped++; continue; }
+      // Format phone using agency's country (not hardcoded US)
+      const formattedPhone = formatPhoneE164(agency.phone, agency.country || 'US');
+
+      // Validate before attempting to send — catch obviously bad numbers
+      if (!formattedPhone || !isValidE164(formattedPhone)) {
+        console.log(`⚠️ Invalid phone for ${agency.name}: ${agency.phone} → ${formattedPhone} (country: ${agency.country || 'US'}) — skipping permanently`);
+        // Increment step so we don't retry this agency every 15 minutes
+        await supabase.from('agencies').update({
+          abandoned_cart_step: 5, // Max step — stops all future retries
+          abandoned_cart_last_sent_at: new Date().toISOString(),
+        }).eq('id', agency.id);
+        results.push({ agency: agency.name, step: nextStep, status: 'invalid_phone', phone: formattedPhone });
+        skipped++;
+        continue;
+      }
 
       const recoveryLink = await getRecoveryLink(agency);
       const name = agency.name || 'there';
@@ -134,7 +170,7 @@ router.post('/abandoned-cart', async (req, res) => {
       console.log(`📱 Sending abandoned cart step ${nextStep} to ${agency.name} (${formattedPhone})`);
 
       const smsSent = await sendAndLogSMS({
-        phone: agency.phone,
+        phone: formattedPhone,
         message,
         agencyId: agency.id,
         recipientType: 'agency_owner',
@@ -142,6 +178,7 @@ router.post('/abandoned-cart', async (req, res) => {
         metadata: {
           step: nextStep,
           linkType: recoveryLink.includes('set-password') ? 'set-password' : 'login',
+          country: agency.country || 'US',
         },
       });
 
@@ -154,8 +191,14 @@ router.post('/abandoned-cart', async (req, res) => {
         results.push({ agency: agency.name, step: nextStep, status: 'sent', linkType: recoveryLink.includes('set-password') ? 'set-password' : 'login' });
         console.log(`✅ Step ${nextStep} sent to ${agency.name}`);
       } else {
-        results.push({ agency: agency.name, step: nextStep, status: 'failed' });
-        console.log(`❌ Failed to send step ${nextStep} to ${agency.name}`);
+        // Send failed — increment step to prevent infinite retry on permanent errors
+        // (Telnyx errors like STOP block, alpha sender, etc. will never succeed)
+        await supabase.from('agencies').update({
+          abandoned_cart_step: nextStep,
+          abandoned_cart_last_sent_at: new Date().toISOString(),
+        }).eq('id', agency.id);
+        results.push({ agency: agency.name, step: nextStep, status: 'failed_advanced' });
+        console.log(`❌ Failed to send step ${nextStep} to ${agency.name} — advancing step to prevent retry`);
       }
     }
 
@@ -183,8 +226,8 @@ router.post('/abandoned-cart/test/:agencyId', async (req, res) => {
     const targetStep = step || (agency.abandoned_cart_step || 0) + 1;
     if (targetStep > 5) return res.json({ success: false, message: 'All 5 messages already sent' });
 
-    const formattedPhone = formatPhoneE164(agency.phone);
-    if (!formattedPhone) return res.json({ success: false, message: `Invalid phone: ${agency.phone}` });
+    const formattedPhone = formatPhoneE164(agency.phone, agency.country || 'US');
+    if (!formattedPhone || !isValidE164(formattedPhone)) return res.json({ success: false, message: `Invalid phone: ${agency.phone} → ${formattedPhone}` });
 
     const recoveryLink = await getRecoveryLink(agency);
     const name = agency.name || 'there';
@@ -194,7 +237,7 @@ router.post('/abandoned-cart/test/:agencyId', async (req, res) => {
     console.log(`🧪 Test sending step ${targetStep} to ${agency.name}`);
 
     const smsSent = await sendAndLogSMS({
-      phone: agency.phone,
+      phone: formattedPhone,
       message,
       agencyId: agency.id,
       recipientType: 'agency_owner',
@@ -214,6 +257,7 @@ router.post('/abandoned-cart/test/:agencyId', async (req, res) => {
       agency: agency.name,
       step: targetStep,
       phone: formattedPhone,
+      country: agency.country || 'US',
       linkType: recoveryLink.includes('set-password') ? 'set-password' : 'login',
       message: smsSent ? `Step ${targetStep} sent` : 'SMS failed',
     });

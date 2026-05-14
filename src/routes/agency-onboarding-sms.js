@@ -1,17 +1,9 @@
 // ============================================================================
 // AGENCY ONBOARDING ENGAGEMENT SMS - Cron Handler
-// ⚠️ LEGACY — This file targets onboarding_completed = false.
-//    Since onboarding was shortened to 3 steps (name → plan → password),
-//    most agencies complete it in minutes and are never picked up by this cron.
+// ⚠️ LEGACY — See activation-sms.js for the primary engagement system.
 //
-//    The PRIMARY engagement system is now activation-sms.js which targets
-//    onboarding_completed = true (agencies that made it into the dashboard).
-//
-//    This file remains active for any edge-case agencies that stall during
-//    the 3-step signup itself. Do not add new features here — add them
-//    to activation-sms.js instead.
-//
-// UPDATED: 2026-05-09 — Added deprecation notice, switched to sendAndLogSMS
+// UPDATED: 2026-05-14 — Fixed phone formatting for international agencies,
+//          added E.164 validation, advance step on permanent send failures
 // ============================================================================
 
 const express = require('express');
@@ -21,23 +13,23 @@ const { formatPhoneE164 } = require('../lib/notifications');
 const { sendAndLogSMS } = require('../lib/sms-logger');
 const { getSmsTemplate } = require('../lib/sms-templates');
 
-// ============================================================================
-// TIMING: Hours after signup for each step
-// ============================================================================
 const STEP_HOURS = { 1: 2, 2: 6, 3: 24, 4: 48, 5: 72, 6: 120, 7: 168, 8: 240, 9: 312 };
 
-// ============================================================================
-// BUILD URLS FOR AGENCY
-// ============================================================================
+function isValidE164(phone) {
+  if (!phone || !phone.startsWith('+')) return false;
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length < 7 || digits.length > 15) return false;
+  if (digits.startsWith('1') && digits.length !== 11) return false;
+  return true;
+}
+
 function getAgencyUrls(agency) {
   const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
   const platformUrl = `https://${platformDomain}`;
-
   let baseUrl;
   if (agency.marketing_domain && agency.domain_verified) baseUrl = `https://${agency.marketing_domain}`;
   else if (agency.slug) baseUrl = `https://${agency.slug}.${platformDomain}`;
   else baseUrl = platformUrl;
-
   return {
     settingsUrl: `${platformUrl}/agency/settings`,
     clientsUrl: `${platformUrl}/agency/clients`,
@@ -47,114 +39,41 @@ function getAgencyUrls(agency) {
   };
 }
 
-// ============================================================================
-// CHECK ELIGIBILITY & CONDITIONS FOR EACH STEP
-// ============================================================================
 async function getNextEligibleStep(agency) {
   const currentStep = agency.onboarding_sms_step || 0;
   const nextStep = currentStep + 1;
   if (nextStep > 9) return null;
-
   const signupTime = new Date(agency.created_at).getTime();
   const hoursSinceSignup = (Date.now() - signupTime) / (1000 * 60 * 60);
   if (hoursSinceSignup < STEP_HOURS[nextStep]) return null;
-
   if (agency.onboarding_sms_last_sent_at) {
     const hoursSinceLastSent = (Date.now() - new Date(agency.onboarding_sms_last_sent_at).getTime()) / (1000 * 60 * 60);
     if (hoursSinceLastSent < 2) return null;
   }
-
   switch (nextStep) {
-    case 1:
-      if (agency.logo_url) return getNextEligibleStep({ ...agency, onboarding_sms_step: nextStep });
-      break;
-    case 2:
-      if (agency.stripe_charges_enabled) return getNextEligibleStep({ ...agency, onboarding_sms_step: nextStep });
-      break;
-    case 4:
-      if (agency.stripe_charges_enabled) return getNextEligibleStep({ ...agency, onboarding_sms_step: nextStep });
-      break;
+    case 1: if (agency.logo_url) return getNextEligibleStep({ ...agency, onboarding_sms_step: nextStep }); break;
+    case 2: if (agency.stripe_charges_enabled) return getNextEligibleStep({ ...agency, onboarding_sms_step: nextStep }); break;
+    case 4: if (agency.stripe_charges_enabled) return getNextEligibleStep({ ...agency, onboarding_sms_step: nextStep }); break;
   }
-
   return { eligible: true, step: nextStep };
 }
 
-// ============================================================================
-// GET MESSAGE FOR STEP
-// ============================================================================
 async function getStepMessage(step, agency, urls) {
   const name = agency.name || 'there';
-
   switch (step) {
-    case 1: {
-      const msg = await getSmsTemplate('onboarding_sms_1', { name, settings_url: urls.settingsUrl });
-      return msg || `Hey ${name}, quick win for your agency 🎨\n\nUpload your logo and set your brand colors — it takes 30 seconds and everything your clients see will be YOUR brand, not ours.\n\n${urls.settingsUrl}?tab=profile`;
-    }
-    case 2: {
-      const msg = await getSmsTemplate('onboarding_sms_2', { name, settings_url: urls.settingsUrl });
-      return msg || `${name}, one important setup step left: connect Stripe so you can collect payments from your clients.\n\nIt takes about 2 minutes and you'll be ready to start earning recurring revenue.\n\n${urls.settingsUrl}?tab=payments`;
-    }
-    case 3: {
-      const msg = await getSmsTemplate('onboarding_sms_3', { dashboard_url: urls.dashboardUrl });
-      return msg || `Pro tip: you already have a test client with a live AI receptionist in your dashboard.\n\nCall the test number to hear exactly what your clients will experience — then share your signup link to start landing real clients.\n\n${urls.dashboardUrl}`;
-    }
-    case 4: {
-      const msg = await getSmsTemplate('onboarding_sms_4', { name, settings_url: urls.settingsUrl });
-      return msg || `Hey ${name}, just a heads up — your agency isn't set up to accept payments yet.\n\nWithout Stripe connected, clients who try to subscribe won't be able to pay you.\n\nConnect now (takes 2 min):\n${urls.settingsUrl}?tab=payments`;
-    }
-    case 5: {
-      const msg = await getSmsTemplate('onboarding_sms_5', { name, signup_url: urls.signupUrl });
-      return msg || `${name}, your client signup page is live:\n${urls.signupUrl}\n\nShare it in your outreach, add it to your website, or DM it directly to a prospect.\n\nEvery business that signs up gets their own AI receptionist — and pays YOU monthly.`;
-    }
-    case 6: {
-      const { data: clients } = await supabase.from('clients').select('id').eq('agency_id', agency.id).eq('is_test_client', false).limit(1);
-      const clientCount = clients?.length || 0;
-      const missing = [];
-      if (!agency.logo_url) missing.push('• Upload your logo');
-      if (!agency.stripe_charges_enabled) missing.push('• Connect Stripe');
-      if (clientCount === 0) missing.push('• Land your first client');
-
-      if (missing.length === 0) {
-        const msg = await getSmsTemplate('onboarding_sms_6_complete', { name, signup_url: urls.signupUrl });
-        return msg || `${name}, your agency is fully set up! 💪\n\nBranding ✅\nStripe ✅\nClients ✅\n\nTime to scale. Share your signup link with more prospects:\n${urls.signupUrl}`;
-      } else {
-        const missingItems = missing.join('\n');
-        const msg = await getSmsTemplate('onboarding_sms_6_progress', { name, missing_items: missingItems, login_url: urls.loginUrl });
-        return msg || `${name}, you're making progress! Here's what's left to get your agency 100% ready:\n\n${missingItems}\n\nLog in: ${urls.loginUrl}`;
-      }
-    }
-    case 7: {
-      const msg = await getSmsTemplate('onboarding_sms_7', { name, signup_url: urls.signupUrl });
-      return msg || `${name}, you're halfway through your free trial.\n\nAgencies that land their first client in week 1 are far more likely to build real recurring revenue.\n\nYour signup page is ready for prospects:\n${urls.signupUrl}\n\nNeed help? Reply to this text.`;
-    }
-    case 8: {
-      const trialEndsAt = agency.trial_ends_at ? new Date(agency.trial_ends_at) : null;
-      let daysMsg = '4 days left';
-      if (trialEndsAt) {
-        const daysLeft = Math.max(0, Math.ceil((trialEndsAt.getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
-        daysMsg = `${daysLeft} day${daysLeft !== 1 ? 's' : ''} left`;
-      }
-      const msg = await getSmsTemplate('onboarding_sms_8', { name, days_msg: daysMsg, settings_url: urls.settingsUrl });
-      return msg || `${name}, ${daysMsg} on your trial.\n\nEverything you've built — your branding, clients, AI assistants — stays active when you subscribe.\n\nLock in your plan:\n${urls.settingsUrl}?tab=billing`;
-    }
-    case 9: {
-      const trialEndsAt = agency.trial_ends_at ? new Date(agency.trial_ends_at) : null;
-      let expiryMsg = 'your VoiceAI Connect trial ends tomorrow';
-      if (trialEndsAt) {
-        const daysLeft = Math.max(0, Math.ceil((trialEndsAt.getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
-        expiryMsg = daysLeft <= 1 ? 'your VoiceAI Connect trial ends tomorrow' : `your VoiceAI Connect trial ends in ${daysLeft} days`;
-      }
-      const msg = await getSmsTemplate('onboarding_sms_9', { name, expiry_msg: expiryMsg, settings_url: urls.settingsUrl });
-      return msg || `${name}, ${expiryMsg}.\n\nAfter that, your agency dashboard and all client AI receptionists will be paused.\n\nSubscribe to keep everything running:\n${urls.settingsUrl}?tab=billing`;
-    }
-    default:
-      return null;
+    case 1: { const msg = await getSmsTemplate('onboarding_sms_1', { name, settings_url: urls.settingsUrl }); return msg || `Hey ${name}, quick win for your agency 🎨\n\nUpload your logo and set your brand colors — it takes 30 seconds and everything your clients see will be YOUR brand, not ours.\n\n${urls.settingsUrl}?tab=profile`; }
+    case 2: { const msg = await getSmsTemplate('onboarding_sms_2', { name, settings_url: urls.settingsUrl }); return msg || `${name}, one important setup step left: connect Stripe so you can collect payments from your clients.\n\nIt takes about 2 minutes and you'll be ready to start earning recurring revenue.\n\n${urls.settingsUrl}?tab=payments`; }
+    case 3: { const msg = await getSmsTemplate('onboarding_sms_3', { dashboard_url: urls.dashboardUrl }); return msg || `Pro tip: you already have a test client with a live AI receptionist in your dashboard.\n\nCall the test number to hear exactly what your clients will experience — then share your signup link to start landing real clients.\n\n${urls.dashboardUrl}`; }
+    case 4: { const msg = await getSmsTemplate('onboarding_sms_4', { name, settings_url: urls.settingsUrl }); return msg || `Hey ${name}, just a heads up — your agency isn't set up to accept payments yet.\n\nWithout Stripe connected, clients who try to subscribe won't be able to pay you.\n\nConnect now (takes 2 min):\n${urls.settingsUrl}?tab=payments`; }
+    case 5: { const msg = await getSmsTemplate('onboarding_sms_5', { name, signup_url: urls.signupUrl }); return msg || `${name}, your client signup page is live:\n${urls.signupUrl}\n\nShare it in your outreach, add it to your website, or DM it directly to a prospect.\n\nEvery business that signs up gets their own AI receptionist — and pays YOU monthly.`; }
+    case 6: { const { data: clients } = await supabase.from('clients').select('id').eq('agency_id', agency.id).eq('is_test_client', false).limit(1); const clientCount = clients?.length || 0; const missing = []; if (!agency.logo_url) missing.push('• Upload your logo'); if (!agency.stripe_charges_enabled) missing.push('• Connect Stripe'); if (clientCount === 0) missing.push('• Land your first client'); if (missing.length === 0) { const msg = await getSmsTemplate('onboarding_sms_6_complete', { name, signup_url: urls.signupUrl }); return msg || `${name}, your agency is fully set up! 💪\n\nBranding ✅\nStripe ✅\nClients ✅\n\nTime to scale. Share your signup link with more prospects:\n${urls.signupUrl}`; } else { const missingItems = missing.join('\n'); const msg = await getSmsTemplate('onboarding_sms_6_progress', { name, missing_items: missingItems, login_url: urls.loginUrl }); return msg || `${name}, you're making progress! Here's what's left to get your agency 100% ready:\n\n${missingItems}\n\nLog in: ${urls.loginUrl}`; } }
+    case 7: { const msg = await getSmsTemplate('onboarding_sms_7', { name, signup_url: urls.signupUrl }); return msg || `${name}, you're halfway through your free trial.\n\nAgencies that land their first client in week 1 are far more likely to build real recurring revenue.\n\nYour signup page is ready for prospects:\n${urls.signupUrl}\n\nNeed help? Reply to this text.`; }
+    case 8: { const trialEndsAt = agency.trial_ends_at ? new Date(agency.trial_ends_at) : null; let daysMsg = '4 days left'; if (trialEndsAt) { const daysLeft = Math.max(0, Math.ceil((trialEndsAt.getTime() - Date.now()) / (1000 * 60 * 60 * 24))); daysMsg = `${daysLeft} day${daysLeft !== 1 ? 's' : ''} left`; } const msg = await getSmsTemplate('onboarding_sms_8', { name, days_msg: daysMsg, settings_url: urls.settingsUrl }); return msg || `${name}, ${daysMsg} on your trial.\n\nEverything you've built — your branding, clients, AI assistants — stays active when you subscribe.\n\nLock in your plan:\n${urls.settingsUrl}?tab=billing`; }
+    case 9: { const trialEndsAt = agency.trial_ends_at ? new Date(agency.trial_ends_at) : null; let expiryMsg = 'your VoiceAI Connect trial ends tomorrow'; if (trialEndsAt) { const daysLeft = Math.max(0, Math.ceil((trialEndsAt.getTime() - Date.now()) / (1000 * 60 * 60 * 24))); expiryMsg = daysLeft <= 1 ? 'your VoiceAI Connect trial ends tomorrow' : `your VoiceAI Connect trial ends in ${daysLeft} days`; } const msg = await getSmsTemplate('onboarding_sms_9', { name, expiry_msg: expiryMsg, settings_url: urls.settingsUrl }); return msg || `${name}, ${expiryMsg}.\n\nAfter that, your agency dashboard and all client AI receptionists will be paused.\n\nSubscribe to keep everything running:\n${urls.settingsUrl}?tab=billing`; }
+    default: return null;
   }
 }
 
-// ============================================================================
-// CRON ENDPOINT — POST /api/cron/agency-onboarding-sms
-// ============================================================================
 router.post('/agency-onboarding-sms', async (req, res) => {
   const cronSecret = req.headers['x-cron-secret'];
   if (process.env.CRON_SECRET && cronSecret !== process.env.CRON_SECRET) {
@@ -181,17 +100,26 @@ router.post('/agency-onboarding-sms', async (req, res) => {
     const results = [];
 
     for (const agency of agencies) {
-      if (agency.subscription_status === 'pending' && (agency.abandoned_cart_step || 0) < 5) {
-        skipped++;
-        continue;
-      }
+      if (agency.subscription_status === 'pending' && (agency.abandoned_cart_step || 0) < 5) { skipped++; continue; }
 
       const result = await getNextEligibleStep(agency);
       if (!result) { skipped++; continue; }
 
       const { step } = result;
-      const formattedPhone = formatPhoneE164(agency.phone);
-      if (!formattedPhone) { console.log(`⚠️ Invalid phone for ${agency.name}`); skipped++; continue; }
+
+      // Format phone with agency's country
+      const formattedPhone = formatPhoneE164(agency.phone, agency.country || 'US');
+
+      if (!formattedPhone || !isValidE164(formattedPhone)) {
+        console.log(`⚠️ Invalid phone for ${agency.name}: ${agency.phone} → ${formattedPhone} (country: ${agency.country || 'US'}) — marking complete`);
+        await supabase.from('agencies').update({
+          onboarding_sms_step: 9,
+          onboarding_sms_last_sent_at: new Date().toISOString(),
+        }).eq('id', agency.id);
+        results.push({ agency: agency.name, step, status: 'invalid_phone' });
+        skipped++;
+        continue;
+      }
 
       const urls = getAgencyUrls(agency);
       const message = await getStepMessage(step, agency, urls);
@@ -200,12 +128,12 @@ router.post('/agency-onboarding-sms', async (req, res) => {
       console.log(`📱 Sending legacy onboarding step ${step} to ${agency.name} (${formattedPhone})`);
 
       const smsSent = await sendAndLogSMS({
-        phone: agency.phone,
+        phone: formattedPhone,
         message,
         agencyId: agency.id,
         recipientType: 'agency_owner',
         messageType: `onboarding_sms_${step}`,
-        metadata: { step, legacy: true },
+        metadata: { step, legacy: true, country: agency.country || 'US' },
       });
 
       if (smsSent) {
@@ -217,8 +145,13 @@ router.post('/agency-onboarding-sms', async (req, res) => {
         results.push({ agency: agency.name, step, status: 'sent' });
         console.log(`✅ Legacy onboarding step ${step} sent to ${agency.name}`);
       } else {
-        results.push({ agency: agency.name, step, status: 'failed' });
-        console.log(`❌ Failed legacy onboarding step ${step} for ${agency.name}`);
+        // Advance step on failure to prevent infinite retry
+        await supabase.from('agencies').update({
+          onboarding_sms_step: step,
+          onboarding_sms_last_sent_at: new Date().toISOString(),
+        }).eq('id', agency.id);
+        results.push({ agency: agency.name, step, status: 'failed_advanced' });
+        console.log(`❌ Failed legacy onboarding step ${step} for ${agency.name} — advancing step`);
       }
     }
 
