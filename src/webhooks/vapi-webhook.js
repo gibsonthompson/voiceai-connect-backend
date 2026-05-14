@@ -5,6 +5,8 @@
 // UPDATED: 2026-05-06 — Usage record tracking for metered billing (Phase 1)
 // UPDATED: 2026-05-09 — Demo SMS: area code location, actionable follow-up,
 //   sendAndLogSMS for full SMS logging
+// UPDATED: 2026-05-14 — Multilingual: English-enforced summaries, callLanguage
+//   extraction, call_language stored on every call record
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -81,7 +83,7 @@ async function generateAISummary(transcript, industry, callerPhone) {
   } catch (error) {
     console.error('❌ AI summary failed:', error.message);
     return { customerName: 'Unknown', customerPhone: callerPhone, customerEmail: null, urgency: 'routine',
-      summary: `Customer called regarding ${industry.replace('_', ' ')} services.`, isSpam: false, spamReason: null };
+      summary: `Customer called regarding ${industry.replace('_', ' ')} services.`, callLanguage: 'en', isSpam: false, spamReason: null };
   }
 }
 
@@ -134,7 +136,6 @@ function buildDisconnectedAssistantConfig(businessName) {
 
 // ============================================================================
 // EXTRACT BUSINESS NAME FROM VAPI END-OF-CALL DATA
-// Tries multiple locations where VAPI stores analysis results
 // ============================================================================
 function extractBusinessNameFromCall(message) {
   const structured = message.analysis?.structuredData
@@ -154,7 +155,6 @@ function extractBusinessNameFromCall(message) {
 
 // ============================================================================
 // GENERATE DEMO CALL SUMMARY (AI extraction via Claude)
-// Falls back gracefully — returns null if transcript too short or API fails.
 // ============================================================================
 async function generateDemoSummary(transcript, callerPhone, industryKey) {
   if (!transcript || transcript.length < 50) return null;
@@ -177,7 +177,7 @@ Extract and return ONLY valid JSON — no backticks, no extra text:
   "interestLevel": "high if they asked about pricing, signup, features, or seemed excited; medium if engaged but noncommittal; low if disinterested or ended quickly",
   "serviceDiscussed": "the specific scenario roleplayed in one short phrase, e.g. 'emergency dental appointment booking' or 'plumbing leak repair intake' — or null",
   "askedQuestions": true or false — did the caller ask follow-up questions about the product after the roleplay,
-  "summary": "2-3 sentence summary covering: what business they run, what the AI demonstrated for them, and their reaction/interest level"
+  "summary": "2-3 sentence summary in English covering: what business they run, what the AI demonstrated for them, and their reaction/interest level"
 }`;
 
   try {
@@ -227,17 +227,11 @@ Extract and return ONLY valid JSON — no backticks, no extra text:
 
 // ============================================================================
 // HANDLE DEMO CALL (end-of-call)
-// industryKey: set = industry demo (simple follow-up)
-// industryKey: null = generic branded demo (signup link)
-//
-// REWRITTEN: 2026-05-05 — Duration, AI summary, comprehensive SMS
-// UPDATED: 2026-05-09 — Area code location, actionable follow-up, sendAndLogSMS
 // ============================================================================
 async function handleDemoCall(agency, message, industryKey = null) {
   const call = message.call;
   const callerPhone = call.customer?.number || null;
 
-  // ── Duration: check ALL VAPI locations ─────────────────────────────────
   let durationSeconds = call.duration
     || message.duration
     || message.artifact?.duration
@@ -252,7 +246,6 @@ async function handleDemoCall(agency, message, industryKey = null) {
 
   console.log(`🎤 Demo call completed for agency: ${agency.name}${industryKey ? ` (${industryKey} demo)` : ''}`);
 
-  // ── Extract VAPI analysis (from analysisPlan) ─────────────────────────
   const vapiAnalysis = message.analysis || {};
   const vapiStructured = vapiAnalysis.structuredData
     || message.artifact?.structuredData
@@ -266,7 +259,6 @@ async function handleDemoCall(agency, message, industryKey = null) {
     || call.analysis?.successEvaluation
     || null;
 
-  // ── Merge: VAPI structured data > extractBusinessNameFromCall > AI ────
   let businessName = vapiStructured?.business_name || extractBusinessNameFromCall(message) || null;
   let businessType = vapiStructured?.business_type || industryKey || null;
   let interestLevel = vapiStructured?.interest_level || null;
@@ -275,7 +267,6 @@ async function handleDemoCall(agency, message, industryKey = null) {
   let askedQuestions = vapiStructured?.asked_questions || false;
   let summary = vapiSummary || null;
 
-  // ── Claude fallback if VAPI analysis incomplete ───────────────────────
   const transcript = message.transcript || message.artifact?.transcript || '';
   if (transcript && (!businessName || !summary)) {
     try {
@@ -294,17 +285,14 @@ async function handleDemoCall(agency, message, industryKey = null) {
     }
   }
 
-  // ── Format for display (using area-codes module) ──────────────────────
   const { formatPhoneDisplay } = require('../lib/notifications');
 
-  // Caller display: formatted phone + area code location
   const callerFormatted = callerPhone ? formatPhone(callerPhone) : 'Unknown';
   const callerLocation = callerPhone ? getPhoneLocation(callerPhone) : null;
   const callerDisplay = callerLocation
     ? `${callerFormatted} · ${callerLocation}`
     : callerFormatted;
 
-  // Duration: clean format via shared helper
   const durationDisplay = durationSeconds
     ? formatDuration(durationSeconds)
     : null;
@@ -323,7 +311,6 @@ async function handleDemoCall(agency, message, industryKey = null) {
   if (callerPhone && callerPhone !== 'Unknown') {
     try {
       if (industryKey) {
-        // Industry demo — personalized thank you
         const displayName = industryKey.replace(/_/g, ' ');
         const nameNote = businessName ? ` for ${businessName}` : '';
         const lines = [
@@ -361,7 +348,6 @@ async function handleDemoCall(agency, message, industryKey = null) {
         console.log('✅ Demo follow-up SMS sent (custom override)');
 
       } else {
-        // Generic branded demo — personalized signup link
         const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
         let signupUrl;
         if (agency.marketing_domain && agency.domain_verified) {
@@ -408,7 +394,6 @@ async function handleDemoCall(agency, message, industryKey = null) {
 
   // ════════════════════════════════════════════════════════════════════════
   // ADMIN NOTIFICATION SMS (to agency owner)
-  // Improved: area code location, clean duration, actionable prompt
   // ════════════════════════════════════════════════════════════════════════
   if (agency.phone) {
     try {
@@ -433,7 +418,6 @@ async function handleDemoCall(agency, message, industryKey = null) {
         lines.push(truncSummary);
       }
 
-      // Actionable follow-up prompt based on interest level
       lines.push(`━━━━━━━━━━━━━━━━━━`);
       if (interestLevel === 'high') {
         lines.push(`💡 Hot lead — follow up within the hour.`);
@@ -750,12 +734,15 @@ async function handleVapiWebhook(req, res) {
 
     if (isSpam) {
       console.log(`🚫 SPAM: ${spamReason}`);
-      const rec = { client_id: client.id, customer_name: customerName || 'Spam', customer_phone: customerPhone || callerPhone,
+      const rec = {
+        client_id: client.id, customer_name: customerName || 'Spam', customer_phone: customerPhone || callerPhone,
         customer_email: null, ai_summary: aiSummary, transcript, recording_url: recordingUrl,
         duration_seconds: durationSeconds, urgency_level: 'spam', call_status: 'spam',
-        ended_reason: endedReason, transfer_status: null, is_spam: true, spam_reason: spamReason, created_at: new Date().toISOString() };
+        ended_reason: endedReason, transfer_status: null, is_spam: true, spam_reason: spamReason,
+        call_language: aiData.callLanguage || 'en', created_at: new Date().toISOString()
+      };
       const { data: inserted, error } = await supabase.from('calls').insert([rec]).select();
-      if (error) { delete rec.is_spam; delete rec.spam_reason; delete rec.ended_reason; delete rec.transfer_status; await supabase.from('calls').insert([rec]).select(); }
+      if (error) { delete rec.is_spam; delete rec.spam_reason; delete rec.ended_reason; delete rec.transfer_status; delete rec.call_language; await supabase.from('calls').insert([rec]).select(); }
 
       // ── Record usage even for spam calls (they still cost VAPI minutes) ──
       try {
@@ -776,16 +763,19 @@ async function handleVapiWebhook(req, res) {
       return res.status(200).json({ received: true, saved: true, spam: true, spamReason, callId: inserted?.[0]?.id });
     }
 
-    const rec = { client_id: client.id, customer_name: customerName, customer_phone: customerPhone,
+    const rec = {
+      client_id: client.id, customer_name: customerName, customer_phone: customerPhone,
       customer_email: customerEmail, ai_summary: aiSummary, transcript, recording_url: recordingUrl,
       duration_seconds: durationSeconds, urgency_level: urgency,
       call_status: wasTransferred ? 'transferred' : 'completed',
       ended_reason: endedReason, transfer_status: transferStatus,
-      is_spam: false, spam_reason: null, created_at: new Date().toISOString() };
+      is_spam: false, spam_reason: null,
+      call_language: aiData.callLanguage || 'en', created_at: new Date().toISOString()
+    };
     const { data: insertedCall, error: insertError } = await supabase.from('calls').insert([rec]).select();
     if (insertError) {
-      if (insertError.message && (insertError.message.includes('ended_reason') || insertError.message.includes('transfer_status') || insertError.message.includes('is_spam') || insertError.message.includes('spam_reason'))) {
-        delete rec.ended_reason; delete rec.transfer_status; delete rec.is_spam; delete rec.spam_reason; rec.call_status = 'completed';
+      if (insertError.message && (insertError.message.includes('ended_reason') || insertError.message.includes('transfer_status') || insertError.message.includes('is_spam') || insertError.message.includes('spam_reason') || insertError.message.includes('call_language'))) {
+        delete rec.ended_reason; delete rec.transfer_status; delete rec.is_spam; delete rec.spam_reason; delete rec.call_language; rec.call_status = 'completed';
         var { data: insertedCallFinal, error: retryError } = await supabase.from('calls').insert([rec]).select();
         if (retryError) return res.status(500).json({ error: 'Failed to save call' });
       } else return res.status(500).json({ error: 'Failed to save call' });
@@ -805,7 +795,6 @@ async function handleVapiWebhook(req, res) {
         });
       }
     } catch (usageErr) {
-      // Non-fatal — don't block call processing if usage tracking fails
       console.warn('⚠️ Usage record failed (non-fatal):', usageErr.message);
     }
 
