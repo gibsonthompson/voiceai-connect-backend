@@ -1,12 +1,15 @@
 // ============================================================================
 // STRIPE CONNECT - Clients Pay Agencies Directly
-// UPDATED: expireTrials disables VAPI phone number (not just static assistant)
+// UPDATED: expireTrials now DELETES VAPI phone number + assistant (frees slots)
 // UPDATED: reactivation re-enables VAPI phone number
 // UPDATED: Admin Stripe Connect notification wired to getSmsTemplate()
 // FIXED: expireTrials verifies status update persisted before sending SMS
 // UPDATED: 2026-05-08 — Per-client billing triggers on client status changes
+// UPDATED: 2026-05-16 — expireTrials DELETES (not disables) VAPI resources
+//          to free up phone number slots. Nulls out resource IDs in DB.
 // ============================================================================
 const Stripe = require('stripe');
+const fetch = require('node-fetch');
 const { 
   supabase, 
   getAgencyById, 
@@ -26,6 +29,7 @@ const { getSmsTemplate } = require('../lib/sms-templates');
 const { updateClientBillingQuantity } = require('../lib/usage-tracker');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const VAPI_API_KEY = process.env.VAPI_API_KEY;
 
 // ============================================================================
 // COUNTRY → CURRENCY MAPPING
@@ -302,7 +306,9 @@ async function createClientPortal(req, res) {
 
 // ============================================================================
 // EXPIRE TRIALS
-// FIXED: Verifies status update actually persisted before sending SMS.
+// UPDATED 2026-05-16: DELETES VAPI phone number + assistant instead of just
+// disabling them. Nulls out resource IDs so the VAPI slot is freed for reuse.
+// If a client later upgrades, they get a new number provisioned at that point.
 // ============================================================================
 async function expireTrials() {
   console.log('Checking for expired trials...');
@@ -320,24 +326,56 @@ async function expireTrials() {
 
   for (const client of expiredClients || []) {
     try {
-      // ── Disable VAPI phone number (PRIMARY — stops calls from routing) ──
-      if (client.vapi_phone_id) {
-        try { await disablePhoneNumber(client.vapi_phone_id); console.log('✅ VAPI phone number disabled:', client.vapi_phone_id); }
-        catch (phoneError) { console.error('❌ Failed to disable VAPI phone number:', phoneError.message); }
-      } else {
-        console.warn('⚠️ No vapi_phone_id for client:', client.business_name);
+      // ── DELETE VAPI phone number (frees up the slot for new clients) ──
+      if (client.vapi_phone_id && VAPI_API_KEY) {
+        try {
+          const phoneRes = await fetch(`https://api.vapi.ai/phone-number/${client.vapi_phone_id}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` },
+          });
+          if (phoneRes.ok || phoneRes.status === 404) {
+            console.log('✅ VAPI phone number DELETED:', client.vapi_phone_id);
+          } else {
+            console.error('⚠️ VAPI phone delete returned:', phoneRes.status);
+            // Fall back to disable if delete fails
+            try { await disablePhoneNumber(client.vapi_phone_id); } catch {}
+          }
+        } catch (phoneError) {
+          console.error('❌ Failed to delete VAPI phone number:', phoneError.message);
+          try { await disablePhoneNumber(client.vapi_phone_id); } catch {}
+        }
+      } else if (client.vapi_phone_id) {
+        try { await disablePhoneNumber(client.vapi_phone_id); } catch {}
       }
 
-      // ── Disable static assistant (SECONDARY — belt-and-suspenders) ──
-      if (client.vapi_assistant_id) {
-        try { await disableAssistant(client.vapi_assistant_id); console.log('✅ VAPI static assistant disabled:', client.vapi_assistant_id); }
-        catch (vapiError) { console.error('⚠️ Failed to disable VAPI assistant (non-critical):', vapiError.message); }
+      // ── DELETE VAPI assistant ──
+      if (client.vapi_assistant_id && VAPI_API_KEY) {
+        try {
+          const asstRes = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` },
+          });
+          if (asstRes.ok || asstRes.status === 404) {
+            console.log('✅ VAPI assistant DELETED:', client.vapi_assistant_id);
+          } else {
+            try { await disableAssistant(client.vapi_assistant_id); } catch {}
+          }
+        } catch (vapiError) {
+          console.error('⚠️ Failed to delete VAPI assistant:', vapiError.message);
+          try { await disableAssistant(client.vapi_assistant_id); } catch {}
+        }
       }
 
-      // ── Update status — CHECK FOR ERRORS ──
+      // ── Update status + null out VAPI resource IDs ──
       const { error: updateError } = await supabase
         .from('clients')
-        .update({ subscription_status: 'trial_expired', status: 'expired' })
+        .update({
+          subscription_status: 'trial_expired',
+          status: 'expired',
+          vapi_phone_id: null,
+          vapi_phone_number: null,
+          vapi_assistant_id: null,
+        })
         .eq('id', client.id);
 
       if (updateError) {
@@ -368,7 +406,7 @@ async function expireTrials() {
       // ── Update agency per-client billing (decrease quantity) ──
       try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
 
-      console.log('✅ Trial expired for:', client.business_name);
+      console.log('✅ Trial expired + VAPI resources released for:', client.business_name);
       results.push({ id: client.id, business_name: client.business_name, success: true });
 
     } catch (err) {

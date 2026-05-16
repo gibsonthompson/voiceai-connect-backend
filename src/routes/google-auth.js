@@ -1,11 +1,16 @@
 // ============================================================================
 // GOOGLE OAUTH ROUTES FOR AGENCY SIGNUP
+// UPDATED: 2026-05-16 — Fixed plan_type from 'starter' to 'free' (constraint
+//          valid_agency_plan only accepts free/pro/scale). Updated default
+//          prices to match agency-signup.js ($99/$149/$299). Added plan_features
+//          and referral_code fields that were missing.
 // ============================================================================
 
 const { OAuth2Client } = require('google-auth-library');
 const { supabase } = require('../lib/supabase');
 const { generateToken } = require('./auth');
 const { createPasswordToken, getCurrencyForCountry } = require('./agency-signup');
+const { seedDefaultTemplatesIfNeeded } = require('../lib/default-templates');
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
@@ -17,6 +22,60 @@ const oauth2Client = new OAuth2Client(
   GOOGLE_CLIENT_SECRET,
   GOOGLE_REDIRECT_URI
 );
+
+// ============================================================================
+// DEFAULT PLAN FEATURES — must match agency-signup.js
+// ============================================================================
+const DEFAULT_PLAN_FEATURES = {
+  starter: {
+    sms_notifications: true,
+    email_summaries: true,
+    custom_greeting: false,
+    custom_voice: false,
+    knowledge_base: false,
+    business_hours: true,
+    google_calendar: false,
+    advanced_analytics: false,
+    priority_support: false,
+    caller_recognition: true,
+    spam_detection: true,
+    call_transfer: false,
+    transfer_fallback: false,
+    after_hours_mode: true,
+  },
+  pro: {
+    sms_notifications: true,
+    email_summaries: true,
+    custom_greeting: true,
+    custom_voice: false,
+    knowledge_base: true,
+    business_hours: true,
+    google_calendar: true,
+    advanced_analytics: true,
+    priority_support: false,
+    caller_recognition: true,
+    spam_detection: true,
+    call_transfer: true,
+    transfer_fallback: true,
+    after_hours_mode: true,
+  },
+  growth: {
+    sms_notifications: true,
+    email_summaries: true,
+    custom_greeting: true,
+    custom_voice: true,
+    knowledge_base: true,
+    business_hours: true,
+    google_calendar: true,
+    advanced_analytics: true,
+    priority_support: true,
+    caller_recognition: true,
+    spam_detection: true,
+    call_transfer: true,
+    transfer_fallback: true,
+    after_hours_mode: true,
+  },
+};
 
 function generateSlug(name) {
   return name
@@ -47,16 +106,12 @@ async function ensureUniqueSlug(baseSlug) {
 
 // ============================================================================
 // Helper: Check if agency has moved past onboarding
-// An agency is "past onboarding" if they have a subscription (trialing/active)
-// OR if onboarding_completed is true
 // ============================================================================
 function isAgencyPastOnboarding(agency) {
   if (!agency) return false;
   if (agency.onboarding_completed) return true;
-  // If they have a subscription, they clearly completed onboarding even if the flag is wrong
   const activeStatuses = ['trialing', 'trial', 'active', 'past_due'];
   if (activeStatuses.includes(agency.subscription_status)) return true;
-  // If they have a stripe subscription ID, they went through checkout
   if (agency.stripe_subscription_id) return true;
   return false;
 }
@@ -64,7 +119,6 @@ function isAgencyPastOnboarding(agency) {
 // GET /api/auth/google
 async function googleAuth(req, res) {
   try {
-    // Parse all query params - ref and country come from frontend
     const referralCode = req.query.ref || null;
     const country = req.query.country || null;
     
@@ -148,10 +202,7 @@ async function googleCallback(req, res) {
           .update({ last_login_at: new Date().toISOString() })
           .eq('id', agency.id);
 
-        // If the agency has moved past onboarding (has subscription, completed flag, etc.)
-        // → go straight to dashboard
         if (isAgencyPastOnboarding(agency)) {
-          // Also fix onboarding_completed if it was stuck at false
           if (!agency.onboarding_completed) {
             await supabase
               .from('agencies')
@@ -164,7 +215,6 @@ async function googleCallback(req, res) {
           return res.redirect(`${FRONTEND_URL}/auth/google-success?token=${token}&agencyId=${agency.id}&redirect=/agency/dashboard`);
         }
 
-        // Agency hasn't completed onboarding yet → send to onboarding
         console.log(`✅ Google login: ${email} → onboarding (step ${agency.onboarding_step})`);
         return res.redirect(`${FRONTEND_URL}/auth/google-success?token=${token}&agencyId=${agency.id}&redirect=/onboarding`);
       } else {
@@ -172,12 +222,14 @@ async function googleCallback(req, res) {
       }
     }
 
-    // New user - create agency
+    // ====================================================================
+    // NEW USER — Create agency
+    // Must match agency-signup.js defaults exactly
+    // ====================================================================
     const tempAgencyName = given_name ? `${given_name}'s Agency` : 'My Agency';
     const baseSlug = generateSlug(tempAgencyName);
     const slug = await ensureUniqueSlug(baseSlug);
 
-    // Resolve country and currency
     const resolvedCountry = country || 'US';
     const resolvedCurrency = getCurrencyForCountry(resolvedCountry);
 
@@ -205,19 +257,21 @@ async function googleCallback(req, res) {
         currency: resolvedCurrency,
         status: 'pending_payment',
         subscription_status: 'pending',
-        plan_type: 'starter',
+        plan_type: 'free',
         onboarding_step: 1,
         onboarding_completed: false,
         referred_by: referredByAgencyId,
         primary_color: '#10b981',
         secondary_color: '#059669',
         accent_color: '#34d399',
-        price_starter: 4900,
-        price_pro: 9900,
-        price_growth: 14900,
+        price_starter: 9900,
+        price_pro: 14900,
+        price_growth: 29900,
         limit_starter: 50,
         limit_pro: 150,
         limit_growth: 500,
+        plan_features: DEFAULT_PLAN_FEATURES,
+        referral_code: slug,
       })
       .select()
       .single();
@@ -228,6 +282,16 @@ async function googleCallback(req, res) {
     }
 
     console.log(`🏢 Agency created via Google: ${agency.id} [${resolvedCountry}/${resolvedCurrency}]`);
+
+    // Seed default outreach templates (matches email signup path)
+    try {
+      const templateResult = await seedDefaultTemplatesIfNeeded(agency.id);
+      if (templateResult.success && !templateResult.skipped) {
+        console.log(`✅ Default templates seeded: ${templateResult.count} templates`);
+      }
+    } catch (templateErr) {
+      console.warn('⚠️ Template seeding failed (non-blocking):', templateErr.message);
+    }
 
     const { data: user, error: userError } = await supabase
       .from('users')

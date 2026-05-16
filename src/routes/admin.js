@@ -129,8 +129,11 @@ router.get('/dashboard', requireAdmin, async (req, res) => {
     ).length || 0;
 
     const PLATFORM_PRICES = {
-      starter: 9900,
-      professional: 19900,
+      free: 0,
+      pro: 17900,
+      scale: 49900,
+      starter: 0,
+      professional: 17900,
       enterprise: 49900
     };
 
