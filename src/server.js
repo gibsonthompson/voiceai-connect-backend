@@ -152,6 +152,7 @@ const usageReporterRoutes = require('./cron/usage-reporter');
 const { getAgencyUsageSummary } = require('./lib/usage-tracker');
 const testClientRoutes = require('./routes/test-client');
 const bookingRoutes = require('./routes/booking');
+const exportRoutes = require('./routes/export');
 const cleanupOrphanedTestClients = require('./routes/cleanup-orphaned-test-clients');
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
@@ -687,6 +688,7 @@ app.post('/api/client/portal', createClientPortal);
 // POST       /api/client/:clientId/team/:memberId/reset-password
 // ============================================================================
 app.use('/api', teamRoutes);
+app.use('/api/export', exportRoutes);
 
 app.get('/api/client/:clientId/details', async (req, res) => {
   try {
