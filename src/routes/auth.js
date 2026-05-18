@@ -3,6 +3,7 @@
 // UPDATED: Team member permissions in login responses
 // UPDATED: client_staff role accepted in client login
 // UPDATED: Clear visible_password on self-password-change
+// UPDATED: 2026-05-18 — Phase 1: dashboard_access check on client login
 // Destination: src/routes/auth.js (FULL REPLACEMENT)
 // ============================================================================
 const bcrypt = require('bcryptjs');
@@ -13,573 +14,241 @@ const { sendEmail } = require('../lib/notifications');
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const JWT_EXPIRES_IN = '7d';
 
-// ============================================================================
-// GENERATE JWT
-// ============================================================================
 function generateToken(user) {
   return jwt.sign(
-    {
-      userId: user.id,
-      email: user.email,
-      role: user.role,
-      agencyId: user.agency_id,
-      clientId: user.client_id
-    },
+    { userId: user.id, email: user.email, role: user.role, agencyId: user.agency_id, clientId: user.client_id },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES_IN }
   );
 }
 
 // ============================================================================
-// AGENCY LOGIN
+// AGENCY LOGIN (unchanged)
 // ============================================================================
 async function agencyLogin(req, res) {
   try {
     const { email, password } = req.body;
-    
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password required' });
-    }
-    
-    // Find user
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+
     const user = await getUserByEmail(email.toLowerCase());
-    
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid email or password' });
-    }
-    
-    // Check if agency user
-    if (!user.agency_id || !['agency_owner', 'agency_staff', 'super_admin'].includes(user.role)) {
-      return res.status(401).json({ error: 'Invalid credentials for agency login' });
-    }
-    
-    // Verify password
-    if (!user.password_hash) {
-      return res.status(401).json({ 
-        error: 'Password not set',
-        message: 'Please set your password using the link in your welcome email'
-      });
-    }
-    
+    if (!user) return res.status(401).json({ error: 'Invalid email or password' });
+    if (!user.agency_id || !['agency_owner', 'agency_staff', 'super_admin'].includes(user.role)) return res.status(401).json({ error: 'Invalid credentials for agency login' });
+    if (!user.password_hash) return res.status(401).json({ error: 'Password not set', message: 'Please set your password using the link in your welcome email' });
+
     const validPassword = await bcrypt.compare(password, user.password_hash);
-    if (!validPassword) {
-      return res.status(401).json({ error: 'Invalid email or password' });
-    }
-    
-    // Fetch full agency data separately (this was the bug - user.agencies was undefined)
-    const { data: agency, error: agencyError } = await supabase
-      .from('agencies')
-      .select('*')
-      .eq('id', user.agency_id)
-      .single();
-    
-    if (agencyError) {
-      console.error('❌ Agency fetch error:', agencyError);
-    }
-    
-    // Check agency status
-    if (agency && agency.status === 'suspended') {
-      return res.status(403).json({ 
-        error: 'Your account has been suspended. Please contact support.' 
-      });
-    }
-    
-    // ================================================================
-    // TEAM PERMISSIONS: Fetch for agency_staff users
-    // ================================================================
+    if (!validPassword) return res.status(401).json({ error: 'Invalid email or password' });
+
+    const { data: agency, error: agencyError } = await supabase.from('agencies').select('*').eq('id', user.agency_id).single();
+    if (agencyError) console.error('❌ Agency fetch error:', agencyError);
+    if (agency && agency.status === 'suspended') return res.status(403).json({ error: 'Your account has been suspended. Please contact support.' });
+
     let teamPermissions = null;
     if (user.role === 'agency_staff') {
-      const { data: teamMember } = await supabase
-        .from('team_members')
-        .select('permissions, notification_prefs, status')
-        .eq('member_user_id', user.id)
-        .eq('entity_type', 'agency')
-        .eq('entity_id', user.agency_id)
-        .single();
-      
+      const { data: teamMember } = await supabase.from('team_members').select('permissions, notification_prefs, status').eq('member_user_id', user.id).eq('entity_type', 'agency').eq('entity_id', user.agency_id).single();
       if (teamMember) {
-        if (teamMember.status === 'disabled') {
-          return res.status(403).json({ error: 'Your account has been disabled by the agency owner.' });
-        }
+        if (teamMember.status === 'disabled') return res.status(403).json({ error: 'Your account has been disabled by the agency owner.' });
         teamPermissions = teamMember.permissions;
       }
     }
-    
-    // Update last login
-    await supabase
-      .from('users')
-      .update({ last_login: new Date().toISOString() })
-      .eq('id', user.id);
-    
-    if (user.agency_id) {
-      await supabase
-        .from('agencies')
-        .update({ last_login_at: new Date().toISOString() })
-        .eq('id', user.agency_id);
-    }
-    
-    // Generate token
+
+    await supabase.from('users').update({ last_login: new Date().toISOString() }).eq('id', user.id);
+    if (user.agency_id) await supabase.from('agencies').update({ last_login_at: new Date().toISOString() }).eq('id', user.agency_id);
+
     const token = generateToken(user);
-    
     console.log('✅ Agency login:', user.email, '| Agency:', agency?.name, '| Role:', user.role);
-    
-    // Return token, user (with agency_id + permissions), and full agency object
+
     res.json({
-      success: true,
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        role: user.role,
-        agency_id: user.agency_id,
-        permissions: teamPermissions  // null for owners, object for staff
-      },
-      agency  // CRITICAL: Full agency object from separate query
+      success: true, token,
+      user: { id: user.id, email: user.email, first_name: user.first_name, last_name: user.last_name, role: user.role, agency_id: user.agency_id, permissions: teamPermissions },
+      agency
     });
-    
-  } catch (error) {
-    console.error('❌ Agency login error:', error);
-    res.status(500).json({ error: 'Login failed' });
-  }
+  } catch (error) { console.error('❌ Agency login error:', error); res.status(500).json({ error: 'Login failed' }); }
 }
 
 // ============================================================================
 // CLIENT LOGIN
-// UPDATED: Accept 'client_staff' role + fetch team permissions
+// UPDATED: Phase 1 — dashboard_access check + read_only flag
 // ============================================================================
 async function clientLogin(req, res) {
   try {
     const { email, password } = req.body;
-    
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password required' });
-    }
-    
-    // Find user
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+
     const user = await getUserByEmail(email.toLowerCase());
-    
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid email or password' });
-    }
-    
-    // Check if client user — UPDATED: accept both 'client' and 'client_staff'
-    if (!user.client_id || !['client', 'client_staff'].includes(user.role)) {
-      return res.status(401).json({ error: 'Invalid credentials for client login' });
-    }
-    
-    // Verify password
-    if (!user.password_hash) {
-      return res.status(401).json({ 
-        error: 'Password not set',
-        message: 'Please set your password using the link in your welcome email'
+    if (!user) return res.status(401).json({ error: 'Invalid email or password' });
+    if (!user.client_id || !['client', 'client_staff'].includes(user.role)) return res.status(401).json({ error: 'Invalid credentials for client login' });
+    if (!user.password_hash) return res.status(401).json({ error: 'Password not set', message: 'Please set your password using the link in your welcome email' });
+
+    const validPassword = await bcrypt.compare(password, user.password_hash);
+    if (!validPassword) return res.status(401).json({ error: 'Invalid email or password' });
+
+    const { data: client, error: clientError } = await supabase.from('clients').select('*').eq('id', user.client_id).single();
+    if (clientError) console.error('❌ Client fetch error:', clientError);
+
+    // ================================================================
+    // PHASE 1: Check dashboard access level
+    // If agency set this client to 'none', block login entirely
+    // ================================================================
+    if (client && client.dashboard_access === 'none') {
+      console.log(`🚫 Client login blocked (dashboard_access=none): ${user.email} | ${client.business_name}`);
+      return res.status(403).json({
+        error: 'Dashboard access disabled',
+        message: 'Your account is managed by your service provider. Contact them for any changes or to view your call activity.'
       });
     }
-    
-    const validPassword = await bcrypt.compare(password, user.password_hash);
-    if (!validPassword) {
-      return res.status(401).json({ error: 'Invalid email or password' });
-    }
-    
-    // Fetch full client data separately
-    const { data: client, error: clientError } = await supabase
-      .from('clients')
-      .select('*')
-      .eq('id', user.client_id)
-      .single();
-    
-    if (clientError) {
-      console.error('❌ Client fetch error:', clientError);
-    }
-    
-    // ================================================================
-    // TEAM PERMISSIONS: Fetch for client_staff users
-    // ================================================================
+
     let teamPermissions = null;
     if (user.role === 'client_staff') {
-      const { data: teamMember } = await supabase
-        .from('team_members')
-        .select('permissions, notification_prefs, status')
-        .eq('member_user_id', user.id)
-        .eq('entity_type', 'client')
-        .eq('entity_id', user.client_id)
-        .single();
-      
+      const { data: teamMember } = await supabase.from('team_members').select('permissions, notification_prefs, status').eq('member_user_id', user.id).eq('entity_type', 'client').eq('entity_id', user.client_id).single();
       if (teamMember) {
-        if (teamMember.status === 'disabled') {
-          return res.status(403).json({ error: 'Your account has been disabled.' });
-        }
+        if (teamMember.status === 'disabled') return res.status(403).json({ error: 'Your account has been disabled.' });
         teamPermissions = teamMember.permissions;
       }
     }
-    
-    // Update last login
-    await supabase
-      .from('users')
-      .update({ last_login: new Date().toISOString() })
-      .eq('id', user.id);
-    
-    // Generate token
+
+    await supabase.from('users').update({ last_login: new Date().toISOString() }).eq('id', user.id);
+
     const token = generateToken(user);
-    
-    console.log('✅ Client login:', user.email, '| Client:', client?.business_name, '| Role:', user.role);
-    
+    console.log('✅ Client login:', user.email, '| Client:', client?.business_name, '| Role:', user.role, '| Access:', client?.dashboard_access || 'full');
+
     res.json({
-      success: true,
-      token,
+      success: true, token,
       user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        role: user.role,
-        client_id: user.client_id,
-        permissions: teamPermissions  // null for owners, object for staff
+        id: user.id, email: user.email, first_name: user.first_name, last_name: user.last_name,
+        role: user.role, client_id: user.client_id, permissions: teamPermissions,
+        read_only: client?.dashboard_access === 'read_only',
       },
-      client  // Full client object
+      client
     });
-    
-  } catch (error) {
-    console.error('❌ Client login error:', error);
-    res.status(500).json({ error: 'Login failed' });
-  }
+  } catch (error) { console.error('❌ Client login error:', error); res.status(500).json({ error: 'Login failed' }); }
 }
 
 // ============================================================================
-// VERIFY TOKEN
+// VERIFY TOKEN (unchanged)
 // ============================================================================
 async function verifyToken(req, res) {
   try {
     const authHeader = req.headers.authorization;
-    
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'No token provided' });
-    }
-    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
     const token = authHeader.split(' ')[1];
-    
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
-      
-      // Get fresh user data
       const user = await getUserById(decoded.userId);
-      
-      if (!user) {
-        return res.status(401).json({ error: 'User not found' });
-      }
-      
-      res.json({
-        valid: true,
-        user: {
-          id: user.id,
-          email: user.email,
-          first_name: user.first_name,
-          last_name: user.last_name,
-          role: user.role,
-          agency_id: user.agency_id,
-          client_id: user.client_id
-        }
-      });
-      
-    } catch (jwtError) {
-      return res.status(401).json({ error: 'Invalid or expired token' });
-    }
-    
-  } catch (error) {
-    console.error('❌ Token verification error:', error);
-    res.status(500).json({ error: 'Token verification failed' });
-  }
+      if (!user) return res.status(401).json({ error: 'User not found' });
+      res.json({ valid: true, user: { id: user.id, email: user.email, first_name: user.first_name, last_name: user.last_name, role: user.role, agency_id: user.agency_id, client_id: user.client_id } });
+    } catch (jwtError) { return res.status(401).json({ error: 'Invalid or expired token' }); }
+  } catch (error) { console.error('❌ Token verification error:', error); res.status(500).json({ error: 'Token verification failed' }); }
 }
 
 // ============================================================================
-// SET PASSWORD (From welcome email link)
+// SET PASSWORD (unchanged)
 // ============================================================================
 async function setPassword(req, res) {
   try {
     const { token, password } = req.body;
-    
-    if (!token || !password) {
-      return res.status(400).json({ error: 'Token and password required' });
-    }
-    
-    if (password.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
-    }
-    
-    // Find token
-    const { data: tokenRecord, error: tokenError } = await supabase
-      .from('password_reset_tokens')
-      .select('*')
-      .eq('token', token)
-      .eq('used', false)
-      .single();
-    
-    if (tokenError || !tokenRecord) {
-      return res.status(400).json({ error: 'Invalid or expired token' });
-    }
-    
-    // Check expiry
-    if (new Date(tokenRecord.expires_at) < new Date()) {
-      return res.status(400).json({ error: 'Token has expired' });
-    }
-    
-    // Hash password
+    if (!token || !password) return res.status(400).json({ error: 'Token and password required' });
+    if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+
+    const { data: tokenRecord, error: tokenError } = await supabase.from('password_reset_tokens').select('*').eq('token', token).eq('used', false).single();
+    if (tokenError || !tokenRecord) return res.status(400).json({ error: 'Invalid or expired token' });
+    if (new Date(tokenRecord.expires_at) < new Date()) return res.status(400).json({ error: 'Token has expired' });
+
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
-    
-    // Update user
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({ password_hash: passwordHash })
-      .eq('id', tokenRecord.user_id);
-    
-    if (updateError) {
-      console.error('❌ Password update error:', updateError);
-      return res.status(500).json({ error: 'Failed to set password' });
-    }
-    
-    // Mark token as used
-    await supabase
-      .from('password_reset_tokens')
-      .update({ used: true })
-      .eq('id', tokenRecord.id);
-    
-    // Get user for response
+    const { error: updateError } = await supabase.from('users').update({ password_hash: passwordHash }).eq('id', tokenRecord.user_id);
+    if (updateError) { console.error('❌ Password update error:', updateError); return res.status(500).json({ error: 'Failed to set password' }); }
+
+    await supabase.from('password_reset_tokens').update({ used: true }).eq('id', tokenRecord.id);
+
     const user = await getUserById(tokenRecord.user_id);
-    
-    // If this is an agency owner, mark onboarding as completed
-    // Step 6 = final step in the current 6-step onboarding flow
+
     if (user && user.agency_id && (user.role === 'agency_owner' || user.role === 'agency_staff')) {
-      const { error: onboardingError } = await supabase
-        .from('agencies')
-        .update({ 
-          onboarding_completed: true, 
-          onboarding_step: 6,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', user.agency_id);
-      
-      if (onboardingError) {
-        console.warn('⚠️ Failed to update onboarding status (non-blocking):', onboardingError.message);
-      } else {
-        console.log(`✅ Onboarding marked complete for agency: ${user.agency_id}`);
-      }
+      const { error: onboardingError } = await supabase.from('agencies').update({ onboarding_completed: true, onboarding_step: 6, updated_at: new Date().toISOString() }).eq('id', user.agency_id);
+      if (onboardingError) console.warn('⚠️ Failed to update onboarding status (non-blocking):', onboardingError.message);
+      else console.log(`✅ Onboarding marked complete for agency: ${user.agency_id}`);
     }
-    
-    // Generate login token
+
     const authToken = generateToken(user);
-    
     console.log('✅ Password set for:', user.email);
-    
-    res.json({
-      success: true,
-      message: 'Password set successfully',
-      token: authToken,
-      user: {
-        id: user.id,
-        email: user.email,
-        role: user.role
-      }
-    });
-    
-  } catch (error) {
-    console.error('❌ Set password error:', error);
-    res.status(500).json({ error: 'Failed to set password' });
-  }
+    res.json({ success: true, message: 'Password set successfully', token: authToken, user: { id: user.id, email: user.email, role: user.role } });
+  } catch (error) { console.error('❌ Set password error:', error); res.status(500).json({ error: 'Failed to set password' }); }
 }
 
 // ============================================================================
-// CHANGE PASSWORD (Authenticated - for clients & agencies)
-// UPDATED: Clears visible_password in team_members when user changes own pw
+// CHANGE PASSWORD (unchanged)
 // ============================================================================
 async function changePassword(req, res) {
   try {
     const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Current password and new password are required' });
+    if (newPassword.length < 6) return res.status(400).json({ error: 'New password must be at least 6 characters' });
 
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ error: 'Current password and new password are required' });
-    }
-
-    if (newPassword.length < 6) {
-      return res.status(400).json({ error: 'New password must be at least 6 characters' });
-    }
-
-    // Get user ID from JWT (set by auth middleware or manual decode)
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
     const token = authHeader.split(' ')[1];
     let decoded;
-    try {
-      decoded = jwt.verify(token, JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ error: 'Invalid or expired token' });
-    }
+    try { decoded = jwt.verify(token, JWT_SECRET); } catch (jwtError) { return res.status(401).json({ error: 'Invalid or expired token' }); }
 
-    // Get user from DB
     const user = await getUserById(decoded.userId);
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    // Verify current password
-    if (!user.password_hash) {
-      return res.status(400).json({ error: 'No password set on this account' });
-    }
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user.password_hash) return res.status(400).json({ error: 'No password set on this account' });
 
     const validPassword = await bcrypt.compare(currentPassword, user.password_hash);
-    if (!validPassword) {
-      return res.status(400).json({ error: 'Current password is incorrect' });
-    }
+    if (!validPassword) return res.status(400).json({ error: 'Current password is incorrect' });
 
-    // Hash new password
     const salt = await bcrypt.genSalt(10);
     const newHash = await bcrypt.hash(newPassword, salt);
+    const { error: updateError } = await supabase.from('users').update({ password_hash: newHash }).eq('id', user.id);
+    if (updateError) { console.error('❌ Password update error:', updateError); return res.status(500).json({ error: 'Failed to update password' }); }
 
-    // Update
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({ password_hash: newHash })
-      .eq('id', user.id);
-
-    if (updateError) {
-      console.error('❌ Password update error:', updateError);
-      return res.status(500).json({ error: 'Failed to update password' });
-    }
-
-    // ================================================================
-    // TEAM: Clear visible_password since user chose their own
-    // Owner will see "Changed by user" instead of plaintext
-    // ================================================================
-    await supabase
-      .from('team_members')
-      .update({ visible_password: null, updated_at: new Date().toISOString() })
-      .eq('member_user_id', user.id);
+    await supabase.from('team_members').update({ visible_password: null, updated_at: new Date().toISOString() }).eq('member_user_id', user.id);
 
     console.log('✅ Password changed for:', user.email);
-
-    res.json({
-      success: true,
-      message: 'Password changed successfully'
-    });
-
-  } catch (error) {
-    console.error('❌ Change password error:', error);
-    res.status(500).json({ error: 'Failed to change password' });
-  }
+    res.json({ success: true, message: 'Password changed successfully' });
+  } catch (error) { console.error('❌ Change password error:', error); res.status(500).json({ error: 'Failed to change password' }); }
 }
 
 // ============================================================================
-// REQUEST PASSWORD RESET
+// REQUEST PASSWORD RESET (unchanged)
 // ============================================================================
 async function requestPasswordReset(req, res) {
   try {
     const { email } = req.body;
-    
-    if (!email) {
-      return res.status(400).json({ error: 'Email required' });
-    }
-    
+    if (!email) return res.status(400).json({ error: 'Email required' });
+
     const user = await getUserByEmail(email.toLowerCase());
-    
-    // Don't reveal if user exists
-    if (!user) {
-      return res.json({ 
-        success: true, 
-        message: 'If an account exists, a reset link has been sent' 
-      });
-    }
-    
-    // Generate token
+    if (!user) return res.json({ success: true, message: 'If an account exists, a reset link has been sent' });
+
     const crypto = require('crypto');
     const token = crypto.randomBytes(32).toString('hex');
-    const expiresAt = new Date();
-    expiresAt.setHours(expiresAt.getHours() + 1);
-    
-    await supabase.from('password_reset_tokens').insert({
-      user_id: user.id,
-      email: email.toLowerCase(),
-      token: token,
-      expires_at: expiresAt.toISOString(),
-      used: false
-    });
-    
-    // Send reset email
+    const expiresAt = new Date(); expiresAt.setHours(expiresAt.getHours() + 1);
+    await supabase.from('password_reset_tokens').insert({ user_id: user.id, email: email.toLowerCase(), token, expires_at: expiresAt.toISOString(), used: false });
+
     const resetUrl = `${process.env.FRONTEND_URL}/auth/reset-password?token=${token}`;
-    
-    await sendEmail({
-      to: email,
-      subject: 'Reset Your Password',
-      html: `
-        <h2>Reset Your Password</h2>
-        <p>Click the link below to reset your password. This link expires in 1 hour.</p>
-        <p><a href="${resetUrl}">Reset Password</a></p>
-        <p>If you didn't request this, you can ignore this email.</p>
-      `
-    });
-    
+    await sendEmail({ to: email, subject: 'Reset Your Password', html: `<h2>Reset Your Password</h2><p>Click the link below to reset your password. This link expires in 1 hour.</p><p><a href="${resetUrl}">Reset Password</a></p><p>If you didn't request this, you can ignore this email.</p>` });
+
     console.log('✅ Password reset email sent to:', email);
-    
-    res.json({ 
-      success: true, 
-      message: 'If an account exists, a reset link has been sent' 
-    });
-    
-  } catch (error) {
-    console.error('❌ Password reset request error:', error);
-    res.status(500).json({ error: 'Failed to process request' });
-  }
+    res.json({ success: true, message: 'If an account exists, a reset link has been sent' });
+  } catch (error) { console.error('❌ Password reset request error:', error); res.status(500).json({ error: 'Failed to process request' }); }
 }
 
 // ============================================================================
-// AUTH MIDDLEWARE (For protected routes)
+// AUTH MIDDLEWARE (unchanged)
 // ============================================================================
 function authMiddleware(requiredRoles = []) {
   return async (req, res, next) => {
     try {
       const authHeader = req.headers.authorization;
-      
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Authentication required' });
-      }
-      
+      if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
       const token = authHeader.split(' ')[1];
-      
       try {
         const decoded = jwt.verify(token, JWT_SECRET);
-        
-        // Check role if required
-        if (requiredRoles.length > 0 && !requiredRoles.includes(decoded.role)) {
-          return res.status(403).json({ error: 'Insufficient permissions' });
-        }
-        
+        if (requiredRoles.length > 0 && !requiredRoles.includes(decoded.role)) return res.status(403).json({ error: 'Insufficient permissions' });
         req.user = decoded;
         next();
-        
-      } catch (jwtError) {
-        return res.status(401).json({ error: 'Invalid or expired token' });
-      }
-      
-    } catch (error) {
-      console.error('❌ Auth middleware error:', error);
-      res.status(500).json({ error: 'Authentication failed' });
-    }
+      } catch (jwtError) { return res.status(401).json({ error: 'Invalid or expired token' }); }
+    } catch (error) { console.error('❌ Auth middleware error:', error); res.status(500).json({ error: 'Authentication failed' }); }
   };
 }
 
-// ============================================================================
-// EXPORTS
-// ============================================================================
-module.exports = {
-  agencyLogin,
-  clientLogin,
-  verifyToken,
-  setPassword,
-  changePassword,
-  requestPasswordReset,
-  authMiddleware,
-  generateToken
-};
+module.exports = { agencyLogin, clientLogin, verifyToken, setPassword, changePassword, requestPasswordReset, authMiddleware, generateToken };

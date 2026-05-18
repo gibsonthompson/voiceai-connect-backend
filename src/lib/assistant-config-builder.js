@@ -1,23 +1,8 @@
 // ============================================================================
 // ASSISTANT CONFIG BUILDER — Dynamic per-call assistant configuration
 //
-// Builds a complete VAPI assistant config object from database data.
-// Called by the assistant-request handler for each inbound call.
-//
-// Phase 2: Base dynamic config (replaces static VAPI assistants)
-// Phase 3: Caller recognition (contact lookup → personalized greeting)
-// Phase 4: Tool config toggles (callerRecognition, spamDetection, 
-//          businessHours, transferFallback, speechTimeout)
-// Phase 5: Business hours routing, transfer fallback to message-taking
-
-// UPDATED: Transfer keywords block — "representative", "live agent", etc.
-// FIX: Added `function` blocks to transferCall and endCall tools so the LLM
-//      registers them as callable functions. Without `function`, the AI sees
-//      transfer instructions in the prompt but has no function to invoke.
-//      Tools stay in model.tools for assistant-request compatibility. (2026-04-14)
-// UPDATED: 2026-05-14 — Multilingual support: Deepgram Nova-2 transcriber
-//          with language='multi' for automatic Spanish/English code-switching.
-//          Language detection prompt block injected into all system prompts.
+// UPDATED: 2026-05-18 — Phase 1: ai_tone, booking_mode, service_areas,
+//          priority_rules. New prompt blocks injected per-client.
 // ============================================================================
 
 const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, TRANSFER_KEYWORDS_BLOCK, VOICES,
@@ -32,7 +17,6 @@ try {
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 
-// Default tool config — matches tool-config.js route
 const DEFAULT_TOOL_CONFIG = {
   callerRecognition: true,
   spamDetection: true,
@@ -44,18 +28,116 @@ const DEFAULT_TOOL_CONFIG = {
   transferFallbackToMessage: true,
 };
 
-// ============================================================================
-// LANGUAGE DETECTION BLOCK — Appended to every assistant's system prompt
-// Enables automatic Spanish/English code-switching without client config
-// ============================================================================
 const LANGUAGE_DETECTION_BLOCK = `
 
 # Language
 If the caller speaks Spanish, immediately switch to Spanish for the remainder of the call. Respond naturally in whatever language the caller uses. All information collection — name, phone number, address, reason for calling — should continue in the caller's language. Do not ask the caller what language they prefer. Just match them automatically. If the caller switches languages mid-conversation, follow them.`;
 
 // ============================================================================
+// TONE BLOCK — Overrides default tone based on client ai_tone setting
+// ============================================================================
+function buildToneBlock(aiTone) {
+  if (!aiTone || aiTone === 'professional') return ''; // default, no override needed
+
+  const toneOverrides = {
+    friendly: `
+
+# Tone Override: Friendly
+Adjust your communication style to be warmer and more personable than the default. Use more casual language, contractions freely, and a conversational cadence. React with genuine enthusiasm: "Oh awesome!", "That's great!", "No worries at all." Be the kind of person callers enjoy talking to. Still professional — just approachable and warm.`,
+
+    casual: `
+
+# Tone Override: Casual
+Adjust your communication style to be relaxed and informal. Talk like a real person having a normal conversation. Use slang where natural, keep sentences short, react naturally: "Yeah for sure", "Oh man, totally", "You got it." Drop formalities — no "I appreciate your patience" or "Thank you for calling." Just be real. Still competent — just not corporate.`,
+
+    clinical: `
+
+# Tone Override: Clinical
+Adjust your communication style to be precise, measured, and formal. Use complete sentences, avoid contractions, minimize filler words. Be thorough and specific in your responses. Do not use casual expressions or slang. Maintain a calm, steady, authoritative cadence. This is appropriate for medical, legal, and financial contexts where precision and professionalism are paramount.`,
+  };
+
+  return toneOverrides[aiTone] || '';
+}
+
+// ============================================================================
+// BOOKING MODE BLOCK — Overrides calendar booking behavior
+// ============================================================================
+function buildBookingModeBlock(bookingMode) {
+  if (!bookingMode || bookingMode === 'auto_book') return ''; // default behavior
+
+  if (bookingMode === 'collect_request') {
+    return `
+
+# Booking Mode: Collect Request Only
+IMPORTANT OVERRIDE: Do NOT book appointments directly to the calendar. Instead, when a caller wants to schedule:
+1. Ask what service or reason they're coming in for
+2. Ask their preferred day and time
+3. Collect their name and phone number
+4. Let them know: "I've noted your preferred time. The office will call you to confirm the appointment."
+Do NOT check calendar availability. Do NOT create calendar events. Simply collect the request and confirm someone will follow up.`;
+  }
+
+  if (bookingMode === 'disabled') {
+    return `
+
+# Booking Mode: Disabled
+IMPORTANT OVERRIDE: This business does not offer appointment booking through the phone system. If a caller asks to schedule or book an appointment:
+- Say: "I'd be happy to take your information and have the office reach out to schedule that with you."
+- Collect their name, phone number, and what they're looking for.
+- Do NOT mention calendar availability, appointment slots, or scheduling.`;
+  }
+
+  return '';
+}
+
+// ============================================================================
+// SERVICE AREAS BLOCK — Injects geographic coverage into prompt
+// ============================================================================
+function buildServiceAreasBlock(serviceAreas) {
+  if (!serviceAreas || !Array.isArray(serviceAreas) || serviceAreas.length === 0) return '';
+
+  const areaList = serviceAreas.join(', ');
+  return `
+
+# Service Areas
+This business serves the following areas: ${areaList}.
+If a caller asks about service in a specific area, check if it falls within or near these areas. If their location is clearly outside the service area, let them know politely: "Unfortunately, we don't currently service that area. We cover ${areaList}." If it's borderline, offer to have the team confirm.`;
+}
+
+// ============================================================================
+// PRIORITY RULES BLOCK — Injects urgency/transfer rules
+// ============================================================================
+function buildPriorityRulesBlock(priorityRules) {
+  if (!priorityRules || typeof priorityRules !== 'object') return '';
+
+  const lines = ['\n\n# Priority Rules'];
+  let hasContent = false;
+
+  if (priorityRules.alwaysTransfer && Array.isArray(priorityRules.alwaysTransfer) && priorityRules.alwaysTransfer.length > 0) {
+    lines.push(`Always transfer the call immediately if the caller mentions any of the following: ${priorityRules.alwaysTransfer.join(', ')}.`);
+    hasContent = true;
+  }
+
+  if (priorityRules.urgentKeywords && Array.isArray(priorityRules.urgentKeywords) && priorityRules.urgentKeywords.length > 0) {
+    lines.push(`Treat the following as high-urgency situations (collect info quickly, transfer if possible): ${priorityRules.urgentKeywords.join(', ')}.`);
+    hasContent = true;
+  }
+
+  if (priorityRules.vipCallers && Array.isArray(priorityRules.vipCallers) && priorityRules.vipCallers.length > 0) {
+    lines.push(`The following are VIP callers — greet them by name and transfer immediately: ${priorityRules.vipCallers.join(', ')}.`);
+    hasContent = true;
+  }
+
+  if (priorityRules.customInstructions && typeof priorityRules.customInstructions === 'string') {
+    lines.push(priorityRules.customInstructions);
+    hasContent = true;
+  }
+
+  return hasContent ? lines.join('\n') : '';
+}
+
+// ============================================================================
 // BUSINESS HOURS CHECK
-// Returns { isOpen, daySchedule, currentTime } for the client's timezone
 // ============================================================================
 function checkBusinessHours(client) {
   const businessHours = client.business_hours;
@@ -131,12 +213,10 @@ function buildCallerContextBlock(contact) {
 
 // ============================================================================
 // BUILD AFTER-HOURS BLOCK
-// Injected into prompt when business is closed and businessHoursRouting is on
 // ============================================================================
-function buildAfterHoursBlock(client, toolConfig, daySchedule) {
+function buildAfterHoursBlock(client, toolConfig) {
   const afterHoursMessage = toolConfig.afterHoursMessage || DEFAULT_TOOL_CONFIG.afterHoursMessage;
 
-  // Build next open info from business_hours
   let nextOpenInfo = '';
   if (client.business_hours) {
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
@@ -175,7 +255,6 @@ ${nextOpenInfo ? `- If they ask when you're open: "${nextOpenInfo}"` : ''}
 
 // ============================================================================
 // BUILD TRANSFER FALLBACK BLOCK
-// When transfer isn't answered, AI stays on and takes a message
 // ============================================================================
 function buildTransferFallbackBlock() {
   return `\n\n# Transfer Fallback
@@ -209,6 +288,7 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
 
 // ============================================================================
 // BUILD SYSTEM PROMPT
+// UPDATED: Now injects tone, booking mode, service areas, priority rules
 // ============================================================================
 async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours) {
   const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
@@ -264,29 +344,35 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
   // ── Language detection — always appended ─────────────────────────────
   systemPrompt += LANGUAGE_DETECTION_BLOCK;
 
-  // ── Conditional blocks based on tool_config ──────────────────────────
+  // ── Phase 1: Tone override ──────────────────────────────────────────
+  systemPrompt += buildToneBlock(client.ai_tone);
 
-  // Spam detection
+  // ── Phase 1: Booking mode override ──────────────────────────────────
+  systemPrompt += buildBookingModeBlock(client.booking_mode);
+
+  // ── Phase 1: Service areas ──────────────────────────────────────────
+  systemPrompt += buildServiceAreasBlock(client.service_areas);
+
+  // ── Phase 1: Priority rules ─────────────────────────────────────────
+  systemPrompt += buildPriorityRulesBlock(client.priority_rules);
+
+  // ── Conditional blocks based on tool_config ──────────────────────────
   if (toolConfig.spamDetection) {
     systemPrompt += SPAM_DETECTION_BLOCK;
   }
 
-  // Transfer keywords — immediate transfer on "representative", "live agent", etc.
   if (toolConfig.transferCall) {
     systemPrompt += TRANSFER_KEYWORDS_BLOCK;
   }
 
-  // After-hours mode
   if (isAfterHours && toolConfig.businessHoursRouting) {
     systemPrompt += buildAfterHoursBlock(client, toolConfig);
   }
 
-  // Transfer fallback to message-taking
   if (toolConfig.transferFallbackToMessage && toolConfig.transferCall) {
     systemPrompt += buildTransferFallbackBlock();
   }
 
-  // Caller context (only if recognition is enabled AND we have a match)
   if (toolConfig.callerRecognition && callerContext) {
     systemPrompt += buildCallerContextBlock(callerContext);
   }
@@ -296,15 +382,10 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
 
 // ============================================================================
 // BUILD TOOLS ARRAY
-// Returns VAPI tools array for model.tools.
-// Each built-in tool (transferCall, endCall) needs a `function` block so the
-// LLM registers it as a callable function. Without `function`, the LLM sees
-// transfer instructions in the prompt but has no function definition to invoke.
 // ============================================================================
 function buildTools(client, toolConfig, isAfterHours) {
   const tools = [];
 
-  // Transfer call tool — skip if disabled or after hours
   if (toolConfig.transferCall && !isAfterHours) {
     const ownerPhone = client.owner_phone;
     if (ownerPhone) {
@@ -327,7 +408,6 @@ function buildTools(client, toolConfig, isAfterHours) {
     }
   }
 
-  // End call tool — always included
   tools.push({
     type: 'endCall',
     function: {
@@ -345,7 +425,6 @@ function buildTools(client, toolConfig, isAfterHours) {
 function buildHooks(client, toolConfig, isAfterHours) {
   const hooks = [];
 
-  // Speech timeout
   if (toolConfig.speechTimeout) {
     hooks.push({
       on: 'customer.speech.timeout',
@@ -358,7 +437,6 @@ function buildHooks(client, toolConfig, isAfterHours) {
     });
   }
 
-  // Pipeline error fallback — transfer to owner (only if not after hours)
   if (toolConfig.transferCall && !isAfterHours) {
     const ownerPhone = client.owner_phone;
     if (ownerPhone) {
@@ -381,8 +459,6 @@ function buildHooks(client, toolConfig, isAfterHours) {
 
 // ============================================================================
 // ENFORCE AGENCY PLAN FEATURES
-// Force-disables tools the client's plan doesn't allow at call time.
-// Maps plan_features (snake_case) → tool_config (camelCase).
 // ============================================================================
 function enforceAgencyPlanFeatures(toolConfig, client, agency) {
   if (!agency?.plan_features) return toolConfig;
@@ -410,22 +486,16 @@ function enforceAgencyPlanFeatures(toolConfig, client, agency) {
 }
 
 // ============================================================================
-// MAIN: Build complete VAPI assistant config for a single call
-//
-// IMPORTANT: Built-in tools (transferCall, endCall) go in model.tools WITH
-// `function` blocks so the LLM can invoke them. Without `function`, the LLM
-// has no callable definition and will just say transfer words without acting.
-// Custom VAPI tool IDs (query tools) go at model.toolIds.
+// MAIN: Build complete VAPI assistant config
+// UPDATED: Respects booking_mode for toolIds (skip calendar tool if disabled)
 // ============================================================================
 async function buildDynamicAssistantConfig(client, agency, callerContext) {
   const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
   const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
 
-  // Merge tool_config with defaults, then enforce agency plan features
   let toolConfig = { ...DEFAULT_TOOL_CONFIG, ...(client.tool_config || {}) };
   toolConfig = enforceAgencyPlanFeatures(toolConfig, client, agency);
 
-  // Check business hours
   const { isOpen } = checkBusinessHours(client);
   const isAfterHours = toolConfig.businessHoursRouting && !isOpen;
 
@@ -433,7 +503,6 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     console.log('🌙 After-hours mode active — transfer disabled, message-taking mode');
   }
 
-  // Check for custom agency template voice/model overrides
   let voiceId = config.voiceId;
   let temperature = config.temperature;
   let modelId = 'gpt-4o-mini';
@@ -461,17 +530,16 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     } catch { /* Use defaults */ }
   }
 
-  // Build all pieces
   const systemPrompt = await buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours);
   const firstMessage = buildFirstMessage(client.business_name, industryKey, callerContext, isAfterHours, toolConfig);
   const tools = buildTools(client, toolConfig, isAfterHours);
   const hooks = buildHooks(client, toolConfig, isAfterHours);
 
-  // ── Assemble final config ────────────────────────────────────────────
-  // toolIds → model.toolIds (references to VAPI-created query tools)
-  // tools   → model.tools (built-in tools WITH function blocks so LLM can call them)
+  // toolIds — skip calendar query tool if booking is disabled
   const toolIds = [];
-  if (client.vapi_query_tool_id) toolIds.push(client.vapi_query_tool_id);
+  if (client.vapi_query_tool_id && client.booking_mode !== 'disabled') {
+    toolIds.push(client.vapi_query_tool_id);
+  }
 
   const assistantConfig = {
     name: sanitizeAssistantName(client.business_name),
@@ -509,6 +577,10 @@ module.exports = {
   buildCallerContextBlock,
   buildAfterHoursBlock,
   buildTransferFallbackBlock,
+  buildToneBlock,
+  buildBookingModeBlock,
+  buildServiceAreasBlock,
+  buildPriorityRulesBlock,
   buildTools,
   buildHooks,
   checkBusinessHours,
