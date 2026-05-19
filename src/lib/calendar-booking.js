@@ -397,8 +397,8 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     const createdEvent = await response.json();
     console.log('✅ Appointment booked:', createdEvent.id);
 
-    // Save to our database
-    await supabase.from('appointments').insert({
+    // Save to our database (staff_name column may not exist yet — fallback gracefully)
+    const appointmentRecord = {
       client_id: clientId,
       google_event_id: createdEvent.id,
       customer_name: customerName,
@@ -409,7 +409,12 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
       staff_name: staffName || null,
       notes,
       status: 'confirmed',
-    });
+    };
+    const { error: apptError } = await supabase.from('appointments').insert(appointmentRecord);
+    if (apptError && apptError.message && apptError.message.includes('staff_name')) {
+      delete appointmentRecord.staff_name;
+      await supabase.from('appointments').insert(appointmentRecord);
+    }
 
     const dateObj = new Date(date + 'T12:00:00');
     const formattedDate = dateObj.toLocaleDateString('en-US', {

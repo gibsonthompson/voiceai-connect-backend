@@ -39,37 +39,8 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
       var availabilityToolId, bookingToolId;
       
       if (existingAvailabilityTool) {
-        // Phase 3B: Update existing tool to include service_type param
-        console.log('📋 Updating existing check_availability tool: ' + existingAvailabilityTool.id);
-        await fetch('https://api.vapi.ai/tool/' + existingAvailabilityTool.id, {
-          method: 'PATCH',
-          headers: {
-            'Authorization': 'Bearer ' + VAPI_API_KEY,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            function: {
-              name: 'check_availability',
-              description: 'Check available appointment times for a specific date. Use this when a customer wants to book an appointment. If you know what service they need, include it so the system can use the correct appointment duration.',
-              parameters: {
-                type: 'object',
-                properties: {
-                  date: { 
-                    type: 'string', 
-                    description: 'Date to check in YYYY-MM-DD format (e.g., 2026-01-15)' 
-                  },
-                  service_type: {
-                    type: 'string',
-                    description: 'The service the caller wants to book (e.g., "General Cleaning", "Consultation"). Include this if known so availability reflects the correct appointment duration.'
-                  }
-                },
-                required: ['date']
-              }
-            }
-          })
-        });
+        console.log('📋 Using existing check_availability tool: ' + existingAvailabilityTool.id);
         availabilityToolId = existingAvailabilityTool.id;
-        console.log('✅ check_availability tool updated: ' + availabilityToolId);
       } else {
         console.log('🔧 Creating check_availability tool...');
         var availabilityToolRes = await fetch('https://api.vapi.ai/tool', {
@@ -113,36 +84,8 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
       }
 
       if (existingBookingTool) {
-        // Phase 3B: Update existing tool to include staff_name param
-        console.log('📋 Updating existing book_appointment tool: ' + existingBookingTool.id);
-        await fetch('https://api.vapi.ai/tool/' + existingBookingTool.id, {
-          method: 'PATCH',
-          headers: {
-            'Authorization': 'Bearer ' + VAPI_API_KEY,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            function: {
-              name: 'book_appointment',
-              description: 'Book an appointment after confirming availability and collecting customer details.',
-              parameters: {
-                type: 'object',
-                properties: {
-                  customer_name: { type: 'string', description: 'Full name of the customer' },
-                  customer_phone: { type: 'string', description: 'Customer phone number' },
-                  date: { type: 'string', description: 'Appointment date in YYYY-MM-DD format' },
-                  time: { type: 'string', description: 'Appointment time (e.g., 2:00 PM)' },
-                  service_type: { type: 'string', description: 'Type of service or reason for appointment' },
-                  staff_name: { type: 'string', description: 'Name of the preferred staff member or provider, if the caller specified one' },
-                  notes: { type: 'string', description: 'Any special requests or notes' }
-                },
-                required: ['customer_name', 'customer_phone', 'date', 'time']
-              }
-            }
-          })
-        });
+        console.log('📋 Using existing book_appointment tool: ' + existingBookingTool.id);
         bookingToolId = existingBookingTool.id;
-        console.log('✅ book_appointment tool updated: ' + bookingToolId);
       } else {
         console.log('🔧 Creating book_appointment tool...');
         var bookingToolRes = await fetch('https://api.vapi.ai/tool', {

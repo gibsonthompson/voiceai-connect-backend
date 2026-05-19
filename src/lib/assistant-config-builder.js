@@ -151,7 +151,7 @@ async function buildServicesBlock(clientId) {
   try {
     const { data: services, error } = await supabase
       .from('client_services')
-      .select('name, description, duration_minutes, buffer_minutes, booking_mode, price')
+      .select('name, description, duration_minutes, buffer_minutes, booking_mode')
       .eq('client_id', clientId)
       .eq('is_active', true)
       .order('sort_order', { ascending: true });
@@ -165,7 +165,6 @@ async function buildServicesBlock(clientId) {
     services.forEach((s, i) => {
       let line = `${i + 1}. ${s.name}`;
       if (s.duration_minutes) line += ` — ${s.duration_minutes} min`;
-      if (s.price) line += ` — ${s.price}`;
       lines.push(line);
       if (s.description) lines.push(`   ${s.description}`);
 
