@@ -7,6 +7,8 @@
 //   sendAndLogSMS for full SMS logging
 // UPDATED: 2026-05-14 — Multilingual: English-enforced summaries, callLanguage
 //   extraction, call_language stored on every call record
+// UPDATED: 2026-05-19 — Fix: demo admin SMS summary truncation cuts at word
+//   boundary (300 char limit) instead of mid-word at 200
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -414,7 +416,13 @@ async function handleDemoCall(agency, message, industryKey = null) {
 
       if (summary) {
         lines.push(`━━━━━━━━━━━━━━━━━━`);
-        const truncSummary = summary.length > 200 ? summary.slice(0, 197) + '...' : summary;
+        let truncSummary = summary;
+        if (summary.length > 300) {
+          truncSummary = summary.slice(0, 297);
+          const lastSpace = truncSummary.lastIndexOf(' ');
+          if (lastSpace > 200) truncSummary = truncSummary.slice(0, lastSpace);
+          truncSummary += '...';
+        }
         lines.push(truncSummary);
       }
 
