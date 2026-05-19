@@ -141,7 +141,45 @@ function buildPriorityRulesBlock(priorityRules) {
 }
 
 // ============================================================================
-// PHASE 3B: SERVICES BLOCK — Queries client_services table
+// HIPAA MODE BLOCK — Overrides data collection behavior for healthcare
+// When active: no recordings, collect-request only, no medical details,
+// no caller recognition, minimal data collection.
+// ============================================================================
+function buildHIPAABlock() {
+  return `
+
+# HIPAA Compliance Mode — ACTIVE
+This is a healthcare practice operating under HIPAA-compliant call handling. Follow these rules strictly:
+
+DATA COLLECTION — ONLY collect:
+- Caller's full name
+- Phone number
+- Whether they are a new or existing patient
+- General reason for visit (e.g., "checkup", "cleaning", "follow-up", "new patient appointment")
+- Preferred date and time for scheduling
+
+DATA COLLECTION — NEVER ask about or collect:
+- Medical history, diagnoses, conditions, or symptoms
+- Medications or treatments
+- Date of birth or Social Security number
+- Insurance ID numbers or policy details
+- Any specific health information
+
+CONVERSATION RULES:
+- If a caller shares medical details voluntarily, redirect immediately: "Our provider will discuss that with you at your appointment. For now, let me help you get scheduled."
+- Do NOT repeat back, confirm, or acknowledge any health information the caller shares.
+- When asking about the visit, say: "What type of appointment are you looking for?" — NOT "What brings you in?" or "What's going on?"
+- Do NOT reference any previous calls or history with this caller.
+- For appointment requests: collect name, phone, preferred date/time, and general visit type only. Let them know the office will call to confirm.
+
+EMERGENCIES:
+- If the caller describes a medical emergency (difficulty breathing, chest pain, severe bleeding, loss of consciousness, severe allergic reaction, stroke symptoms), direct them immediately: "This sounds like it may require emergency care. Please call 911 or go to your nearest emergency room right away."
+- Do not attempt to assess, diagnose, or advise on any medical situation.
+
+This call is NOT being recorded.`;
+}
+
+// ============================================================================ — Queries client_services table
 // Injects structured service menu into prompt. Service-level booking_mode
 // overrides the client-level default.
 // ============================================================================
@@ -367,8 +405,17 @@ If you transfer a call and the transfer fails or is not answered (you'll know be
 // ============================================================================
 // BUILD PERSONALIZED FIRST MESSAGE
 // ============================================================================
-function buildFirstMessage(businessName, industryKey, contact, isAfterHours, toolConfig) {
+function buildFirstMessage(businessName, industryKey, contact, isAfterHours, toolConfig, hipaaMode) {
   const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
+
+  // HIPAA mode: no recording disclosure, no caller recognition greeting
+  if (hipaaMode) {
+    if (isAfterHours && toolConfig.businessHoursRouting) {
+      return `Hi, thanks for calling ${businessName}. We're currently closed, but I can help you leave a message or get you scheduled. How can I help?`;
+    }
+    return `Hello, you've reached ${businessName}. How can I help you today?`;
+  }
+
   const defaultMessage = config.firstMessage(businessName);
 
   if (isAfterHours && toolConfig.businessHoursRouting) {
@@ -391,6 +438,7 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
 //          structured services, and staff members
 // ============================================================================
 async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours) {
+  const hipaaMode = client.hipaa_mode === true;
   const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
   const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
   const businessName = client.business_name;
@@ -452,7 +500,14 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
   // ── Phase 1: Booking mode override (client-level default) ───────────
   // NOTE: Service-level booking_mode in buildServicesBlock overrides this
   // per-service. This block sets the fallback for services without an override.
-  systemPrompt += buildBookingModeBlock(client.booking_mode);
+  // HIPAA mode forces collect_request regardless of client setting.
+  systemPrompt += buildBookingModeBlock(hipaaMode ? 'collect_request' : client.booking_mode);
+
+  // ── HIPAA mode — injected before services/staff so it takes precedence ──
+  if (hipaaMode) {
+    systemPrompt += buildHIPAABlock();
+    console.log('🏥 HIPAA mode active — recordings disabled, collect-request forced, caller recognition off');
+  }
 
   // ── Phase 3B: Structured services from client_services table ────────
   systemPrompt += await buildServicesBlock(client.id);
@@ -483,7 +538,8 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     systemPrompt += buildTransferFallbackBlock();
   }
 
-  if (toolConfig.callerRecognition && callerContext) {
+  // ── Caller recognition — disabled in HIPAA mode ───────────────────
+  if (toolConfig.callerRecognition && callerContext && !hipaaMode) {
     systemPrompt += buildCallerContextBlock(callerContext);
   }
 
@@ -602,9 +658,15 @@ function enforceAgencyPlanFeatures(toolConfig, client, agency) {
 async function buildDynamicAssistantConfig(client, agency, callerContext) {
   const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
   const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
+  const hipaaMode = client.hipaa_mode === true;
 
   let toolConfig = { ...DEFAULT_TOOL_CONFIG, ...(client.tool_config || {}) };
   toolConfig = enforceAgencyPlanFeatures(toolConfig, client, agency);
+
+  // ── HIPAA enforcement: disable caller recognition ──
+  if (hipaaMode) {
+    toolConfig.callerRecognition = false;
+  }
 
   const { isOpen } = checkBusinessHours(client);
   const isAfterHours = toolConfig.businessHoursRouting && !isOpen;
@@ -641,13 +703,15 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   }
 
   const systemPrompt = await buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours);
-  const firstMessage = buildFirstMessage(client.business_name, industryKey, callerContext, isAfterHours, toolConfig);
+  const firstMessage = buildFirstMessage(client.business_name, industryKey, callerContext, isAfterHours, toolConfig, hipaaMode);
   const tools = buildTools(client, toolConfig, isAfterHours);
   const hooks = buildHooks(client, toolConfig, isAfterHours);
 
-  // toolIds — skip calendar query tool if booking is disabled
+  // toolIds — skip calendar tool if booking is disabled OR HIPAA mode forces collect_request
   const toolIds = [];
   if (client.vapi_query_tool_id && client.booking_mode !== 'disabled') {
+    // HIPAA mode still allows the calendar query tool (for collect_request availability checks)
+    // but the booking tool behavior is controlled by the prompt (collect only, no direct booking)
     toolIds.push(client.vapi_query_tool_id);
   }
 
@@ -668,7 +732,8 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     },
     voice: { provider: '11labs', voiceId },
     firstMessage,
-    recordingEnabled: true,
+    // ── HIPAA: disable recording entirely ──
+    recordingEnabled: hipaaMode ? false : true,
     serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
     serverUrl: `${BACKEND_URL}/webhook/vapi`,
     hooks
@@ -691,6 +756,7 @@ module.exports = {
   buildBookingModeBlock,
   buildServiceAreasBlock,
   buildPriorityRulesBlock,
+  buildHIPAABlock,
   buildServicesBlock,
   buildStaffBlock,
   buildTools,

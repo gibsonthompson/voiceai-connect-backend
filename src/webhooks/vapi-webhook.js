@@ -734,6 +734,14 @@ async function handleVapiWebhook(req, res) {
     const endedReason = call.endedReason || message.endedReason || null;
     const { transferStatus, wasTransferred } = detectTransferStatus(endedReason, transcript);
 
+    // ── HIPAA mode: strip recording and transcript before storage ──────
+    const hipaaMode = client.hipaa_mode === true;
+    const storedRecordingUrl = hipaaMode ? null : recordingUrl;
+    const storedTranscript = hipaaMode ? null : transcript;
+    if (hipaaMode) {
+      console.log('🏥 HIPAA mode — recording and transcript will not be stored');
+    }
+
     if (wasTransferred && isSpam) {
       console.log(`⚠️ Spam flag overridden — call was successfully transferred (${endedReason})`);
       isSpam = false;
@@ -744,7 +752,7 @@ async function handleVapiWebhook(req, res) {
       console.log(`🚫 SPAM: ${spamReason}`);
       const rec = {
         client_id: client.id, customer_name: customerName || 'Spam', customer_phone: customerPhone || callerPhone,
-        customer_email: null, ai_summary: aiSummary, transcript, recording_url: recordingUrl,
+        customer_email: null, ai_summary: aiSummary, transcript: storedTranscript, recording_url: storedRecordingUrl,
         duration_seconds: durationSeconds, urgency_level: 'spam', call_status: 'spam',
         ended_reason: endedReason, transfer_status: null, is_spam: true, spam_reason: spamReason,
         call_language: aiData.callLanguage || 'en', created_at: new Date().toISOString()
@@ -773,7 +781,7 @@ async function handleVapiWebhook(req, res) {
 
     const rec = {
       client_id: client.id, customer_name: customerName, customer_phone: customerPhone,
-      customer_email: customerEmail, ai_summary: aiSummary, transcript, recording_url: recordingUrl,
+      customer_email: customerEmail, ai_summary: aiSummary, transcript: storedTranscript, recording_url: storedRecordingUrl,
       duration_seconds: durationSeconds, urgency_level: urgency,
       call_status: wasTransferred ? 'transferred' : 'completed',
       ended_reason: endedReason, transfer_status: transferStatus,
@@ -829,7 +837,7 @@ async function handleVapiWebhook(req, res) {
     if (client.owner_phone) smsSent = await sendCallNotificationSMS(client, agency, aiData);
     await notifyTeamMembers(client.id, aiData, agency);
     if (isFeatureEnabled(client, agency, 'email_summaries') && client.email) {
-      const r = await sendCallSummaryEmail(client, agency, aiData, { duration_seconds: durationSeconds, transcript, created_at: savedCall?.[0]?.created_at || new Date().toISOString() });
+      const r = await sendCallSummaryEmail(client, agency, aiData, { duration_seconds: durationSeconds, transcript: storedTranscript, created_at: savedCall?.[0]?.created_at || new Date().toISOString() });
       emailSent = r?.success || false;
     }
 
