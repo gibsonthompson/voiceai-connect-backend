@@ -39,8 +39,37 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
       var availabilityToolId, bookingToolId;
       
       if (existingAvailabilityTool) {
-        console.log('📋 Using existing check_availability tool: ' + existingAvailabilityTool.id);
+        // Phase 3B: Update existing tool to include service_type param
+        console.log('📋 Updating existing check_availability tool: ' + existingAvailabilityTool.id);
+        await fetch('https://api.vapi.ai/tool/' + existingAvailabilityTool.id, {
+          method: 'PATCH',
+          headers: {
+            'Authorization': 'Bearer ' + VAPI_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            function: {
+              name: 'check_availability',
+              description: 'Check available appointment times for a specific date. Use this when a customer wants to book an appointment. If you know what service they need, include it so the system can use the correct appointment duration.',
+              parameters: {
+                type: 'object',
+                properties: {
+                  date: { 
+                    type: 'string', 
+                    description: 'Date to check in YYYY-MM-DD format (e.g., 2026-01-15)' 
+                  },
+                  service_type: {
+                    type: 'string',
+                    description: 'The service the caller wants to book (e.g., "General Cleaning", "Consultation"). Include this if known so availability reflects the correct appointment duration.'
+                  }
+                },
+                required: ['date']
+              }
+            }
+          })
+        });
         availabilityToolId = existingAvailabilityTool.id;
+        console.log('✅ check_availability tool updated: ' + availabilityToolId);
       } else {
         console.log('🔧 Creating check_availability tool...');
         var availabilityToolRes = await fetch('https://api.vapi.ai/tool', {
@@ -53,13 +82,17 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
             type: 'function',
             function: {
               name: 'check_availability',
-              description: 'Check available appointment times for a specific date. Use this when a customer wants to book an appointment.',
+              description: 'Check available appointment times for a specific date. Use this when a customer wants to book an appointment. If you know what service they need, include it so the system can use the correct appointment duration.',
               parameters: {
                 type: 'object',
                 properties: {
                   date: { 
                     type: 'string', 
                     description: 'Date to check in YYYY-MM-DD format (e.g., 2026-01-15)' 
+                  },
+                  service_type: {
+                    type: 'string',
+                    description: 'The service the caller wants to book (e.g., "General Cleaning", "Consultation"). Include this if known so availability reflects the correct appointment duration.'
                   }
                 },
                 required: ['date']
@@ -80,8 +113,36 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
       }
 
       if (existingBookingTool) {
-        console.log('📋 Using existing book_appointment tool: ' + existingBookingTool.id);
+        // Phase 3B: Update existing tool to include staff_name param
+        console.log('📋 Updating existing book_appointment tool: ' + existingBookingTool.id);
+        await fetch('https://api.vapi.ai/tool/' + existingBookingTool.id, {
+          method: 'PATCH',
+          headers: {
+            'Authorization': 'Bearer ' + VAPI_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            function: {
+              name: 'book_appointment',
+              description: 'Book an appointment after confirming availability and collecting customer details.',
+              parameters: {
+                type: 'object',
+                properties: {
+                  customer_name: { type: 'string', description: 'Full name of the customer' },
+                  customer_phone: { type: 'string', description: 'Customer phone number' },
+                  date: { type: 'string', description: 'Appointment date in YYYY-MM-DD format' },
+                  time: { type: 'string', description: 'Appointment time (e.g., 2:00 PM)' },
+                  service_type: { type: 'string', description: 'Type of service or reason for appointment' },
+                  staff_name: { type: 'string', description: 'Name of the preferred staff member or provider, if the caller specified one' },
+                  notes: { type: 'string', description: 'Any special requests or notes' }
+                },
+                required: ['customer_name', 'customer_phone', 'date', 'time']
+              }
+            }
+          })
+        });
         bookingToolId = existingBookingTool.id;
+        console.log('✅ book_appointment tool updated: ' + bookingToolId);
       } else {
         console.log('🔧 Creating book_appointment tool...');
         var bookingToolRes = await fetch('https://api.vapi.ai/tool', {
@@ -103,6 +164,7 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
                   date: { type: 'string', description: 'Appointment date in YYYY-MM-DD format' },
                   time: { type: 'string', description: 'Appointment time (e.g., 2:00 PM)' },
                   service_type: { type: 'string', description: 'Type of service or reason for appointment' },
+                  staff_name: { type: 'string', description: 'Name of the preferred staff member or provider, if the caller specified one' },
                   notes: { type: 'string', description: 'Any special requests or notes' }
                 },
                 required: ['customer_name', 'customer_phone', 'date', 'time']
@@ -133,15 +195,13 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
       console.log('📋 Final toolIds: ' + newToolIds.length);
       
       var systemPrompt = assistant.model?.messages?.[0]?.content || '';
-      var calendarInstructions = '\n\n## APPOINTMENT BOOKING\nYou can book appointments directly to the business calendar.\n\nCRITICAL DATE RULES:\n- You do NOT know today\'s date. Do NOT guess or say any date to the caller until AFTER you receive the tool response.\n- When a caller asks to book, say "Let me check that for you" — do NOT repeat back any date.\n- The check_availability tool response will tell you the EXACT correct date. ONLY use that date when speaking to the caller.\n- NEVER say a date like "October", "November", or any date from your own memory. ONLY say the date that appears in the tool response.\n\nBooking flow:\n1. Caller wants to book — ask for their preferred date\n2. Call check_availability with whatever date info you have\n3. Read the tool response — it contains the CORRECT date and available times\n4. Tell the caller the date and times FROM THE TOOL RESPONSE ONLY\n5. Collect: name, phone number, service type\n6. Use book_appointment to confirm\n7. Read the booking confirmation from the tool response and repeat it to the caller\n\nIf no slots are available, offer alternative dates or take their info for a callback.';
+      var calendarInstructions = '\n\n## APPOINTMENT BOOKING\nYou can book appointments directly to the business calendar.\n\nCRITICAL DATE RULES:\n- You do NOT know today\'s date. Do NOT guess or say any date to the caller until AFTER you receive the tool response.\n- When a caller asks to book, say "Let me check that for you" — do NOT repeat back any date.\n- The check_availability tool response will tell you the EXACT correct date. ONLY use that date when speaking to the caller.\n- NEVER say a date like "October", "November", or any date from your own memory. ONLY say the date that appears in the tool response.\n\nBooking flow:\n1. Caller wants to book — ask what service they need (if not already stated)\n2. Ask if they have a preferred provider/staff member (if staff are listed above)\n3. Ask for their preferred date\n4. Call check_availability with the date and service type\n5. Read the tool response — it contains the CORRECT date and available times\n6. Tell the caller the date and times FROM THE TOOL RESPONSE ONLY\n7. Collect: name, phone number\n8. Use book_appointment with all details including staff_name if they chose one\n9. Read the booking confirmation from the tool response and repeat it to the caller\n\nIf no slots are available, offer alternative dates or take their info for a callback.';
 
       if (!systemPrompt.includes('APPOINTMENT BOOKING')) {
         systemPrompt += calendarInstructions;
       } else {
-        // Replace old calendar instructions with new ones
         var startIdx = systemPrompt.indexOf('## APPOINTMENT BOOKING');
         if (startIdx > 0) {
-          // Find a reasonable end point - look for next ## or end of string
           var beforeCalendar = systemPrompt.substring(0, startIdx).trimEnd();
           systemPrompt = beforeCalendar + calendarInstructions;
         }
@@ -178,7 +238,6 @@ async function updateAssistantCalendar(assistantId, clientId, enabled) {
     } else {
       var systemPrompt2 = assistant.model?.messages?.[0]?.content || '';
       
-      // Remove calendar instructions
       var startIdx2 = systemPrompt2.indexOf('## APPOINTMENT BOOKING');
       if (startIdx2 > 0) {
         systemPrompt2 = systemPrompt2.substring(0, startIdx2).trimEnd();

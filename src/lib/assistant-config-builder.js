@@ -3,6 +3,10 @@
 //
 // UPDATED: 2026-05-18 — Phase 1: ai_tone, booking_mode, service_areas,
 //          priority_rules. New prompt blocks injected per-client.
+// UPDATED: 2026-05-19 — Phase 3B: Services & staff prompt injection.
+//          buildServicesBlock() queries client_services table.
+//          buildStaffBlock() queries staff_members table.
+//          Service-level booking_mode overrides client-level.
 // ============================================================================
 
 const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, TRANSFER_KEYWORDS_BLOCK, VOICES,
@@ -37,7 +41,7 @@ If the caller speaks Spanish, immediately switch to Spanish for the remainder of
 // TONE BLOCK — Overrides default tone based on client ai_tone setting
 // ============================================================================
 function buildToneBlock(aiTone) {
-  if (!aiTone || aiTone === 'professional') return ''; // default, no override needed
+  if (!aiTone || aiTone === 'professional') return '';
 
   const toneOverrides = {
     friendly: `
@@ -63,7 +67,7 @@ Adjust your communication style to be precise, measured, and formal. Use complet
 // BOOKING MODE BLOCK — Overrides calendar booking behavior
 // ============================================================================
 function buildBookingModeBlock(bookingMode) {
-  if (!bookingMode || bookingMode === 'auto_book') return ''; // default behavior
+  if (!bookingMode || bookingMode === 'auto_book') return '';
 
   if (bookingMode === 'collect_request') {
     return `
@@ -134,6 +138,102 @@ function buildPriorityRulesBlock(priorityRules) {
   }
 
   return hasContent ? lines.join('\n') : '';
+}
+
+// ============================================================================
+// PHASE 3B: SERVICES BLOCK — Queries client_services table
+// Injects structured service menu into prompt. Service-level booking_mode
+// overrides the client-level default.
+// ============================================================================
+async function buildServicesBlock(clientId) {
+  if (!supabase || !clientId) return '';
+
+  try {
+    const { data: services, error } = await supabase
+      .from('client_services')
+      .select('name, description, duration_minutes, buffer_minutes, booking_mode, price')
+      .eq('client_id', clientId)
+      .eq('is_active', true)
+      .order('sort_order', { ascending: true });
+
+    if (error || !services || services.length === 0) return '';
+
+    const lines = ['\n\n# Available Services'];
+    lines.push('This business offers the following services. When a caller asks what you offer or wants to schedule, present the relevant options:');
+    lines.push('');
+
+    services.forEach((s, i) => {
+      let line = `${i + 1}. ${s.name}`;
+      if (s.duration_minutes) line += ` — ${s.duration_minutes} min`;
+      if (s.price) line += ` — ${s.price}`;
+      lines.push(line);
+      if (s.description) lines.push(`   ${s.description}`);
+
+      if (s.booking_mode === 'collect_request') {
+        lines.push(`   ⚠ DO NOT book this service directly. Collect the caller's name, phone, preferred date/time, and let them know: "Someone from the office will call you to confirm."`);
+      } else if (s.booking_mode === 'disabled') {
+        lines.push(`   ⚠ This service is NOT bookable by phone. If asked, take their information for a callback.`);
+      }
+    });
+
+    lines.push('');
+    lines.push('When booking, use the service-specific duration listed above (not the default). If a caller is unsure which service they need, ask a clarifying question to guide them to the right one.');
+
+    return lines.join('\n');
+  } catch (err) {
+    console.warn('⚠️ Services block failed:', err.message);
+    return '';
+  }
+}
+
+// ============================================================================
+// PHASE 3B: STAFF BLOCK — Queries staff_members table
+// Injects staff names, roles, and availability into prompt so the AI
+// can reference providers by name and attach them to bookings.
+// ============================================================================
+async function buildStaffBlock(clientId) {
+  if (!supabase || !clientId) return '';
+
+  try {
+    const { data: staff, error } = await supabase
+      .from('staff_members')
+      .select('name, role, available_hours')
+      .eq('client_id', clientId)
+      .eq('is_active', true)
+      .order('name', { ascending: true });
+
+    if (error || !staff || staff.length === 0) return '';
+
+    const lines = ['\n\n# Staff / Providers'];
+
+    staff.forEach(s => {
+      let line = `- ${s.name}`;
+      if (s.role) line += ` (${s.role})`;
+
+      if (s.available_hours && typeof s.available_hours === 'object' && Object.keys(s.available_hours).length > 0) {
+        const dayAbbrev = { monday: 'Mon', tuesday: 'Tue', wednesday: 'Wed', thursday: 'Thu', friday: 'Fri', saturday: 'Sat', sunday: 'Sun' };
+        const activeDays = Object.entries(s.available_hours)
+          .filter(([_, val]) => val && val !== 'off' && val !== false)
+          .map(([day]) => dayAbbrev[day] || day)
+          .join(', ');
+        if (activeDays) line += ` — available ${activeDays}`;
+      }
+
+      lines.push(line);
+    });
+
+    lines.push('');
+    if (staff.length > 1) {
+      lines.push('When booking an appointment, ask: "Do you have a preferred provider?" If they do, include that name in the booking. If they don\'t have a preference, you can skip it.');
+    } else {
+      lines.push(`Appointments are with ${staff[0].name}${staff[0].role ? ` (${staff[0].role})` : ''}. Include their name in booking details.`);
+    }
+
+    return lines.join('\n');
+  } catch (err) {
+    console.warn('⚠️ Staff block failed:', err.message);
+    return '';
+  }
 }
 
 // ============================================================================
@@ -288,7 +388,8 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
 
 // ============================================================================
 // BUILD SYSTEM PROMPT
-// UPDATED: Now injects tone, booking mode, service areas, priority rules
+// UPDATED: Now injects tone, booking mode, service areas, priority rules,
+//          structured services, and staff members
 // ============================================================================
 async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours) {
   const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
@@ -327,6 +428,8 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
       const kb = customTemplate.knowledge_base_data;
       let kbSection = '\n\n## BUSINESS INFORMATION';
       if (kb.businessHours?.trim()) kbSection += `\n\n### Business Hours\n${kb.businessHours}`;
+      // NOTE: KB services still injected for general Q&A context (pricing, descriptions).
+      // The structured services block below controls booking behavior and overrides.
       if (kb.services?.trim()) kbSection += `\n\n### Services & Pricing\n${kb.services}`;
       if (kb.faqs?.trim()) kbSection += `\n\n### Frequently Asked Questions\n${kb.faqs}`;
       if (kb.additionalInfo?.trim()) kbSection += `\n\n### Additional Information\n${kb.additionalInfo}`;
@@ -347,8 +450,16 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
   // ── Phase 1: Tone override ──────────────────────────────────────────
   systemPrompt += buildToneBlock(client.ai_tone);
 
-  // ── Phase 1: Booking mode override ──────────────────────────────────
+  // ── Phase 1: Booking mode override (client-level default) ───────────
+  // NOTE: Service-level booking_mode in buildServicesBlock overrides this
+  // per-service. This block sets the fallback for services without an override.
   systemPrompt += buildBookingModeBlock(client.booking_mode);
+
+  // ── Phase 3B: Structured services from client_services table ────────
+  systemPrompt += await buildServicesBlock(client.id);
+
+  // ── Phase 3B: Staff members from staff_members table ────────────────
+  systemPrompt += await buildStaffBlock(client.id);
 
   // ── Phase 1: Service areas ──────────────────────────────────────────
   systemPrompt += buildServiceAreasBlock(client.service_areas);
@@ -581,6 +692,8 @@ module.exports = {
   buildBookingModeBlock,
   buildServiceAreasBlock,
   buildPriorityRulesBlock,
+  buildServicesBlock,
+  buildStaffBlock,
   buildTools,
   buildHooks,
   checkBusinessHours,

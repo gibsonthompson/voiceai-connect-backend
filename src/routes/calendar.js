@@ -3,6 +3,7 @@ var router = express.Router();
 var calendarBooking = require('../lib/calendar-booking');
 var getAvailableSlots = calendarBooking.getAvailableSlots;
 var bookAppointment = calendarBooking.bookAppointment;
+var lookupServiceConfig = calendarBooking.lookupServiceConfig;
 
 // ============================================================================
 // SERVER-SIDE DATE RESOLVER
@@ -78,7 +79,6 @@ function resolveDate(input) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
     var parsed = new Date(raw + 'T12:00:00');
     if (parsed >= today) return raw;
-    // Past date — find the next occurrence of the same weekday
     var targetDow = parsed.getDay();
     var currentDow = today.getDay();
     var ahead = targetDow - currentDow;
@@ -103,7 +103,6 @@ function resolveDate(input) {
   var lastResort = new Date(raw);
   if (!isNaN(lastResort.getTime())) {
     if (lastResort >= today) return formatISO(lastResort);
-    // Past — find next occurrence of same weekday
     var targetDow2 = lastResort.getDay();
     var currentDow2 = today.getDay();
     var ahead2 = targetDow2 - currentDow2;
@@ -132,6 +131,7 @@ function friendlyDate(isoDate) {
 
 // ============================================================================
 // VAPI Tool: Check availability
+// UPDATED Phase 3B: Looks up service config for duration/buffer overrides
 // ============================================================================
 router.post('/availability/:clientId', async function(req, res) {
   try {
@@ -143,9 +143,11 @@ router.post('/availability/:clientId', async function(req, res) {
     var args = toolCall?.arguments || toolCall?.function?.arguments;
     
     var dateInput;
+    var serviceType = null;
     if (args) {
       var parsed = typeof args === 'string' ? JSON.parse(args) : args;
       dateInput = parsed.date;
+      serviceType = parsed.service_type || null;
     }
     
     if (!dateInput) {
@@ -164,6 +166,17 @@ router.post('/availability/:clientId', async function(req, res) {
       });
     }
 
+    // Phase 3B: Look up service config for duration/buffer
+    var slotOptions = {};
+    if (serviceType) {
+      var svcConfig = await lookupServiceConfig(clientId, serviceType);
+      if (svcConfig) {
+        if (svcConfig.duration_minutes) slotOptions.durationOverride = svcConfig.duration_minutes;
+        if (svcConfig.buffer_minutes) slotOptions.bufferMinutes = svcConfig.buffer_minutes;
+        console.log('📅 Service "' + serviceType + '": duration=' + (svcConfig.duration_minutes || 'default') + 'min, buffer=' + (svcConfig.buffer_minutes || 0) + 'min');
+      }
+    }
+
     // Handle "next available" — search consecutive days
     if (date === 'NEXT_AVAILABLE') {
       for (var i = 0; i < 7; i++) {
@@ -172,7 +185,7 @@ router.post('/availability/:clientId', async function(req, res) {
         var checkStr = formatISO(checkDate);
         
         console.log('📅 Checking next available: ' + checkStr);
-        var checkResult = await getAvailableSlots(clientId, checkStr);
+        var checkResult = await getAvailableSlots(clientId, checkStr, slotOptions);
         
         if (checkResult.success && checkResult.slots.length > 0) {
           var slots = checkResult.slots;
@@ -194,7 +207,7 @@ router.post('/availability/:clientId', async function(req, res) {
     }
 
     console.log('📅 Checking availability for client ' + clientId + ' on ' + date);
-    var result = await getAvailableSlots(clientId, date);
+    var result = await getAvailableSlots(clientId, date, slotOptions);
     
     if (!result.success) {
       return res.json({ 
@@ -241,6 +254,7 @@ router.post('/availability/:clientId', async function(req, res) {
 
 // ============================================================================
 // VAPI Tool: Book appointment
+// UPDATED Phase 3B: Extracts staff_name, passes through to bookAppointment
 // ============================================================================
 router.post('/book/:clientId', async function(req, res) {
   try {
@@ -264,6 +278,7 @@ router.post('/book/:clientId', async function(req, res) {
     var time = parsed.time;
     var serviceType = parsed.service_type;
     var notes = parsed.notes;
+    var staffName = parsed.staff_name || null;
 
     if (!customerName || !customerPhone || !dateInput || !time) {
       var missing = [];
@@ -285,8 +300,8 @@ router.post('/book/:clientId', async function(req, res) {
       });
     }
 
-    console.log('📅 Booking for client ' + clientId + ': ' + customerName + ' on ' + date + ' at ' + time);
-    var result = await bookAppointment(clientId, customerName, customerPhone, date, time, serviceType, notes);
+    console.log('📅 Booking for client ' + clientId + ': ' + customerName + ' on ' + date + ' at ' + time + (staffName ? ' with ' + staffName : ''));
+    var result = await bookAppointment(clientId, customerName, customerPhone, date, time, serviceType, notes, staffName);
 
     if (result.success) {
       return res.json({ 

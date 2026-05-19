@@ -2,6 +2,9 @@
 // GOOGLE CALENDAR BOOKING - VAPI Tool Handler
 // Matched to CallBird working implementation
 // UPDATED: Added double-booking prevention guard
+// UPDATED: 2026-05-19 Phase 3B — Service-aware booking: looks up service
+//   duration from client_services table, includes staff name in event
+//   title, applies buffer minutes between appointments.
 // ====================================================================
 const { supabase } = require('./supabase');
 
@@ -64,7 +67,6 @@ async function refreshAccessToken(client) {
 function parseTimeTo24Hr(timeStr) {
   const normalized = timeStr.trim().toLowerCase();
   
-  // Already 24hr format
   if (/^\d{1,2}:\d{2}$/.test(normalized) && !normalized.includes('m')) {
     return normalized.padStart(5, '0');
   }
@@ -90,8 +92,43 @@ function formatSlotLabel(hr, min) {
   return hour12 + minStr + ' ' + ampm;
 }
 
+// ====================================================================
+// PHASE 3B: Look up service by name in client_services table
+// Returns { duration_minutes, buffer_minutes, booking_mode } or null
+// ====================================================================
+async function lookupServiceConfig(clientId, serviceName) {
+  if (!serviceName || !clientId) return null;
+
+  try {
+    const normalizedName = serviceName.trim().toLowerCase();
+
+    const { data: services, error } = await supabase
+      .from('client_services')
+      .select('name, duration_minutes, buffer_minutes, booking_mode')
+      .eq('client_id', clientId)
+      .eq('is_active', true);
+
+    if (error || !services || services.length === 0) return null;
+
+    // Fuzzy match: exact first, then includes, then starts-with
+    const exact = services.find(s => s.name.toLowerCase() === normalizedName);
+    if (exact) return exact;
+
+    const includes = services.find(s => s.name.toLowerCase().includes(normalizedName) || normalizedName.includes(s.name.toLowerCase()));
+    if (includes) return includes;
+
+    return null;
+  } catch (err) {
+    console.warn('⚠️ Service lookup failed:', err.message);
+    return null;
+  }
+}
+
+// ====================================================================
 // Get available time slots
-async function getAvailableSlots(clientId, date) {
+// options: { durationOverride, bufferMinutes }
+// ====================================================================
+async function getAvailableSlots(clientId, date, options) {
   try {
     const { data: client, error } = await supabase
       .from('clients')
@@ -158,7 +195,9 @@ async function getAvailableSlots(clientId, date) {
       return { startMinutes, endMinutes };
     });
 
-    const duration = client.appointment_duration || 30;
+    // Use service-specific duration if provided, else client default
+    const duration = (options && options.durationOverride) || client.appointment_duration || 30;
+    const buffer = (options && options.bufferMinutes) || 0;
     const slots = [];
     
     const [openHr, openMin] = hours.open.split(':').map(Number);
@@ -168,12 +207,16 @@ async function getAvailableSlots(clientId, date) {
     const closeMinutes = closeHr * 60 + closeMin;
 
     while (currentMinutes + duration <= closeMinutes) {
-      const slotEndMinutes = currentMinutes + duration;
+      // Include buffer on both sides when checking conflicts
+      const slotStartWithBuffer = currentMinutes - buffer;
+      const slotEndWithBuffer = currentMinutes + duration + buffer;
       
       const hasConflict = busyRanges.some(busy =>
         (currentMinutes >= busy.startMinutes && currentMinutes < busy.endMinutes) ||
-        (slotEndMinutes > busy.startMinutes && slotEndMinutes <= busy.endMinutes) ||
-        (currentMinutes <= busy.startMinutes && slotEndMinutes >= busy.endMinutes)
+        ((currentMinutes + duration) > busy.startMinutes && (currentMinutes + duration) <= busy.endMinutes) ||
+        (currentMinutes <= busy.startMinutes && (currentMinutes + duration) >= busy.endMinutes) ||
+        // Buffer overlap: the buffer zone around this slot overlaps with an existing event
+        (buffer > 0 && slotStartWithBuffer < busy.endMinutes && slotEndWithBuffer > busy.startMinutes)
       );
 
       if (!hasConflict) {
@@ -188,7 +231,7 @@ async function getAvailableSlots(clientId, date) {
       currentMinutes += 30;
     }
 
-    console.log(`📅 Available slots for ${date}: ${slots.length} slots`);
+    console.log(`📅 Available slots for ${date}: ${slots.length} slots (duration: ${duration}min, buffer: ${buffer}min)`);
     return { success: true, slots, date };
   } catch (err) {
     console.error('Get slots error:', err);
@@ -196,10 +239,15 @@ async function getAvailableSlots(clientId, date) {
   }
 }
 
+// ====================================================================
 // Book an appointment
-async function bookAppointment(clientId, customerName, customerPhone, date, time, serviceType, notes) {
+// staffName: optional — included in event title and description
+// The function looks up service config from client_services for
+// duration override and buffer enforcement.
+// ====================================================================
+async function bookAppointment(clientId, customerName, customerPhone, date, time, serviceType, notes, staffName) {
   try {
-    console.log('📅 Booking appointment:', { clientId, customerName, date, time, serviceType });
+    console.log('📅 Booking appointment:', { clientId, customerName, date, time, serviceType, staffName: staffName || 'none' });
 
     const { data: client, error } = await supabase
       .from('clients')
@@ -228,14 +276,37 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     
     console.log(`📅 Parsed time: "${time}" -> "${time24}"`);
 
-    const duration = client.appointment_duration || 30;
+    // ── Phase 3B: Look up service config for duration/buffer/booking_mode ──
+    const serviceConfig = await lookupServiceConfig(clientId, serviceType);
+    let duration = client.appointment_duration || 30;
+    let bufferMinutes = 0;
+
+    if (serviceConfig) {
+      if (serviceConfig.duration_minutes) {
+        duration = serviceConfig.duration_minutes;
+        console.log(`📅 Using service-specific duration: ${duration}min (${serviceConfig.name})`);
+      }
+      if (serviceConfig.buffer_minutes) {
+        bufferMinutes = serviceConfig.buffer_minutes;
+        console.log(`📅 Buffer: ${bufferMinutes}min between appointments`);
+      }
+      // Check service-level booking_mode override
+      if (serviceConfig.booking_mode === 'collect_request' || serviceConfig.booking_mode === 'disabled') {
+        console.log(`⚠️ Service "${serviceConfig.name}" has booking_mode: ${serviceConfig.booking_mode} — should not be booked directly`);
+        return {
+          success: false,
+          error: `This service is not available for direct booking. Please collect the caller's preferred date and time, and let them know the office will call to confirm.`
+        };
+      }
+    }
+
     const timezone = client.timezone || 'America/New_York';
 
     // ====================================================================
     // DOUBLE-BOOKING PREVENTION: Re-check availability before booking
     // ====================================================================
     const [checkHr, checkMin] = time24.split(':').map(Number);
-    const availResult = await getAvailableSlots(clientId, date);
+    const availResult = await getAvailableSlots(clientId, date, { durationOverride: duration, bufferMinutes });
     if (availResult.success) {
       const requestedLabel = formatSlotLabel(checkHr, checkMin);
       const isAvailable = availResult.slots.some(function(slot) {
@@ -270,9 +341,23 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
 
     console.log(`📅 Event time: ${startDateTime} to ${endDateTime} (${timezone})`);
 
+    // ── Phase 3B: Build event title with service + staff + customer ──
+    const titleParts = [];
+    titleParts.push(serviceType || 'Appointment');
+    if (staffName) titleParts.push(staffName);
+    titleParts.push(customerName);
+    const eventTitle = titleParts.join(' — ');
+
+    // Build description
+    const descParts = [`Customer: ${customerName}`, `Phone: ${customerPhone}`];
+    if (staffName) descParts.push(`Provider: ${staffName}`);
+    if (serviceType) descParts.push(`Service: ${serviceType}`);
+    if (notes) descParts.push(`Notes: ${notes}`);
+    descParts.push('', 'Booked via AI Receptionist');
+
     const event = {
-      summary: `${serviceType || 'Appointment'} - ${customerName}`,
-      description: `Customer: ${customerName}\nPhone: ${customerPhone}\n${notes ? `Notes: ${notes}` : ''}\n\nBooked via AI Receptionist`,
+      summary: eventTitle,
+      description: descParts.join('\n'),
       start: {
         dateTime: startDateTime,
         timeZone: timezone,
@@ -321,6 +406,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
       appointment_time: new Date(startDateTime).toISOString(),
       duration,
       service_type: serviceType,
+      staff_name: staffName || null,
       notes,
       status: 'confirmed',
     });
@@ -336,13 +422,17 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     const ampm = hr >= 12 ? 'PM' : 'AM';
     const formattedTime = min === 0 ? `${hr12} ${ampm}` : `${hr12}:${min.toString().padStart(2, '0')} ${ampm}`;
 
+    let confirmMsg = `Appointment confirmed for ${customerName} on ${formattedDate} at ${formattedTime}`;
+    if (staffName) confirmMsg += ` with ${staffName}`;
+
     return {
       success: true,
-      message: `Appointment confirmed for ${customerName} on ${formattedDate} at ${formattedTime}`,
+      message: confirmMsg,
       appointment: {
         date: formattedDate,
         time: formattedTime,
-        service: serviceType
+        service: serviceType,
+        staff: staffName || null,
       }
     };
 
@@ -355,5 +445,6 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
 module.exports = {
   getAvailableSlots,
   bookAppointment,
-  refreshAccessToken
+  refreshAccessToken,
+  lookupServiceConfig
 };
