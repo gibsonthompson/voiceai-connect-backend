@@ -2,6 +2,7 @@
 // VOICEAI CONNECT - MULTI-TENANT BACKEND SERVER
 // UPDATED: Team member routes mounted, Content render service mounted
 // UPDATED: 2026-05-07 — Usage tracking cron + usage summary endpoint (Phase 1)
+// UPDATED: 2026-05-19 — Phase 3A: Staff members + client services routes
 // Destination: src/server.js (or src/index.js) — FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -152,7 +153,8 @@ const usageReporterRoutes = require('./cron/usage-reporter');
 const { getAgencyUsageSummary } = require('./lib/usage-tracker');
 const testClientRoutes = require('./routes/test-client');
 const bookingRoutes = require('./routes/booking');
-const exportRoutes = require('./routes/export');
+const staffMembersRoutes = require('./routes/staff-members');
+const clientServicesRoutes = require('./routes/client-services');
 const cleanupOrphanedTestClients = require('./routes/cleanup-orphaned-test-clients');
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
@@ -676,6 +678,8 @@ app.post('/api/client/signup', handleClientSignup);
 app.use('/api/client', clientRoutes);
 app.use('/api/client', require('./routes/call-mode'));
 app.use('/api/client', clientContactsRoutes);
+app.use('/api/client', staffMembersRoutes);
+app.use('/api/client', clientServicesRoutes);
 app.use('/api/client', toolConfigRoutes);
 app.use('/api/client', pwaTrackingRoutes);
 app.post('/api/client/checkout', createClientCheckout);
@@ -688,7 +692,6 @@ app.post('/api/client/portal', createClientPortal);
 // POST       /api/client/:clientId/team/:memberId/reset-password
 // ============================================================================
 app.use('/api', teamRoutes);
-app.use('/api/export', exportRoutes);
 
 app.get('/api/client/:clientId/details', async (req, res) => {
   try {
