@@ -8,6 +8,7 @@
 // UPDATED: Extract and store vapi_query_tool_id for dynamic config builder
 // UPDATED: New clients inherit nav_bg/nav_text from agency defaults (2026-04-17)
 // UPDATED: 2026-05-07 — Per-client billing triggers on client add (pricing restructure)
+// UPDATED: 2026-05-19 — Two-way SMS: auto-assign messaging profile + 10DLC campaign
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -33,6 +34,69 @@ const { provisionBYOTNumber } = require('./byot');
 
 // Import per-client billing update
 const { updateClientBillingQuantity } = require('../lib/usage-tracker');
+
+// ============================================================================
+// ENABLE SMS FOR PHONE NUMBER
+// Assigns the number to a Telnyx messaging profile and 10DLC campaign
+// so it can send/receive SMS for two-way messaging.
+// Non-blocking — failure here doesn't stop client provisioning.
+// ============================================================================
+async function enableSMSForNumber(phoneNumber) {
+  const messagingProfileId = process.env.TELNYX_MESSAGING_PROFILE_ID;
+  const campaignId = process.env.TELNYX_10DLC_CAMPAIGN_ID;
+  const apiKey = process.env.TELNYX_API_KEY;
+
+  if (!messagingProfileId || !campaignId || !apiKey) {
+    console.log('⚠️ SMS provisioning skipped — TELNYX_MESSAGING_PROFILE_ID or TELNYX_10DLC_CAMPAIGN_ID not configured');
+    return { success: false, reason: 'not_configured' };
+  }
+
+  const normalized = phoneNumber.startsWith('+') ? phoneNumber : `+${phoneNumber.replace(/\D/g, '')}`;
+
+  try {
+    // Step 1: Assign to messaging profile
+    const profileRes = await fetch(`https://api.telnyx.com/v2/messaging_phone_numbers/${encodeURIComponent(normalized)}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ messaging_profile_id: messagingProfileId }),
+    });
+
+    if (!profileRes.ok) {
+      const err = await profileRes.text();
+      console.warn(`⚠️ SMS messaging profile assignment failed for ${normalized}:`, err);
+      return { success: false, reason: 'profile_failed', error: err };
+    }
+
+    console.log(`✅ SMS messaging profile assigned: ${normalized}`);
+
+    // Step 2: Assign to 10DLC campaign
+    const campaignRes = await fetch('https://api.telnyx.com/v2/10dlc/phoneNumberCampaign', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ phoneNumber: normalized, campaignId }),
+    });
+
+    if (!campaignRes.ok) {
+      const err = await campaignRes.text();
+      console.warn(`⚠️ SMS 10DLC campaign assignment failed for ${normalized}:`, err);
+      // Profile was assigned — number can still receive inbound, just might get filtered on outbound
+      return { success: true, reason: 'campaign_failed', error: err };
+    }
+
+    console.log(`✅ SMS 10DLC campaign assigned: ${normalized}`);
+    return { success: true };
+
+  } catch (error) {
+    console.warn(`⚠️ SMS provisioning error for ${normalized}:`, error.message);
+    return { success: false, reason: 'exception', error: error.message };
+  }
+}
 
 // ============================================================================
 // COUNTRY → PROVISIONING METHOD
@@ -252,8 +316,6 @@ async function handleClientSignup(req, res) {
     if (!limitCheck.allowed) {
       const isBilling = limitCheck.reason === 'billing_required';
       console.log(`🚫 ${isBilling ? 'Billing required' : 'Client limit reached'} for agency ${agency.name}: ${limitCheck.reason}`);
-      // For marketing site signups, business owners see a user-facing message
-      // (they can't fix the agency's billing — only the agency owner can)
       return res.status(403).json({ 
         error: isBilling ? 'not_accepting' : 'Client limit reached',
         message: isBilling 
@@ -346,6 +408,9 @@ async function handleClientSignup(req, res) {
     }, assistant.id);
     
     console.log(`✅ Phone provisioned (${phoneResult.provisioningMethod}): ${phoneResult.number}`);
+
+    // Enable two-way SMS on the provisioned number (non-blocking)
+    try { await enableSMSForNumber(phoneResult.number); } catch (e) { console.warn('⚠️ SMS enable failed:', e.message); }
 
     // ============================================
     // STEP 4: CREATE CLIENT RECORD
@@ -617,6 +682,9 @@ async function handleAgencyAddClient(req, res) {
 
     console.log(`✅ Phone provisioned (${phoneResult.provisioningMethod}): ${phoneResult.number}`);
 
+    // Enable two-way SMS on the provisioned number (non-blocking)
+    try { await enableSMSForNumber(phoneResult.number); } catch (e) { console.warn('⚠️ SMS enable failed:', e.message); }
+
     // === STEP 4: Create Client Record ===
     const trialEndsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     const callLimitKey = `limit_${planType}`;
@@ -787,6 +855,11 @@ async function provisionClient(clientId) {
       businessName: client.business_name,
       phone: client.owner_phone
     }, assistant.id);
+
+    console.log(`✅ Phone provisioned (${phoneResult.provisioningMethod}): ${phoneResult.number}`);
+
+    // Enable two-way SMS on the provisioned number (non-blocking)
+    try { await enableSMSForNumber(phoneResult.number); } catch (e) { console.warn('⚠️ SMS enable failed:', e.message); }
     
     const { data: updatedClient } = await supabase
       .from('clients')

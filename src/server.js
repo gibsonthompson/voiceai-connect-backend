@@ -199,6 +199,8 @@ const adminAgencyDetail = require('./routes/admin-agency-detail');
 const smsLogRoutes = require('./routes/sms-log');
 const errorReportRoutes = require('./routes/error-report');
 const previewTokenRoutes = require('./routes/preview-token');
+const smsRoutes = require('./routes/sms');
+const { handleTelnyxSMSWebhook } = require('./routes/sms');
 // ============================================================================
 // HEALTH CHECK
 // ============================================================================
@@ -682,6 +684,7 @@ app.use('/api/client', staffMembersRoutes);
 app.use('/api/client', clientServicesRoutes);
 app.use('/api/client', toolConfigRoutes);
 app.use('/api/client', pwaTrackingRoutes);
+app.use('/api/sms', smsRoutes);
 app.post('/api/client/checkout', createClientCheckout);
 app.post('/api/client/portal', createClientPortal);
 
@@ -813,7 +816,7 @@ app.post('/webhook/vapi', handleVapiWebhook);
 
 // SUPPORT LINE ADDITION: Voice support webhook (shared number, dynamic agency context + whisper)
 app.post('/webhook/vapi-support', handleSupportWebhook);
-
+app.post('/webhook/telnyx-sms', handleTelnyxSMSWebhook);
 // Stripe platform webhooks (agency subscriptions)
 app.post('/webhook/stripe', 
   express.raw({ type: 'application/json' }), 
