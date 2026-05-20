@@ -14,6 +14,8 @@
 // FIXED: Phone provisioning error logging + early bail on account errors (2026-04-15)
 // FIXED: POST /phone-number/buy deprecated → POST /phone-number provider:vapi (2026-04-15)
 // FIXED: KB logic fallthrough when websiteContent exists but fileId is null (2026-04-15)
+// UPDATED: 2026-05-20 — Phone provisioning switched from VAPI free numbers to
+//          Telnyx purchase + VAPI import. Removes 10-number cap entirely.
 // ============================================================================
 const fetch = require('node-fetch');
 const FormData = require('form-data');
@@ -31,6 +33,7 @@ const { createKnowledgeBaseFromWebsite } = require('./website-scraper');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
+const TELNYX_API_KEY = process.env.TELNYX_API_KEY;
 
 // ============================================================================
 // INDUSTRY MAPPING - Each industry has its own unique key
@@ -1463,14 +1466,10 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       console.log(`📚 Creating industry-only knowledge base (no website provided)`);
       finalKnowledgeBase = await createIndustryKnowledgeBase(businessName, industryKey);
     } else {
-      // Always create combined KB — whether website scraper's initial upload
-      // succeeded (has fileId) or failed (has websiteContent but no fileId).
-      // createIndustryKnowledgeBase prepends the industry doc and re-uploads.
       console.log(`📚 Creating combined knowledge base (industry doc + website content)`);
       finalKnowledgeBase = await createIndustryKnowledgeBase(businessName, industryKey, finalKnowledgeBase);
     }
 
-    // Warn if KB failed — assistant will work but can't answer business questions
     if (!finalKnowledgeBase || !finalKnowledgeBase.fileId) {
       console.warn(`⚠️ Knowledge base creation failed for ${businessName} — assistant will have NO knowledge base`);
     }
@@ -1839,48 +1838,166 @@ async function updateDemoAssistantName(assistantId, newAgencyName) {
 }
 
 // ============================================================================
-// PHONE PROVISIONING
-// FIXED: Full error logging with HTTP status, raw body, account-level detection
+// STATE AREA CODES
 // ============================================================================
 const STATE_AREA_CODES = {"AL":["205","251","256","334","938"],"AK":["907"],"AZ":["480","520","602","623","928"],"AR":["479","501","870"],"CA":["213","310","323","408","415","510","530","559","619","626","650","661","707","714","760","805","818","831","858","909","916","925","949","951"],"CO":["303","719","720","970"],"CT":["203","475","860"],"DE":["302"],"DC":["202"],"FL":["239","305","321","352","386","407","561","727","754","772","786","813","850","863","904","941","954"],"GA":["229","404","470","478","678","706","770","912"],"HI":["808"],"ID":["208","986"],"IL":["217","224","309","312","331","618","630","708","773","815","847"],"IN":["219","260","317","463","574","765","812"],"IA":["319","515","563","641","712"],"KS":["316","620","785","913"],"KY":["270","364","502","606","859"],"LA":["225","318","337","504","985"],"ME":["207"],"MD":["240","301","410","443","667"],"MA":["339","351","413","508","617","774","781","857","978"],"MI":["231","248","269","313","517","586","616","734","810","906","947","989"],"MN":["218","320","507","612","651","763","952"],"MS":["228","601","662","769"],"MO":["314","417","573","636","660","816"],"MT":["406"],"NE":["308","402","531"],"NV":["702","725","775"],"NH":["603"],"NJ":["201","551","609","732","848","856","862","908","973"],"NM":["505","575"],"NY":["212","315","347","516","518","585","607","631","646","716","718","845","914","917","929"],"NC":["252","336","704","743","828","910","919","980","984"],"ND":["701"],"OH":["216","234","330","380","419","440","513","567","614","740","937"],"OK":["405","539","580","918"],"OR":["458","503","541","971"],"PA":["215","267","272","412","484","570","610","717","724","814","878"],"RI":["401"],"SC":["803","843","854","864"],"SD":["605"],"TN":["423","615","629","731","865","901","931"],"TX":["210","214","254","281","325","346","361","409","430","432","469","512","682","713","726","737","806","817","830","832","903","915","936","940","956","972","979"],"UT":["385","435","801"],"VT":["802"],"VA":["276","434","540","571","703","757","804"],"WA":["206","253","360","425","509","564"],"WV":["304","681"],"WI":["262","414","534","608","715","920"],"WY":["307"],"AB":["403","587","780","825"],"BC":["236","250","604","672","778"],"MB":["204","431"],"NB":["506"],"NL":["709"],"NS":["782","902"],"NT":["867"],"NU":["867"],"ON":["226","249","289","343","365","382","416","437","519","548","613","647","705","742","807","905"],"PE":["782","902"],"QC":["354","367","418","438","450","468","514","579","581","819","873"],"SK":["306","639"],"YT":["867"]};
 
+// ============================================================================
+// TELNYX CREDENTIAL LOOKUP (cached — runs once per process lifetime)
+// ============================================================================
+let _telnyxCredentialIdCache = null;
+
+async function getTelnyxCredentialId() {
+  if (_telnyxCredentialIdCache) return _telnyxCredentialIdCache;
+  try {
+    const res = await fetch('https://api.vapi.ai/credential', {
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
+    });
+    if (!res.ok) throw new Error(`Failed to fetch VAPI credentials (HTTP ${res.status})`);
+    const creds = await res.json();
+    const telnyxCred = creds.find(c => c.provider === 'telnyx');
+    if (!telnyxCred) {
+      throw new Error('No Telnyx credential found in VAPI — add your Telnyx API key in VAPI dashboard → Provider Keys');
+    }
+    _telnyxCredentialIdCache = telnyxCred.id;
+    console.log(`✅ Telnyx credential ID cached: ${_telnyxCredentialIdCache}`);
+    return _telnyxCredentialIdCache;
+  } catch (err) {
+    console.error('❌ getTelnyxCredentialId failed:', err.message);
+    throw err;
+  }
+}
+
+// ============================================================================
+// PHONE PROVISIONING — Telnyx Purchase + VAPI Import
+// UPDATED 2026-05-20: Replaces VAPI free number approach (10-number cap).
+// Flow: Search Telnyx → Buy from Telnyx → Import into VAPI
+// No cap. ~$1-2/month per number billed to your Telnyx account.
+// ============================================================================
 async function provisionPhoneNumber(areaCode) {
-  const buyResponse = await fetch('https://api.vapi.ai/phone-number', {
+  if (!TELNYX_API_KEY) {
+    throw new Error('TELNYX_API_KEY not configured — cannot provision phone numbers');
+  }
+
+  // ── Step 1: Search Telnyx for available numbers ───────────────────
+  const searchUrl = `https://api.telnyx.com/v2/available_phone_numbers?filter[country_code]=US&filter[national_destination_code]=${areaCode}&filter[features][]=sms&filter[features][]=voice&filter[limit]=1`;
+
+  const searchRes = await fetch(searchUrl, {
+    headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}` }
+  });
+
+  if (!searchRes.ok) {
+    const errText = await searchRes.text().catch(() => '');
+    const statusCode = searchRes.status;
+    const error = new Error(`[HTTP ${statusCode}] Telnyx number search failed for area code ${areaCode}: ${errText.slice(0, 200)}`);
+    error.statusCode = statusCode;
+    if ([402, 403, 429].includes(statusCode)) error.isAccountLevel = true;
+    throw error;
+  }
+
+  const searchData = await searchRes.json();
+  const available = searchData.data || [];
+
+  if (available.length === 0) {
+    throw new Error(`No numbers available in area code ${areaCode}`);
+  }
+
+  const selectedNumber = available[0].phone_number; // E.164 format
+  console.log(`   📱 Found available number: ${selectedNumber} (area code: ${areaCode})`);
+
+  // ── Step 2: Order the number from Telnyx ──────────────────────────
+  const orderRes = await fetch('https://api.telnyx.com/v2/number_orders', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${TELNYX_API_KEY}`
+    },
+    body: JSON.stringify({
+      phone_numbers: [{ phone_number: selectedNumber }]
+    })
+  });
+
+  if (!orderRes.ok) {
+    const statusCode = orderRes.status;
+    const errText = await orderRes.text().catch(() => '');
+    const error = new Error(`[HTTP ${statusCode}] Telnyx number order failed for ${selectedNumber}: ${errText.slice(0, 200)}`);
+    error.statusCode = statusCode;
+    if ([402, 403, 429].includes(statusCode)) error.isAccountLevel = true;
+    throw error;
+  }
+
+  const orderData = await orderRes.json();
+  const orderStatus = orderData.data?.status;
+  console.log(`   🛒 Telnyx order placed: ${selectedNumber} (status: ${orderStatus})`);
+
+  // Brief wait for Telnyx to activate the number (US numbers are usually instant)
+  if (orderStatus === 'pending') {
+    console.log(`   ⏳ Waiting for Telnyx to activate number...`);
+    await new Promise(resolve => setTimeout(resolve, 3000));
+  }
+
+  // ── Step 3: Get VAPI credential ID for Telnyx ─────────────────────
+  let credentialId;
+  try {
+    credentialId = await getTelnyxCredentialId();
+  } catch (credErr) {
+    console.error(`❌ Cannot import to VAPI — Telnyx credential not found. Number ${selectedNumber} was purchased on Telnyx but not imported to VAPI.`);
+    const error = new Error(`Telnyx number purchased (${selectedNumber}) but VAPI import failed: ${credErr.message}`);
+    error.isAccountLevel = true;
+    throw error;
+  }
+
+  // ── Step 4: Import the number into VAPI ───────────────────────────
+  const importRes = await fetch('https://api.vapi.ai/phone-number', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${VAPI_API_KEY}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ provider: 'vapi', numberDesiredAreaCode: areaCode })
+    body: JSON.stringify({
+      provider: 'telnyx',
+      number: selectedNumber,
+      credentialId: credentialId
+    })
   });
 
-  if (!buyResponse.ok) {
-    const statusCode = buyResponse.status;
-    const rawBody = await buyResponse.text().catch(() => '');
-    let errData = {};
-    try { errData = JSON.parse(rawBody); } catch {}
+  if (!importRes.ok) {
+    const statusCode = importRes.status;
+    const errText = await importRes.text().catch(() => '');
+    console.error(`❌ VAPI import failed for ${selectedNumber}: [HTTP ${statusCode}] ${errText}`);
 
-    // VAPI's new endpoint can return message as a string OR an array
-    const rawMessage = errData.message;
-    const errMessage = Array.isArray(rawMessage) ? rawMessage.join('; ') : (typeof rawMessage === 'string' ? rawMessage : rawBody.slice(0, 300) || 'Failed to provision phone number');
-    const error = new Error(`[HTTP ${statusCode}] ${errMessage}`);
-    error.statusCode = statusCode;
+    // Try alternative provider format if 'telnyx' doesn't work
+    console.log(`   🔄 Retrying VAPI import with provider: byo-phone-number...`);
+    const retryRes = await fetch('https://api.vapi.ai/phone-number', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${VAPI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        provider: 'byo-phone-number',
+        number: selectedNumber,
+        numberE164CheckEnabled: false,
+        credentialId: credentialId
+      })
+    });
 
-    // Parse VAPI's suggested area codes hint
-    const hintMatch = errMessage.match(/Try one of ([0-9, ]+)/);
-    if (hintMatch) {
-      error.suggestedCodes = hintMatch[1].split(',').map(c => c.trim()).filter(c => /^\d{3}$/.test(c));
-    }
-
-    // Flag account-level errors so callers can bail early instead of retrying
-    if ([402, 403, 429].includes(statusCode)) {
+    if (!retryRes.ok) {
+      const retryErr = await retryRes.text().catch(() => '');
+      const error = new Error(`[HTTP ${retryRes.status}] VAPI import failed for ${selectedNumber} (both methods): ${retryErr.slice(0, 200)}`);
+      error.statusCode = retryRes.status;
       error.isAccountLevel = true;
+      throw error;
     }
 
-    throw error;
+    const retryData = await retryRes.json();
+    console.log(`✅ Number imported to VAPI (byo-phone-number): ${retryData.number || selectedNumber} → ${retryData.id}`);
+    return retryData;
   }
 
-  return buyResponse.json();
+  const importData = await importRes.json();
+  console.log(`✅ Number imported to VAPI: ${importData.number || selectedNumber} → ${importData.id}`);
+  return importData;
 }
 
 // ============================================================================
@@ -1939,7 +2056,7 @@ async function provisionLocalPhone(city, state, assistantId, businessName, owner
       // Account-level error (billing, limit, rate limit) — stop wasting API calls
       if (error.isAccountLevel) {
         console.error(`   🚫 Account-level error (HTTP ${error.statusCode}) — aborting all ${areaCodesToTry.length - areaCodesToTry.indexOf(areaCode) - 1} remaining retries`);
-        throw new Error(`Phone provisioning blocked: ${error.message}. Check VAPI dashboard for billing or phone number limits.`);
+        throw new Error(`Phone provisioning blocked: ${error.message}. Check Telnyx dashboard for billing or phone number limits.`);
       }
 
       if (error.suggestedCodes) {
@@ -1951,7 +2068,7 @@ async function provisionLocalPhone(city, state, assistantId, businessName, owner
   }
   
   if (suggestedCodes.size > 0) {
-    console.log(`   🔄 Trying ${suggestedCodes.size} VAPI-suggested area codes: ${[...suggestedCodes].join(', ')}`);
+    console.log(`   🔄 Trying ${suggestedCodes.size} suggested area codes: ${[...suggestedCodes].join(', ')}`);
     for (const areaCode of suggestedCodes) {
       try {
         const phoneData = await provisionPhoneNumber(areaCode);
@@ -1961,7 +2078,7 @@ async function provisionLocalPhone(city, state, assistantId, businessName, owner
         console.log(`   ❌ ${areaCode} (suggested): ${error.message}`);
         if (error.isAccountLevel) {
           console.error(`   🚫 Account-level error — aborting`);
-          throw new Error(`Phone provisioning blocked: ${error.message}. Check VAPI dashboard for billing or phone number limits.`);
+          throw new Error(`Phone provisioning blocked: ${error.message}. Check Telnyx dashboard for billing or phone number limits.`);
         }
       }
     }
