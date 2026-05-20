@@ -1,7 +1,7 @@
 // ============================================================================
 // SUPPORT CHAT - AI-powered support with VoiceAI Connect knowledge base
 // POST /api/agency/:agencyId/support/chat
-// UPDATED: 2026-05-20 — Migrated from deprecated claude-sonnet-4-20250514
+// UPDATED: 2026-05-20 — Migrated from deprecated claude-sonnet-4-6-20260217
 //          to claude-sonnet-4-6. Old model retires June 15, 2026.
 // ============================================================================
 const express = require('express');

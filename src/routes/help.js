@@ -1,6 +1,9 @@
 // src/routes/help.js
 // Support widget endpoints: AI chatbot + SMS escalation
 // Mount in server.js: app.use('/api/help', require('./routes/help'));
+// UPDATED: 2026-05-20 — Fixed sendAndLogSMS param names (was using to/body/type
+//          instead of phone/message/messageType, causing "Invalid phone: undefined").
+//          Updated Claude model to claude-sonnet-4-6-20260217.
 
 const express = require('express');
 const router = express.Router();
@@ -13,7 +16,7 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 // Gibson's phone number for escalation
 const SUPPORT_PHONE = process.env.SUPPORT_PHONE_NUMBER || '';
 // Platform notification number for sending
-const PLATFORM_NUMBER = process.env.TELNYX_PHONE_NUMBER || process.env.PLATFORM_PHONE_NUMBER || '';
+const PLATFORM_NUMBER = process.env.TELNYX_SMS_FROM_NUMBER || process.env.TELNYX_PHONE_NUMBER || process.env.PLATFORM_PHONE_NUMBER || '';
 
 // ── Knowledge Base Context (embedded for AI) ────────────────────────
 // This is the full FAQ content the AI uses to answer questions.
@@ -167,7 +170,7 @@ router.post('/chat', async (req, res) => {
     messages.push({ role: 'user', content: message.trim() });
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6-20260217',
       max_tokens: 500,
       system: KB_CONTEXT,
       messages,
@@ -203,6 +206,7 @@ router.post('/message', async (req, res) => {
     // Extract agency info from auth token if available
     let agencyInfo = 'Unknown';
     let userEmail = 'Unknown';
+    let agencyId = null;
     try {
       const token = req.headers.authorization?.replace('Bearer ', '');
       if (token) {
@@ -210,6 +214,7 @@ router.post('/message', async (req, res) => {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         agencyInfo = decoded.agencyName || decoded.agency_name || decoded.agency_id || 'Unknown';
         userEmail = decoded.email || 'Unknown';
+        agencyId = decoded.agency_id || null;
       }
     } catch {
       // Token parsing failed, continue with Unknown
@@ -224,23 +229,17 @@ router.post('/message', async (req, res) => {
       `Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}`,
     ].join('\n');
 
-    // Send SMS via existing infrastructure
-    if (typeof sendAndLogSMS === 'function') {
-      await sendAndLogSMS({
-        to: SUPPORT_PHONE,
-        from: PLATFORM_NUMBER,
-        body: smsBody,
-        type: 'support_escalation',
-      });
-    } else {
-      // Fallback: direct Telnyx send
-      const telnyx = require('telnyx')(process.env.TELNYX_API_KEY);
-      await telnyx.messages.create({
-        from: PLATFORM_NUMBER,
-        to: SUPPORT_PHONE,
-        text: smsBody,
-      });
-    }
+    // FIX: Use correct parameter names for sendAndLogSMS
+    // Old code used { to, from, body, type } which are not valid params —
+    // sendAndLogSMS expects { phone, message, agencyId, recipientType, messageType, metadata }
+    await sendAndLogSMS({
+      phone: SUPPORT_PHONE,
+      message: smsBody,
+      agencyId: agencyId,
+      recipientType: 'admin',
+      messageType: 'support_escalation',
+      metadata: { agencyName: agencyInfo, email: userEmail },
+    });
 
     res.json({ success: true, message: 'Your message has been sent to our team.' });
   } catch (err) {

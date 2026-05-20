@@ -13,6 +13,9 @@
 //   });
 //
 // CREATED: 2026-05-09
+// UPDATED: 2026-05-20 — Early bail on undefined/null/empty phone to prevent
+//          "Invalid phone number: undefined" log spam from callers with wrong
+//          param names or missing data.
 // ============================================================================
 
 const { supabase } = require('./supabase');
@@ -23,10 +26,27 @@ const { sendTelnyxSMS, formatPhoneE164 } = require('./notifications');
  * Returns true if SMS was sent successfully, false otherwise.
  */
 async function sendAndLogSMS({ phone, message, agencyId, recipientType, messageType, metadata }) {
+  // ── Early bail: phone must be a non-empty string ────────────────────
+  // Catches callers passing undefined (e.g. wrong param name like "to" instead
+  // of "phone") before we hit formatPhoneE164 and log a noisy warning.
+  if (!phone || typeof phone !== 'string' || phone.trim().length === 0) {
+    console.warn(`⚠️ SMS Logger: Skipped — no phone provided for ${messageType || 'unknown'} (got: ${typeof phone === 'string' ? `"${phone}"` : String(phone)})`);
+    await logSMS({
+      agencyId,
+      phone: 'missing',
+      recipientType,
+      messageType,
+      message,
+      telnyxMessageId: null,
+      status: 'skipped',
+      metadata: { ...metadata, error: 'No phone number provided' },
+    });
+    return false;
+  }
+
   const formattedPhone = formatPhoneE164(phone);
   if (!formattedPhone) {
-    console.warn(`⚠️ SMS Logger: Invalid phone number: ${phone}`);
-    // Log the failure
+    console.warn(`⚠️ SMS Logger: Invalid phone number: ${phone} (for ${messageType || 'unknown'})`);
     await logSMS({
       agencyId,
       phone: phone || 'invalid',

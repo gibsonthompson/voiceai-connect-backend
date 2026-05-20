@@ -167,7 +167,7 @@ IMPORTANT: When you call transferToHuman, the 'issue_summary' should be a concis
     serverUrl: `${BACKEND_URL}/webhook/vapi-support`,
     model: {
       provider: 'anthropic',
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6-20260217',
       messages: [
         { role: 'system', content: systemPrompt }
       ],

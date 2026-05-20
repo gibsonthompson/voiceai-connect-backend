@@ -72,7 +72,7 @@ async function generateAISummary(transcript, industry, callerPhone) {
       signal: _ac1.signal,
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 500, temperature: 0.3, messages: [{ role: "user", content: prompt }] })
+      body: JSON.stringify({ model: "claude-sonnet-4-6-20260217", max_tokens: 500, temperature: 0.3, messages: [{ role: "user", content: prompt }] })
     });
     clearTimeout(_t1);
     if (!response.ok) throw new Error(`Claude API failed: ${response.status}`);
@@ -194,7 +194,7 @@ Extract and return ONLY valid JSON — no backticks, no extra text:
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-6-20260217',
         max_tokens: 500,
         temperature: 0.3,
         messages: [{ role: 'user', content: prompt }],

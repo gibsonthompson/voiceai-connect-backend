@@ -407,7 +407,7 @@ ${idea.notes ? `\nCreator notes: ${idea.notes}` : ''}
 Write the script as a roadmap — what to say in each block, key phrases to hit, where to show screen recordings. NOT a teleprompter script. The speaker should be able to glance at this and riff naturally.`;
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6-20260217',
       max_tokens: 4000,
       system: SCRIPT_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userPrompt }],
