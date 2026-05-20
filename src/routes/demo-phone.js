@@ -1,7 +1,10 @@
 // ============================================================================
 // DEMO PHONE ROUTES
-// POST /api/agency/:agencyId/demo-phone — Create demo phone
-// DELETE /api/agency/:agencyId/demo-phone — Remove demo phone
+// POST   /api/agency/:agencyId/demo-phone         — Create demo phone
+// DELETE /api/agency/:agencyId/demo-phone         — Remove demo phone
+// GET    /api/agency/:agencyId/demo-calls         — List demo calls
+// GET    /api/agency/:agencyId/demo-calls/:callId — Get demo call detail
+// UPDATED: 2026-05-20 — Added demo call history endpoints
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -184,6 +187,82 @@ router.delete('/:agencyId/demo-phone', async (req, res) => {
   } catch (error) {
     console.error('❌ Delete demo phone error:', error);
     res.status(500).json({ error: 'Failed to delete demo phone' });
+  }
+});
+
+// ============================================================================
+// LIST DEMO CALLS
+// GET /:agencyId/demo-calls
+// Returns paginated demo call history for the agency
+// Query params: limit (default 20), offset (default 0)
+// ============================================================================
+router.get('/:agencyId/demo-calls', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const limit = Math.min(parseInt(req.query.limit) || 20, 50);
+    const offset = parseInt(req.query.offset) || 0;
+
+    // Get total count
+    const { count, error: countError } = await supabase
+      .from('demo_calls')
+      .select('id', { count: 'exact', head: true })
+      .eq('agency_id', agencyId);
+
+    if (countError) {
+      console.error('Demo calls count error:', countError);
+      return res.status(400).json({ error: countError.message });
+    }
+
+    // Fetch calls
+    const { data: calls, error } = await supabase
+      .from('demo_calls')
+      .select('id, caller_phone, caller_name, business_name, business_type, interest_level, service_discussed, asked_questions, summary, duration_seconds, industry_key, caller_location, recording_url, created_at')
+      .eq('agency_id', agencyId)
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) {
+      console.error('Demo calls fetch error:', error);
+      return res.status(400).json({ error: error.message });
+    }
+
+    res.json({
+      success: true,
+      calls: calls || [],
+      total: count || 0,
+      limit,
+      offset,
+    });
+  } catch (error) {
+    console.error('❌ List demo calls error:', error);
+    res.status(500).json({ error: 'Failed to fetch demo calls' });
+  }
+});
+
+// ============================================================================
+// GET DEMO CALL DETAIL
+// GET /:agencyId/demo-calls/:callId
+// Returns full demo call data including transcript
+// ============================================================================
+router.get('/:agencyId/demo-calls/:callId', async (req, res) => {
+  try {
+    const { agencyId, callId } = req.params;
+
+    const { data: call, error } = await supabase
+      .from('demo_calls')
+      .select('*')
+      .eq('id', callId)
+      .eq('agency_id', agencyId)
+      .single();
+
+    if (error || !call) {
+      return res.status(404).json({ error: 'Demo call not found' });
+    }
+
+    res.json({ success: true, call });
+  } catch (error) {
+    console.error('❌ Get demo call error:', error);
+    res.status(500).json({ error: 'Failed to fetch demo call' });
   }
 });
 

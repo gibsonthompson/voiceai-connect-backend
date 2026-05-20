@@ -9,6 +9,8 @@
 //   extraction, call_language stored on every call record
 // UPDATED: 2026-05-19 — Fix: demo admin SMS summary truncation cuts at word
 //   boundary (300 char limit) instead of mid-word at 200
+// UPDATED: 2026-05-20 — Save demo calls to demo_calls table for dashboard display.
+//   Migrated Claude model from claude-sonnet-4-20250514 to claude-sonnet-4-6-20260217.
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -457,6 +459,38 @@ async function handleDemoCall(agency, message, industryKey = null) {
     } catch (ownerSmsErr) {
       console.warn('⚠️ Agency owner notification failed:', ownerSmsErr.message);
     }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // SAVE DEMO CALL TO DATABASE
+  // Stores full call data so agencies can review demo calls in their
+  // dashboard with transcripts, recordings, and AI summaries.
+  // ════════════════════════════════════════════════════════════════════════
+  try {
+    const recordingUrl = message.recordingUrl || message.artifact?.recordingUrl || call.recordingUrl || null;
+
+    await supabase.from('demo_calls').insert({
+      agency_id: agency.id,
+      caller_phone: callerPhone,
+      caller_name: callerName || null,
+      business_name: businessName || null,
+      business_type: businessType || null,
+      interest_level: interestLevel || 'medium',
+      service_discussed: serviceDiscussed || null,
+      asked_questions: askedQuestions || false,
+      summary: summary || null,
+      transcript: transcript || null,
+      recording_url: recordingUrl,
+      duration_seconds: durationSeconds || null,
+      vapi_call_id: call.id || null,
+      vapi_success_score: vapiSuccessScore || null,
+      call_language: 'en',
+      industry_key: industryKey || null,
+      caller_location: callerLocation || null,
+    });
+    console.log('✅ Demo call saved to database');
+  } catch (dbErr) {
+    console.warn('⚠️ Failed to save demo call (non-fatal):', dbErr.message);
   }
 
   return {
