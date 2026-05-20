@@ -1,6 +1,8 @@
 // ============================================================================
 // SUPPORT CHAT - AI-powered support with VoiceAI Connect knowledge base
 // POST /api/agency/:agencyId/support/chat
+// UPDATED: 2026-05-20 — Migrated from deprecated claude-sonnet-4-20250514
+//          to claude-sonnet-4-6. Old model retires June 15, 2026.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -368,7 +370,7 @@ router.post('/:agencyId/support/chat', async (req, res) => {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-6-20260217',
         max_tokens: 1000,
         temperature: 0.3,
         system: contextPrompt,

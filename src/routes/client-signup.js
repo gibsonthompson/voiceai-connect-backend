@@ -9,6 +9,9 @@
 // UPDATED: New clients inherit nav_bg/nav_text from agency defaults (2026-04-17)
 // UPDATED: 2026-05-07 — Per-client billing triggers on client add (pricing restructure)
 // UPDATED: 2026-05-19 — Two-way SMS: auto-assign messaging profile + 10DLC campaign
+// UPDATED: 2026-05-20 — Rollback: clean up orphaned VAPI resources (assistant, KB,
+//          query tool) when phone provisioning fails. Guard SMS sends against
+//          undefined phone numbers. Better error messages for Telnyx 402.
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -34,6 +37,50 @@ const { provisionBYOTNumber } = require('./byot');
 
 // Import per-client billing update
 const { updateClientBillingQuantity } = require('../lib/usage-tracker');
+
+// ============================================================================
+// CLEANUP: Delete orphaned VAPI resources when signup fails mid-flow
+// Called when phone provisioning (step 3) fails after assistant/KB creation
+// (steps 1-2) already succeeded. Without this, each failed signup leaks
+// an assistant + KB file + query tool in VAPI.
+// ============================================================================
+async function cleanupVapiResources(assistantId, queryToolId, context) {
+  if (!assistantId) return;
+
+  console.log(`🧹 Cleaning up orphaned VAPI resources for failed signup: ${context}`);
+
+  try {
+    // Delete the assistant (VAPI will also clean up associated phone assignment)
+    const res = await fetch(`https://api.vapi.ai/assistant/${assistantId}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${process.env.VAPI_API_KEY}` },
+    });
+
+    if (res.ok) {
+      console.log(`🧹 Deleted orphaned assistant: ${assistantId}`);
+    } else {
+      console.warn(`⚠️ Failed to delete assistant ${assistantId}: ${res.status}`);
+    }
+  } catch (err) {
+    console.warn(`⚠️ VAPI cleanup error (assistant): ${err.message}`);
+  }
+
+  // Also try to delete the query tool if it exists
+  if (queryToolId) {
+    try {
+      const res = await fetch(`https://api.vapi.ai/tool/${queryToolId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${process.env.VAPI_API_KEY}` },
+      });
+
+      if (res.ok) {
+        console.log(`🧹 Deleted orphaned query tool: ${queryToolId}`);
+      }
+    } catch (err) {
+      console.warn(`⚠️ VAPI cleanup error (tool): ${err.message}`);
+    }
+  }
+}
 
 // ============================================================================
 // ENABLE SMS FOR PHONE NUMBER
@@ -105,6 +152,24 @@ const PLATFORM_PROVISIONING_COUNTRIES = ['US']; // Only US for now
 
 function canPlatformProvision(countryCode) {
   return PLATFORM_PROVISIONING_COUNTRIES.includes(countryCode?.toUpperCase() || 'US');
+}
+
+// ============================================================================
+// FRIENDLY ERROR MESSAGES
+// Converts internal provisioning errors into user-facing messages
+// ============================================================================
+function getFriendlyProvisioningError(error) {
+  const msg = error?.message || '';
+
+  if (msg.includes('Insufficient Funds') || msg.includes('HTTP 402')) {
+    return 'Phone number provisioning is temporarily unavailable. The platform team has been notified. Please try again in a few minutes.';
+  }
+
+  if (msg.includes('No numbers found') || msg.includes('HTTP 400')) {
+    return 'No phone numbers are currently available in that area. Please try a different city or contact support.';
+  }
+
+  return 'Phone provisioning failed. Please try again or contact support.';
 }
 
 // ============================================================================
@@ -275,6 +340,10 @@ async function provisionPhoneForClient(agency, clientData, assistantId) {
 // MAIN CLIENT SIGNUP HANDLER (from agency marketing site)
 // ============================================================================
 async function handleClientSignup(req, res) {
+  // Track created resources for rollback on failure
+  let createdAssistantId = null;
+  let createdQueryToolId = null;
+
   try {
     console.log('📝 Client Signup Request Received');
 
@@ -386,10 +455,12 @@ async function handleClientSignup(req, res) {
       agencyId  // Pass agencyId for template override lookup
     );
     
+    createdAssistantId = assistant.id;
     console.log(`✅ Assistant created: ${assistant.id}`);
 
     // Extract query tool ID for dynamic config builder
     const queryToolId = await extractQueryToolId(assistant.id);
+    createdQueryToolId = queryToolId;
     if (queryToolId) console.log(`🔧 Query tool ID extracted: ${queryToolId}`);
 
     const templateKB = assistant._templateKnowledgeBase || null;
@@ -399,13 +470,29 @@ async function handleClientSignup(req, res) {
 
     // ============================================
     // STEP 3: PROVISION PHONE NUMBER (unified)
+    // This can fail (Telnyx 402 insufficient funds, no numbers available, etc.)
+    // If it fails, we must clean up the VAPI resources created in steps 1-2.
     // ============================================
-    const phoneResult = await provisionPhoneForClient(agency, {
-      businessCity,
-      businessState,
-      businessName,
-      phone
-    }, assistant.id);
+    let phoneResult;
+    try {
+      phoneResult = await provisionPhoneForClient(agency, {
+        businessCity,
+        businessState,
+        businessName,
+        phone
+      }, assistant.id);
+    } catch (phoneError) {
+      // Phone provisioning failed — clean up VAPI resources
+      await cleanupVapiResources(createdAssistantId, createdQueryToolId, businessName);
+      createdAssistantId = null;
+      createdQueryToolId = null;
+
+      console.error('❌ Phone provisioning failed:', phoneError.message);
+      return res.status(503).json({
+        error: 'Provisioning failed',
+        message: getFriendlyProvisioningError(phoneError),
+      });
+    }
     
     console.log(`✅ Phone provisioned (${phoneResult.provisioningMethod}): ${phoneResult.number}`);
 
@@ -458,6 +545,10 @@ async function handleClientSignup(req, res) {
       throw clientError;
     }
 
+    // Past this point, client record exists — no more rollback needed
+    createdAssistantId = null;
+    createdQueryToolId = null;
+
     console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult.provisioningMethod})`);
 
     // ── Update per-client billing for the agency (non-blocking) ─────
@@ -507,13 +598,17 @@ async function handleClientSignup(req, res) {
     await sendClientWelcomeEmail(newClient, agency, null, passwordToken);
 
     // ============================================
-    // STEP 8: SEND WELCOME SMS
+    // STEP 8: SEND WELCOME SMS (guarded)
     // ============================================
-    console.log('📱 Sending welcome SMS...');
-    await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneResult.number, agency);
+    if (formattedOwnerPhone && formattedOwnerPhone !== 'undefined') {
+      console.log('📱 Sending welcome SMS...');
+      await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneResult.number, agency);
+    } else {
+      console.warn('⚠️ Skipping welcome SMS — no valid owner phone');
+    }
 
     // ============================================
-    // STEP 9: NOTIFY PLATFORM OWNER
+    // STEP 9: NOTIFY PLATFORM OWNER (guarded)
     // ============================================
     console.log('📱 Notifying platform owner...');
     await sendClientSignupNotificationSMS(newClient, agency);
@@ -542,6 +637,11 @@ async function handleClientSignup(req, res) {
     });
 
   } catch (error) {
+    // If we still have tracked VAPI resources, clean them up
+    if (createdAssistantId) {
+      await cleanupVapiResources(createdAssistantId, createdQueryToolId, 'signup-catch');
+    }
+
     console.error('❌ Signup error:', error);
     res.status(500).json({ 
       error: 'Signup failed', 
@@ -555,6 +655,10 @@ async function handleClientSignup(req, res) {
 // AGENCY ADD CLIENT HANDLER
 // ============================================================================
 async function handleAgencyAddClient(req, res) {
+  // Track created resources for rollback on failure
+  let createdAssistantId = null;
+  let createdQueryToolId = null;
+
   try {
     const { agencyId } = req.params;
 
@@ -661,10 +765,12 @@ async function handleAgencyAddClient(req, res) {
       null,
       agencyId
     );
+    createdAssistantId = assistant.id;
     console.log(`✅ Assistant created: ${assistant.id}`);
 
     // Extract query tool ID for dynamic config builder
     const queryToolId = await extractQueryToolId(assistant.id);
+    createdQueryToolId = queryToolId;
     if (queryToolId) console.log(`🔧 Query tool ID extracted: ${queryToolId}`);
 
     const templateKB = assistant._templateKnowledgeBase || null;
@@ -673,12 +779,27 @@ async function handleAgencyAddClient(req, res) {
     }
 
     // === STEP 3: Provision Phone (unified) ===
-    const phoneResult = await provisionPhoneForClient(agency, {
-      businessCity,
-      businessState,
-      businessName,
-      phone
-    }, assistant.id);
+    // This can fail — if it does, roll back VAPI resources from steps 1-2
+    let phoneResult;
+    try {
+      phoneResult = await provisionPhoneForClient(agency, {
+        businessCity,
+        businessState,
+        businessName,
+        phone
+      }, assistant.id);
+    } catch (phoneError) {
+      // Phone provisioning failed — clean up orphaned VAPI resources
+      await cleanupVapiResources(createdAssistantId, createdQueryToolId, businessName);
+      createdAssistantId = null;
+      createdQueryToolId = null;
+
+      console.error('❌ Phone provisioning failed:', phoneError.message);
+      return res.status(503).json({
+        error: 'Provisioning failed',
+        message: getFriendlyProvisioningError(phoneError),
+      });
+    }
 
     console.log(`✅ Phone provisioned (${phoneResult.provisioningMethod}): ${phoneResult.number}`);
 
@@ -729,6 +850,11 @@ async function handleAgencyAddClient(req, res) {
       console.error('❌ Database error:', clientError);
       throw clientError;
     }
+
+    // Past this point, client record exists — no more rollback needed
+    createdAssistantId = null;
+    createdQueryToolId = null;
+
     console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult.provisioningMethod})`);
 
     // ── Update per-client billing for the agency (non-blocking) ─────
@@ -762,9 +888,13 @@ async function handleAgencyAddClient(req, res) {
       throw userError;
     }
 
-    // === STEP 6: Welcome SMS ===
-    console.log('📱 Sending welcome SMS...');
-    await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneResult.number, agency);
+    // === STEP 6: Welcome SMS (guarded) ===
+    if (formattedOwnerPhone && formattedOwnerPhone !== 'undefined') {
+      console.log('📱 Sending welcome SMS...');
+      await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneResult.number, agency);
+    } else {
+      console.warn('⚠️ Skipping welcome SMS — no valid owner phone');
+    }
 
     // === STEP 7: Notify Agency Owner ===
     console.log('📱 Notifying agency owner...');
@@ -793,6 +923,11 @@ async function handleAgencyAddClient(req, res) {
     });
 
   } catch (error) {
+    // If we still have tracked VAPI resources, clean them up
+    if (createdAssistantId) {
+      await cleanupVapiResources(createdAssistantId, createdQueryToolId, 'agency-add-catch');
+    }
+
     console.error('❌ Agency add client error:', error);
     res.status(500).json({
       error: 'Failed to add client',
@@ -806,6 +941,9 @@ async function handleAgencyAddClient(req, res) {
 // PROVISION CLIENT (Called after Stripe checkout)
 // ============================================================================
 async function provisionClient(clientId) {
+  let createdAssistantId = null;
+  let createdQueryToolId = null;
+
   try {
     console.log('🚀 Provisioning client:', clientId);
     
@@ -843,18 +981,27 @@ async function provisionClient(clientId) {
       client.agency_id
     );
 
+    createdAssistantId = assistant.id;
+
     // Extract query tool ID for dynamic config builder
     const queryToolId = await extractQueryToolId(assistant.id);
+    createdQueryToolId = queryToolId;
     if (queryToolId) console.log(`🔧 Query tool ID extracted: ${queryToolId}`);
 
     const templateKB = assistant._templateKnowledgeBase || null;
     
-    const phoneResult = await provisionPhoneForClient(agency, {
-      businessCity: client.business_city,
-      businessState: client.business_state,
-      businessName: client.business_name,
-      phone: client.owner_phone
-    }, assistant.id);
+    let phoneResult;
+    try {
+      phoneResult = await provisionPhoneForClient(agency, {
+        businessCity: client.business_city,
+        businessState: client.business_state,
+        businessName: client.business_name,
+        phone: client.owner_phone
+      }, assistant.id);
+    } catch (phoneError) {
+      await cleanupVapiResources(createdAssistantId, createdQueryToolId, client.business_name);
+      throw phoneError;
+    }
 
     console.log(`✅ Phone provisioned (${phoneResult.provisioningMethod}): ${phoneResult.number}`);
 
@@ -879,6 +1026,10 @@ async function provisionClient(clientId) {
       .eq('id', clientId)
       .select()
       .single();
+
+    // No more rollback needed
+    createdAssistantId = null;
+    createdQueryToolId = null;
 
     // ── Update per-client billing (non-blocking) ────────────────────
     try {
@@ -908,13 +1059,20 @@ async function provisionClient(clientId) {
       
       const token = await createPasswordToken(newUser.id, client.email);
       await sendClientWelcomeEmail(updatedClient, agency, null, token);
-      await sendWelcomeSMS(client.owner_phone, client.business_name, phoneResult.number, agency);
+
+      // Guard SMS against undefined phone
+      if (client.owner_phone && client.owner_phone !== 'undefined') {
+        await sendWelcomeSMS(client.owner_phone, client.business_name, phoneResult.number, agency);
+      }
     }
     
     console.log(`✅ Client provisioned (${phoneResult.provisioningMethod}): ${client.business_name}`);
     return updatedClient;
     
   } catch (error) {
+    if (createdAssistantId) {
+      await cleanupVapiResources(createdAssistantId, createdQueryToolId, 'provision-catch');
+    }
     console.error('❌ Provisioning error:', error);
     throw error;
   }

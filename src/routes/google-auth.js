@@ -4,6 +4,12 @@
 //          valid_agency_plan only accepts free/pro/scale). Updated default
 //          prices to match agency-signup.js ($99/$149/$299). Added plan_features
 //          and referral_code fields that were missing.
+// UPDATED: 2026-05-20 — Fixed duplicate email crash: when Google auth user
+//          already has an agency (created via email signup or prior Google auth),
+//          the old code only checked the users table. If the user record was
+//          missing or the join failed, it fell through to INSERT on agencies,
+//          which crashed on the unique email constraint. Now checks agencies
+//          table directly as a fallback and routes to login/onboarding.
 // ============================================================================
 
 const { OAuth2Client } = require('google-auth-library');
@@ -116,6 +122,50 @@ function isAgencyPastOnboarding(agency) {
   return false;
 }
 
+// ============================================================================
+// Helper: Handle login for an existing agency (shared by user-path and
+// agency-fallback-path to avoid duplicating redirect logic)
+// ============================================================================
+async function handleExistingAgencyLogin(res, agency, user, email) {
+  // Update last login timestamps
+  if (user) {
+    await supabase
+      .from('users')
+      .update({ last_login_at: new Date().toISOString() })
+      .eq('id', user.id);
+  }
+
+  await supabase
+    .from('agencies')
+    .update({ last_login_at: new Date().toISOString() })
+    .eq('id', agency.id);
+
+  // Generate token from user record (preferred) or synthesize from agency
+  const tokenPayload = user || {
+    id: agency.id,
+    email: email,
+    agency_id: agency.id,
+    role: 'agency_owner',
+  };
+  const token = generateToken(tokenPayload);
+
+  if (isAgencyPastOnboarding(agency)) {
+    if (!agency.onboarding_completed) {
+      await supabase
+        .from('agencies')
+        .update({ onboarding_completed: true, onboarding_step: 7 })
+        .eq('id', agency.id);
+      console.log(`🔧 Fixed onboarding_completed for agency: ${agency.name}`);
+    }
+
+    console.log(`✅ Google login: ${email} → dashboard`);
+    return res.redirect(`${FRONTEND_URL}/auth/google-success?token=${token}&agencyId=${agency.id}&redirect=/agency/dashboard`);
+  }
+
+  console.log(`✅ Google login: ${email} → onboarding (step ${agency.onboarding_step})`);
+  return res.redirect(`${FRONTEND_URL}/auth/google-success?token=${token}&agencyId=${agency.id}&redirect=/onboarding`);
+}
+
 // GET /api/auth/google
 async function googleAuth(req, res) {
   try {
@@ -180,50 +230,94 @@ async function googleCallback(req, res) {
 
     console.log(`🔐 Google auth for: ${email} [country: ${country || 'not set'}]`);
 
-    // Check if user exists
+    // ================================================================
+    // PATH 1: Check users table for existing user record
+    // ================================================================
     const { data: existingUser } = await supabase
       .from('users')
-      .select('*, agencies!clients_agency_id_fkey(*)')
+      .select('*')
       .eq('email', email.toLowerCase())
+      .eq('role', 'agency_owner')
       .single();
 
-    if (existingUser) {
-      if (existingUser.agency_id && existingUser.agencies) {
-        const token = generateToken(existingUser);
-        const agency = existingUser.agencies;
-        
-        await supabase
-          .from('users')
-          .update({ last_login_at: new Date().toISOString() })
-          .eq('id', existingUser.id);
+    if (existingUser && existingUser.agency_id) {
+      // Found user → fetch their agency
+      const { data: agency } = await supabase
+        .from('agencies')
+        .select('*')
+        .eq('id', existingUser.agency_id)
+        .single();
 
-        await supabase
-          .from('agencies')
-          .update({ last_login_at: new Date().toISOString() })
-          .eq('id', agency.id);
-
-        if (isAgencyPastOnboarding(agency)) {
-          if (!agency.onboarding_completed) {
-            await supabase
-              .from('agencies')
-              .update({ onboarding_completed: true, onboarding_step: 7 })
-              .eq('id', agency.id);
-            console.log(`🔧 Fixed onboarding_completed for agency: ${agency.name}`);
-          }
-
-          console.log(`✅ Google login: ${email} → dashboard`);
-          return res.redirect(`${FRONTEND_URL}/auth/google-success?token=${token}&agencyId=${agency.id}&redirect=/agency/dashboard`);
-        }
-
-        console.log(`✅ Google login: ${email} → onboarding (step ${agency.onboarding_step})`);
-        return res.redirect(`${FRONTEND_URL}/auth/google-success?token=${token}&agencyId=${agency.id}&redirect=/onboarding`);
-      } else {
-        return res.redirect(`${FRONTEND_URL}/signup?error=account_exists`);
+      if (agency) {
+        console.log(`✅ Agency login: ${email} | Agency: ${agency.name} | Role: agency_owner`);
+        return handleExistingAgencyLogin(res, agency, existingUser, email);
       }
     }
 
+    // ================================================================
+    // PATH 2: User record not found — check agencies table directly
+    // (Catches cases where agency exists but user record is missing,
+    //  or the user lookup join failed)
+    // ================================================================
+    const { data: existingAgency } = await supabase
+      .from('agencies')
+      .select('*')
+      .eq('email', email.toLowerCase())
+      .single();
+
+    if (existingAgency) {
+      console.log(`🔄 Agency found by email (no user record or user lookup missed): ${existingAgency.name}`);
+
+      // Try to find or create the user record for this agency
+      let userRecord = null;
+      const { data: agencyUser } = await supabase
+        .from('users')
+        .select('*')
+        .eq('agency_id', existingAgency.id)
+        .eq('role', 'agency_owner')
+        .single();
+
+      if (agencyUser) {
+        userRecord = agencyUser;
+      } else {
+        // Agency exists but no user record — create one to fix the data
+        console.log(`🔧 Creating missing user record for agency: ${existingAgency.name}`);
+        const { data: newUser } = await supabase
+          .from('users')
+          .insert({
+            agency_id: existingAgency.id,
+            email: email.toLowerCase(),
+            first_name: given_name || '',
+            last_name: family_name || '',
+            role: 'agency_owner',
+            avatar_url: picture || null,
+            password_hash: null,
+          })
+          .select()
+          .single();
+        userRecord = newUser;
+      }
+
+      return handleExistingAgencyLogin(res, existingAgency, userRecord, email);
+    }
+
+    // ================================================================
+    // PATH 3: Check if email exists as a client user (not agency owner)
+    // ================================================================
+    const { data: clientUser } = await supabase
+      .from('users')
+      .select('id, role')
+      .eq('email', email.toLowerCase())
+      .eq('role', 'client')
+      .single();
+
+    if (clientUser) {
+      console.log(`⚠️ Google auth: ${email} exists as a client user, not an agency owner`);
+      return res.redirect(`${FRONTEND_URL}/signup?error=account_exists`);
+    }
+
     // ====================================================================
-    // NEW USER — Create agency
+    // PATH 4: NEW USER — Create agency
     // Must match agency-signup.js defaults exactly
     // ====================================================================
     const tempAgencyName = given_name ? `${given_name}'s Agency` : 'My Agency';
@@ -277,6 +371,21 @@ async function googleCallback(req, res) {
       .single();
 
     if (agencyError) {
+      // Final safety net: if we STILL get a duplicate key error despite
+      // the checks above (race condition), treat it as a login
+      if (agencyError.code === '23505') {
+        console.log(`🔄 Race condition: agency created between check and insert for ${email}`);
+        const { data: raceAgency } = await supabase
+          .from('agencies')
+          .select('*')
+          .eq('email', email.toLowerCase())
+          .single();
+
+        if (raceAgency) {
+          return handleExistingAgencyLogin(res, raceAgency, null, email);
+        }
+      }
+
       console.error('❌ Agency creation error:', agencyError);
       return res.redirect(`${FRONTEND_URL}/signup?error=signup_failed`);
     }
