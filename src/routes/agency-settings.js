@@ -6,6 +6,7 @@
 // UPDATED: Added analytics tracking (GTM, GA4, FB Pixel) + OG meta fields
 // UPDATED: Added AI tool keys to plan_features validation
 // UPDATED: Added team member limits to settings response
+// UPDATED: Added marketing_template to responses + whitelist
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
@@ -64,6 +65,7 @@ async function getAgencyByHost(req, res) {
         website_headline: agency.website_headline,
         website_subheadline: agency.website_subheadline,
         marketing_config: agency.marketing_config,
+        marketing_template: agency.marketing_template || 'classic',
         
         // Theme settings
         website_theme: agency.website_theme,
@@ -187,6 +189,7 @@ async function getAgencySettings(req, res) {
         website_headline: agency.website_headline,
         website_subheadline: agency.website_subheadline,
         marketing_config: agency.marketing_config,
+        marketing_template: agency.marketing_template || 'classic',
         
         // Theme settings
         website_theme: agency.website_theme,
@@ -290,6 +293,7 @@ async function updateAgencySettings(req, res) {
       'website_headline',
       'website_subheadline',
       'marketing_config',
+      'marketing_template',
       // Theme settings
       'website_theme',
       'logo_background_color',
@@ -403,6 +407,14 @@ async function updateAgencySettings(req, res) {
       const allValid = cep.every(plan => validPlans.includes(plan));
       if (!allValid) {
         return res.status(400).json({ error: 'calendar_enabled_plans contains invalid plan names' });
+      }
+    }
+
+    // Validate marketing_template if provided
+    if (sanitizedUpdates.marketing_template !== undefined && sanitizedUpdates.marketing_template !== null) {
+      const validTemplates = ['classic', 'beside', 'editorial', 'aurora'];
+      if (!validTemplates.includes(sanitizedUpdates.marketing_template)) {
+        return res.status(400).json({ error: 'Invalid marketing_template value' });
       }
     }
 
