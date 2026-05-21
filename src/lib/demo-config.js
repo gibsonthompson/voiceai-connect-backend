@@ -4,6 +4,10 @@
 // UPDATED: 2026-05-21 — V3 unified multi-industry demo prompt. Single prompt
 //          handles ALL 12 industries via conditional playbooks. Replaces V2
 //          generic prompt and separate industry-specific prompts.
+//          ElevenLabs voice config: eleven_flash_v2_5 model, stability 0.5,
+//          similarityBoost 0.75, speed 0.9 for natural phone pacing.
+//          Prompt pacing: explicit instructions to not rush, breathe between
+//          transitions, stop after asking questions.
 //
 // PHONE NUMBER ROUTING:
 //   +1 (505) 594-5806 → CallBird generic demo (via agencies.demo_phone_number)
@@ -19,6 +23,18 @@
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
 const DEMO_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL';
+
+// ── Shared ElevenLabs voice quality settings ──────────────────────────────
+// Applied to ALL demo calls. Previously bare { provider, voiceId } only.
+// See: https://docs.vapi.ai/voice-fallback-plan for VAPI ElevenLabs schema
+const DEMO_VOICE_SETTINGS = {
+  model: 'eleven_flash_v2_5',       // Low-latency model, best for phone calls
+  stability: 0.5,                    // Natural variation without erratic swings
+  similarityBoost: 0.75,             // Clear without over-enunciation
+  style: 0.0,                        // ElevenLabs recommends 0 to avoid artifacts
+  speed: 0.9,                        // Slightly slower — natural phone pacing
+  optimizeStreamingLatency: 3,       // Default balance of quality vs speed
+};
 
 // ── Industry demo numbers (backward compat — all use V3 now) ──────────────
 const INDUSTRY_DEMO_NUMBERS = {
@@ -220,6 +236,9 @@ You are a live demo AI receptionist for ${agencyName}. Your job is to show a bus
 - Short. One to two sentences per turn. This is a phone call, not an email.
 - Warm and upbeat. Match their energy. If they are excited, be excited. If they are serious, be steady.
 - One question at a time. Never stack questions.
+- Do not rush. Take a beat after the caller finishes speaking before you respond.
+- After asking a question, stop. Do not add follow-up commentary while waiting for their answer.
+- When transitioning between parts of the demo, breathe. A short pause sounds natural and confident.
 - Say phone numbers digit by digit. Say dates as words. Say currency as words.
 - Do not use markdown, bullet points, or any text formatting. Speak naturally.
 
@@ -459,7 +478,7 @@ function buildIndustryDemoConfig(industryKey, agency) {
       messages: [{ role: 'system', content: systemPrompt }],
       tools: getDemoTools(),
     },
-    voice: { provider: '11labs', voiceId },
+    voice: { provider: '11labs', voiceId, ...DEMO_VOICE_SETTINGS },
     firstMessage,
     recordingEnabled: true,
     analysisPlan: DEMO_ANALYSIS_PLAN,
@@ -489,7 +508,7 @@ function buildDemoDynamicConfig(agency) {
       messages: [{ role: 'system', content: getDemoSystemPromptV3(agencyName, { skipSignupMention }) }],
       tools: getDemoTools(),
     },
-    voice: { provider: '11labs', voiceId: DEMO_VOICE_ID },
+    voice: { provider: '11labs', voiceId: DEMO_VOICE_ID, ...DEMO_VOICE_SETTINGS },
     firstMessage: getDemoFirstMessageV3(agencyName),
     recordingEnabled: true,
     analysisPlan: DEMO_ANALYSIS_PLAN,
