@@ -1,6 +1,7 @@
 // ============================================================================
 // DOMAIN MANAGEMENT ROUTES
 // VoiceAI Connect - Automated Vercel Domain Provisioning
+// UPDATED: fetchVercelDnsConfig now passes projectIdOrName for per-project CNAME
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -63,7 +64,7 @@ class VercelApiError extends Error {
     super(message);
     this.name = 'VercelApiError';
     this.status = status;
-    this.data = data; // Full Vercel response body — includes verification records
+    this.data = data;
   }
 }
 
@@ -99,22 +100,17 @@ async function vercelRequest(method, endpoint, body = null) {
 
 // ============================================================================
 // HELPER: Extract verification records from Vercel response
-// Vercel returns these in different shapes depending on the endpoint/error.
 // ============================================================================
 function extractVerificationRecords(data) {
   if (!data) return [];
   const records = [];
 
-  // Shape 1: Top-level verification array (from successful POST or GET)
-  //   verification: [{ type: "TXT", domain: "_vercel.example.com", value: "vc-domain-verify=...", reason: "..." }]
   if (Array.isArray(data.verification)) {
     for (const v of data.verification) {
       records.push({ type: v.type || 'TXT', name: v.domain || '', value: v.value || '', reason: v.reason || '' });
     }
   }
 
-  // Shape 2: Nested under error (from 409 conflict)
-  //   error: { ..., verification: [...] }
   if (data.error && Array.isArray(data.error.verification)) {
     for (const v of data.error.verification) {
       records.push({ type: v.type || 'TXT', name: v.domain || '', value: v.value || '', reason: v.reason || '' });
@@ -126,6 +122,7 @@ function extractVerificationRecords(data) {
 
 // ============================================================================
 // HELPER: Fetch Project-Specific DNS Values from Vercel
+// FIXED: Now passes projectIdOrName so Vercel returns per-project CNAME
 // ============================================================================
 async function fetchVercelDnsConfig(domain) {
   if (!VERCEL_TOKEN) {
@@ -133,8 +130,12 @@ async function fetchVercelDnsConfig(domain) {
     return DEFAULT_DNS_CONFIG;
   }
   try {
-    const teamParam = VERCEL_TEAM_ID ? `?teamId=${VERCEL_TEAM_ID}` : '';
-    const configUrl = `${VERCEL_API}/v6/domains/${domain}/config${teamParam}`;
+    // Build query params — projectIdOrName is CRITICAL for per-project CNAME
+    const params = new URLSearchParams();
+    if (VERCEL_TEAM_ID) params.set('teamId', VERCEL_TEAM_ID);
+    if (VERCEL_PROJECT_ID) params.set('projectIdOrName', VERCEL_PROJECT_ID);
+    const configUrl = `${VERCEL_API}/v6/domains/${domain}/config?${params.toString()}`;
+
     console.log(`🔍 Fetching DNS config from: ${configUrl}`);
     const response = await fetch(configUrl, { headers: { 'Authorization': `Bearer ${VERCEL_TOKEN}` } });
     const data = await response.json();
@@ -153,7 +154,13 @@ async function fetchVercelDnsConfig(domain) {
       const preferred = data.recommendedCNAME.find(r => r.rank === 1);
       if (preferred?.value) { cnameRecord = preferred.value; console.log(`✅ Found project-specific CNAME: ${cnameRecord}`); }
     }
-    return { aRecord, cnameRecord, misconfigured: data.misconfigured, source: aRecord !== DEFAULT_DNS_CONFIG.aRecord ? 'vercel-api' : 'fallback' };
+    return {
+      aRecord,
+      cnameRecord,
+      misconfigured: data.misconfigured,
+      configuredBy: data.configuredBy || null,
+      source: (aRecord !== DEFAULT_DNS_CONFIG.aRecord || cnameRecord !== DEFAULT_DNS_CONFIG.cnameRecord) ? 'vercel-api' : 'fallback',
+    };
   } catch (error) {
     console.error('❌ Failed to fetch Vercel DNS config:', error);
     return DEFAULT_DNS_CONFIG;
@@ -176,15 +183,14 @@ router.get('/dns-config', async (req, res) => {
   let config = { ...DEFAULT_DNS_CONFIG, source: 'fallback' };
   if (domain && VERCEL_TOKEN) {
     const vercelConfig = await fetchVercelDnsConfig(domain);
-    config = { aRecord: vercelConfig.aRecord, cnameRecord: vercelConfig.cnameRecord, source: vercelConfig.source || (vercelConfig.aRecord !== DEFAULT_DNS_CONFIG.aRecord ? 'vercel-api' : 'fallback'), misconfigured: vercelConfig.misconfigured };
+    config = { aRecord: vercelConfig.aRecord, cnameRecord: vercelConfig.cnameRecord, source: vercelConfig.source || 'fallback', misconfigured: vercelConfig.misconfigured, configuredBy: vercelConfig.configuredBy };
   }
   console.log(`📤 Returning DNS config: A=${config.aRecord}, CNAME=${config.cnameRecord}, source=${config.source}`);
-  res.json({ a_record: config.aRecord, cname_record: config.cnameRecord, source: config.source, misconfigured: config.misconfigured, instructions: { apex: `Point your A record (@) to ${config.aRecord}`, www: `Point your CNAME (www) to ${config.cnameRecord}` } });
+  res.json({ a_record: config.aRecord, cname_record: config.cnameRecord, source: config.source, misconfigured: config.misconfigured, configured_by: config.configuredBy, instructions: { apex: `Point your A record (@) to ${config.aRecord}`, www: `Point your CNAME (www) to ${config.cnameRecord}` } });
 });
 
 // ============================================================================
 // POST /:agencyId/domain — Add custom domain
-// Now captures and returns Vercel verification records (TXT) when needed.
 // ============================================================================
 router.post('/:agencyId/domain', async (req, res) => {
   const { agencyId } = req.params;
@@ -206,7 +212,7 @@ router.post('/:agencyId/domain', async (req, res) => {
       return res.status(400).json({ error: 'Invalid domain format' });
     }
 
-    // Block platform subdomains — these can never be verified
+    // Block platform subdomains
     const blockedSuffix = BLOCKED_DOMAIN_SUFFIXES.find(suffix => normalizedDomain.endsWith(suffix));
     if (blockedSuffix) {
       return res.status(400).json({
@@ -238,13 +244,11 @@ router.post('/:agencyId/domain', async (req, res) => {
       try {
         vercelApexResponse = await vercelRequest('POST', `/v10/projects/${VERCEL_PROJECT_ID}/domains`, { name: normalizedDomain });
         console.log(`   ✅ Apex domain added to Vercel`);
-        // Successful add may still require verification (domain on another account)
         const records = extractVerificationRecords(vercelApexResponse);
         if (records.length > 0) verificationRecords = records;
       } catch (err) {
         if (err.message.includes('already') || err.message.includes('exists') || err.message.includes('DOMAIN_ALREADY_EXISTS') || err.status === 409) {
           console.log(`   ℹ️ Apex domain conflict — checking for verification records`);
-          // Extract verification records from the error response
           const records = extractVerificationRecords(err.data);
           if (records.length > 0) {
             verificationRecords = records;
@@ -260,7 +264,6 @@ router.post('/:agencyId/domain', async (req, res) => {
       try {
         vercelWwwResponse = await vercelRequest('POST', `/v10/projects/${VERCEL_PROJECT_ID}/domains`, { name: `www.${normalizedDomain}` });
         console.log(`   ✅ WWW domain added to Vercel`);
-        // Also check for verification records on www
         const wwwRecords = extractVerificationRecords(vercelWwwResponse);
         if (wwwRecords.length > 0 && verificationRecords.length === 0) {
           verificationRecords = wwwRecords;
@@ -268,7 +271,6 @@ router.post('/:agencyId/domain', async (req, res) => {
       } catch (err) {
         if (err.message.includes('already') || err.message.includes('exists') || err.message.includes('DOMAIN_ALREADY_EXISTS') || err.status === 409) {
           console.log(`   ℹ️ WWW domain conflict — continuing`);
-          // Extract verification if we don't have any yet
           if (verificationRecords.length === 0) {
             const records = extractVerificationRecords(err.data);
             if (records.length > 0) verificationRecords = records;
@@ -284,7 +286,7 @@ router.post('/:agencyId/domain', async (req, res) => {
     // ── Fetch project-specific DNS values ─────────────────────────────
     console.log(`   🔍 Fetching project-specific DNS values...`);
     const dnsConfig = await fetchVercelDnsConfig(normalizedDomain);
-    console.log(`   📋 DNS Config: A=${dnsConfig.aRecord}, CNAME=${dnsConfig.cnameRecord}`);
+    console.log(`   📋 DNS Config: A=${dnsConfig.aRecord}, CNAME=${dnsConfig.cnameRecord}, source=${dnsConfig.source}`);
 
     // ── Update database ───────────────────────────────────────────────
     const { data: agency, error: dbError } = await supabase
@@ -309,10 +311,8 @@ router.post('/:agencyId/domain', async (req, res) => {
       domain: normalizedDomain,
       vercel_added: !!(vercelApexResponse || vercelWwwResponse),
       vercel_error: vercelError,
-      // ── Verification records for the frontend ───────────────────────
       verification_needed: needsVerification,
       verification_records: verificationRecords,
-      // ── DNS instructions ────────────────────────────────────────────
       dns_instructions: {
         primary: { type: 'A', name: '@', value: dnsConfig.aRecord, description: 'Points your root domain to our servers' },
         secondary: { type: 'CNAME', name: 'www', value: dnsConfig.cnameRecord, description: 'Redirects www to your root domain' },
@@ -321,6 +321,7 @@ router.post('/:agencyId/domain', async (req, res) => {
         a_record: dnsConfig.aRecord,
         cname_record: dnsConfig.cnameRecord,
         source: dnsConfig.source || 'fallback',
+        misconfigured: dnsConfig.misconfigured,
       },
     });
 
@@ -331,7 +332,7 @@ router.post('/:agencyId/domain', async (req, res) => {
 });
 
 // ============================================================================
-// GET /:agencyId/domain/status — now includes verification records
+// GET /:agencyId/domain/status
 // ============================================================================
 router.get('/:agencyId/domain/status', async (req, res) => {
   const { agencyId } = req.params;
@@ -358,12 +359,10 @@ router.get('/:agencyId/domain/status', async (req, res) => {
       try {
         vercelStatus = await vercelRequest('GET', `/v9/projects/${VERCEL_PROJECT_ID}/domains/${domain}`);
         console.log(`   Vercel verified: ${vercelStatus?.verified}`);
-        // Extract any pending verification records
         const records = extractVerificationRecords(vercelStatus);
         if (records.length > 0) verificationRecords = records;
       } catch (err) {
         console.log(`   ⚠️ Could not fetch Vercel status:`, err.message);
-        // Even errors can contain verification records
         if (err.data) {
           const records = extractVerificationRecords(err.data);
           if (records.length > 0) verificationRecords = records;
@@ -380,6 +379,7 @@ router.get('/:agencyId/domain/status', async (req, res) => {
       vercel_verified: vercelStatus?.verified || false,
       verification_needed: verificationRecords.length > 0,
       verification_records: verificationRecords,
+      misconfigured: dnsConfig.misconfigured || false,
       dns_instructions: {
         a_record: { type: 'A', name: '@', value: dnsConfig.aRecord },
         cname_record: { type: 'CNAME', name: 'www', value: dnsConfig.cnameRecord },
@@ -424,14 +424,12 @@ router.post('/:agencyId/domain/verify', async (req, res) => {
         const vercelResult = await vercelRequest('POST', `/v9/projects/${VERCEL_PROJECT_ID}/domains/${domain}/verify`);
         vercelVerified = vercelResult.verified === true;
         console.log(`   📋 Vercel verification: ${vercelVerified}`);
-        // If still not verified, extract any pending verification records
         if (!vercelVerified) {
           const records = extractVerificationRecords(vercelResult);
           if (records.length > 0) verificationRecords = records;
         }
       } catch (err) {
         console.log(`   ⚠️ Vercel verification failed:`, err.message);
-        // Extract verification records from error
         if (err.data) {
           const records = extractVerificationRecords(err.data);
           if (records.length > 0) verificationRecords = records;
@@ -483,7 +481,6 @@ router.post('/:agencyId/domain/verify', async (req, res) => {
       dns_details: dnsDetails,
       expected_a_record: dnsConfig.aRecord,
       expected_cname: dnsConfig.cnameRecord,
-      // Include verification records if still pending
       verification_needed: verificationRecords.length > 0,
       verification_records: verificationRecords,
       message: isVerified
