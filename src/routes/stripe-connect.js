@@ -7,17 +7,19 @@
 // UPDATED: 2026-05-08 — Per-client billing triggers on client status changes
 // UPDATED: 2026-05-16 — expireTrials DELETES (not disables) VAPI resources
 //          to free up phone number slots. Nulls out resource IDs in DB.
+// UPDATED: 2026-05-22 — Client checkout: logging, explicit FK hint, pricing
+//          defaults updated to $99/$149/$299
 // ============================================================================
 const Stripe = require('stripe');
 const fetch = require('node-fetch');
-const { 
-  supabase, 
-  getAgencyById, 
+const {
+  supabase,
+  getAgencyById,
   getAgencyByStripeAccountId,
   getClientByStripeConnectedCustomerId,
   getClientById
 } = require('../lib/supabase');
-const { 
+const {
   sendEmail,
   sendClientTrialExpiredSMS,
   sendClientPaymentFailedSMS,
@@ -84,7 +86,7 @@ async function createConnectAccountLink(req, res) {
           transfers: { requested: true }
         }
       });
-      
+
       accountId = account.id;
 
       await supabase.from('agencies').update({ stripe_account_id: accountId }).eq('id', agency_id);
@@ -206,10 +208,13 @@ async function createClientCheckout(req, res) {
       return res.status(400).json({ error: 'Missing required fields', required: ['client_id', 'plan'] });
     }
 
+    console.log('🛒 Client checkout attempt:', { client_id, plan });
+
     const { data: client, error: clientError } = await supabase
-      .from('clients').select('*, agencies (*)').eq('id', client_id).single();
+      .from('clients').select('*, agencies!clients_agency_id_fkey(*)').eq('id', client_id).single();
 
     if (clientError || !client) {
+      console.error('❌ Client checkout lookup failed:', { client_id, error: clientError?.message, code: clientError?.code, details: clientError?.details });
       return res.status(404).json({ error: 'Client not found' });
     }
 
@@ -258,16 +263,16 @@ async function createClientCheckout(req, res) {
       customer: connectedCustomerId, mode: 'subscription', payment_method_types: ['card'],
       line_items: [{ price: price.id, quantity: 1 }],
       success_url: `${agencyUrl}/client/dashboard?upgrade=success`,
-      cancel_url: `${agencyUrl}/client/upgrade?canceled=true`,
+      cancel_url: `${agencyUrl}/client/upgrade-required?canceled=true`,
       metadata: { client_id, agency_id: agency.id, plan, call_limit: callLimits[plan].toString(), type: 'client_subscription' },
       subscription_data: { metadata: { client_id, agency_id: agency.id, plan } }
     }, { stripeAccount: agency.stripe_account_id });
 
-    console.log('Client checkout created:', session.id, '| Currency:', currency);
+    console.log('✅ Client checkout created:', session.id, '| Currency:', currency, '| Amount:', priceAmount);
     res.json({ success: true, sessionId: session.id, url: session.url });
 
   } catch (error) {
-    console.error('Client checkout error:', error);
+    console.error('❌ Client checkout error:', error);
     res.status(500).json({ error: 'Failed to create checkout session' });
   }
 }
@@ -337,7 +342,6 @@ async function expireTrials() {
             console.log('✅ VAPI phone number DELETED:', client.vapi_phone_id);
           } else {
             console.error('⚠️ VAPI phone delete returned:', phoneRes.status);
-            // Fall back to disable if delete fails
             try { await disablePhoneNumber(client.vapi_phone_id); } catch {}
           }
         } catch (phoneError) {
@@ -468,7 +472,7 @@ async function handleAccountUpdated(account) {
 
   if (account.charges_enabled && !agency.stripe_charges_enabled) {
     console.log('Agency can now accept payments:', agency.name);
-    
+
     const stripeMsg = await getSmsTemplate('admin_agency_stripe_connected', {
       name: agency.name,
       email: agency.email || 'N/A',
