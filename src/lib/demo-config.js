@@ -28,12 +28,12 @@ const DEMO_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL';
 // Applied to ALL demo calls. Previously bare { provider, voiceId } only.
 // See: https://docs.vapi.ai/voice-fallback-plan for VAPI ElevenLabs schema
 const DEMO_VOICE_SETTINGS = {
-  model: 'eleven_flash_v2_5',       // Low-latency model, best for phone calls
+  model: 'eleven_flash_v2',       // Low-latency model, best for phone calls
   stability: 0.5,                    // Natural variation without erratic swings
   similarityBoost: 0.75,             // Clear without over-enunciation
   style: 0.0,                        // ElevenLabs recommends 0 to avoid artifacts
   speed: 0.9,                        // Slightly slower — natural phone pacing
-  optimizeStreamingLatency: 3,       // Default balance of quality vs speed
+  optimizeStreamingLatency: 2,       // Default balance of quality vs speed
 };
 
 // ── Industry demo numbers (backward compat — all use V3 now) ──────────────
