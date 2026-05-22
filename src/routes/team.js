@@ -286,7 +286,7 @@ router.post('/client/:clientId/team', async (req, res) => {
     if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
     const limits = await checkTeamLimit('client', clientId);
     if (!limits.allowed) return res.status(403).json({ error: `Team member limit reached (${limits.current}/${limits.max}). Contact your provider to upgrade.`, limits });
-    const { data: client } = await supabase.from('clients').select('agency_id').eq('id', clientId).single();
+    const { data: client } = await supabase.from('clients').select('agency_id, agencies!clients_agency_id_fkey(slug, marketing_domain, domain_verified)').eq('id', clientId).single();
     const { data: existingUser } = await supabase.from('users').select('id').eq('email', email.toLowerCase()).single();
     if (existingUser) return res.status(409).json({ error: 'This email is already associated with an account' });
     const tempPassword = generateTempPassword();
@@ -297,7 +297,7 @@ router.post('/client/:clientId/team', async (req, res) => {
     const { data: member, error: memberError } = await supabase.from('team_members').insert({ owner_user_id: ownerUserId, member_user_id: newUser.id, entity_type: 'client', entity_id: clientId, display_name: name, phone: phone || null, visible_password: tempPassword, permissions: sanitizedPerms, status: 'active' }).select().single();
     if (memberError) { console.error('❌ Create client team member error:', memberError); await supabase.from('users').delete().eq('id', newUser.id); return res.status(500).json({ error: 'Failed to create team member' }); }
     await logActivity(member.id, ownerUserId, 'client', clientId, 'member_added', { name, email: email.toLowerCase() });
-    if (phone) { try { const send = getSendSms(); await send(phone, `You've been added as a team member!\n\nLogin: https://myvoiceaiconnect.com/client/login\nEmail: ${email.toLowerCase()}\nPassword: ${tempPassword}`); } catch {} }
+    if (phone) { try { const send = getSendSms(); const agency = client?.agencies; const loginUrl = agency?.marketing_domain && agency?.domain_verified ? `https://${agency.marketing_domain}/client/login` : `https://${agency?.slug || 'app'}.myvoiceaiconnect.com/client/login`; await send(phone, `You've been added as a team member!\n\nLogin: ${loginUrl}\nEmail: ${email.toLowerCase()}\nPassword: ${tempPassword}`); } catch {} }
     res.json({ success: true, member: { id: member.id, display_name: member.display_name, phone: member.phone, email: newUser.email, visible_password: tempPassword, permissions: member.permissions, notification_prefs: member.notification_prefs, status: member.status, created_at: member.created_at } });
   } catch (err) { console.error('❌ Add client team member error:', err); res.status(500).json({ error: 'Failed to add team member' }); }
 });
