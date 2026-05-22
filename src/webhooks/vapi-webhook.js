@@ -483,7 +483,7 @@ async function handleDemoCall(agency, message, industryKey = null) {
       summary: summary || null,
       transcript: transcript || null,
       recording_url: recordingUrl,
-      duration_seconds: durationSeconds || null,
+      duration_seconds: durationSeconds ? Math.round(durationSeconds) : null,
       vapi_call_id: call.id || null,
       vapi_success_score: vapiSuccessScore || null,
       call_language: 'en',
