@@ -1,7 +1,11 @@
 // ============================================================================
 // DOMAIN MANAGEMENT ROUTES
 // VoiceAI Connect - Automated Vercel Domain Provisioning
-// UPDATED: fetchVercelDnsConfig now passes projectIdOrName for per-project CNAME
+// UPDATED: fetchVercelDnsConfig passes projectIdOrName for per-project CNAME
+// UPDATED: 2026-05-22 — Subdomain support: detect apex vs subdomain, only add
+//   www for apex, show correct DNS instructions (CNAME-only for subdomains).
+//   Verify endpoint no longer bypasses TXT ownership check when DNS resolves.
+//   Platform domains blocked.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -33,11 +37,31 @@ const DEFAULT_DNS_CONFIG = {
 // Subdomains of hosting platforms can never be verified because the agency
 // doesn't control the root domain's DNS (where _vercel TXT goes).
 const BLOCKED_DOMAIN_SUFFIXES = [
+  '.myvoiceaiconnect.com', '.callbirdai.com',
   '.lovable.app', '.vercel.app', '.netlify.app', '.herokuapp.com',
   '.github.io', '.pages.dev', '.fly.dev', '.railway.app',
   '.render.com', '.onrender.com', '.surge.sh', '.web.app',
   '.firebaseapp.com', '.amplifyapp.com', '.replit.app', '.repl.co',
   '.glitch.me', '.stackblitz.io', '.codesandbox.io',
+];
+
+// Exact platform domains that should never be added as custom domains
+const BLOCKED_EXACT_DOMAINS = [
+  'myvoiceaiconnect.com', 'callbirdai.com',
+];
+
+// Multi-part TLDs where the "apex" has 3+ parts (e.g. example.co.uk)
+const MULTI_PART_TLDS = [
+  '.co.uk', '.org.uk', '.me.uk', '.net.uk', '.ac.uk',
+  '.com.au', '.net.au', '.org.au', '.co.nz', '.net.nz',
+  '.co.za', '.com.br', '.net.br', '.co.in', '.com.in',
+  '.co.jp', '.com.mx', '.com.ar', '.com.co', '.co.kr',
+  '.com.sg', '.com.hk', '.com.tw', '.co.th', '.com.ph',
+  '.co.il', '.com.tr', '.com.ua', '.com.eg', '.co.ke',
+  '.com.ng', '.co.id', '.com.my', '.com.pk', '.com.bd',
+  '.com.vn', '.com.pe', '.com.ec', '.com.gt', '.com.do',
+  '.com.uy', '.com.py', '.com.bo', '.com.ve', '.com.sv',
+  '.com.ni', '.com.hn', '.com.cr', '.com.pa', '.com.cu',
 ];
 
 console.log('📡 Domain routes loaded with config:', {
@@ -47,6 +71,42 @@ console.log('📡 Domain routes loaded with config:', {
   projectId: VERCEL_PROJECT_ID || 'not set',
   hasTeamId: !!VERCEL_TEAM_ID,
 });
+
+// ============================================================================
+// HELPER: Detect if a domain is an apex (root) domain vs a subdomain
+// Handles multi-part TLDs like .co.uk
+// ============================================================================
+function isApexDomain(domain) {
+  // Check multi-part TLDs first
+  for (const tld of MULTI_PART_TLDS) {
+    if (domain.endsWith(tld)) {
+      // e.g. "example.co.uk" → remove ".co.uk" → "example" → no dots → apex
+      // e.g. "app.example.co.uk" → remove ".co.uk" → "app.example" → has dot → subdomain
+      const withoutTld = domain.slice(0, -tld.length);
+      return !withoutTld.includes('.');
+    }
+  }
+  // Standard TLD: apex = exactly 2 parts (example.com)
+  return domain.split('.').length === 2;
+}
+
+// Extract subdomain prefix for DNS instructions
+// "ai.revop.xyz" → "ai"
+// "app.demo.revop.xyz" → "app.demo"
+function getSubdomainPrefix(domain) {
+  for (const tld of MULTI_PART_TLDS) {
+    if (domain.endsWith(tld)) {
+      const withoutTld = domain.slice(0, -tld.length);
+      const parts = withoutTld.split('.');
+      // Remove the last part (the registrable domain name)
+      parts.pop();
+      return parts.join('.');
+    }
+  }
+  // Standard TLD: everything before the last two parts
+  const parts = domain.split('.');
+  return parts.slice(0, -2).join('.');
+}
 
 // ============================================================================
 // CORS OPTIONS HANDLERS
@@ -130,7 +190,6 @@ async function fetchVercelDnsConfig(domain) {
     return DEFAULT_DNS_CONFIG;
   }
   try {
-    // Build query params — projectIdOrName is CRITICAL for per-project CNAME
     const params = new URLSearchParams();
     if (VERCEL_TEAM_ID) params.set('teamId', VERCEL_TEAM_ID);
     if (VERCEL_PROJECT_ID) params.set('projectIdOrName', VERCEL_PROJECT_ID);
@@ -185,8 +244,23 @@ router.get('/dns-config', async (req, res) => {
     const vercelConfig = await fetchVercelDnsConfig(domain);
     config = { aRecord: vercelConfig.aRecord, cnameRecord: vercelConfig.cnameRecord, source: vercelConfig.source || 'fallback', misconfigured: vercelConfig.misconfigured, configuredBy: vercelConfig.configuredBy };
   }
-  console.log(`📤 Returning DNS config: A=${config.aRecord}, CNAME=${config.cnameRecord}, source=${config.source}`);
-  res.json({ a_record: config.aRecord, cname_record: config.cnameRecord, source: config.source, misconfigured: config.misconfigured, configured_by: config.configuredBy, instructions: { apex: `Point your A record (@) to ${config.aRecord}`, www: `Point your CNAME (www) to ${config.cnameRecord}` } });
+
+  const apex = domain ? isApexDomain(domain) : true;
+  const subPrefix = domain && !apex ? getSubdomainPrefix(domain) : null;
+
+  console.log(`📤 Returning DNS config: A=${config.aRecord}, CNAME=${config.cnameRecord}, source=${config.source}, apex=${apex}`);
+  res.json({
+    a_record: config.aRecord,
+    cname_record: config.cnameRecord,
+    source: config.source,
+    misconfigured: config.misconfigured,
+    configured_by: config.configuredBy,
+    is_subdomain: !apex,
+    subdomain_prefix: subPrefix,
+    instructions: apex
+      ? { apex: `Point your A record (@) to ${config.aRecord}`, www: `Point your CNAME (www) to ${config.cnameRecord}` }
+      : { cname: `Point your CNAME (${subPrefix}) to ${config.cnameRecord}` },
+  });
 });
 
 // ============================================================================
@@ -212,6 +286,11 @@ router.post('/:agencyId/domain', async (req, res) => {
       return res.status(400).json({ error: 'Invalid domain format' });
     }
 
+    // Block exact platform domains
+    if (BLOCKED_EXACT_DOMAINS.includes(normalizedDomain)) {
+      return res.status(400).json({ error: 'This is a platform domain and cannot be used as a custom domain.' });
+    }
+
     // Block platform subdomains
     const blockedSuffix = BLOCKED_DOMAIN_SUFFIXES.find(suffix => normalizedDomain.endsWith(suffix));
     if (blockedSuffix) {
@@ -231,8 +310,13 @@ router.post('/:agencyId/domain', async (req, res) => {
       return res.status(400).json({ error: 'Domain is already in use by another agency' });
     }
 
+    // ── Detect apex vs subdomain ──────────────────────────────────────
+    const apex = isApexDomain(normalizedDomain);
+    const subPrefix = !apex ? getSubdomainPrefix(normalizedDomain) : null;
+    console.log(`   📋 Domain type: ${apex ? 'apex' : `subdomain (prefix: ${subPrefix})`}`);
+
     // ── Add to Vercel + capture verification records ──────────────────
-    let vercelApexResponse = null;
+    let vercelPrimaryResponse = null;
     let vercelWwwResponse = null;
     let vercelError = null;
     let verificationRecords = [];
@@ -240,15 +324,15 @@ router.post('/:agencyId/domain', async (req, res) => {
     if (VERCEL_TOKEN && VERCEL_PROJECT_ID) {
       console.log(`   🔄 Adding to Vercel project: ${VERCEL_PROJECT_ID}`);
 
-      // Add apex domain
+      // Add primary domain (apex or subdomain)
       try {
-        vercelApexResponse = await vercelRequest('POST', `/v10/projects/${VERCEL_PROJECT_ID}/domains`, { name: normalizedDomain });
-        console.log(`   ✅ Apex domain added to Vercel`);
-        const records = extractVerificationRecords(vercelApexResponse);
+        vercelPrimaryResponse = await vercelRequest('POST', `/v10/projects/${VERCEL_PROJECT_ID}/domains`, { name: normalizedDomain });
+        console.log(`   ✅ Primary domain added to Vercel`);
+        const records = extractVerificationRecords(vercelPrimaryResponse);
         if (records.length > 0) verificationRecords = records;
       } catch (err) {
         if (err.message.includes('already') || err.message.includes('exists') || err.message.includes('DOMAIN_ALREADY_EXISTS') || err.status === 409) {
-          console.log(`   ℹ️ Apex domain conflict — checking for verification records`);
+          console.log(`   ℹ️ Primary domain conflict — checking for verification records`);
           const records = extractVerificationRecords(err.data);
           if (records.length > 0) {
             verificationRecords = records;
@@ -256,28 +340,32 @@ router.post('/:agencyId/domain', async (req, res) => {
           }
         } else {
           vercelError = err.message;
-          console.log(`   ⚠️ Vercel apex domain error:`, err.message);
+          console.log(`   ⚠️ Vercel primary domain error:`, err.message);
         }
       }
 
-      // Add www subdomain
-      try {
-        vercelWwwResponse = await vercelRequest('POST', `/v10/projects/${VERCEL_PROJECT_ID}/domains`, { name: `www.${normalizedDomain}` });
-        console.log(`   ✅ WWW domain added to Vercel`);
-        const wwwRecords = extractVerificationRecords(vercelWwwResponse);
-        if (wwwRecords.length > 0 && verificationRecords.length === 0) {
-          verificationRecords = wwwRecords;
-        }
-      } catch (err) {
-        if (err.message.includes('already') || err.message.includes('exists') || err.message.includes('DOMAIN_ALREADY_EXISTS') || err.status === 409) {
-          console.log(`   ℹ️ WWW domain conflict — continuing`);
-          if (verificationRecords.length === 0) {
-            const records = extractVerificationRecords(err.data);
-            if (records.length > 0) verificationRecords = records;
+      // Only add www variant for apex domains
+      if (apex) {
+        try {
+          vercelWwwResponse = await vercelRequest('POST', `/v10/projects/${VERCEL_PROJECT_ID}/domains`, { name: `www.${normalizedDomain}` });
+          console.log(`   ✅ WWW domain added to Vercel`);
+          const wwwRecords = extractVerificationRecords(vercelWwwResponse);
+          if (wwwRecords.length > 0 && verificationRecords.length === 0) {
+            verificationRecords = wwwRecords;
           }
-        } else {
-          console.log(`   ⚠️ Vercel www domain error (non-fatal):`, err.message);
+        } catch (err) {
+          if (err.message.includes('already') || err.message.includes('exists') || err.message.includes('DOMAIN_ALREADY_EXISTS') || err.status === 409) {
+            console.log(`   ℹ️ WWW domain conflict — continuing`);
+            if (verificationRecords.length === 0) {
+              const records = extractVerificationRecords(err.data);
+              if (records.length > 0) verificationRecords = records;
+            }
+          } else {
+            console.log(`   ⚠️ Vercel www domain error (non-fatal):`, err.message);
+          }
         }
+      } else {
+        console.log(`   ℹ️ Subdomain detected — skipping www.${normalizedDomain}`);
       }
     } else {
       console.log(`   ⚠️ Vercel credentials not configured`);
@@ -306,22 +394,33 @@ router.post('/:agencyId/domain', async (req, res) => {
     const needsVerification = verificationRecords.length > 0;
     console.log(`   ✅ Domain configured: ${normalizedDomain}${needsVerification ? ' (TXT verification required)' : ''}`);
 
+    // ── Build DNS instructions based on domain type ───────────────────
+    const dnsInstructions = apex
+      ? {
+          primary: { type: 'A', name: '@', value: dnsConfig.aRecord, description: 'Points your root domain to our servers' },
+          secondary: { type: 'CNAME', name: 'www', value: dnsConfig.cnameRecord, description: 'Redirects www to your root domain' },
+        }
+      : {
+          primary: { type: 'CNAME', name: subPrefix, value: dnsConfig.cnameRecord, description: `Points ${normalizedDomain} to our servers` },
+        };
+
     res.json({
       success: true,
       domain: normalizedDomain,
-      vercel_added: !!(vercelApexResponse || vercelWwwResponse),
+      is_subdomain: !apex,
+      subdomain_prefix: subPrefix,
+      vercel_added: !!(vercelPrimaryResponse || vercelWwwResponse),
       vercel_error: vercelError,
       verification_needed: needsVerification,
       verification_records: verificationRecords,
-      dns_instructions: {
-        primary: { type: 'A', name: '@', value: dnsConfig.aRecord, description: 'Points your root domain to our servers' },
-        secondary: { type: 'CNAME', name: 'www', value: dnsConfig.cnameRecord, description: 'Redirects www to your root domain' },
-      },
+      dns_instructions: dnsInstructions,
       dns_config: {
         a_record: dnsConfig.aRecord,
         cname_record: dnsConfig.cnameRecord,
         source: dnsConfig.source || 'fallback',
         misconfigured: dnsConfig.misconfigured,
+        is_subdomain: !apex,
+        subdomain_prefix: subPrefix,
       },
     });
 
@@ -350,7 +449,9 @@ router.get('/:agencyId/domain/status', async (req, res) => {
     }
 
     const domain = agency.marketing_domain;
-    console.log(`   Domain: ${domain}`);
+    const apex = isApexDomain(domain);
+    const subPrefix = !apex ? getSubdomainPrefix(domain) : null;
+    console.log(`   Domain: ${domain} (${apex ? 'apex' : `subdomain, prefix: ${subPrefix}`})`);
 
     let vercelStatus = null;
     let verificationRecords = [];
@@ -372,18 +473,26 @@ router.get('/:agencyId/domain/status', async (req, res) => {
 
     const dnsConfig = await fetchVercelDnsConfig(domain);
 
+    const dnsInstructions = apex
+      ? {
+          a_record: { type: 'A', name: '@', value: dnsConfig.aRecord },
+          cname_record: { type: 'CNAME', name: 'www', value: dnsConfig.cnameRecord },
+        }
+      : {
+          cname_record: { type: 'CNAME', name: subPrefix, value: dnsConfig.cnameRecord },
+        };
+
     res.json({
       configured: true,
       domain,
+      is_subdomain: !apex,
+      subdomain_prefix: subPrefix,
       verified: agency.domain_verified,
       vercel_verified: vercelStatus?.verified || false,
       verification_needed: verificationRecords.length > 0,
       verification_records: verificationRecords,
       misconfigured: dnsConfig.misconfigured || false,
-      dns_instructions: {
-        a_record: { type: 'A', name: '@', value: dnsConfig.aRecord },
-        cname_record: { type: 'CNAME', name: 'www', value: dnsConfig.cnameRecord },
-      },
+      dns_instructions: dnsInstructions,
     });
 
   } catch (error) {
@@ -411,10 +520,12 @@ router.post('/:agencyId/domain/verify', async (req, res) => {
     }
 
     const domain = agency.marketing_domain;
-    console.log(`   Verifying domain: ${domain}`);
+    const apex = isApexDomain(domain);
+    const subPrefix = !apex ? getSubdomainPrefix(domain) : null;
+    console.log(`   Verifying domain: ${domain} (${apex ? 'apex' : 'subdomain'})`);
 
     const dnsConfig = await fetchVercelDnsConfig(domain);
-    console.log(`   Expected A record: ${dnsConfig.aRecord}`);
+    console.log(`   Expected: ${apex ? `A=${dnsConfig.aRecord}` : `CNAME=${dnsConfig.cnameRecord}`}`);
 
     // Step 1: Vercel verification
     let vercelVerified = false;
@@ -442,36 +553,45 @@ router.post('/:agencyId/domain/verify', async (req, res) => {
     let dnsVerified = false;
     let dnsDetails = {};
 
-    try {
-      const aRecords = await dns.resolve4(domain);
-      dnsDetails.a_records = aRecords;
-      console.log(`   A records found:`, aRecords);
-      if (aRecords.includes(dnsConfig.aRecord)) {
-        dnsVerified = true;
-        console.log(`   ✅ A record matches expected value`);
-      } else {
-        console.log(`   ⚠️ A record mismatch. Expected: ${dnsConfig.aRecord}, Found: ${aRecords.join(', ')}`);
+    if (apex) {
+      // Apex: check A record
+      try {
+        const aRecords = await dns.resolve4(domain);
+        dnsDetails.a_records = aRecords;
+        console.log(`   A records found:`, aRecords);
+        if (aRecords.includes(dnsConfig.aRecord)) {
+          dnsVerified = true;
+          console.log(`   ✅ A record matches expected value`);
+        } else {
+          console.log(`   ⚠️ A record mismatch. Expected: ${dnsConfig.aRecord}, Found: ${aRecords.join(', ')}`);
+        }
+      } catch (e) {
+        console.log(`   No A record found`);
       }
-    } catch (e) {
-      console.log(`   No A record found`);
     }
 
+    // Check CNAME (for subdomains this is the primary check, for apex it's backup)
     if (!dnsVerified) {
       try {
         const cnameRecords = await dns.resolveCname(domain);
         dnsDetails.cname_records = cnameRecords;
         console.log(`   CNAME records found:`, cnameRecords);
-        if (cnameRecords.some(r => r.toLowerCase().includes('vercel'))) dnsVerified = true;
+        if (cnameRecords.some(r => r.toLowerCase().includes('vercel'))) {
+          dnsVerified = true;
+          console.log(`   ✅ CNAME points to Vercel`);
+        }
       } catch (e) { console.log(`   No CNAME record found`); }
     }
 
+    // CRITICAL FIX: Do not mark as verified if Vercel requires TXT ownership
+    // verification, even if DNS records point correctly to Vercel.
     const isVerified = vercelVerified || (dnsVerified && verificationRecords.length === 0);
 
     if (isVerified) {
       await supabase.from('agencies').update({ domain_verified: true, updated_at: new Date().toISOString() }).eq('id', agencyId);
       console.log(`   ✅ Domain verified: ${domain}`);
     } else {
-      console.log(`   ⏳ Domain not yet verified`);
+      console.log(`   ⏳ Domain not yet verified${verificationRecords.length > 0 ? ' (TXT ownership verification pending)' : ''}`);
     }
 
     res.json({
@@ -479,15 +599,19 @@ router.post('/:agencyId/domain/verify', async (req, res) => {
       vercel_verified: vercelVerified,
       dns_verified: dnsVerified,
       dns_details: dnsDetails,
-      expected_a_record: dnsConfig.aRecord,
+      is_subdomain: !apex,
+      subdomain_prefix: subPrefix,
+      expected_a_record: apex ? dnsConfig.aRecord : null,
       expected_cname: dnsConfig.cnameRecord,
       verification_needed: verificationRecords.length > 0,
       verification_records: verificationRecords,
       message: isVerified
         ? 'Domain verified successfully!'
         : verificationRecords.length > 0
-          ? `This domain requires ownership verification. Add the TXT record shown below, then try verifying again.`
-          : `DNS records not found. Please set your A record to ${dnsConfig.aRecord} and CNAME (www) to ${dnsConfig.cnameRecord}. Allow up to 48 hours for propagation.`,
+          ? `This domain requires ownership verification. Add the TXT record shown below at your domain registrar, then try verifying again.`
+          : apex
+            ? `DNS records not found. Please set your A record to ${dnsConfig.aRecord} and CNAME (www) to ${dnsConfig.cnameRecord}. Allow up to 48 hours for propagation.`
+            : `DNS record not found. Please set a CNAME record for "${subPrefix}" pointing to ${dnsConfig.cnameRecord}. Allow up to 48 hours for propagation.`,
     });
 
   } catch (error) {
@@ -515,11 +639,16 @@ router.delete('/:agencyId/domain', async (req, res) => {
     }
 
     const domain = agency.marketing_domain;
-    console.log(`   Removing domain: ${domain}`);
+    const apex = isApexDomain(domain);
+    console.log(`   Removing domain: ${domain} (${apex ? 'apex' : 'subdomain'})`);
 
     if (VERCEL_TOKEN && VERCEL_PROJECT_ID) {
-      try { await vercelRequest('DELETE', `/v9/projects/${VERCEL_PROJECT_ID}/domains/${domain}`); console.log(`   ✅ Apex removed from Vercel`); } catch (err) { console.log(`   ⚠️ Could not remove apex:`, err.message); }
-      try { await vercelRequest('DELETE', `/v9/projects/${VERCEL_PROJECT_ID}/domains/www.${domain}`); console.log(`   ✅ WWW removed from Vercel`); } catch (err) { console.log(`   ⚠️ Could not remove www:`, err.message); }
+      // Always remove the primary domain
+      try { await vercelRequest('DELETE', `/v9/projects/${VERCEL_PROJECT_ID}/domains/${domain}`); console.log(`   ✅ Primary domain removed from Vercel`); } catch (err) { console.log(`   ⚠️ Could not remove primary:`, err.message); }
+      // Only remove www for apex domains
+      if (apex) {
+        try { await vercelRequest('DELETE', `/v9/projects/${VERCEL_PROJECT_ID}/domains/www.${domain}`); console.log(`   ✅ WWW removed from Vercel`); } catch (err) { console.log(`   ⚠️ Could not remove www:`, err.message); }
+      }
     }
 
     const { error: dbError } = await supabase
