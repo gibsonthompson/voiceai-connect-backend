@@ -4,10 +4,15 @@
 // UPDATED: 2026-05-21 — V3 unified multi-industry demo prompt. Single prompt
 //          handles ALL 12 industries via conditional playbooks. Replaces V2
 //          generic prompt and separate industry-specific prompts.
-//          ElevenLabs voice config: eleven_flash_v2_5 model, stability 0.5,
+//          ElevenLabs voice config: eleven_flash_v2 model, stability 0.5,
 //          similarityBoost 0.75, speed 0.9 for natural phone pacing.
 //          Prompt pacing: explicit instructions to not rush, breathe between
 //          transitions, stop after asking questions.
+//
+// UPDATED: 2026-05-22 — Roleplay transition: AI says "Ready?" then answers
+//          first as the receptionist instead of telling prospect to "call in."
+//          Customization question: "anything specific you'd need handled"
+//          instead of "anything you'd want handled differently."
 //
 // PHONE NUMBER ROUTING:
 //   +1 (505) 594-5806 → CallBird generic demo (via agencies.demo_phone_number)
@@ -215,13 +220,18 @@ function getDemoSystemPromptV3(agencyName, options = {}) {
   const discoveryInstructions = knownIndustry
     ? `You already know this caller runs a ${INDUSTRY_DISPLAY_NAMES[knownIndustry] || knownIndustry} business.
 Ask what their business is called: "What's your ${knownIndustry === 'legal' ? 'firm' : knownIndustry === 'dental' || knownIndustry === 'medical' ? 'practice' : 'business'} called?"
-Once you have it: "Love it. Alright, I'm gonna answer your next call like I've been working the front desk at [business name] for years. Go ahead and call in like you're a ${knownIndustry === 'restaurant' ? 'customer' : knownIndustry === 'dental' || knownIndustry === 'medical' ? 'patient' : knownIndustry === 'legal' ? 'client' : 'customer'}."
+Once you have it: "Love it. Alright, I'm gonna answer your next call like I've been working the front desk at [business name] for years. Ready?"
+
+Then immediately start the roleplay yourself by answering as their receptionist: "Thanks for calling [business name], how can I help you today?"
+
 If they start roleplaying immediately, roll with it.`
     : `Find out what kind of business they run and what it is called. Ask one at a time:
 1. "What type of business do you run?"
 2. "And what's your business called?"
 
-Once you have both: "Alright, let me show you how this would sound for [business name]. Go ahead and call in like you're a customer."
+Once you have both: "Alright, let me show you how this would sound for [business name]. Ready?"
+
+Then immediately start the roleplay yourself by answering as their receptionist: "Thanks for calling [business name], how can I help you today?"
 
 If they start roleplaying before you finish setup, roll with it immediately.
 If their industry is unclear, ask: "Got it — would you say that's more of a [closest match] type business?" Then proceed.`;
@@ -410,7 +420,7 @@ After the roleplay reaches a natural conclusion (you have collected their info, 
 
 Then mention: "And keep in mind, this is just a generic demo. When you sign up, I get fully trained on your website, your specific services, your pricing, insurance info, all of it. You can customize everything from the dashboard."
 
-Then ask: "Is there anything you'd want the AI to handle differently for your business?"
+Then ask: "Is there anything specific you'd need handled for your business?"
 
 Listen to their feedback.
 
