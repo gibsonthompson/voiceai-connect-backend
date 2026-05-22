@@ -10,7 +10,9 @@
 // UPDATED: 2026-05-19 — Fix: demo admin SMS summary truncation cuts at word
 //   boundary (300 char limit) instead of mid-word at 200
 // UPDATED: 2026-05-20 — Save demo calls to demo_calls table for dashboard display.
-//   Migrated Claude model from claude-sonnet-4-20250514 to claude-sonnet-4-6-20260217.
+// UPDATED: 2026-05-22 — Fix: Claude model string claude-sonnet-4-6 (was 404ing
+//   with invalid dated version). Fix: demo_calls insert now checks Supabase
+//   error return instead of silently succeeding.
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -74,7 +76,7 @@ async function generateAISummary(transcript, industry, callerPhone) {
       signal: _ac1.signal,
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model: "claude-sonnet-4-6-20260217", max_tokens: 500, temperature: 0.3, messages: [{ role: "user", content: prompt }] })
+      body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 500, temperature: 0.3, messages: [{ role: "user", content: prompt }] })
     });
     clearTimeout(_t1);
     if (!response.ok) throw new Error(`Claude API failed: ${response.status}`);
@@ -196,7 +198,7 @@ Extract and return ONLY valid JSON — no backticks, no extra text:
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6-20260217',
+        model: 'claude-sonnet-4-6',
         max_tokens: 500,
         temperature: 0.3,
         messages: [{ role: 'user', content: prompt }],
@@ -469,7 +471,7 @@ async function handleDemoCall(agency, message, industryKey = null) {
   try {
     const recordingUrl = message.recordingUrl || message.artifact?.recordingUrl || call.recordingUrl || null;
 
-    await supabase.from('demo_calls').insert({
+    const { error: dbError } = await supabase.from('demo_calls').insert({
       agency_id: agency.id,
       caller_phone: callerPhone,
       caller_name: callerName || null,
@@ -488,9 +490,14 @@ async function handleDemoCall(agency, message, industryKey = null) {
       industry_key: industryKey || null,
       caller_location: callerLocation || null,
     });
-    console.log('✅ Demo call saved to database');
+
+    if (dbError) {
+      console.error('❌ Demo call insert failed:', dbError.message, dbError.code, dbError.details);
+    } else {
+      console.log('✅ Demo call saved to database');
+    }
   } catch (dbErr) {
-    console.warn('⚠️ Failed to save demo call (non-fatal):', dbErr.message);
+    console.error('❌ Failed to save demo call (exception):', dbErr.message);
   }
 
   return {
