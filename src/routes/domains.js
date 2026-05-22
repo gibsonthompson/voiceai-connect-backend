@@ -465,7 +465,7 @@ router.post('/:agencyId/domain/verify', async (req, res) => {
       } catch (e) { console.log(`   No CNAME record found`); }
     }
 
-    const isVerified = vercelVerified || dnsVerified;
+    const isVerified = vercelVerified || (dnsVerified && verificationRecords.length === 0);
 
     if (isVerified) {
       await supabase.from('agencies').update({ domain_verified: true, updated_at: new Date().toISOString() }).eq('id', agencyId);
