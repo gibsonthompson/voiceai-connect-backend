@@ -677,6 +677,8 @@ app.use('/api/agency', previewTokenRoutes);
 // ============================================================================
 
 app.post('/api/client/signup', handleClientSignup);
+app.post('/api/client/checkout', createClientCheckout);
+app.post('/api/client/portal', createClientPortal);
 app.use('/api/client', clientRoutes);
 app.use('/api/client', require('./routes/call-mode'));
 app.use('/api/client', clientContactsRoutes);
@@ -685,8 +687,6 @@ app.use('/api/client', clientServicesRoutes);
 app.use('/api/client', toolConfigRoutes);
 app.use('/api/client', pwaTrackingRoutes);
 app.use('/api/sms', smsRoutes);
-app.post('/api/client/checkout', createClientCheckout);
-app.post('/api/client/portal', createClientPortal);
 
 // ============================================================================
 // TEAM MEMBER ROUTES (Client-level)

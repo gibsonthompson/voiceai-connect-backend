@@ -221,7 +221,7 @@ async function createClientCheckout(req, res) {
 
     console.log('Creating client checkout for:', client.email, 'via agency:', agency.name);
 
-    const priceAmounts = { starter: agency.price_starter || 4900, pro: agency.price_pro || 9900, growth: agency.price_growth || 14900 };
+    const priceAmounts = { starter: agency.price_starter || 9900, pro: agency.price_pro || 14900, growth: agency.price_growth || 29900 };
     const callLimits = { starter: agency.limit_starter || 50, pro: agency.limit_pro || 150, growth: agency.limit_growth || 500 };
     const priceAmount = priceAmounts[plan];
     if (!priceAmount) return res.status(400).json({ error: 'Invalid plan' });
