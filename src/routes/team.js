@@ -2,6 +2,9 @@
 // TEAM MEMBER ROUTES
 // VoiceAI Connect - Agency + Client Level
 // Destination: src/routes/team.js
+//
+// UPDATED: 2026-05-22 — Trial clients get 2 team members regardless of
+//          starter plan config (checkTeamLimit reads subscription_status)
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -58,7 +61,9 @@ function sanitizePermissions(perms, entityType) {
 }
 
 // ============================================================================
-// CHECK TEAM LIMIT — Updated to read per-plan team_members from plan_features
+// CHECK TEAM LIMIT
+// Reads per-plan team_members from plan_features.
+// Trial clients get a minimum of 2 team members regardless of plan config.
 // ============================================================================
 async function checkTeamLimit(entityType, entityId) {
   if (entityType === 'agency') {
@@ -83,7 +88,7 @@ async function checkTeamLimit(entityType, entityId) {
     // 1. Check per-client override first
     const { data: client } = await supabase
       .from('clients')
-      .select('max_team_members, agency_id, plan_type')
+      .select('max_team_members, agency_id, plan_type, subscription_status')
       .eq('id', entityId)
       .single();
 
@@ -112,6 +117,13 @@ async function checkTeamLimit(entityType, entityId) {
       } else {
         maxAllowed = 0;
       }
+    }
+
+    // 4. Trial clients get a minimum of 2 team members so they can
+    //    experience the feature during their trial period
+    const isTrial = client?.subscription_status === 'trial' || client?.subscription_status === 'trialing';
+    if (isTrial && maxAllowed < 2) {
+      maxAllowed = 2;
     }
 
     const { count } = await supabase
