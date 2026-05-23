@@ -69,10 +69,29 @@ async function checkTeamLimit(entityType, entityId) {
   if (entityType === 'agency') {
     const { data: agency } = await supabase
       .from('agencies')
-      .select('max_team_members_agency')
+      .select('max_team_members_agency, subscription_status, plan_type')
       .eq('id', entityId)
       .single();
-    const maxAllowed = agency?.max_team_members_agency ?? 0;
+
+    let maxAllowed = agency?.max_team_members_agency;
+
+    // If no explicit override set, derive from plan + trial status
+    if (!maxAllowed) {
+      const isTrial = agency?.subscription_status === 'trial' || agency?.subscription_status === 'trialing';
+      const plan = (agency?.plan_type || 'free').toLowerCase();
+
+      if (isTrial) {
+        // Trial agencies get Scale-level access
+        maxAllowed = 50;
+      } else if (plan === 'scale' || plan === 'enterprise') {
+        maxAllowed = 50;
+      } else if (plan === 'pro' || plan === 'professional') {
+        maxAllowed = 5;
+      } else {
+        // Free plan — no team members
+        maxAllowed = 0;
+      }
+    }
 
     const { count } = await supabase
       .from('team_members')
@@ -297,7 +316,7 @@ router.post('/client/:clientId/team', async (req, res) => {
     const { data: member, error: memberError } = await supabase.from('team_members').insert({ owner_user_id: ownerUserId, member_user_id: newUser.id, entity_type: 'client', entity_id: clientId, display_name: name, phone: phone || null, visible_password: tempPassword, permissions: sanitizedPerms, status: 'active' }).select().single();
     if (memberError) { console.error('❌ Create client team member error:', memberError); await supabase.from('users').delete().eq('id', newUser.id); return res.status(500).json({ error: 'Failed to create team member' }); }
     await logActivity(member.id, ownerUserId, 'client', clientId, 'member_added', { name, email: email.toLowerCase() });
-    if (phone) { try { const send = getSendSms(); const agency = client?.agencies; const loginUrl = agency?.marketing_domain && agency?.domain_verified ? `https://${agency.marketing_domain}/client/login` : `https://${agency?.slug || 'app'}.myvoiceaiconnect.com/client/login`; await send(phone, `You've been added as a team member!\n\nEmail: ${email.toLowerCase()}\nPassword: ${tempPassword}\n\n${loginUrl}`); } catch {} }
+    if (phone) { try { const send = getSendSms(); const agency = client?.agencies; const loginUrl = agency?.marketing_domain && agency?.domain_verified ? `https://${agency.marketing_domain}/client/login` : `https://${agency?.slug || 'app'}.myvoiceaiconnect.com/client/login`; await send(phone, `You've been added as a team member!\n\nLogin: ${loginUrl}\nEmail: ${email.toLowerCase()}\nPassword: ${tempPassword}`); } catch {} }
     res.json({ success: true, member: { id: member.id, display_name: member.display_name, phone: member.phone, email: newUser.email, visible_password: tempPassword, permissions: member.permissions, notification_prefs: member.notification_prefs, status: member.status, created_at: member.created_at } });
   } catch (err) { console.error('❌ Add client team member error:', err); res.status(500).json({ error: 'Failed to add team member' }); }
 });
