@@ -5,6 +5,7 @@
 // UPDATED: 2026-05-18 — Phase 1: ai-settings endpoints (tone, booking mode,
 //          service areas, priority rules, dashboard access)
 // UPDATED: 2026-05-22 — Added allow_client_branding to agency select
+// UPDATED: 2026-05-22 — Added onboarding_completed to PUT settings
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -54,12 +55,14 @@ router.get('/:id', async (req, res) => {
 router.put('/:id/settings', async (req, res) => {
   try {
     const { id } = req.params;
-    const { email, owner_phone, business_name, hipaa_mode } = req.body;
+    const { email, owner_phone, business_name, hipaa_mode, onboarding_completed } = req.body;
     const updates = {};
     if (email) updates.email = email;
     if (owner_phone) updates.owner_phone = owner_phone;
     if (business_name !== undefined && business_name.trim()) updates.business_name = business_name.trim();
-    if (hipaa_mode !== undefined) updates.hipaa_mode = hipaa_mode === true;    const { data, error } = await supabase.from('clients').update(updates).eq('id', id).select().single();
+    if (hipaa_mode !== undefined) updates.hipaa_mode = hipaa_mode === true;
+    if (onboarding_completed !== undefined) updates.onboarding_completed = onboarding_completed === true;
+    const { data, error } = await supabase.from('clients').update(updates).eq('id', id).select().single();
     if (error) return res.status(400).json({ error: error.message });
     res.json({ success: true, client: data });
   } catch (error) {
@@ -81,7 +84,8 @@ router.put('/:id/branding', async (req, res) => {
     if (secondary_color !== undefined) updates.secondary_color = secondary_color || null;
     if (accent_color !== undefined) updates.accent_color = accent_color || null;
     if (business_name !== undefined && business_name.trim()) updates.business_name = business_name.trim();
-    if (hipaa_mode !== undefined) updates.hipaa_mode = hipaa_mode === true;    if (nav_bg !== undefined) updates.nav_bg = nav_bg || null;
+    if (hipaa_mode !== undefined) updates.hipaa_mode = hipaa_mode === true;
+    if (nav_bg !== undefined) updates.nav_bg = nav_bg || null;
     if (nav_text !== undefined) updates.nav_text = nav_text || null;
     if (button_text !== undefined) updates.button_text = button_text || null;
     if (page_bg !== undefined) updates.page_bg = page_bg || null;
