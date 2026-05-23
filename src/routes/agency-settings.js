@@ -7,6 +7,7 @@
 // UPDATED: Added AI tool keys to plan_features validation
 // UPDATED: Added team member limits to settings response
 // UPDATED: Added marketing_template to responses + whitelist
+// UPDATED: 2026-05-22 — Added client_header_mode + allow_client_branding to whitelist + response
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
@@ -198,6 +199,10 @@ async function getAgencySettings(req, res) {
         // Dashboard branding overrides (nav, bg, card, button colors)
         branding_overrides: agency.branding_overrides || null,
         
+        // Client dashboard settings
+        client_header_mode: agency.client_header_mode || 'agency_name',
+        allow_client_branding: agency.allow_client_branding || false,
+        
         // Domain
         marketing_domain: agency.marketing_domain,
         domain_verified: agency.domain_verified,
@@ -299,6 +304,9 @@ async function updateAgencySettings(req, res) {
       'logo_background_color',
       // Dashboard branding overrides (nav, bg, card, button colors)
       'branding_overrides',
+      // Client dashboard settings
+      'client_header_mode',
+      'allow_client_branding',
       // Client plan feature gating
       'plan_features',
       // Calendar plan gating (which client plans can connect Google Calendar)
@@ -348,6 +356,18 @@ async function updateAgencySettings(req, res) {
         }
         // If all values were stripped, store null instead of empty object
         sanitizedUpdates.branding_overrides = Object.keys(cleaned).length > 0 ? cleaned : null;
+      }
+    }
+
+    // Validate allow_client_branding if provided
+    if (sanitizedUpdates.allow_client_branding !== undefined) {
+      sanitizedUpdates.allow_client_branding = sanitizedUpdates.allow_client_branding === true;
+    }
+
+    // Validate client_header_mode if provided
+    if (sanitizedUpdates.client_header_mode !== undefined && sanitizedUpdates.client_header_mode !== null) {
+      if (!['agency_name', 'business_name'].includes(sanitizedUpdates.client_header_mode)) {
+        return res.status(400).json({ error: 'Invalid client_header_mode. Must be agency_name or business_name' });
       }
     }
     
