@@ -12,6 +12,7 @@
 // UPDATED: 2026-05-20 — Rollback: clean up orphaned VAPI resources (assistant, KB,
 //          query tool) when phone provisioning fails. Guard SMS sends against
 //          undefined phone numbers. Better error messages for Telnyx 402.
+// UPDATED: 2026-05-29 — Fix: agency_id now set on user record in all signup paths
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -569,6 +570,7 @@ async function handleClientSignup(req, res) {
     const { data: newUser, error: userError } = await supabase
       .from('users')
       .insert({
+        agency_id: agencyId,
         client_id: newClient.id,
         email: email.toLowerCase(),
         first_name: firstName,
@@ -873,6 +875,7 @@ async function handleAgencyAddClient(req, res) {
     const { data: newUser, error: userError } = await supabase
       .from('users')
       .insert({
+        agency_id: agencyId,
         client_id: newClient.id,
         email: email.toLowerCase(),
         first_name: firstName,
@@ -1048,6 +1051,7 @@ async function provisionClient(clientId) {
       const { data: newUser } = await supabase
         .from('users')
         .insert({
+          agency_id: client.agency_id,
           client_id: clientId,
           email: client.email,
           first_name: client.owner_name?.split(' ')[0] || 'User',
