@@ -8,6 +8,7 @@
 // UPDATED: Added team member limits to settings response
 // UPDATED: Added marketing_template to responses + whitelist
 // UPDATED: 2026-05-22 — Added client_header_mode + allow_client_branding to whitelist + response
+// UPDATED: 2026-05-29 — Fixed plan_features validation: team_members is a number, not boolean
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
@@ -387,14 +388,6 @@ async function updateAgencySettings(req, res) {
     if (sanitizedUpdates.plan_features) {
       const pf = sanitizedUpdates.plan_features;
       const validPlans = ['starter', 'pro', 'growth'];
-      const validFeatures = [
-        'sms_notifications', 'email_summaries', 'custom_greeting',
-        'custom_voice', 'knowledge_base', 'business_hours',
-        'google_calendar', 'advanced_analytics', 'priority_support',
-        // AI Tools
-        'caller_recognition', 'spam_detection', 'call_transfer',
-        'transfer_fallback', 'after_hours_mode'
-      ];
       
       let isValid = true;
       for (const plan of validPlans) {
@@ -402,11 +395,19 @@ async function updateAgencySettings(req, res) {
           isValid = false;
           break;
         }
-        // Validate all feature values are booleans
+        // Validate feature values: booleans for toggles, numbers for team_members
         for (const feature of Object.keys(pf[plan])) {
-          if (typeof pf[plan][feature] !== 'boolean') {
-            isValid = false;
-            break;
+          const val = pf[plan][feature];
+          if (feature === 'team_members') {
+            if (typeof val !== 'number' || val < 0) {
+              isValid = false;
+              break;
+            }
+          } else {
+            if (typeof val !== 'boolean') {
+              isValid = false;
+              break;
+            }
           }
         }
         if (!isValid) break;

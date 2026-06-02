@@ -3,7 +3,7 @@
 // Mount in server.js: app.use('/api/help', require('./routes/help'));
 // UPDATED: 2026-05-20 — Fixed sendAndLogSMS param names (was using to/body/type
 //          instead of phone/message/messageType, causing "Invalid phone: undefined").
-//          Updated Claude model to claude-sonnet-4-6-20260217.
+// UPDATED: 2026-05-29 — Fixed model string: claude-sonnet-4-6 (was using deprecated dated version)
 
 const express = require('express');
 const router = express.Router();
@@ -19,8 +19,6 @@ const SUPPORT_PHONE = process.env.SUPPORT_PHONE_NUMBER || '';
 const PLATFORM_NUMBER = process.env.TELNYX_SMS_FROM_NUMBER || process.env.TELNYX_PHONE_NUMBER || process.env.PLATFORM_PHONE_NUMBER || '';
 
 // ── Knowledge Base Context (embedded for AI) ────────────────────────
-// This is the full FAQ content the AI uses to answer questions.
-// Keep in sync with frontend lib/support-kb.ts
 const KB_CONTEXT = `
 You are the VoiceAI Connect support assistant. Answer questions about the platform accurately and helpfully using ONLY the information below. If a question isn't covered, say you don't have that information and suggest the user contact support.
 
@@ -141,7 +139,7 @@ SUPPORT:
 - Support responds within a few hours.
 `;
 
-// ── POST /api/support/chat ──────────────────────────────────────────
+// ── POST /api/help/chat ─────────────────────────────────────────────
 // AI chatbot powered by Claude
 router.post('/chat', async (req, res) => {
   try {
@@ -170,7 +168,7 @@ router.post('/chat', async (req, res) => {
     messages.push({ role: 'user', content: message.trim() });
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6-20260217',
+      model: 'claude-sonnet-4-6',
       max_tokens: 500,
       system: KB_CONTEXT,
       messages,
@@ -188,7 +186,7 @@ router.post('/chat', async (req, res) => {
   }
 });
 
-// ── POST /api/support/message ───────────────────────────────────────
+// ── POST /api/help/message ──────────────────────────────────────────
 // SMS escalation to Gibson
 router.post('/message', async (req, res) => {
   try {
@@ -229,9 +227,6 @@ router.post('/message', async (req, res) => {
       `Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}`,
     ].join('\n');
 
-    // FIX: Use correct parameter names for sendAndLogSMS
-    // Old code used { to, from, body, type } which are not valid params —
-    // sendAndLogSMS expects { phone, message, agencyId, recipientType, messageType, metadata }
     await sendAndLogSMS({
       phone: SUPPORT_PHONE,
       message: smsBody,
