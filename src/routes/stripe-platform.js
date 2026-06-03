@@ -62,7 +62,7 @@ const COMMISSION_RATE = 0.40;
 // ============================================================================
 async function createAgencyCheckout(req, res) {
   try {
-    const { agency_id, plan: rawPlan, skipTrial } = req.body;
+    const { agency_id, plan: rawPlan, skipTrial, successUrl, cancelUrl } = req.body;
     if (!agency_id || !rawPlan) return res.status(400).json({ error: 'Missing required fields', required: ['agency_id', 'plan'] });
 
     const plan = normalizePlan(rawPlan);
@@ -96,8 +96,8 @@ async function createAgencyCheckout(req, res) {
     const session = await stripe.checkout.sessions.create({
       customer: customerId, mode: 'subscription', payment_method_types: ['card'],
       line_items: lineItems, subscription_data: subscriptionData,
-      success_url: `${process.env.FRONTEND_URL}/agency/settings?tab=billing&subscribed=true`,
-      cancel_url: `${process.env.FRONTEND_URL}/agency/settings?tab=billing`,
+      success_url: successUrl || `${process.env.FRONTEND_URL}/agency/settings?tab=billing&subscribed=true`,
+      cancel_url: cancelUrl || `${process.env.FRONTEND_URL}/agency/settings?tab=billing`,
       metadata: { agency_id, plan, type: 'agency_subscription' },
     });
 
@@ -236,7 +236,7 @@ async function handleAgencyCheckoutCompleted(session) {
   if (!agencyId) return;
 
   const teamLimits = TEAM_MEMBER_LIMITS[plan] || TEAM_MEMBER_LIMITS.free;
-  let updateData = { plan_type: plan, stripe_subscription_id: session.subscription, usage_billing_enabled: true, updated_at: new Date().toISOString(), max_team_members_agency: teamLimits.agency, max_team_members_client: teamLimits.client };
+  let updateData = { plan_type: plan, stripe_subscription_id: session.subscription, usage_billing_enabled: true, onboarding_completed: true, updated_at: new Date().toISOString(), max_team_members_agency: teamLimits.agency, max_team_members_client: teamLimits.client };
 
   if (session.subscription) {
     try {
@@ -462,6 +462,30 @@ async function canAgencyAddClient(agencyId) {
   if (plan === 'free' && !agency.stripe_subscription_id) {
     return { allowed: false, reason: 'billing_required', message: 'Add a payment method to start adding clients. You will be charged per client and per minute of voice usage.' };
   }
+
+  // During the free trial, an agency can onboard only ONE real client (to
+  // validate the product). To add more, the trial must convert to a paid
+  // subscription. Caps free resource consumption (Telnyx number + voice
+  // minutes) during the trial. The sandbox test client (is_test_client = true)
+  // is a separate, opt-in "try it" tool — it is NOT counted here, so it never
+  // consumes the real-client slot.
+  if (['trialing', 'trial'].includes(agency.subscription_status)) {
+    const { count } = await supabase
+      .from('clients')
+      .select('id', { count: 'exact', head: true })
+      .eq('agency_id', agencyId)
+      .eq('is_test_client', false);
+    if ((count || 0) >= 1) {
+      return {
+        allowed: false,
+        reason: 'trial_client_limit',
+        message: 'Your free trial includes one client. Add more once your trial converts to a paid plan.',
+        limit: 1,
+        current: count || 0,
+      };
+    }
+  }
+
   return { allowed: true, limit: 'unlimited' };
 }
 

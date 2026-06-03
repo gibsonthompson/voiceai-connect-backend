@@ -329,7 +329,7 @@ async function expireTrials() {
   const now = new Date().toISOString();
 
   const { data: expiredClients, error } = await supabase
-    .from('clients').select('*, agencies!clients_agency_id_fkey(*)').eq('subscription_status', 'trial').lt('trial_ends_at', now);
+    .from('clients').select('*, agencies!clients_agency_id_fkey(*)').in('subscription_status', ['trial', 'trialing']).lt('trial_ends_at', now);
 
   if (error) { console.error('Error fetching expired trials:', error); return { success: false, error: error.message }; }
 
