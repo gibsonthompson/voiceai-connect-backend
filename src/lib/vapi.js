@@ -16,6 +16,9 @@
 // FIXED: KB logic fallthrough when websiteContent exists but fileId is null (2026-04-15)
 // UPDATED: 2026-05-20 — Phone provisioning switched from VAPI free numbers to
 //          Telnyx purchase + VAPI import. Removes 10-number cap entirely.
+// UPDATED: 2026-06-03 — Added releaseTelnyxNumber + fullyReleaseNumber. Deleting
+//          the VAPI phone object does NOT release the underlying Telnyx number;
+//          it must be deleted on Telnyx or it bills monthly forever.
 // ============================================================================
 const fetch = require('node-fetch');
 const FormData = require('form-data');
@@ -2185,6 +2188,95 @@ async function enablePhoneNumber(phoneId) {
 }
 
 // ============================================================================
+// RELEASE TELNYX NUMBER — stops the monthly rental (the real cost)
+// UPDATED 2026-06-03: Deleting the VAPI phone object does NOT release the
+// underlying Telnyx number. The number is purchased on Telnyx (see
+// provisionPhoneNumber), so it must be deleted on Telnyx directly or it bills
+// monthly forever. Looks up the Telnyx resource ID by E.164, then deletes it.
+// Returns true if the number is no longer on the account (deleted OR not found).
+// ============================================================================
+async function releaseTelnyxNumber(e164) {
+  if (!TELNYX_API_KEY) { console.warn('⚠️ releaseTelnyxNumber: TELNYX_API_KEY not set'); return false; }
+  if (!e164) { console.warn('⚠️ releaseTelnyxNumber: no number provided'); return false; }
+
+  // Normalize to E.164 (Telnyx stores +1XXXXXXXXXX)
+  let number = String(e164).trim();
+  if (!number.startsWith('+')) {
+    const d = number.replace(/\D/g, '');
+    if (d.length === 10) number = `+1${d}`;
+    else if (d.length === 11 && d.startsWith('1')) number = `+${d}`;
+    else number = `+${d}`;
+  }
+
+  try {
+    const lookupRes = await fetch(
+      `https://api.telnyx.com/v2/phone_numbers?filter[phone_number]=${encodeURIComponent(number)}`,
+      { headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}` } }
+    );
+    if (!lookupRes.ok) {
+      console.error(`❌ Telnyx lookup failed for ${number}: HTTP ${lookupRes.status}`);
+      return false;
+    }
+
+    const record = ((await lookupRes.json()).data || [])[0];
+    if (!record) {
+      // Not on the account — already released or never owned. Treat as success.
+      console.log(`ℹ️ Telnyx number not on account (already released?): ${number}`);
+      return true;
+    }
+
+    const delRes = await fetch(`https://api.telnyx.com/v2/phone_numbers/${record.id}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}` },
+    });
+    if (delRes.ok || delRes.status === 404) {
+      console.log(`✅ Telnyx number RELEASED: ${number} (${record.id})`);
+      return true;
+    }
+
+    const errText = await delRes.text().catch(() => '');
+    console.error(`❌ Telnyx delete failed for ${number} (${record.id}): HTTP ${delRes.status} ${errText.slice(0, 200)}`);
+    return false;
+  } catch (err) {
+    console.error(`❌ releaseTelnyxNumber error for ${number}:`, err.message);
+    return false;
+  }
+}
+
+// ============================================================================
+// FULLY RELEASE NUMBER — deletes the VAPI object AND releases the Telnyx number
+// UPDATED 2026-06-03: Use this everywhere a number is permanently torn down
+// (trial expiry, demo deletion). Deleting only the VAPI object leaves the
+// Telnyx rental billing forever.
+// ============================================================================
+async function fullyReleaseNumber(vapiPhoneId, e164) {
+  let vapiDeleted = false;
+
+  // 1. Delete the VAPI phone-number object (removes routing/import)
+  if (vapiPhoneId && VAPI_API_KEY) {
+    try {
+      const res = await fetch(`https://api.vapi.ai/phone-number/${vapiPhoneId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` },
+      });
+      if (res.ok || res.status === 404) {
+        vapiDeleted = true;
+        console.log(`✅ VAPI phone object deleted: ${vapiPhoneId}`);
+      } else {
+        console.error(`⚠️ VAPI phone delete returned ${res.status} for ${vapiPhoneId}`);
+      }
+    } catch (err) {
+      console.error(`❌ VAPI phone delete error for ${vapiPhoneId}:`, err.message);
+    }
+  }
+
+  // 2. Release the underlying Telnyx number (stops the monthly rental)
+  const telnyxReleased = await releaseTelnyxNumber(e164);
+
+  return { vapiDeleted, telnyxReleased };
+}
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 module.exports = {
@@ -2209,6 +2301,8 @@ module.exports = {
   enableAssistant,
   disablePhoneNumber,
   enablePhoneNumber,
+  releaseTelnyxNumber,
+  fullyReleaseNumber,
   // Demo provisioning
   getDemoSystemPrompt,
   getDemoFirstMessage,

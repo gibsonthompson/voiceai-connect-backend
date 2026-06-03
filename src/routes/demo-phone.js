@@ -5,11 +5,13 @@
 // GET    /api/agency/:agencyId/demo-calls         — List demo calls
 // GET    /api/agency/:agencyId/demo-calls/:callId — Get demo call detail
 // UPDATED: 2026-05-20 — Added demo call history endpoints
+// UPDATED: 2026-06-03 — DELETE now releases the underlying Telnyx number
+//          (not just the VAPI object) so the monthly rental actually stops.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
-const { provisionAgencyDemo, updateDemoAssistantName } = require('../lib/vapi');
+const { provisionAgencyDemo, updateDemoAssistantName, fullyReleaseNumber } = require('../lib/vapi');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 
@@ -127,20 +129,14 @@ router.delete('/:agencyId/demo-phone', async (req, res) => {
 
     console.log(`🗑️ Deleting demo phone for ${agency.name}: ${agency.demo_phone_number}`);
 
-    // 2. Delete VAPI phone number
-    if (agency.demo_vapi_phone_id) {
+    // 2. Release the demo number — VAPI object AND the underlying Telnyx rental.
+    //    Deleting only the VAPI object leaves the Telnyx number billing monthly.
+    if (agency.demo_vapi_phone_id || agency.demo_phone_number) {
       try {
-        const phoneResponse = await fetch(`https://api.vapi.ai/phone-number/${agency.demo_vapi_phone_id}`, {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
-        });
-        if (phoneResponse.ok) {
-          console.log('✅ VAPI phone number deleted');
-        } else {
-          console.warn('⚠️ Failed to delete VAPI phone (continuing):', phoneResponse.status);
-        }
+        const release = await fullyReleaseNumber(agency.demo_vapi_phone_id, agency.demo_phone_number);
+        console.log(`📞 Demo release ${agency.name}: VAPI=${release.vapiDeleted} Telnyx=${release.telnyxReleased}`);
       } catch (err) {
-        console.warn('⚠️ VAPI phone delete error (continuing):', err.message);
+        console.warn('⚠️ Demo number release error (continuing):', err.message);
       }
     }
 

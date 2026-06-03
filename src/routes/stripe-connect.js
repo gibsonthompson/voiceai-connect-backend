@@ -9,6 +9,9 @@
 //          to free up phone number slots. Nulls out resource IDs in DB.
 // UPDATED: 2026-05-22 — Client checkout: logging, explicit FK hint, pricing
 //          defaults updated to $99/$149/$299
+// UPDATED: 2026-06-03 — expireTrials now RELEASES the underlying Telnyx number
+//          (via fullyReleaseNumber) before nulling vapi_phone_number. Deleting
+//          only the VAPI object left the Telnyx rental billing monthly forever.
 // ============================================================================
 const Stripe = require('stripe');
 const fetch = require('node-fetch');
@@ -26,7 +29,7 @@ const {
   sendClientSubscriptionActivatedSMS,
   sendPlatformNotificationSMS
 } = require('../lib/notifications');
-const { enableAssistant, disableAssistant, disablePhoneNumber, enablePhoneNumber } = require('../lib/vapi');
+const { enableAssistant, disableAssistant, disablePhoneNumber, enablePhoneNumber, fullyReleaseNumber } = require('../lib/vapi');
 const { getSmsTemplate } = require('../lib/sms-templates');
 const { updateClientBillingQuantity } = require('../lib/usage-tracker');
 
@@ -314,6 +317,11 @@ async function createClientPortal(req, res) {
 // UPDATED 2026-05-16: DELETES VAPI phone number + assistant instead of just
 // disabling them. Nulls out resource IDs so the VAPI slot is freed for reuse.
 // If a client later upgrades, they get a new number provisioned at that point.
+// UPDATED 2026-06-03: Also RELEASES the underlying Telnyx number (the monthly
+// rental) via fullyReleaseNumber. This runs BEFORE the DB null-out because the
+// stored E.164 (vapi_phone_number) is the only handle to the Telnyx number —
+// no Telnyx ID is persisted. Deleting only the VAPI object left the Telnyx
+// number renting forever, which was the silent cost leak.
 // ============================================================================
 async function expireTrials() {
   console.log('Checking for expired trials...');
@@ -331,25 +339,22 @@ async function expireTrials() {
 
   for (const client of expiredClients || []) {
     try {
-      // ── DELETE VAPI phone number (frees up the slot for new clients) ──
-      if (client.vapi_phone_id && VAPI_API_KEY) {
+      // ── RELEASE the phone number: delete the VAPI object AND release the
+      //    underlying Telnyx number. Must run BEFORE we null vapi_phone_number
+      //    below, since the E.164 is the only handle to the Telnyx number
+      //    (no Telnyx ID is stored). Deleting only the VAPI object left the
+      //    Telnyx rental billing monthly forever — that was the leak.
+      if (client.vapi_phone_id || client.vapi_phone_number) {
         try {
-          const phoneRes = await fetch(`https://api.vapi.ai/phone-number/${client.vapi_phone_id}`, {
-            method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` },
-          });
-          if (phoneRes.ok || phoneRes.status === 404) {
-            console.log('✅ VAPI phone number DELETED:', client.vapi_phone_id);
-          } else {
-            console.error('⚠️ VAPI phone delete returned:', phoneRes.status);
-            try { await disablePhoneNumber(client.vapi_phone_id); } catch {}
+          const release = await fullyReleaseNumber(client.vapi_phone_id, client.vapi_phone_number);
+          console.log(`📞 Release ${client.business_name}: VAPI=${release.vapiDeleted} Telnyx=${release.telnyxReleased}`);
+          if (!release.telnyxReleased) {
+            console.error(`⚠️ Telnyx NOT released for ${client.business_name} (${client.vapi_phone_number}) — orphan sweep will catch it`);
           }
-        } catch (phoneError) {
-          console.error('❌ Failed to delete VAPI phone number:', phoneError.message);
-          try { await disablePhoneNumber(client.vapi_phone_id); } catch {}
+        } catch (relErr) {
+          console.error('❌ Number release failed:', relErr.message);
+          if (client.vapi_phone_id) { try { await disablePhoneNumber(client.vapi_phone_id); } catch {} }
         }
-      } else if (client.vapi_phone_id) {
-        try { await disablePhoneNumber(client.vapi_phone_id); } catch {}
       }
 
       // ── DELETE VAPI assistant ──
