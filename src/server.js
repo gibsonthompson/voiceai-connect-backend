@@ -3,6 +3,7 @@
 // UPDATED: Team member routes mounted, Content render service mounted
 // UPDATED: 2026-05-07 — Usage tracking cron + usage summary endpoint (Phase 1)
 // UPDATED: 2026-05-19 — Phase 3A: Staff members + client services routes
+// UPDATED: 2026-06-03 — /api/agency/cancel now releases the agency demo number
 // Destination: src/server.js (or src/index.js) — FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -10,6 +11,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { supabase } = require('./lib/supabase');
+const { fullyReleaseNumber } = require('./lib/vapi');
 const { expressErrorHandler, setupProcessErrorHandlers } = require('./lib/error-monitor');
 
 const app = express();
@@ -269,7 +271,7 @@ app.post('/api/agency/cancel', async (req, res) => {
   try {
     const { data: agency, error } = await supabase
       .from('agencies')
-      .select('id, name, stripe_subscription_id')
+      .select('id, name, stripe_subscription_id, demo_vapi_phone_id, demo_phone_number, demo_assistant_id')
       .eq('id', agency_id)
       .single();
 
@@ -289,11 +291,36 @@ app.post('/api/agency/cancel', async (req, res) => {
       }
     }
 
+    // Release the agency demo number (VAPI object + underlying Telnyx rental)
+    // so it stops billing once the agency is canceled.
+    if (agency.demo_vapi_phone_id || agency.demo_phone_number) {
+      try {
+        const release = await fullyReleaseNumber(agency.demo_vapi_phone_id, agency.demo_phone_number);
+        console.log(`📞 Demo released for ${agency.name}: VAPI=${release.vapiDeleted} Telnyx=${release.telnyxReleased}`);
+        if (!release.telnyxReleased) {
+          console.error(`⚠️ Telnyx demo NOT released for ${agency.name} (${agency.demo_phone_number}) — orphan sweep will catch it`);
+        }
+        if (agency.demo_assistant_id && process.env.VAPI_API_KEY) {
+          try {
+            await fetch(`https://api.vapi.ai/assistant/${agency.demo_assistant_id}`, {
+              method: 'DELETE',
+              headers: { 'Authorization': `Bearer ${process.env.VAPI_API_KEY}` },
+            });
+          } catch (e) { /* non-blocking */ }
+        }
+      } catch (relErr) {
+        console.error('Demo release failed (continuing):', relErr.message);
+      }
+    }
+
     await supabase
       .from('agencies')
       .update({ 
         subscription_status: 'canceled', 
         status: 'canceled',
+        demo_phone_number: null,
+        demo_assistant_id: null,
+        demo_vapi_phone_id: null,
         updated_at: new Date().toISOString()
       })
       .eq('id', agency_id);

@@ -3,6 +3,8 @@
 // REWRITTEN: 2026-05-06 — Pricing Restructure (free/pro/scale + metered billing)
 // UPDATED: 2026-05-09 — Trial warning guards, sendAndLogSMS
 // UPDATED: 2026-05-10 — alertError() in all catch blocks for SMS alerts
+// UPDATED: 2026-06-03 — handleAgencySubscriptionDeleted now releases the agency
+//   demo number (VAPI object + Telnyx rental) so it stops billing on cancel
 //
 // NEW MODEL:
 //   Free  = $0 platform + $29.99/client + $0.12/min (no Stripe sub until first client)
@@ -22,6 +24,7 @@ const { getSmsTemplate } = require('../lib/sms-templates');
 const { sendAndLogSMS } = require('../lib/sms-logger');
 const { getPlanRates } = require('../lib/usage-tracker');
 const { alertError } = require('../lib/error-monitor');
+const { fullyReleaseNumber } = require('../lib/vapi');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -292,7 +295,44 @@ async function handleAgencySubscriptionDeleted(subscription) {
   console.log('Agency subscription deleted:', subscription.id);
   const agency = await getAgencyByStripeCustomerId(subscription.customer);
   if (!agency) return;
-  await supabase.from('agencies').update({ subscription_status: 'canceled', status: 'suspended', usage_billing_enabled: false }).eq('id', agency.id);
+
+  // Release the agency demo number (VAPI object + underlying Telnyx rental)
+  // before nulling the fields — otherwise the Telnyx number keeps billing
+  // every month on a canceled agency.
+  try {
+    const { data: demo } = await supabase
+      .from('agencies')
+      .select('demo_vapi_phone_id, demo_phone_number, demo_assistant_id')
+      .eq('id', agency.id)
+      .single();
+
+    if (demo && (demo.demo_vapi_phone_id || demo.demo_phone_number)) {
+      const release = await fullyReleaseNumber(demo.demo_vapi_phone_id, demo.demo_phone_number);
+      console.log(`   📞 Demo released for ${agency.name}: VAPI=${release.vapiDeleted} Telnyx=${release.telnyxReleased}`);
+      if (!release.telnyxReleased) {
+        console.error(`   ⚠️ Telnyx demo NOT released for ${agency.name} (${demo.demo_phone_number}) — orphan sweep will catch it`);
+      }
+      if (demo.demo_assistant_id && process.env.VAPI_API_KEY) {
+        try {
+          await fetch(`https://api.vapi.ai/assistant/${demo.demo_assistant_id}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${process.env.VAPI_API_KEY}` },
+          });
+        } catch (e) { /* non-blocking */ }
+      }
+    }
+  } catch (relErr) {
+    console.error(`   ⚠️ Demo release failed for ${agency.name}:`, relErr.message);
+  }
+
+  await supabase.from('agencies').update({
+    subscription_status: 'canceled',
+    status: 'suspended',
+    usage_billing_enabled: false,
+    demo_phone_number: null,
+    demo_assistant_id: null,
+    demo_vapi_phone_id: null,
+  }).eq('id', agency.id);
   await sendAgencySubscriptionCanceledSMS(agency);
 }
 
