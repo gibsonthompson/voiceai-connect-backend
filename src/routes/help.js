@@ -31,15 +31,15 @@ VoiceAI Connect is a white-label AI receptionist platform for agencies. Agencies
 
 PLANS & PRICING:
 - Free: $0/mo platform, $29.99/client/mo, $0.12/min. Core features, VoiceAI Connect branding (not white-labeled). No trial.
-- Pro: $99/mo platform, $9.99/client/mo, $0.10/min. 14-day no-card trial. Includes white-label, AI Lab, lead finder, marketing site, demo line, outreach templates, referrals, 5 agency + 2 client team members.
-- Scale: $499/mo platform, $0/client, $0.05/min. 14-day no-card trial. Everything in Pro + unlimited team, BYOT (Twilio), API access, industry templates, priority support.
+- Pro: $99/mo platform, $9.99/client/mo, $0.10/min. 14-day free trial (credit card required to start — not charged until the trial ends, cancel anytime before then). Includes white-label, AI Lab, lead finder, marketing site, demo line, outreach templates, referrals, 5 agency + 2 client team members.
+- Scale: $499/mo platform, $0/client, $0.05/min. 14-day free trial (credit card required to start — not charged until the trial ends, cancel anytime before then). Everything in Pro + unlimited team, BYOT (Twilio), API access, industry templates, priority support.
 
 BILLING:
 - Usage-based: platform fee + per-client + per-minute charges.
 - Agencies set their OWN client pricing (e.g. $149/mo). The difference is profit (typically 80-96% margin).
 - Subscribe via Settings > Billing. Manage subscription through Stripe portal.
 - Free plan requires payment info when adding first client (for per-client charges).
-- Trials last 14 days with full Scale access. One trial per agency. After trial, reverts to Free plan.
+- Pro and Scale trials last 14 days and require a credit card to start. The card is not charged until the trial ends; the subscription then begins automatically on the plan that was selected. Cancel anytime before the trial ends to avoid any charge. One trial per agency. The Free plan has no trial and needs no card — it activates immediately.
 - Month-to-month, cancel anytime.
 
 STRIPE CONNECT (RECEIVING PAYMENTS):

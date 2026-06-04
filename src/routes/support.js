@@ -3,6 +3,8 @@
 // POST /api/agency/:agencyId/support/chat
 // UPDATED: 2026-05-20 — Migrated from deprecated claude-sonnet-4-6-20260217
 //          to claude-sonnet-4-6. Old model retires June 15, 2026.
+// UPDATED: 2026-06-04 — Corrected stale pricing/trial copy: Pro is $99/mo
+//          (was $179), and Pro/Scale trials are now card-required (was no-card).
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -30,8 +32,8 @@ VoiceAI Connect lets marketing agencies resell AI phone receptionists to local b
 ## AGENCY ONBOARDING FLOW
 1. Agency signs up at the platform → creates account with name, email, phone
 2. Enters agency name — a test client with a live AI receptionist and phone number is auto-provisioned immediately
-3. Selects a plan: Free (activates instantly, no card needed), Pro ($179/mo), or Scale ($499/mo)
-4. Pro and Scale plans start a 14-day free trial — no credit card required
+3. Selects a plan: Free (activates instantly, no card needed), Pro ($99/mo), or Scale ($499/mo)
+4. Pro and Scale plans start a 14-day free trial — a credit card is required to start, but it is not charged until the trial ends, and the trial can be canceled anytime before then
 5. Sets password and enters the dashboard
 6. Dashboard shows a setup checklist guiding them through: upload logo, set brand colors, connect Stripe, share signup link
 7. Gets a branded subdomain (agency-name.myvoiceaiconnect.com) or can connect a custom domain (Pro/Scale)
@@ -50,19 +52,19 @@ VoiceAI Connect uses hybrid usage-based pricing. Every plan has a platform fee, 
 - No trial period — activates immediately, no credit card needed
 - Payment method collected when first real client is added
 
-### Pro Plan — $179/mo
-- $179 platform fee per month
+### Pro Plan — $99/mo
+- $99 platform fee per month
 - $9.99 per active client per month
 - $0.10 per minute of voice usage
 - Includes everything in Free PLUS: full white-label branding, custom domain, marketing website, lead finder, up to 5 team members, analytics, priority email support
-- 14-day free trial, no credit card required
+- 14-day free trial — credit card required to start (not charged until the trial ends, cancel anytime before then)
 
 ### Scale Plan — $499/mo
 - $499 platform fee per month
 - $0 per client (no per-client fee)
 - $0.05 per minute of voice usage
 - Includes everything in Pro PLUS: AI Lab, Packaged Receptionists (industry templates), advanced lead finder, API access, unlimited team members, dedicated support
-- 14-day free trial, no credit card required
+- 14-day free trial — credit card required to start (not charged until the trial ends, cancel anytime before then)
 
 ### Upgrading Plans
 - Free agencies can upgrade to Pro or Scale from Settings → Billing
@@ -177,7 +179,7 @@ Agencies set their own prices for each tier (Settings → Pricing). They also co
 - Per-client fees are based on the count of active, non-test clients (test clients are excluded)
 - Voice minutes are tracked in real time and billed via metered billing on the monthly invoice
 - Free agencies: no platform fee, payment method collected when they add their first real client
-- Pro/Scale agencies: 14-day free trial, then monthly billing
+- Pro/Scale agencies: 14-day free trial (credit card required to start), then monthly billing
 - Agencies can view their usage breakdown in Settings → Billing
 
 ### How Client Billing Works (Stripe Connect)
@@ -256,7 +258,7 @@ Agencies set their own prices for each tier (Settings → Pricing). They also co
 
 ### "How do I upgrade my plan?"
 - Go to Settings → Billing
-- Free agencies will see upgrade options for Pro ($179/mo) and Scale ($499/mo)
+- Free agencies will see upgrade options for Pro ($99/mo) and Scale ($499/mo)
 - Pro agencies will see an upgrade option for Scale
 - Clicking upgrade redirects to Stripe Checkout to add a payment method and start the subscription
 - All data, clients, and branding are preserved during upgrades
@@ -312,8 +314,8 @@ Agencies set their own prices for each tier (Settings → Pricing). They also co
 
 ## FEATURES BY PLAN (Agency level)
 - **Free**: Dashboard, clients, leads, outreach, analytics, demo phone, test client, VoiceAI Connect branding, email support
-- **Pro**: Everything in Free + white-label branding, marketing website, custom domain, lead finder, team members (3 agency + 2 per client), priority support. 14-day trial.
-- **Scale**: Everything in Pro + AI Lab, Packaged Receptionists, advanced lead finder, API access, unlimited team members (10 agency + 5 per client), dedicated support. 14-day trial.
+- **Pro**: Everything in Free + white-label branding, marketing website, custom domain, lead finder, team members (3 agency + 2 per client), priority support. 14-day trial (credit card required).
+- **Scale**: Everything in Pro + AI Lab, Packaged Receptionists, advanced lead finder, API access, unlimited team members (10 agency + 5 per client), dedicated support. 14-day trial (credit card required).
 
 ## RESPONSE GUIDELINES
 - Be concise and direct — agency owners are busy
@@ -350,7 +352,7 @@ router.post('/:agencyId/support/chat', async (req, res) => {
       if (agencyPlan === 'free' || agencyPlan === 'starter') {
         contextPrompt += ' As a Free plan user, they pay $29.99/client/mo + $0.12/min with no platform fee. They do not have white-label branding, marketing website, or custom domain. They can upgrade to Pro or Scale from Settings → Billing.';
       } else if (agencyPlan === 'pro' || agencyPlan === 'professional') {
-        contextPrompt += ' As a Pro plan user, they pay $179/mo + $9.99/client/mo + $0.10/min. They have full white-label branding, marketing website, custom domain, and up to 5 team members. They can upgrade to Scale from Settings → Billing.';
+        contextPrompt += ' As a Pro plan user, they pay $99/mo + $9.99/client/mo + $0.10/min. They have full white-label branding, marketing website, custom domain, and up to 5 team members. They can upgrade to Scale from Settings → Billing.';
       } else if (agencyPlan === 'scale' || agencyPlan === 'enterprise') {
         contextPrompt += ' As a Scale plan user, they pay $499/mo + $0/client + $0.05/min. They have all features including AI Lab, industry templates, and unlimited team members.';
       }
