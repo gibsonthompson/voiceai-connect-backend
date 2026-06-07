@@ -765,11 +765,9 @@ async function handleVapiWebhook(req, res) {
       return res.status(200).json({ received: true, blocked: true, reason: 'Limit reached' });
     }
 
+    // ── EXTRACT CALL DATA (before AI, so we can save immediately) ──────
     const transcript = message.transcript || '';
     const callerPhone = call.customer?.number || 'Unknown';
-    const aiData = await generateAISummary(transcript, client.industry || 'professional_services', callerPhone);
-    const { customerName, customerPhone, customerEmail, urgency, summary: aiSummary } = aiData;
-    let { isSpam, spamReason } = aiData;
     const recordingUrl = message.recordingUrl || message.artifact?.recordingUrl || call.recordingUrl || null;
     const durationSeconds = call.duration || message.duration || message.artifact?.duration || message.durationSeconds || null;
     const endedReason = call.endedReason || message.endedReason || null;
@@ -783,106 +781,128 @@ async function handleVapiWebhook(req, res) {
       console.log('🏥 HIPAA mode — recording and transcript will not be stored');
     }
 
-    if (wasTransferred && isSpam) {
-      console.log(`⚠️ Spam flag overridden — call was successfully transferred (${endedReason})`);
-      isSpam = false;
-      spamReason = null;
-    }
-
-    if (isSpam) {
-      console.log(`🚫 SPAM: ${spamReason}`);
-      const rec = {
-        client_id: client.id, customer_name: customerName || 'Spam', customer_phone: customerPhone || callerPhone,
-        customer_email: null, ai_summary: aiSummary, transcript: storedTranscript, recording_url: storedRecordingUrl,
-        duration_seconds: durationSeconds, urgency_level: 'spam', call_status: 'spam',
-        ended_reason: endedReason, transfer_status: null, is_spam: true, spam_reason: spamReason,
-        call_language: aiData.callLanguage || 'en', created_at: new Date().toISOString()
-      };
-      const { data: inserted, error } = await supabase.from('calls').insert([rec]).select();
-      if (error) { delete rec.is_spam; delete rec.spam_reason; delete rec.ended_reason; delete rec.transfer_status; delete rec.call_language; await supabase.from('calls').insert([rec]).select(); }
-
-      // ── Record usage even for spam calls (they still cost VAPI minutes) ──
-      try {
-        const agencyId = agency?.id || client.agency_id;
-        if (agencyId && durationSeconds && durationSeconds > 0) {
-          await insertUsageRecord({
-            agencyId,
-            clientId: client.id,
-            callId: inserted?.[0]?.id || null,
-            durationSeconds,
-          });
-        }
-      } catch (usageErr) {
-        console.warn('⚠️ Usage record failed (non-fatal):', usageErr.message);
-      }
-
-      if (client.owner_phone) { try { await sendSpamBlockedSMS(client, agency, callerPhone, spamReason); } catch {} }
-      return res.status(200).json({ received: true, saved: true, spam: true, spamReason, callId: inserted?.[0]?.id });
-    }
-
-    const rec = {
-      client_id: client.id, customer_name: customerName, customer_phone: customerPhone,
-      customer_email: customerEmail, ai_summary: aiSummary, transcript: storedTranscript, recording_url: storedRecordingUrl,
-      duration_seconds: durationSeconds, urgency_level: urgency,
-      call_status: wasTransferred ? 'transferred' : 'completed',
+    // ── STEP 1: SAVE CALL RECORD IMMEDIATELY ──────────────────────────
+    // Insert before AI summary so a slow/failed Claude API never loses
+    // the call record. AI data is backfilled in step 4.
+    const initialRec = {
+      client_id: client.id, customer_name: 'Unknown', customer_phone: callerPhone,
+      customer_email: null, ai_summary: null, transcript: storedTranscript,
+      recording_url: storedRecordingUrl, duration_seconds: durationSeconds,
+      urgency_level: 'routine', call_status: wasTransferred ? 'transferred' : 'completed',
       ended_reason: endedReason, transfer_status: transferStatus,
       is_spam: false, spam_reason: null,
-      call_language: aiData.callLanguage || 'en', created_at: new Date().toISOString()
+      call_language: 'en', created_at: new Date().toISOString()
     };
-    const { data: insertedCall, error: insertError } = await supabase.from('calls').insert([rec]).select();
-    if (insertError) {
-      if (insertError.message && (insertError.message.includes('ended_reason') || insertError.message.includes('transfer_status') || insertError.message.includes('is_spam') || insertError.message.includes('spam_reason') || insertError.message.includes('call_language'))) {
-        delete rec.ended_reason; delete rec.transfer_status; delete rec.is_spam; delete rec.spam_reason; delete rec.call_language; rec.call_status = 'completed';
-        var { data: insertedCallFinal, error: retryError } = await supabase.from('calls').insert([rec]).select();
-        if (retryError) return res.status(500).json({ error: 'Failed to save call' });
-      } else return res.status(500).json({ error: 'Failed to save call' });
-    }
-    const savedCall = insertedCall || insertedCallFinal;
-    console.log('✅ Call saved');
-
-    // ── Record voice usage for metered billing ──────────────────────────
-    try {
-      const agencyId = agency?.id || client.agency_id;
-      if (agencyId && durationSeconds && durationSeconds > 0) {
-        await insertUsageRecord({
-          agencyId,
-          clientId: client.id,
-          callId: savedCall?.[0]?.id || null,
-          durationSeconds,
-        });
+    let savedCallId = null;
+    {
+      const { data: insertedCall, error: insertError } = await supabase.from('calls').insert([initialRec]).select();
+      if (insertError) {
+        if (insertError.message && (insertError.message.includes('ended_reason') || insertError.message.includes('transfer_status') || insertError.message.includes('is_spam') || insertError.message.includes('spam_reason') || insertError.message.includes('call_language'))) {
+          delete initialRec.ended_reason; delete initialRec.transfer_status; delete initialRec.is_spam; delete initialRec.spam_reason; delete initialRec.call_language; initialRec.call_status = 'completed';
+          const { data: retried, error: retryError } = await supabase.from('calls').insert([initialRec]).select();
+          if (retryError) return res.status(500).json({ error: 'Failed to save call' });
+          savedCallId = retried?.[0]?.id || null;
+        } else {
+          return res.status(500).json({ error: 'Failed to save call' });
+        }
+      } else {
+        savedCallId = insertedCall?.[0]?.id || null;
       }
-    } catch (usageErr) {
-      console.warn('⚠️ Usage record failed (non-fatal):', usageErr.message);
     }
+    console.log('✅ Call saved (pre-AI):', savedCallId);
 
-    try {
-      const { contact, isNew } = await upsertContactFromCall({ clientId: client.id, agencyId: agency?.id, callId: savedCall?.[0]?.id,
-        customerPhone, customerName, customerEmail, customerAddress: call.customer?.address || null,
-        aiSummary, urgency, serviceRequested: call.customer?.serviceRequested || null });
-      if (contact) console.log(`📇 Contact ${isNew ? 'created' : 'updated'}: ${contact.name}`);
-    } catch (e) { console.warn('⚠️ Contact upsert failed:', e.message); }
-
+    // ── STEP 2: UPDATE CALL COUNT ─────────────────────────────────────
     const newCount = currentCallCount + 1;
     const isFirst = newCount === 1;
     const upd = { calls_this_month: newCount };
     if (isFirst) { upd.first_call_received = true; upd.first_call_received_at = new Date().toISOString(); }
     await supabase.from('clients').update(upd).eq('id', client.id);
 
+    // ── STEP 3: RECORD VOICE USAGE ────────────────────────────────────
+    try {
+      const agencyId = agency?.id || client.agency_id;
+      if (agencyId && durationSeconds && durationSeconds > 0) {
+        await insertUsageRecord({ agencyId, clientId: client.id, callId: savedCallId, durationSeconds });
+      }
+    } catch (usageErr) {
+      console.warn('⚠️ Usage record failed (non-fatal):', usageErr.message);
+    }
+
+    // ── STEP 4: GENERATE AI SUMMARY (with hard timeout) ───────────────
+    // Promise.race guarantees we never hang even if AbortController fails.
+    let aiData = {
+      customerName: 'Unknown', customerPhone: callerPhone, customerEmail: null,
+      urgency: 'routine', summary: `Customer called regarding ${(client.industry || 'professional_services').replace('_', ' ')} services.`,
+      callLanguage: 'en', isSpam: false, spamReason: null
+    };
+    try {
+      aiData = await Promise.race([
+        generateAISummary(transcript, client.industry || 'professional_services', callerPhone),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('AI summary hard timeout (12s)')), 12000))
+      ]);
+    } catch (aiErr) {
+      console.warn('⚠️ AI summary failed/timed out:', aiErr.message);
+    }
+
+    const { customerName, customerPhone: aiPhone, customerEmail, urgency, summary: aiSummary } = aiData;
+    let { isSpam, spamReason } = aiData;
+
+    if (wasTransferred && isSpam) {
+      console.log(`⚠️ Spam flag overridden — call was successfully transferred (${endedReason})`);
+      isSpam = false;
+      spamReason = null;
+    }
+
+    // ── STEP 5: UPDATE CALL RECORD WITH AI DATA ───────────────────────
+    if (savedCallId) {
+      const aiUpdate = {
+        customer_name: customerName,
+        customer_phone: aiPhone || callerPhone,
+        customer_email: customerEmail,
+        ai_summary: aiSummary,
+        urgency_level: isSpam ? 'spam' : urgency,
+        call_status: isSpam ? 'spam' : (wasTransferred ? 'transferred' : 'completed'),
+        is_spam: isSpam,
+        spam_reason: spamReason || null,
+        call_language: aiData.callLanguage || 'en',
+      };
+      const { error: updateErr } = await supabase.from('calls').update(aiUpdate).eq('id', savedCallId);
+      if (updateErr) console.warn('⚠️ Call AI update failed (non-fatal):', updateErr.message);
+      else console.log('✅ Call updated with AI data');
+    }
+
+    // ── SPAM: notify and return early ─────────────────────────────────
+    if (isSpam) {
+      console.log(`🚫 SPAM: ${spamReason}`);
+      if (client.owner_phone) { try { await sendSpamBlockedSMS(client, agency, callerPhone, spamReason); } catch {} }
+      return res.status(200).json({ received: true, saved: true, spam: true, spamReason, callId: savedCallId });
+    }
+
+    // ── STEP 6: UPSERT CONTACT ────────────────────────────────────────
+    try {
+      const { contact, isNew } = await upsertContactFromCall({ clientId: client.id, agencyId: agency?.id, callId: savedCallId,
+        customerPhone: aiPhone || callerPhone, customerName, customerEmail, customerAddress: call.customer?.address || null,
+        aiSummary, urgency, serviceRequested: call.customer?.serviceRequested || null });
+      if (contact) console.log(`📇 Contact ${isNew ? 'created' : 'updated'}: ${contact.name}`);
+    } catch (e) { console.warn('⚠️ Contact upsert failed:', e.message); }
+
+    // ── STEP 7: USAGE WARNINGS ────────────────────────────────────────
     if (callLimit !== -1) {
       const pct = (newCount / callLimit) * 100;
       if (pct >= 80 && pct < 100 && newCount === Math.floor(callLimit * 0.8)) await sendUsageWarningEmail(client, agency, newCount, callLimit);
       if (newCount >= callLimit && newCount === callLimit) await sendLimitReachedEmail(client, agency, callLimit);
     }
 
+    // ── STEP 8: NOTIFICATIONS ─────────────────────────────────────────
     let smsSent = false, emailSent = false;
     if (client.owner_phone) smsSent = await sendCallNotificationSMS(client, agency, aiData);
     await notifyTeamMembers(client.id, aiData, agency);
     if (isFeatureEnabled(client, agency, 'email_summaries') && client.email) {
-      const r = await sendCallSummaryEmail(client, agency, aiData, { duration_seconds: durationSeconds, transcript: storedTranscript, created_at: savedCall?.[0]?.created_at || new Date().toISOString() });
+      const r = await sendCallSummaryEmail(client, agency, aiData, { duration_seconds: durationSeconds, transcript: storedTranscript, created_at: new Date().toISOString() });
       emailSent = r?.success || false;
     }
 
-    return res.status(200).json({ received: true, saved: true, callId: savedCall?.[0]?.id,
+    return res.status(200).json({ received: true, saved: true, callId: savedCallId,
       smsSent, emailSent, firstCall: isFirst, agency: agency?.name, duration: durationSeconds,
       endedReason, transferStatus, wasTransferred, spam: false });
 
