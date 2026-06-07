@@ -4,6 +4,7 @@
 // UPDATED: 2026-05-07 — Usage tracking cron + usage summary endpoint (Phase 1)
 // UPDATED: 2026-05-19 — Phase 3A: Staff members + client services routes
 // UPDATED: 2026-06-03 — /api/agency/cancel now releases the agency demo number
+// UPDATED: 2026-06-07 — Generic client field update endpoint (business_name, owner_phone, etc.)
 // Destination: src/server.js (or src/index.js) — FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -527,6 +528,74 @@ app.put('/api/agency/:agencyId/clients/:clientId/industry', async (req, res) => 
     res.json({ success: true, industry });
   } catch (error) {
     console.error('Error updating industry:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// GENERIC CLIENT FIELD UPDATE (business_name, owner_phone, etc.)
+// Whitelisted fields only. Used by the client detail page inline-edit UI.
+// ============================================================================
+app.put('/api/agency/:agencyId/clients/:clientId', async (req, res) => {
+  try {
+    const { agencyId, clientId } = req.params;
+
+    const ALLOWED_FIELDS = [
+      'business_name',
+      'owner_phone',
+      'owner_name',
+      'business_city',
+      'business_state',
+      'business_website',
+    ];
+
+    const updates = {};
+    for (const key of ALLOWED_FIELDS) {
+      if (req.body[key] !== undefined) {
+        const v = req.body[key];
+        updates[key] = typeof v === 'string' ? v.trim() : v;
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
+
+    // business_name cannot be cleared to empty string
+    if (updates.business_name !== undefined && updates.business_name === '') {
+      return res.status(400).json({ error: 'Business name cannot be empty' });
+    }
+
+    // Verify client belongs to this agency before updating
+    const { data: existing, error: lookupErr } = await supabase
+      .from('clients')
+      .select('id')
+      .eq('id', clientId)
+      .eq('agency_id', agencyId)
+      .single();
+
+    if (lookupErr || !existing) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+
+    updates.updated_at = new Date().toISOString();
+
+    const { data: client, error } = await supabase
+      .from('clients')
+      .update(updates)
+      .eq('id', clientId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Error updating client:', error);
+      return res.status(500).json({ error: 'Failed to update client' });
+    }
+
+    console.log(`✅ Client ${clientId} updated: ${Object.keys(updates).filter(k => k !== 'updated_at').join(', ')}`);
+    res.json({ success: true, client });
+  } catch (error) {
+    console.error('Error updating client:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
