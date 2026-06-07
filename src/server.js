@@ -5,6 +5,7 @@
 // UPDATED: 2026-05-19 — Phase 3A: Staff members + client services routes
 // UPDATED: 2026-06-03 — /api/agency/cancel now releases the agency demo number
 // UPDATED: 2026-06-07 — Generic client field update endpoint (business_name, owner_phone, etc.)
+// UPDATED: 2026-06-07 — Exclude test clients from dashboard/analytics MRR and stats
 // Destination: src/server.js (or src/index.js) — FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -366,7 +367,7 @@ app.get('/api/agency/:agencyId/dashboard', async (req, res) => {
 
     const { data: clients, error } = await supabase
       .from('clients')
-      .select('id, business_name, plan_type, subscription_status, status, calls_this_month, created_at')
+      .select('id, business_name, plan_type, subscription_status, status, calls_this_month, created_at, is_test_client')
       .eq('agency_id', agencyId)
       .order('created_at', { ascending: false });
 
@@ -376,6 +377,8 @@ app.get('/api/agency/:agencyId/dashboard', async (req, res) => {
     }
 
     const clientList = clients || [];
+    // Test clients don't count toward revenue or paying-client metrics
+    const realClients = clientList.filter(c => !c.is_test_client);
 
     const { data: agency } = await supabase
       .from('agencies')
@@ -384,7 +387,7 @@ app.get('/api/agency/:agencyId/dashboard', async (req, res) => {
       .single();
 
     let mrr = 0;
-    clientList.forEach(client => {
+    realClients.forEach(client => {
       if (client.subscription_status === 'active') {
         switch (client.plan_type) {
           case 'starter': mrr += agency?.price_starter || 4900; break;
@@ -397,9 +400,9 @@ app.get('/api/agency/:agencyId/dashboard', async (req, res) => {
     const totalCalls = clientList.reduce((sum, c) => sum + (c.calls_this_month || 0), 0);
     const recentClients = clientList.slice(0, 5);
 
-    console.log(`📊 Dashboard loaded for agency ${agencyId}: ${clientList.length} clients, $${mrr/100} MRR`);
+    console.log(`📊 Dashboard loaded for agency ${agencyId}: ${clientList.length} clients (${realClients.length} real), $${mrr/100} MRR`);
 
-    res.json({ clientCount: clientList.length, mrr, totalCalls, recentClients });
+    res.json({ clientCount: realClients.length, mrr, totalCalls, recentClients });
   } catch (error) {
     console.error('Error fetching dashboard:', error);
     res.status(500).json({ error: 'Server error' });
@@ -614,7 +617,7 @@ app.get('/api/agency/:agencyId/analytics', async (req, res) => {
 
     const { data: clients, error: clientsError } = await supabase
       .from('clients')
-      .select('id, business_name, plan_type, subscription_status, status, created_at')
+      .select('id, business_name, plan_type, subscription_status, status, created_at, is_test_client')
       .eq('agency_id', agencyId)
       .order('created_at', { ascending: false });
 
@@ -624,12 +627,14 @@ app.get('/api/agency/:agencyId/analytics', async (req, res) => {
     }
 
     const clientList = clients || [];
-    const activeClients = clientList.filter(c => c.subscription_status === 'active').length;
-    const trialClients = clientList.filter(c => c.subscription_status === 'trial' || c.subscription_status === 'trialing').length;
-    const totalClients = clientList.length;
+    // Test clients don't count toward revenue or paying-client metrics
+    const realClients = clientList.filter(c => !c.is_test_client);
+    const activeClients = realClients.filter(c => c.subscription_status === 'active').length;
+    const trialClients = realClients.filter(c => c.subscription_status === 'trial' || c.subscription_status === 'trialing').length;
+    const totalClients = realClients.length;
 
     let mrr = 0;
-    clientList.forEach(client => {
+    realClients.forEach(client => {
       if (client.subscription_status === 'active') {
         switch (client.plan_type) {
           case 'starter': mrr += agency?.price_starter || 4900; break;
@@ -639,7 +644,8 @@ app.get('/api/agency/:agencyId/analytics', async (req, res) => {
       }
     });
 
-    const clientIds = clientList.map(c => c.id);
+    // Only query payments for real (non-test) clients
+    const clientIds = realClients.map(c => c.id);
     let payments = [];
     let totalEarned = 0;
     let pendingPayout = 0;
