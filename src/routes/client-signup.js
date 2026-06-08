@@ -13,6 +13,14 @@
 //          query tool) when phone provisioning fails. Guard SMS sends against
 //          undefined phone numbers. Better error messages for Telnyx 402.
 // UPDATED: 2026-05-29 — Fix: agency_id now set on user record in all signup paths
+// UPDATED: 2026-06-08 — Phase 1 double-billing fix: handleClientSignup now
+//          HONORS req.body.planType (starter|pro|growth) instead of hardcoding
+//          'starter'. Matches the pattern already in handleAgencyAddClient.
+//          /signup/plan was posting the user's selected plan; backend was
+//          silently dropping it and dumping every signup into a Starter trial.
+//          Users then re-selected their intended plan on /upgrade-required,
+//          which is where the double-billing happened (now guarded backend-side
+//          in stripe-connect.js createClientCheckout).
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -38,6 +46,12 @@ const { provisionBYOTNumber } = require('./byot');
 
 // Import per-client billing update
 const { updateClientBillingQuantity } = require('../lib/usage-tracker');
+
+// ============================================================================
+// VALID CLIENT PLANS — single source of truth for plan-tier validation
+// across handleClientSignup, handleAgencyAddClient, and provisionClient.
+// ============================================================================
+const VALID_CLIENT_PLANS = ['starter', 'pro', 'growth'];
 
 // ============================================================================
 // CLEANUP: Delete orphaned VAPI resources when signup fails mid-flow
@@ -339,6 +353,9 @@ async function provisionPhoneForClient(agency, clientData, assistantId) {
 
 // ============================================================================
 // MAIN CLIENT SIGNUP HANDLER (from agency marketing site)
+// UPDATED 2026-06-08 — Phase 1: now honors req.body.planType so plan selection
+// in /signup/plan is no longer theater. Same validation pattern as
+// handleAgencyAddClient below.
 // ============================================================================
 async function handleClientSignup(req, res) {
   // Track created resources for rollback on failure
@@ -371,6 +388,17 @@ async function handleClientSignup(req, res) {
       password
     } = req.body;
 
+    // ────────────────────────────────────────────────────────────────────
+    // Phase 1: Resolve plan from request body. Frontend /signup/plan posts
+    // planType when the user picks a tile. Anything not in VALID_CLIENT_PLANS
+    // (including missing) falls back to 'starter'. Matches the pattern in
+    // handleAgencyAddClient (which already worked correctly).
+    // ────────────────────────────────────────────────────────────────────
+    const planType = VALID_CLIENT_PLANS.includes(req.body.planType) ? req.body.planType : 'starter';
+    if (req.body.planType && !VALID_CLIENT_PLANS.includes(req.body.planType)) {
+      console.warn(`⚠️ Invalid planType "${req.body.planType}" from signup request — defaulting to starter`);
+    }
+
     const agency = await getAgencyById(agencyId);
     if (!agency) {
       return res.status(404).json({ error: 'Agency not found' });
@@ -397,7 +425,7 @@ async function handleClientSignup(req, res) {
     }
     
     console.log(`✅ Client limit check passed: ${limitCheck.current}/${limitCheck.limit === -1 ? 'unlimited' : limitCheck.limit}`);
-    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Client country: ${clientCountry}`);
+    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Client country: ${clientCountry} | Plan: ${planType}`);
 
     let websiteUrl = rawWebsiteUrl;
     if (websiteUrl && !websiteUrl.startsWith('http')) {
@@ -502,9 +530,13 @@ async function handleClientSignup(req, res) {
 
     // ============================================
     // STEP 4: CREATE CLIENT RECORD
+    // ────────────────────────────────────────────
+    // Phase 1: monthly_call_limit now derived from the chosen plan's column
+    // (agency[`limit_${planType}`]) instead of hardcoded agency.limit_starter.
     // ============================================
     const trialEndsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-    const callLimit = agency.limit_starter || 50;
+    const callLimitKey = `limit_${planType}`;
+    const callLimit = agency[callLimitKey] ?? agency.limit_starter ?? 50;
     
     const { data: newClient, error: clientError } = await supabase
       .from('clients')
@@ -529,7 +561,7 @@ async function handleClientSignup(req, res) {
         subscription_status: 'trial',
         trial_ends_at: trialEndsAt,
         status: 'active',
-        plan_type: 'starter',
+        plan_type: planType,
         monthly_call_limit: callLimit,
         calls_this_month: 0,
         business_website: websiteUrl || null,
@@ -550,7 +582,7 @@ async function handleClientSignup(req, res) {
     createdAssistantId = null;
     createdQueryToolId = null;
 
-    console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult.provisioningMethod})`);
+    console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult.provisioningMethod}, ${planType}, limit=${callLimit})`);
 
     // ── Update per-client billing for the agency (non-blocking) ─────
     try {
@@ -634,6 +666,8 @@ async function handleClientSignup(req, res) {
         location: `${businessCity}, ${businessState}`,
         trial_ends_at: newClient.trial_ends_at,
         subscription_status: 'trial',
+        plan_type: planType,
+        monthly_call_limit: callLimit,
         agency: agency.name
       }
     });
@@ -700,6 +734,13 @@ async function handleAgencyAddClient(req, res) {
       return res.status(400).json({ error: 'Validation failed', errors });
     }
 
+    // Validate planType the same way handleClientSignup does. Default 'starter'
+    // already comes from destructuring; this rejects any out-of-set string.
+    const resolvedPlanType = VALID_CLIENT_PLANS.includes(planType) ? planType : 'starter';
+    if (planType !== resolvedPlanType) {
+      console.warn(`⚠️ Invalid planType "${planType}" from agency add-client — defaulting to starter`);
+    }
+
     const agency = await getAgencyById(agencyId);
     if (!agency) {
       return res.status(404).json({ error: 'Agency not found' });
@@ -723,7 +764,7 @@ async function handleAgencyAddClient(req, res) {
     }
 
     console.log(`✅ Limit check passed: ${limitCheck.current}/${limitCheck.limit === -1 ? 'unlimited' : limitCheck.limit}`);
-    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Adding: ${businessName} (${clientCountry})`);
+    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Adding: ${businessName} (${clientCountry}, ${resolvedPlanType})`);
 
     let websiteUrl = rawWebsiteUrl;
     if (websiteUrl && !websiteUrl.startsWith('http')) {
@@ -810,8 +851,8 @@ async function handleAgencyAddClient(req, res) {
 
     // === STEP 4: Create Client Record ===
     const trialEndsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-    const callLimitKey = `limit_${planType}`;
-    const callLimit = agency[callLimitKey] || agency.limit_starter || 50;
+    const callLimitKey = `limit_${resolvedPlanType}`;
+    const callLimit = agency[callLimitKey] ?? agency.limit_starter ?? 50;
 
     const { data: newClient, error: clientError } = await supabase
       .from('clients')
@@ -836,7 +877,7 @@ async function handleAgencyAddClient(req, res) {
         subscription_status: 'trial',
         trial_ends_at: trialEndsAt,
         status: 'active',
-        plan_type: planType,
+        plan_type: resolvedPlanType,
         monthly_call_limit: callLimit,
         calls_this_month: 0,
         business_website: websiteUrl || null,

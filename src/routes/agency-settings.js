@@ -9,6 +9,9 @@
 // UPDATED: Added marketing_template to responses + whitelist
 // UPDATED: 2026-05-22 — Added client_header_mode + allow_client_branding to whitelist + response
 // UPDATED: 2026-05-29 — Fixed plan_features validation: team_members is a number, not boolean
+// UPDATED: 2026-06-08 — Added plan_*_name and plan_*_description columns for
+//                       white-label plan customization (Phase 3). Returned in
+//                       both getAgencyByHost (public) and getAgencySettings.
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
@@ -89,7 +92,15 @@ async function getAgencyByHost(req, res) {
         limit_starter: agency.limit_starter,
         limit_pro: agency.limit_pro,
         limit_growth: agency.limit_growth,
-        
+
+        // White-label plan customization (Phase 3)
+        plan_starter_name: agency.plan_starter_name || 'Starter',
+        plan_pro_name: agency.plan_pro_name || 'Professional',
+        plan_growth_name: agency.plan_growth_name || 'Growth',
+        plan_starter_description: agency.plan_starter_description || null,
+        plan_pro_description: agency.plan_pro_description || null,
+        plan_growth_description: agency.plan_growth_description || null,
+
         // Client plan features (for dynamic plan cards on signup)
         plan_features: agency.plan_features || null,
         
@@ -116,7 +127,11 @@ async function getAgencyByHost(req, res) {
         // OG / Social meta (for marketing site social sharing)
         og_title: agency.og_title || null,
         og_description: agency.og_description || null,
-        og_image_url: agency.og_image_url || null
+        og_image_url: agency.og_image_url || null,
+
+        // Marketing domain (used by the embed widget for cross-origin auth handoff)
+        marketing_domain: agency.marketing_domain || null,
+        domain_verified: agency.domain_verified || false
       }
     });
     
@@ -215,7 +230,15 @@ async function getAgencySettings(req, res) {
         limit_starter: agency.limit_starter,
         limit_pro: agency.limit_pro,
         limit_growth: agency.limit_growth,
-        
+
+        // White-label plan customization (Phase 3)
+        plan_starter_name: agency.plan_starter_name || 'Starter',
+        plan_pro_name: agency.plan_pro_name || 'Professional',
+        plan_growth_name: agency.plan_growth_name || 'Growth',
+        plan_starter_description: agency.plan_starter_description || null,
+        plan_pro_description: agency.plan_pro_description || null,
+        plan_growth_description: agency.plan_growth_description || null,
+
         // Client plan feature gating
         plan_features: agency.plan_features || null,
         
@@ -293,6 +316,9 @@ async function updateAgencySettings(req, res) {
       'marketing_domain', 'domain_verified',
       'price_starter', 'price_pro', 'price_growth',
       'limit_starter', 'limit_pro', 'limit_growth',
+      // Phase 3 — white-label plan customization
+      'plan_starter_name', 'plan_pro_name', 'plan_growth_name',
+      'plan_starter_description', 'plan_pro_description', 'plan_growth_description',
       'support_email', 'support_phone', 'timezone',
       // Marketing website content fields
       'company_tagline',
@@ -332,7 +358,58 @@ async function updateAgencySettings(req, res) {
         sanitizedUpdates[key] = updates[key];
       }
     }
-    
+
+    // Validate + sanitize plan name / description fields (Phase 3)
+    const PLAN_NAME_FIELDS = ['plan_starter_name', 'plan_pro_name', 'plan_growth_name'];
+    const PLAN_DESC_FIELDS = ['plan_starter_description', 'plan_pro_description', 'plan_growth_description'];
+    const PLAN_NAME_DEFAULTS = {
+      plan_starter_name: 'Starter',
+      plan_pro_name: 'Professional',
+      plan_growth_name: 'Growth',
+    };
+
+    for (const field of PLAN_NAME_FIELDS) {
+      if (sanitizedUpdates[field] === undefined) continue;
+      const v = sanitizedUpdates[field];
+      if (v === null) {
+        // null means "reset to default"
+        sanitizedUpdates[field] = PLAN_NAME_DEFAULTS[field];
+        continue;
+      }
+      if (typeof v !== 'string') {
+        return res.status(400).json({ error: `${field} must be a string` });
+      }
+      const trimmed = v.trim();
+      if (trimmed.length === 0) {
+        // Empty input → reset to default rather than store empty string
+        sanitizedUpdates[field] = PLAN_NAME_DEFAULTS[field];
+      } else if (trimmed.length > 50) {
+        return res.status(400).json({ error: `${field} must be 50 characters or fewer` });
+      } else {
+        sanitizedUpdates[field] = trimmed;
+      }
+    }
+
+    for (const field of PLAN_DESC_FIELDS) {
+      if (sanitizedUpdates[field] === undefined) continue;
+      const v = sanitizedUpdates[field];
+      if (v === null) {
+        sanitizedUpdates[field] = null;
+        continue;
+      }
+      if (typeof v !== 'string') {
+        return res.status(400).json({ error: `${field} must be a string` });
+      }
+      const trimmed = v.trim();
+      if (trimmed.length === 0) {
+        sanitizedUpdates[field] = null;
+      } else if (trimmed.length > 200) {
+        return res.status(400).json({ error: `${field} must be 200 characters or fewer` });
+      } else {
+        sanitizedUpdates[field] = trimmed;
+      }
+    }
+
     // Validate branding_overrides structure if provided
     if (sanitizedUpdates.branding_overrides !== undefined) {
       const bo = sanitizedUpdates.branding_overrides;

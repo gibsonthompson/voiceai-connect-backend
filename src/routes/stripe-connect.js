@@ -12,6 +12,13 @@
 // UPDATED: 2026-06-03 — expireTrials now RELEASES the underlying Telnyx number
 //          (via fullyReleaseNumber) before nulling vapi_phone_number. Deleting
 //          only the VAPI object left the Telnyx rental billing monthly forever.
+// UPDATED: 2026-06-08 — Phase 1 double-billing fix: createClientCheckout
+//          rejects with 409 if client.stripe_connected_subscription_id already
+//          points to an active|trialing|past_due Stripe subscription. Stale IDs
+//          (resource_missing) fall through to a fresh checkout. This is the
+//          direct cause of Neil at Apex Law getting billed $249 + $499 in
+//          19 minutes — same client clicked Pro, completed Stripe, came back
+//          to /upgrade-required (state lost), clicked Growth, got a second sub.
 // ============================================================================
 const Stripe = require('stripe');
 const fetch = require('node-fetch');
@@ -202,6 +209,11 @@ async function disconnectConnectAccount(req, res) {
 
 // ============================================================================
 // CREATE CLIENT CHECKOUT
+// UPDATED 2026-06-08 — Phase 1 active-subscription guard. If the client
+// already has a Stripe Connect subscription that's active|trialing|past_due,
+// reject with 409 before creating a new product/price/session. The frontend
+// turns 409 into a billing-portal redirect. resource_missing (stale ID from
+// a deleted Stripe sub) falls through to a fresh checkout.
 // ============================================================================
 async function createClientCheckout(req, res) {
   try {
@@ -225,6 +237,42 @@ async function createClientCheckout(req, res) {
     if (!agency) return res.status(404).json({ error: 'Agency not found' });
     if (!agency.stripe_account_id || !agency.stripe_charges_enabled) {
       return res.status(400).json({ error: 'Agency has not completed Stripe Connect setup' });
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Phase 1: Active-subscription guard — prevents double-billing.
+    // The webhook handler `handleClientCheckoutCompleted` writes
+    // `stripe_connected_subscription_id` after a successful checkout. If a
+    // user returns to /upgrade-required after that webhook has fired (state
+    // lost, two tabs, back-button), the next checkout attempt would create
+    // a SECOND subscription on the same Connect customer. This guard reads
+    // the live Stripe status and refuses if there's already a live sub.
+    //
+    // 'resource_missing' = the sub was deleted on Stripe but the DB still
+    // has the ID. Safe to fall through to a fresh checkout.
+    // ────────────────────────────────────────────────────────────────────
+    if (client.stripe_connected_subscription_id) {
+      try {
+        const existingSub = await stripe.subscriptions.retrieve(
+          client.stripe_connected_subscription_id,
+          { stripeAccount: agency.stripe_account_id }
+        );
+        if (['active', 'trialing', 'past_due'].includes(existingSub.status)) {
+          console.log(`🚫 Blocked duplicate checkout for client ${client_id}: existing sub ${existingSub.id} (${existingSub.status})`);
+          return res.status(409).json({
+            error: 'active_subscription_exists',
+            message: 'You already have an active subscription. Use the billing portal to change plans.',
+            existing_subscription_id: existingSub.id,
+            existing_status: existingSub.status,
+          });
+        }
+      } catch (subErr) {
+        if (subErr.code !== 'resource_missing') {
+          console.error('Existing-sub lookup failed:', subErr);
+          throw subErr;
+        }
+        console.warn(`Stale stripe_connected_subscription_id ${client.stripe_connected_subscription_id} for client ${client_id} — proceeding with fresh checkout`);
+      }
     }
 
     console.log('Creating client checkout for:', client.email, 'via agency:', agency.name);
