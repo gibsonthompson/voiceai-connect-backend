@@ -87,9 +87,16 @@ async function createAgencyCheckout(req, res) {
       console.log('Stripe customer created:', customerId);
     }
 
+    // Per-client price is intentionally NOT added at checkout. Adding it with
+    // quantity:1 would bill the agency for a phantom client on day one of the
+    // trial (or first invoice for skipTrial). The per-client subscription item
+    // is created by updateClientBillingQuantity() in lib/usage-tracker.js when
+    // the agency provisions their first real client — at which point the
+    // quantity reflects actual billable client count and grows/shrinks from
+    // there. Per-minute is a metered Price (no quantity) and stays — it's
+    // free until usage is reported via the voice_minutes meter.
     const lineItems = [];
     if (priceIds.platform) lineItems.push({ price: priceIds.platform, quantity: 1 });
-    if (priceIds.client) lineItems.push({ price: priceIds.client, quantity: 1 });
     if (priceIds.minute) lineItems.push({ price: priceIds.minute });
     if (lineItems.length === 0) return res.status(400).json({ error: 'No Stripe prices configured for this plan. Set STRIPE_PRICE_* env vars.' });
 
@@ -131,8 +138,14 @@ async function createFreeUsageSubscription(agencyId) {
     await supabase.from('agencies').update({ stripe_customer_id: customerId }).eq('id', agencyId);
   }
 
+  // Per-client price is intentionally NOT added here. The Free subscription
+  // is created when the agency unlocks billing (canAgencyAddClient gate) at
+  // the moment they're about to add their first client. The client row hasn't
+  // been inserted yet, so quantity:1 would either undercount (if client gets
+  // created next) or charge for nothing. updateClientBillingQuantity() runs
+  // after client insert and creates the per-client subscription item at the
+  // correct live count.
   const items = [];
-  if (priceIds.client) items.push({ price: priceIds.client, quantity: 1 });
   if (priceIds.minute) items.push({ price: priceIds.minute });
 
   try {
@@ -176,9 +189,11 @@ async function createAgencyPortal(req, res) {
     const customer = await stripe.customers.create({ email: agency.email, name: agency.name, metadata: { agency_id, type: 'agency' } });
     await supabase.from('agencies').update({ stripe_customer_id: customer.id }).eq('id', agency_id);
 
+    // Per-client intentionally omitted — see createAgencyCheckout above for
+    // the full reasoning. updateClientBillingQuantity creates the per-client
+    // subscription item on first real client provision.
     const lineItems = [];
     if (priceIds.platform) lineItems.push({ price: priceIds.platform, quantity: 1 });
-    if (priceIds.client) lineItems.push({ price: priceIds.client, quantity: 1 });
     if (priceIds.minute) lineItems.push({ price: priceIds.minute });
 
     const session = await stripe.checkout.sessions.create({

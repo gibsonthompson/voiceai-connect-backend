@@ -5,6 +5,9 @@
 // Updated: 2026-05-07 — Migrated to Stripe Meters API (replaces legacy usage records)
 // Updated: 2026-05-10 — Fixed per-client billing for Free agencies
 // Updated: 2026-05-10 — Added alertError() to all catch blocks for SMS alerts
+// Updated: 2026-06-09 — PLAN_RATES.pro.platformFee corrected 179 → 99 (stale
+//   pre-restructure value was inflating getAgencyUsageSummary estimated totals
+//   by $80/mo for every Pro agency on their billing dashboard)
 // ============================================================================
 const Stripe = require('stripe');
 const { supabase } = require('./supabase');
@@ -17,7 +20,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // ============================================================================
 const PLAN_RATES = {
   free:  { platformFee: 0,     perClient: 29.99, perMinute: 0.12 },
-  pro:   { platformFee: 179,   perClient: 9.99,  perMinute: 0.10 },
+  pro:   { platformFee: 99,    perClient: 9.99,  perMinute: 0.10 },
   scale: { platformFee: 499,   perClient: 0,     perMinute: 0.05 },
 };
 
