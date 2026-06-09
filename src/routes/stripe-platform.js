@@ -5,6 +5,10 @@
 // UPDATED: 2026-05-10 — alertError() in all catch blocks for SMS alerts
 // UPDATED: 2026-06-03 — handleAgencySubscriptionDeleted now releases the agency
 //   demo number (VAPI object + Telnyx rental) so it stops billing on cancel
+// UPDATED: 2026-06-09 — Pro tier agency team-member cap dropped from 5 → 3.
+//   Scale stays unlimited (-1). Mirror in lib/plan-limits.ts (maxTeamMembers),
+//   lib/plan-features.ts (AGENCY_PLAN_TIERS.pro.features), and
+//   src/routes/team.js (checkTeamLimit defaults).
 //
 // NEW MODEL:
 //   Free  = $0 platform + $29.99/client + $0.12/min (no Stripe sub until first client)
@@ -39,7 +43,7 @@ const PLAN_DETAILS = {
 
 const TEAM_MEMBER_LIMITS = {
   free:  { agency: 0, client: 0 },
-  pro:   { agency: 5, client: 2 },
+  pro:   { agency: 3, client: 2 },
   scale: { agency: -1, client: -1 },
 };
 

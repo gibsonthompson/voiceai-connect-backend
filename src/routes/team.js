@@ -5,6 +5,16 @@
 //
 // UPDATED: 2026-05-22 — Trial clients get 2 team members regardless of
 //          starter plan config (checkTeamLimit reads subscription_status)
+// UPDATED: 2026-06-09 — Pro tier agency cap dropped from 5 → 3. Scale/trial
+//          changed from 50 → -1 (the "unlimited" sentinel already used in
+//          stripe-platform.js TEAM_MEMBER_LIMITS). Also fixes the latent
+//          truthy-check bug where max_team_members_agency = -1 in the DB
+//          was being treated as a finite cap of -1 (always blocking) instead
+//          of unlimited. We now use a strict null/undefined check for the
+//          "derive from plan" branch and handle -1 explicitly. Frontend
+//          should display max === -1 as "Unlimited" — getTeamMemberLimitDisplay
+//          in lib/plan-limits.ts already does this for client-side uses; team
+//          UI may need the same check.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -75,18 +85,22 @@ async function checkTeamLimit(entityType, entityId) {
 
     let maxAllowed = agency?.max_team_members_agency;
 
-    // If no explicit override set, derive from plan + trial status
-    if (!maxAllowed) {
+    // Derive from plan + status only when nothing was explicitly set in the
+    // DB. Strict null/undefined check (NOT !maxAllowed) so that 0 (Free tier
+    // explicit cap) and -1 (Scale tier unlimited sentinel set by
+    // TEAM_MEMBER_LIMITS in stripe-platform.js) are both respected.
+    if (maxAllowed === null || maxAllowed === undefined) {
       const isTrial = agency?.subscription_status === 'trial' || agency?.subscription_status === 'trialing';
       const plan = (agency?.plan_type || 'free').toLowerCase();
 
       if (isTrial) {
-        // Trial agencies get Scale-level access
-        maxAllowed = 50;
+        // Trial agencies get Scale-level access (unlimited) so they can
+        // genuinely evaluate the product before committing.
+        maxAllowed = -1;
       } else if (plan === 'scale' || plan === 'enterprise') {
-        maxAllowed = 50;
+        maxAllowed = -1;
       } else if (plan === 'pro' || plan === 'professional') {
-        maxAllowed = 5;
+        maxAllowed = 3;
       } else {
         // Free plan — no team members
         maxAllowed = 0;
@@ -100,7 +114,15 @@ async function checkTeamLimit(entityType, entityId) {
       .eq('entity_id', entityId)
       .neq('status', 'disabled');
 
-    return { allowed: (count || 0) < maxAllowed, current: count || 0, max: maxAllowed };
+    // -1 = unlimited (matches the sentinel set by TEAM_MEMBER_LIMITS in
+    // stripe-platform.js when a Scale subscription completes). Frontend
+    // should render max === -1 as "Unlimited".
+    const isUnlimited = maxAllowed === -1;
+    return {
+      allowed: isUnlimited || (count || 0) < maxAllowed,
+      current: count || 0,
+      max: maxAllowed,
+    };
   }
 
   if (entityType === 'client') {
@@ -141,7 +163,7 @@ async function checkTeamLimit(entityType, entityId) {
     // 4. Trial clients get a minimum of 2 team members so they can
     //    experience the feature during their trial period
     const isTrial = client?.subscription_status === 'trial' || client?.subscription_status === 'trialing';
-    if (isTrial && maxAllowed < 2) {
+    if (isTrial && maxAllowed !== -1 && maxAllowed < 2) {
       maxAllowed = 2;
     }
 
@@ -152,7 +174,13 @@ async function checkTeamLimit(entityType, entityId) {
       .eq('entity_id', entityId)
       .neq('status', 'disabled');
 
-    return { allowed: (count || 0) < maxAllowed, current: count || 0, max: maxAllowed };
+    // -1 = unlimited (matches TEAM_MEMBER_LIMITS in stripe-platform.js for Scale).
+    const isUnlimited = maxAllowed === -1;
+    return {
+      allowed: isUnlimited || (count || 0) < maxAllowed,
+      current: count || 0,
+      max: maxAllowed,
+    };
   }
 
   return { allowed: false, current: 0, max: 0 };
@@ -198,7 +226,10 @@ router.post('/:agencyId/team', async (req, res) => {
     const ownerUserId = decoded.userId;
     if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
     const limits = await checkTeamLimit('agency', agencyId);
-    if (!limits.allowed) return res.status(403).json({ error: `Team member limit reached (${limits.current}/${limits.max}). Upgrade your plan to add more.`, limits });
+    if (!limits.allowed) {
+      const limitDisplay = limits.max === -1 ? 'Unlimited' : limits.max;
+      return res.status(403).json({ error: `Team member limit reached (${limits.current}/${limitDisplay}). Upgrade your plan to add more.`, limits });
+    }
     const { data: existingUser } = await supabase.from('users').select('id, email, role, agency_id').eq('email', email.toLowerCase()).single();
     if (existingUser) {
       if (existingUser.agency_id === agencyId) return res.status(409).json({ error: 'A user with this email already exists for this agency' });
@@ -304,7 +335,10 @@ router.post('/client/:clientId/team', async (req, res) => {
     const ownerUserId = decoded.userId;
     if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
     const limits = await checkTeamLimit('client', clientId);
-    if (!limits.allowed) return res.status(403).json({ error: `Team member limit reached (${limits.current}/${limits.max}). Contact your provider to upgrade.`, limits });
+    if (!limits.allowed) {
+      const limitDisplay = limits.max === -1 ? 'Unlimited' : limits.max;
+      return res.status(403).json({ error: `Team member limit reached (${limits.current}/${limitDisplay}). Contact your provider to upgrade.`, limits });
+    }
     const { data: client } = await supabase.from('clients').select('agency_id, agencies!clients_agency_id_fkey(slug, marketing_domain, domain_verified)').eq('id', clientId).single();
     const { data: existingUser } = await supabase.from('users').select('id').eq('email', email.toLowerCase()).single();
     if (existingUser) return res.status(409).json({ error: 'This email is already associated with an account' });
