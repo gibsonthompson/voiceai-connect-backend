@@ -18,6 +18,99 @@ const dns = require('dns').promises;
 const { supabase, getAgencyBySlug, getAgencyByDomain, getAgencyById } = require('../lib/supabase');
 
 // ============================================================================
+// PUBLIC AGENCY SHAPE
+// ----------------------------------------------------------------------------
+// Whitelisted projection of an agency row for unauthenticated consumers:
+// marketing site, signup widget, embed iframe. NEVER include columns that
+// shouldn't be public (BYOT credentials, internal tokens, anything sensitive).
+// Used by both getAgencyByHost (subdomain/marketing-domain lookup) and
+// getAgencyByIdPublic (Path A embed flow — iframe knows agency UUID from the
+// embed snippet's data-agency attribute).
+// ============================================================================
+function publicAgencyShape(agency) {
+  return {
+    id: agency.id,
+    name: agency.name,
+    slug: agency.slug,
+    logo_url: agency.logo_url,
+    favicon_url: agency.favicon_url,
+    primary_color: agency.primary_color,
+    secondary_color: agency.secondary_color,
+    accent_color: agency.accent_color,
+    support_email: agency.support_email,
+    support_phone: agency.support_phone,
+
+    // Marketing website content
+    company_tagline: agency.company_tagline,
+    website_headline: agency.website_headline,
+    website_subheadline: agency.website_subheadline,
+    marketing_config: agency.marketing_config,
+    marketing_template: agency.marketing_template || 'classic',
+
+    // Theme settings
+    website_theme: agency.website_theme,
+    logo_background_color: agency.logo_background_color,
+
+    // Dashboard branding overrides (nav, bg, card, button colors)
+    branding_overrides: agency.branding_overrides || null,
+
+    // Plan type (for feature gating)
+    plan_type: agency.plan_type,
+    subscription_status: agency.subscription_status,
+
+    // Pricing (for client signup + marketing website)
+    price_starter: agency.price_starter,
+    price_pro: agency.price_pro,
+    price_growth: agency.price_growth,
+
+    // Limits
+    limit_starter: agency.limit_starter,
+    limit_pro: agency.limit_pro,
+    limit_growth: agency.limit_growth,
+
+    // White-label plan customization (Phase 3)
+    plan_starter_name: agency.plan_starter_name || 'Starter',
+    plan_pro_name: agency.plan_pro_name || 'Professional',
+    plan_growth_name: agency.plan_growth_name || 'Growth',
+    plan_starter_description: agency.plan_starter_description || null,
+    plan_pro_description: agency.plan_pro_description || null,
+    plan_growth_description: agency.plan_growth_description || null,
+
+    // Client plan features (for dynamic plan cards on signup)
+    plan_features: agency.plan_features || null,
+
+    // Demo phone (auto-provisioned per agency via VAPI)
+    demo_phone_number: agency.demo_phone_number || null,
+    // Legacy manual override field
+    demo_phone: agency.demo_phone || null,
+
+    // Currency (for marketing page pricing display)
+    currency: agency.currency || 'USD',
+    display_currency: agency.display_currency || null,
+
+    // Stripe (needed for checkout)
+    stripe_account_id: agency.stripe_account_id,
+    stripe_charges_enabled: agency.stripe_charges_enabled,
+
+    // Analytics & Tracking (for marketing site script injection)
+    gtm_id: agency.gtm_id || null,
+    fb_pixel_id: agency.fb_pixel_id || null,
+    google_analytics_id: agency.google_analytics_id || null,
+    custom_head_scripts: agency.custom_head_scripts || null,
+    custom_body_scripts: agency.custom_body_scripts || null,
+
+    // OG / Social meta (for marketing site social sharing)
+    og_title: agency.og_title || null,
+    og_description: agency.og_description || null,
+    og_image_url: agency.og_image_url || null,
+
+    // Marketing domain (used by the embed widget for cross-origin auth handoff)
+    marketing_domain: agency.marketing_domain || null,
+    domain_verified: agency.domain_verified || false
+  };
+}
+
+// ============================================================================
 // GET AGENCY BY HOST (For middleware/frontend)
 // ============================================================================
 async function getAgencyByHost(req, res) {
@@ -48,95 +141,71 @@ async function getAgencyByHost(req, res) {
       return res.status(404).json({ error: 'Agency not found' });
     }
     
-    console.log('✅ Agency found:', agency.name);
-    
-    // Return public agency info (for branding + marketing website)
+    // Return public agency info (for branding + marketing website + embed widget)
     res.json({
       success: true,
-      agency: {
-        id: agency.id,
-        name: agency.name,
-        slug: agency.slug,
-        logo_url: agency.logo_url,
-        favicon_url: agency.favicon_url,
-        primary_color: agency.primary_color,
-        secondary_color: agency.secondary_color,
-        accent_color: agency.accent_color,
-        support_email: agency.support_email,
-        support_phone: agency.support_phone,
-        
-        // Marketing website content
-        company_tagline: agency.company_tagline,
-        website_headline: agency.website_headline,
-        website_subheadline: agency.website_subheadline,
-        marketing_config: agency.marketing_config,
-        marketing_template: agency.marketing_template || 'classic',
-        
-        // Theme settings
-        website_theme: agency.website_theme,
-        logo_background_color: agency.logo_background_color,
-        
-        // Dashboard branding overrides (nav, bg, card, button colors)
-        branding_overrides: agency.branding_overrides || null,
-        
-        // Plan type (for feature gating)
-        plan_type: agency.plan_type,
-        subscription_status: agency.subscription_status,
-        
-        // Pricing (for client signup + marketing website)
-        price_starter: agency.price_starter,
-        price_pro: agency.price_pro,
-        price_growth: agency.price_growth,
-        
-        // Limits
-        limit_starter: agency.limit_starter,
-        limit_pro: agency.limit_pro,
-        limit_growth: agency.limit_growth,
-
-        // White-label plan customization (Phase 3)
-        plan_starter_name: agency.plan_starter_name || 'Starter',
-        plan_pro_name: agency.plan_pro_name || 'Professional',
-        plan_growth_name: agency.plan_growth_name || 'Growth',
-        plan_starter_description: agency.plan_starter_description || null,
-        plan_pro_description: agency.plan_pro_description || null,
-        plan_growth_description: agency.plan_growth_description || null,
-
-        // Client plan features (for dynamic plan cards on signup)
-        plan_features: agency.plan_features || null,
-        
-        // Demo phone (auto-provisioned per agency via VAPI)
-        demo_phone_number: agency.demo_phone_number || null,
-        // Legacy manual override field
-        demo_phone: agency.demo_phone || null,
-        
-        // Currency (for marketing page pricing display)
-        currency: agency.currency || 'USD',
-        display_currency: agency.display_currency || null,
-        
-        // Stripe (needed for checkout)
-        stripe_account_id: agency.stripe_account_id,
-        stripe_charges_enabled: agency.stripe_charges_enabled,
-
-        // Analytics & Tracking (for marketing site script injection)
-        gtm_id: agency.gtm_id || null,
-        fb_pixel_id: agency.fb_pixel_id || null,
-        google_analytics_id: agency.google_analytics_id || null,
-        custom_head_scripts: agency.custom_head_scripts || null,
-        custom_body_scripts: agency.custom_body_scripts || null,
-
-        // OG / Social meta (for marketing site social sharing)
-        og_title: agency.og_title || null,
-        og_description: agency.og_description || null,
-        og_image_url: agency.og_image_url || null,
-
-        // Marketing domain (used by the embed widget for cross-origin auth handoff)
-        marketing_domain: agency.marketing_domain || null,
-        domain_verified: agency.domain_verified || false
-      }
+      agency: publicAgencyShape(agency)
     });
     
   } catch (error) {
     console.error('❌ Agency lookup error:', error);
+    res.status(500).json({ error: 'Failed to lookup agency' });
+  }
+}
+
+// ============================================================================
+// GET AGENCY BY ID (Public, embed-widget Path A)
+// ----------------------------------------------------------------------------
+// The embed snippet bakes in the agency's UUID via data-agency. When the
+// iframe loads on the platform domain (myvoiceaiconnect.com), there's no
+// host-based agency context to derive — middleware sees a platform request
+// and skips Supabase. This endpoint lets the iframe look up the agency by
+// the UUID it already has, then render the client-side signup flow branded
+// by that agency.
+//
+// Security:
+//   - UUID format guard rejects garbage before hitting the DB.
+//   - Same status filter as getAgencyByHost: only 'active' or 'trial' agencies
+//     are returned. Suspended/canceled → 403 so the embed shows an unavailable
+//     state instead of a working form for an off-status agency.
+//   - Returns the publicAgencyShape projection (same as by-host). NEVER add
+//     fields here that aren't already exposed via by-host — they'd leak via
+//     the embed widget too.
+// ============================================================================
+async function getAgencyByIdPublic(req, res) {
+  try {
+    const { id } = req.query;
+
+    if (!id) {
+      return res.status(400).json({ error: 'id parameter required' });
+    }
+
+    // UUID v4-ish format guard. Prevents the DB from being hit with arbitrary
+    // strings and gives us a fast 400 for malformed embed snippets.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      return res.status(400).json({ error: 'invalid id format' });
+    }
+
+    const agency = await getAgencyById(id);
+
+    if (!agency) {
+      return res.status(404).json({ error: 'Agency not found' });
+    }
+
+    // Mirror suspended-agency handling from middleware's rewriteToUnavailable.
+    // We don't want a suspended agency's embed snippet to keep working in the
+    // wild after they've been removed.
+    if (agency.status !== 'active' && agency.status !== 'trial') {
+      return res.status(403).json({ error: 'Agency not active' });
+    }
+
+    res.json({
+      success: true,
+      agency: publicAgencyShape(agency)
+    });
+
+  } catch (error) {
+    console.error('❌ Agency by-id lookup error:', error);
     res.status(500).json({ error: 'Failed to lookup agency' });
   }
 }
@@ -704,6 +773,7 @@ async function verifyAgencyDomain(req, res) {
 // ============================================================================
 module.exports = {
   getAgencyByHost,
+  getAgencyByIdPublic,
   getAgencySettings,
   updateAgencySettings,
   verifyAgencyDomain

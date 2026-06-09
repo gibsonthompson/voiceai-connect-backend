@@ -111,7 +111,7 @@ app.use((req, res, next) => {
 // ============================================================================
 
 const { handleAgencySignup, handleAgencyOnboarding } = require('./routes/agency-signup');
-const { getAgencyByHost, getAgencySettings, updateAgencySettings, verifyAgencyDomain } = require('./routes/agency-settings');
+const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySettings, verifyAgencyDomain } = require('./routes/agency-settings');
 const demoPhoneRoutes = require('./routes/demo-phone');
 const referralRoutes = require('./routes/referrals');
 
@@ -257,6 +257,9 @@ app.use('/api/content-render', contentRender);
 app.post('/api/agency/signup', handleAgencySignup);
 app.post('/api/agency/onboarding', handleAgencyOnboarding);
 app.get('/api/agency/by-host', getAgencyByHost);
+// Embed-widget Path A: iframe loads myvoiceaiconnect.com/get-started?agency=UUID
+// and looks the agency up by ID since there's no host-based context to derive.
+app.get('/api/agency/by-id', getAgencyByIdPublic);
 app.get('/api/agency/:agencyId/settings', getAgencySettings);
 app.put('/api/agency/:agencyId/settings', updateAgencySettings);
 app.post('/api/agency/:agencyId/domain/verify', verifyAgencyDomain);
