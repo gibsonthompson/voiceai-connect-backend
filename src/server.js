@@ -802,6 +802,11 @@ app.get('/api/client/:clientId/details', async (req, res) => {
   try {
     const { clientId } = req.params;
 
+    // Pulls in the agency-level plan rebranding columns (added Phase 3),
+    // plan_features JSONB (powers buildClientPlans), and the theme/currency
+    // fields that /client/upgrade-required and the client dashboard expect.
+    // Without these, the upgrade-required page would fall back to hardcoded
+    // names and USD even after agencies set custom plan_*_name values.
     const { data: client, error } = await supabase
       .from('clients')
       .select(`
@@ -811,6 +816,10 @@ app.get('/api/client/:clientId/details', async (req, res) => {
           support_email, branding_overrides,
           price_starter, price_pro, price_growth,
           limit_starter, limit_pro, limit_growth,
+          plan_starter_name, plan_pro_name, plan_growth_name,
+          plan_starter_description, plan_pro_description, plan_growth_description,
+          plan_features,
+          website_theme, country, currency, display_currency,
           stripe_account_id, stripe_charges_enabled
         )
       `)
