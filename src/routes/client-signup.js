@@ -21,6 +21,11 @@
 //          Users then re-selected their intended plan on /upgrade-required,
 //          which is where the double-billing happened (now guarded backend-side
 //          in stripe-connect.js createClientCheckout).
+// UPDATED: 2026-06-08 — Phase 5 hardening: exported signupRateLimiter middleware
+//          to throttle /api/client/signup at 5 requests per IP per hour.
+//          In-memory token bucket (single-instance safe). Public embed widget
+//          makes this endpoint internet-exposed without auth, so a basic
+//          rate limit is the bare minimum before CAPTCHA / fraud detection.
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -52,6 +57,82 @@ const { updateClientBillingQuantity } = require('../lib/usage-tracker');
 // across handleClientSignup, handleAgencyAddClient, and provisionClient.
 // ============================================================================
 const VALID_CLIENT_PLANS = ['starter', 'pro', 'growth'];
+
+// ============================================================================
+// RATE LIMITER (Phase 5) — in-memory token bucket for /api/client/signup
+// ----------------------------------------------------------------------------
+// The public embed widget makes this endpoint reachable by anyone with the
+// snippet. Without throttling, a single script could spin up arbitrary
+// numbers of VAPI assistants + Telnyx numbers, each of which costs real
+// money the moment they're provisioned. This caps the damage at 5 attempts
+// per source IP per hour.
+//
+// Implementation notes:
+//  - In-memory Map. Resets on server restart. That's acceptable for a single
+//    DigitalOcean instance; if we scale horizontally, swap for Redis.
+//  - Window-based, not sliding: 1-hour fixed window per IP. Simpler and good
+//    enough. A determined attacker rotating IPs is a separate problem
+//    (CAPTCHA, captcha-grade fraud detection) for Phase 5+.
+//  - IP detection prefers x-forwarded-for[0] because we sit behind DO's
+//    load balancer. req.ip would be the LB peer otherwise.
+//  - Periodic prune every 10 min keeps the Map bounded.
+//  - dev/test bypass: NODE_ENV !== 'production' skips the limiter so local
+//    runs and integration tests don't trip on themselves.
+// ============================================================================
+const SIGNUP_RATE_LIMIT_MAX = 5;            // requests per window per IP
+const SIGNUP_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;  // 1 hour
+const signupAttempts = new Map(); // ip -> { count, resetAt }
+
+// Periodic cleanup of expired buckets so the Map can't grow unbounded.
+// 10-minute interval is plenty given a 1-hour window.
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, bucket] of signupAttempts.entries()) {
+    if (bucket.resetAt <= now) signupAttempts.delete(ip);
+  }
+}, 10 * 60 * 1000).unref(); // unref so the timer doesn't keep the process alive in tests
+
+function getClientIp(req) {
+  // x-forwarded-for is a chain set by DO's LB; first entry is the original
+  // caller. Fall back to req.ip (which is the LB peer if trust proxy isn't
+  // set — still useful as a partial identifier locally).
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.length > 0) {
+    return xff.split(',')[0].trim();
+  }
+  return req.ip || req.connection?.remoteAddress || 'unknown';
+}
+
+function signupRateLimiter(req, res, next) {
+  // Skip in non-production so dev / integration tests don't self-limit.
+  if (process.env.NODE_ENV !== 'production') return next();
+
+  const ip = getClientIp(req);
+  const now = Date.now();
+  const bucket = signupAttempts.get(ip);
+
+  if (!bucket || bucket.resetAt <= now) {
+    // First request from this IP, or previous window has expired — open a
+    // fresh window.
+    signupAttempts.set(ip, { count: 1, resetAt: now + SIGNUP_RATE_LIMIT_WINDOW_MS });
+    return next();
+  }
+
+  if (bucket.count < SIGNUP_RATE_LIMIT_MAX) {
+    bucket.count += 1;
+    return next();
+  }
+
+  // Over the cap. Tell the client when they can try again.
+  const retryAfterSec = Math.ceil((bucket.resetAt - now) / 1000);
+  res.set('Retry-After', String(retryAfterSec));
+  console.warn(`🚫 Signup rate limit hit for IP ${ip} (resets in ${retryAfterSec}s)`);
+  return res.status(429).json({
+    error: 'rate_limited',
+    message: 'Too many signup attempts from this network. Please try again later.',
+    retryAfterSec,
+  });
+}
 
 // ============================================================================
 // CLEANUP: Delete orphaned VAPI resources when signup fails mid-flow
@@ -1129,5 +1210,6 @@ async function provisionClient(clientId) {
 module.exports = {
   handleClientSignup,
   provisionClient,
-  handleAgencyAddClient
+  handleAgencyAddClient,
+  signupRateLimiter,
 };

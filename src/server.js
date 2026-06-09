@@ -128,7 +128,7 @@ try {
   });
 }
 
-const { handleClientSignup, provisionClient, handleAgencyAddClient } = require('./routes/client-signup');
+const { handleClientSignup, provisionClient, handleAgencyAddClient, signupRateLimiter } = require('./routes/client-signup');
 const clientRoutes = require('./routes/client');
 const clientContactsRoutes = require('./routes/client-contacts');
 const clientPromptRoutes = require('./routes/client-prompt');
@@ -778,7 +778,11 @@ app.use('/api/agency', previewTokenRoutes);
 // CLIENT ROUTES (Agencies → Clients)
 // ============================================================================
 
-app.post('/api/client/signup', handleClientSignup);
+// Phase 5: signupRateLimiter caps /api/client/signup at 5 requests per IP
+// per hour. Embed widget makes this endpoint internet-exposed without auth,
+// so a bare-minimum throttle is needed before CAPTCHA / fraud detection.
+// Middleware is a no-op in non-production envs (NODE_ENV !== 'production').
+app.post('/api/client/signup', signupRateLimiter, handleClientSignup);
 app.post('/api/client/checkout', createClientCheckout);
 app.post('/api/client/portal', createClientPortal);
 app.use('/api/client', clientRoutes);
