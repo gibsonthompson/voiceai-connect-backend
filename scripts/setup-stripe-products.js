@@ -2,7 +2,7 @@
 /**
  * ============================================================================
  * setup-stripe-products.js
- * VoiceAI Connect — Stripe Product/Price setup
+ * VoiceAI Connect Stripe Product/Price setup
  * ============================================================================
  *
  * Creates the optimal 3-Product Stripe architecture:
@@ -29,7 +29,7 @@
  *     existing Prices by nickname; skips creation if found, reuses IDs.
  *   - Looks up your existing voice_minutes Meter (the one your code already
  *     reports usage to). Creates it only if missing.
- *   - Does NOT touch or archive any existing Products/Prices — your live
+ *   - Does NOT touch or archive any existing Products/Prices. Your live
  *     subscriptions are untouched.
  *   - Uses --dry-run to print what would be created without writing anything.
  *   - When run against a sk_live_ key, pauses 5 seconds for Ctrl+C before
@@ -49,7 +49,7 @@
  *
  * REQUIRES:
  *   - Node.js 18+ (for top-level async)
- *   - stripe SDK v14+ (you're already on a recent version — your code uses
+ *   - stripe SDK v14+ (you're already on a recent version, since your code uses
  *     stripe.billing.meterEvents.create which is post-v14)
  * ============================================================================
  */
@@ -117,7 +117,7 @@ const heading = (m) => console.log(`\n${c.bold}${c.cyan}━━━ ${m} ━━━
 const SPEC = [
   {
     productName: 'Platform Subscription',
-    description: 'Your fully white-labeled AI receptionist agency workspace — branded marketing site, agency dashboard, client management, lead generation CRM, and Stripe Connect for direct client payouts.',
+    description: 'White-label AI receptionist platform with agency dashboard, client management, and Stripe Connect.',
     prices: [
       { nickname: 'Pro Platform',   unit_amount: 9900,  envVar: 'STRIPE_PRICE_PRO_PLATFORM',   metered: false },
       { nickname: 'Scale Platform', unit_amount: 49900, envVar: 'STRIPE_PRICE_SCALE_PLATFORM', metered: false },
@@ -125,7 +125,7 @@ const SPEC = [
   },
   {
     productName: 'Per-Client Billing',
-    description: "Monthly fee per active client business running on your platform. Quantity tracks your live client count — you're only billed for businesses you've actually onboarded.",
+    description: 'Monthly fee per active client business on your platform.',
     prices: [
       { nickname: 'Free Per-Client', unit_amount: 2999, envVar: 'STRIPE_PRICE_FREE_CLIENT', metered: false },
       { nickname: 'Pro Per-Client',  unit_amount: 999,  envVar: 'STRIPE_PRICE_PRO_CLIENT',  metered: false },
@@ -133,7 +133,7 @@ const SPEC = [
   },
   {
     productName: 'Voice Minutes',
-    description: 'Per-minute usage charge for AI voice call time across all your clients. Billed at each cycle close based on actual minutes consumed.',
+    description: 'Per-minute usage for AI voice call time across all clients.',
     meterEventName: 'voice_minutes',
     prices: [
       { nickname: 'Free Voice Minutes',  unit_amount: 12, envVar: 'STRIPE_PRICE_FREE_MINUTE',  metered: true },
@@ -148,7 +148,7 @@ async function ensureMeter(eventName, displayName) {
   heading(`Voice usage meter (event_name=${eventName})`);
 
   // List active meters and match by event_name. Stripe's meters.list returns
-  // newest-first with a 'status' field — we want the active one (an account
+  // newest-first with a 'status' field. We want the active one (an account
   // can have at most one active meter per event_name).
   let cursor = undefined;
   let found = null;
@@ -214,7 +214,7 @@ async function ensureProduct(productSpec) {
     // it in sync ensures the spec wins on re-run.
     if (existing.description !== productSpec.description) {
       if (dryRun) {
-        warn('Description differs from spec — would update.');
+        warn('Description differs from spec, would update.');
         dim(`  Stripe:    ${(existing.description || '(empty)').slice(0, 80)}...`);
         dim(`  Spec:      ${productSpec.description.slice(0, 80)}...`);
       } else {
@@ -258,8 +258,8 @@ async function ensurePrice(product, priceSpec, meter) {
   if (existing) {
     if (existing.unit_amount !== priceSpec.unit_amount) {
       // Stripe Prices are immutable for amount. If amounts diverge, surface it
-      // loudly — Gibson must decide whether to archive + recreate manually.
-      warn(`Price "${priceSpec.nickname}" exists with amount=${existing.unit_amount}c, spec wants ${priceSpec.unit_amount}c. Stripe Prices are immutable — reusing existing.`);
+      // loudly. Gibson must decide whether to archive + recreate manually.
+      warn(`Price "${priceSpec.nickname}" exists with amount=${existing.unit_amount}c, spec wants ${priceSpec.unit_amount}c. Stripe Prices are immutable, reusing existing.`);
     } else {
       ok(`Reusing Price: ${existing.id} (${priceSpec.nickname})`);
     }
@@ -301,7 +301,7 @@ function formatUsd(cents) {
 // ─── Main ─────────────────────────────────────────────────────────────────
 async function main() {
   console.log('');
-  console.log(`${c.bold}🎤 VoiceAI Connect — Stripe Product Setup${c.reset}`);
+  console.log(`${c.bold}🎤 VoiceAI Connect Stripe Product Setup${c.reset}`);
   console.log(`   Mode:    ${isLive ? `${c.red}${c.bold}LIVE${c.reset}` : `${c.green}TEST${c.reset}`}`);
   console.log(`   Dry-run: ${dryRun ? `${c.yellow}YES (no writes)${c.reset}` : 'NO'}`);
   console.log('');
@@ -313,7 +313,7 @@ async function main() {
   }
 
   // Find/create the voice_minutes meter. Same meter serves all 3 Voice Minutes
-  // Prices (Free/Pro/Scale) — Stripe sums all events tagged to a customer's
+  // Prices (Free/Pro/Scale). Stripe sums all events tagged to a customer's
   // subscription regardless of which Price they're on.
   const voiceMeter = await ensureMeter('voice_minutes', 'Voice Minutes');
 
@@ -322,7 +322,7 @@ async function main() {
 
   // Surface meter ID as an env var. usage-tracker.js's meterEvents.create
   // references the meter by event_name (not ID), so the backend doesn't read
-  // this var today — but it's listed in the agency's env and is needed for
+  // this var today, but it's listed in the agency's env and is needed for
   // admin / dashboard code that queries meter detail or pulls eventSummaries
   // directly (e.g. stripe.billing.meters.eventSummaries.list(meterId, ...)).
   results.push({
@@ -353,7 +353,7 @@ async function main() {
   }
 
   // ─── Output env vars ────────────────────────────────────────────────────
-  heading('Env vars — paste these into DigitalOcean App config');
+  heading('Env vars, paste these into DigitalOcean App config');
   console.log('');
   for (const r of results) {
     if (r.isMeter) {
@@ -378,7 +378,7 @@ async function main() {
     const outFile = path.join(process.cwd(), '.env.stripe-new');
     const fileContent = [
       '# ============================================================',
-      '# VoiceAI Connect — Stripe Price IDs + Meter',
+      '# VoiceAI Connect Stripe Price IDs + Meter',
       `# Generated:  ${new Date().toISOString()}`,
       `# Mode:       ${isLive ? 'LIVE' : 'TEST'}`,
       `# Source key: ${stripeKey.slice(0, 12)}...${stripeKey.slice(-4)}`,
@@ -423,7 +423,7 @@ async function main() {
   console.log(`  4. ${c.bold}(Optional, later)${c.reset} once all existing subs migrate naturally:`);
   console.log('     - Rename old "VoiceAI Connect Pro" Product to "[ARCHIVED] VoiceAI Connect Pro"');
   console.log('     - Same for old "VoiceAI Connect Scale"');
-  console.log('     - Do NOT delete or archive Prices — existing subs still reference them.');
+  console.log('     - Do NOT delete or archive Prices, existing subs still reference them.');
   console.log('');
   if (isLive) {
     console.log(`  ${c.yellow}⚠ You ran this against LIVE. Existing subscriptions are untouched.${c.reset}`);

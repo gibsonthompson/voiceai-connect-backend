@@ -243,7 +243,21 @@ router.post('/:agencyId/team', async (req, res) => {
     const { data: member, error: memberError } = await supabase.from('team_members').insert({ owner_user_id: ownerUserId, member_user_id: newUser.id, entity_type: 'agency', entity_id: agencyId, display_name: name, phone: phone || null, visible_password: tempPassword, permissions: sanitizedPerms, status: 'active' }).select().single();
     if (memberError) { console.error('❌ Create team member error:', memberError); await supabase.from('users').delete().eq('id', newUser.id); return res.status(500).json({ error: 'Failed to create team member' }); }
     await logActivity(member.id, ownerUserId, 'agency', agencyId, 'member_added', { name, email: email.toLowerCase(), phone });
-    if (phone) { try { const send = getSendSms(); await send(phone, `You've been added to a VoiceAI Connect team!\n\nLogin: https://myvoiceaiconnect.com/agency/login\nEmail: ${email.toLowerCase()}\nPassword: ${tempPassword}\n\nChange your password after first login.`); } catch (smsErr) { console.warn('⚠️ SMS send failed:', smsErr.message); } }
+    if (phone) {
+      try {
+        const send = getSendSms();
+        const { data: agencyRow } = await supabase
+          .from('agencies')
+          .select('name, slug, marketing_domain, domain_verified')
+          .eq('id', agencyId)
+          .single();
+        const teamLabel = agencyRow?.name ? `${agencyRow.name} team` : 'team';
+        const loginUrl = agencyRow?.marketing_domain && agencyRow?.domain_verified
+          ? `https://${agencyRow.marketing_domain}/agency/login`
+          : `https://${agencyRow?.slug || 'app'}.myvoiceaiconnect.com/agency/login`;
+        await send(phone, `You've been added to the ${teamLabel}!\n\nLogin: ${loginUrl}\nEmail: ${email.toLowerCase()}\nPassword: ${tempPassword}\n\nChange your password after first login.`);
+      } catch (smsErr) { console.warn('⚠️ SMS send failed:', smsErr.message); }
+    }
     console.log(`✅ Team member added: ${name} (${email}) → agency ${agencyId}`);
     res.json({ success: true, member: { id: member.id, display_name: member.display_name, phone: member.phone, email: newUser.email, visible_password: tempPassword, permissions: member.permissions, notification_prefs: member.notification_prefs, status: member.status, created_at: member.created_at } });
   } catch (err) { console.error('❌ Add team member error:', err); res.status(500).json({ error: 'Failed to add team member' }); }
@@ -285,7 +299,21 @@ router.post('/:agencyId/team/:memberId/reset-password', async (req, res) => {
     await supabase.from('users').update({ password_hash: passwordHash }).eq('id', member.member_user_id);
     await supabase.from('team_members').update({ visible_password: newPassword, updated_at: new Date().toISOString() }).eq('id', memberId);
     await logActivity(memberId, decoded.userId, 'agency', agencyId, 'password_reset', { reset_by: 'owner' });
-    if (member.phone) { try { const send = getSendSms(); await send(member.phone, `Your VoiceAI Connect password has been reset.\n\nNew password: ${newPassword}\n\nPlease change it after logging in.`); } catch {} }
+    if (member.phone) {
+      try {
+        const send = getSendSms();
+        const { data: agencyRow } = await supabase
+          .from('agencies')
+          .select('name, slug, marketing_domain, domain_verified')
+          .eq('id', agencyId)
+          .single();
+        const brandName = agencyRow?.name || 'VoiceAI Connect';
+        const loginUrl = agencyRow?.marketing_domain && agencyRow?.domain_verified
+          ? `https://${agencyRow.marketing_domain}/agency/login`
+          : `https://${agencyRow?.slug || 'app'}.myvoiceaiconnect.com/agency/login`;
+        await send(member.phone, `Your ${brandName} password has been reset.\n\nNew password: ${newPassword}\nLogin: ${loginUrl}\n\nPlease change it after logging in.`);
+      } catch {}
+    }
     res.json({ success: true, visible_password: newPassword });
   } catch (err) { console.error('❌ Reset password error:', err); res.status(500).json({ error: 'Failed to reset password' }); }
 });
