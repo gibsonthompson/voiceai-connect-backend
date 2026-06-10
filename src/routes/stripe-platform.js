@@ -61,6 +61,139 @@ const PLAN_DETAILS = {
 };
 
 // ============================================================================
+// HELPERS
+// ----------------------------------------------------------------------------
+// normalizeSubscriptionStatus: Stripe emits its own status vocabulary
+// ('trialing', 'active', 'past_due', 'canceled', 'unpaid', 'incomplete',
+// 'incomplete_expired', 'paused'). Our internal subscription_status column
+// is referenced by team.js, the warnExpiringAgencyTrials cron, and several
+// other queries that expect a stable set of values. We always write the
+// normalized form so downstream consumers can equality-check against one
+// known string instead of two.
+//
+// detectPlanFromSubscription: Stripe portal lets users change plan without
+// going through our checkout. The new plan is reflected in subscription.items
+// (which prices are attached), not in metadata. We map active price ids back
+// to our plan ids so handleAgencySubscriptionUpdated can keep plan_type in
+// sync. Returns null if no known platform price is present.
+// ============================================================================
+function normalizeSubscriptionStatus(stripeStatus) {
+  switch (stripeStatus) {
+    case 'trialing':           return 'trial';
+    case 'active':             return 'active';
+    case 'past_due':           return 'past_due';
+    case 'canceled':           return 'canceled';
+    case 'unpaid':             return 'unpaid';
+    case 'incomplete':         return 'incomplete';
+    case 'incomplete_expired': return 'canceled';
+    case 'paused':             return 'paused';
+    default:                   return stripeStatus || 'unknown';
+  }
+}
+
+function detectPlanFromSubscription(subscription) {
+  // Items reflect the current truth. Stripe portal plan switches update
+  // subscription.items but NOT subscription.metadata, so the metadata.plan
+  // stays at whatever the original checkout set (e.g., 'pro') even after
+  // the user switches to Scale. Always scan items first.
+  const items = subscription?.items?.data || [];
+  for (const item of items) {
+    const priceId = item?.price?.id;
+    if (!priceId) continue;
+    for (const [planId, cfg] of Object.entries(PLATFORM_PLANS)) {
+      if (cfg.platformPrice === priceId) return planId;
+    }
+  }
+
+  // Fall back to metadata only when items don't reveal a known platform
+  // price (e.g., subscription created with a different price for some
+  // promotional/grandfathered reason).
+  const metaPlan = subscription?.metadata?.plan;
+  if (metaPlan && PLATFORM_PLANS[metaPlan]) return metaPlan;
+
+  return null;
+}
+
+// syncPerClientSubscriptionItem: reconciles the per-client subscription item
+// against the target plan. Called from checkout-completed (new subscription),
+// subscription-created (defense in depth), and subscription-updated (portal
+// plan switch). Idempotent: lists existing items first, removes any stale
+// per-client items from a previous plan, then adds the target plan's per-
+// client item if applicable and not already attached.
+//
+// Flow per plan transition:
+//   Pro → Scale: removes Pro $9.99/client item, adds nothing (Scale has no
+//                per-client price)
+//   Scale → Pro: adds Pro $9.99/client item at current client count
+//   Pro → Pro / Scale → Scale: no-op (target already matches)
+//   anything → Free: not reached (Free has no Stripe subscription)
+async function syncPerClientSubscriptionItem(agencyId, planId, subscriptionId) {
+  if (!subscriptionId) return;
+  const planConfig = PLATFORM_PLANS[planId];
+  if (!planConfig) return;
+
+  let existingItems;
+  try {
+    const list = await stripe.subscriptionItems.list({
+      subscription: subscriptionId,
+      limit: 100,
+    });
+    existingItems = list.data || [];
+  } catch (e) {
+    console.error('syncPerClientSubscriptionItem: failed to list items:', e.message);
+    return;
+  }
+
+  // Set of every per-client price id across all plans so we can detect
+  // stale items left over from a prior plan.
+  const allClientPriceIds = Object.values(PLATFORM_PLANS)
+    .map((cfg) => cfg.clientPrice)
+    .filter(Boolean);
+
+  const perClientItems = existingItems.filter(
+    (item) => item.price && allClientPriceIds.includes(item.price.id)
+  );
+
+  const targetPriceId = planConfig.clientPrice; // null for Scale
+
+  // Remove stale per-client items (any item whose price doesn't match target).
+  for (const item of perClientItems) {
+    if (item.price.id !== targetPriceId) {
+      try {
+        await stripe.subscriptionItems.del(item.id, { proration_behavior: 'create_prorations' });
+        console.log(`🗑️ Removed stale per-client item ${item.id} (price=${item.price.id})`);
+      } catch (e) {
+        console.error(`Failed to remove stale per-client item ${item.id}:`, e.message);
+      }
+    }
+  }
+
+  // Add target per-client item if applicable and not already attached.
+  if (targetPriceId) {
+    const alreadyAttached = perClientItems.some((item) => item.price.id === targetPriceId);
+    if (!alreadyAttached) {
+      try {
+        const { count } = await supabase
+          .from('clients')
+          .select('id', { count: 'exact', head: true })
+          .eq('agency_id', agencyId)
+          .eq('is_test_client', false);
+
+        await stripe.subscriptionItems.create({
+          subscription: subscriptionId,
+          price: targetPriceId,
+          quantity: count || 0,
+          proration_behavior: 'create_prorations',
+        });
+        console.log(`✅ Added per-client item for plan=${planId} (qty=${count || 0})`);
+      } catch (e) {
+        console.error(`Failed to add per-client item for plan=${planId}:`, e.message);
+      }
+    }
+  }
+}
+
+// ============================================================================
 // CREATE CHECKOUT SESSION (Agency subscribes to platform)
 // ============================================================================
 async function createAgencyCheckout(req, res) {
@@ -100,6 +233,31 @@ async function createAgencyCheckout(req, res) {
 
     console.log(`🛒 Creating ${plan} checkout for: ${agency.email}`);
 
+    // Defense against duplicate subscriptions. If the agency already has an
+    // active/trialing/past_due subscription, force them through the Stripe
+    // Customer Portal to change plans instead of letting createAgencyCheckout
+    // mint a second concurrent subscription that would double-charge them.
+    // Frontend gates this at the button level on /agency/settings, but a
+    // direct API hit (or stale tab) could otherwise sneak through.
+    if (agency.stripe_subscription_id) {
+      try {
+        const existingSub = await stripe.subscriptions.retrieve(agency.stripe_subscription_id);
+        const blockingStatuses = ['active', 'trialing', 'past_due'];
+        if (blockingStatuses.includes(existingSub.status)) {
+          return res.status(409).json({
+            error: 'subscription_exists',
+            message: 'You already have an active subscription. Use Manage Subscription to change plans.',
+            existing_status: existingSub.status,
+          });
+        }
+      } catch (e) {
+        // Stripe returns 404 if the subscription was deleted externally or
+        // belongs to a different mode (test vs live). Log and continue with
+        // checkout, since there's effectively no active subscription.
+        console.warn(`Could not retrieve existing subscription ${agency.stripe_subscription_id}:`, e.message);
+      }
+    }
+
     // Create or get Stripe customer
     let customerId = agency.stripe_customer_id;
 
@@ -131,7 +289,19 @@ async function createAgencyCheckout(req, res) {
       lineItems.push({ price: planConfig.minutePrice });
     }
 
-    // Create checkout session with 14-day trial
+    // Create checkout session with 14-day trial.
+    // The frontend (signup-plan-page.tsx, agency-settings-page.tsx) passes
+    // successUrl / cancelUrl in the request body so the signup flow can chain
+    // through /auth/set-password before landing on the dashboard. Without
+    // honoring these, the new agency user never sets a password and the
+    // post-checkout redirect auto-logs them in as whatever auth_token is
+    // already in localStorage (potentially a different agency entirely).
+    // Fall back to sensible defaults for direct/non-signup callers.
+    const defaultSuccess = `${process.env.FRONTEND_URL}/agency/dashboard?upgraded=${plan}&session_id={CHECKOUT_SESSION_ID}`;
+    const defaultCancel = `${process.env.FRONTEND_URL}/agency/settings?tab=billing&canceled=true`;
+    const successUrl = req.body.successUrl || defaultSuccess;
+    const cancelUrl = req.body.cancelUrl || defaultCancel;
+
     const session = await stripe.checkout.sessions.create({
       customer: customerId,
       mode: 'subscription',
@@ -144,8 +314,8 @@ async function createAgencyCheckout(req, res) {
           plan: plan,
         },
       },
-      success_url: `${process.env.FRONTEND_URL}/agency/dashboard?upgraded=${plan}&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.FRONTEND_URL}/agency/settings?tab=billing&canceled=true`,
+      success_url: successUrl,
+      cancel_url: cancelUrl,
       metadata: {
         agency_id: agency_id,
         plan: plan,
@@ -292,14 +462,21 @@ async function handleAgencyCheckoutCompleted(session) {
 
   const planConfig = PLATFORM_PLANS[plan];
 
+  // Compute trial_ends_at. The checkout.session event doesn't include the
+  // subscription's trial_end, so we use Date.now + 14 days as an initial
+  // value. handleAgencySubscriptionUpdated will overwrite this with
+  // subscription.trial_end (Stripe's authoritative value) within seconds,
+  // since customer.subscription.created fires alongside this event.
+  const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+
   await supabase
     .from('agencies')
     .update({
       status: 'trial',
-      subscription_status: 'trial',
+      subscription_status: 'trial', // normalized (Stripe will say 'trialing')
       plan_type: plan,
       stripe_subscription_id: session.subscription,
-      trial_ends_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+      trial_ends_at: trialEndsAt,
       // Clear per-row team caps so plan-based defaults in routes/team.js
       // (checkTeamLimit) take effect. The column is treated as a hard
       // override when non-null, including the value 0 which would block
@@ -310,27 +487,12 @@ async function handleAgencyCheckoutCompleted(session) {
     })
     .eq('id', agencyId);
 
-  // Add the per-client subscription item if the plan has a per-client price.
-  // Quantity starts at the current real (non-test) client count — typically 0
-  // for an agency upgrading from Free, but could be non-zero if they had a
-  // previous paid subscription that was canceled or they pre-added clients.
-  if (planConfig.clientPrice && session.subscription) {
-    try {
-      const { count } = await supabase
-        .from('clients')
-        .select('id', { count: 'exact', head: true })
-        .eq('agency_id', agencyId)
-        .eq('is_test_client', false);
-
-      await stripe.subscriptionItems.create({
-        subscription: session.subscription,
-        price: planConfig.clientPrice,
-        quantity: count || 0,
-      });
-      console.log(`✅ Added per-client subscription item (qty=${count || 0})`);
-    } catch (e) {
-      console.error('Failed to add per-client subscription item:', e.message);
-    }
+  // Reconcile the per-client subscription item against the new plan. Sync
+  // is idempotent so a Stripe webhook retry won't create duplicates, and it
+  // handles the rare case where the agency already had per-client items
+  // from a previous canceled subscription that need to be cleaned up.
+  if (session.subscription) {
+    await syncPerClientSubscriptionItem(agencyId, plan, session.subscription);
   }
 
   // Log event
@@ -360,7 +522,7 @@ async function handleAgencySubscriptionCreated(subscription) {
     .from('agencies')
     .update({
       stripe_subscription_id: subscription.id,
-      subscription_status: subscription.status,
+      subscription_status: normalizeSubscriptionStatus(subscription.status),
       plan_type: plan,
       // See handleAgencyCheckoutCompleted comment. Clear caps so plan
       // defaults apply (Pro=3, Scale=unlimited via team.js).
@@ -368,6 +530,17 @@ async function handleAgencySubscriptionCreated(subscription) {
       max_team_members_client: null,
     })
     .eq('id', agency.id);
+
+  // Defense in depth: only call sync here when metadata.plan is missing,
+  // which indicates the subscription was created outside our checkout flow
+  // (e.g., manual creation via Stripe Dashboard). For normal checkouts,
+  // metadata.plan is set and handleAgencyCheckoutCompleted has already
+  // called sync. Calling it again here risks a webhook delivery race
+  // where two concurrent syncs both see an empty item list and both
+  // create the per-client item, producing duplicates.
+  if (!subscription.metadata?.plan) {
+    await syncPerClientSubscriptionItem(agency.id, plan, subscription.id);
+  }
 }
 
 async function handleAgencySubscriptionUpdated(subscription) {
@@ -376,30 +549,67 @@ async function handleAgencySubscriptionUpdated(subscription) {
   const agency = await getAgencyByStripeCustomerId(subscription.customer);
   if (!agency) return;
 
-  const status = subscription.status;
-  let agencyStatus = agency.status;
+  // Stale-event guard: see handleAgencySubscriptionDeleted comment. An old
+  // canceled subscription can still emit updated events (e.g., refund
+  // processing) after we've moved to a new subscription on the same
+  // customer. Processing those updates would corrupt the current state.
+  if (agency.stripe_subscription_id && agency.stripe_subscription_id !== subscription.id) {
+    console.log(
+      `Ignoring update for stale subscription ${subscription.id} ` +
+      `(agency current = ${agency.stripe_subscription_id})`
+    );
+    return;
+  }
 
-  // Map Stripe status to our internal agency.status
-  if (status === 'active') {
-    agencyStatus = 'active';
-  } else if (status === 'trialing') {
-    agencyStatus = 'trial';
-  } else if (status === 'past_due') {
-    agencyStatus = 'active'; // keep active but flag via subscription_status
-  } else if (status === 'canceled' || status === 'unpaid') {
-    agencyStatus = 'suspended';
+  const status = normalizeSubscriptionStatus(subscription.status);
+
+  // Map normalized status to internal agency.status (the broader account
+  // gate used to suspend access). Covers Stripe's full status set including
+  // incomplete/paused which the prior version silently fell through.
+  let agencyStatus = agency.status;
+  switch (status) {
+    case 'active':     agencyStatus = 'active'; break;
+    case 'trial':      agencyStatus = 'trial'; break;
+    case 'past_due':   agencyStatus = 'active'; break;       // keep usable, flag via subscription_status
+    case 'incomplete': agencyStatus = 'pending_payment'; break;
+    case 'paused':     agencyStatus = 'suspended'; break;
+    case 'canceled':
+    case 'unpaid':     agencyStatus = 'suspended'; break;
+  }
+
+  // Detect plan change (portal-driven plan switches don't fire a fresh
+  // checkout, only this update event). If the active platform price now
+  // maps to a different plan than our DB has, sync plan_type and clear
+  // team caps so team.js plan defaults take effect immediately. The
+  // per-client subscription item is also reconciled to the new plan via
+  // syncPerClientSubscriptionItem (removes Pro $9.99 item on upgrade to
+  // Scale, adds it on downgrade to Pro, no-op otherwise).
+  const detectedPlan = detectPlanFromSubscription(subscription);
+  const planChanged = detectedPlan && detectedPlan !== agency.plan_type;
+
+  const updates = {
+    subscription_status: status,
+    status: agencyStatus,
+    trial_ends_at: subscription.trial_end
+      ? new Date(subscription.trial_end * 1000)
+      : null,
+  };
+
+  if (planChanged) {
+    console.log(`📈 Plan change detected: ${agency.plan_type} → ${detectedPlan}`);
+    updates.plan_type = detectedPlan;
+    updates.max_team_members_agency = null;
+    updates.max_team_members_client = null;
   }
 
   await supabase
     .from('agencies')
-    .update({
-      subscription_status: status,
-      status: agencyStatus,
-      trial_ends_at: subscription.trial_end
-        ? new Date(subscription.trial_end * 1000)
-        : null,
-    })
+    .update(updates)
     .eq('id', agency.id);
+
+  if (planChanged) {
+    await syncPerClientSubscriptionItem(agency.id, detectedPlan, subscription.id);
+  }
 }
 
 async function handleAgencySubscriptionDeleted(subscription) {
@@ -408,13 +618,32 @@ async function handleAgencySubscriptionDeleted(subscription) {
   const agency = await getAgencyByStripeCustomerId(subscription.customer);
   if (!agency) return;
 
+  // Stale-event guard: an agency that cancels and re-subscribes quickly can
+  // receive delete events for the OLD subscription AFTER we've already
+  // recorded the new subscription_id. Suspending them now would wipe the
+  // fresh subscription. Ignore deletions that don't match the current id.
+  if (agency.stripe_subscription_id && agency.stripe_subscription_id !== subscription.id) {
+    console.log(
+      `Ignoring deletion of stale subscription ${subscription.id} ` +
+      `(agency current = ${agency.stripe_subscription_id})`
+    );
+    return;
+  }
+
+  // Full reset back to a clean Free state. Clearing stripe_subscription_id
+  // is important because createAgencyCheckout's duplicate-subscription guard
+  // would otherwise treat the stale id as an active subscription and block
+  // the agency from re-subscribing after cancellation. trial_ends_at is also
+  // nulled so the trial-warning cron doesn't keep emailing about an ended
+  // trial on a canceled agency.
   await supabase
     .from('agencies')
     .update({
       subscription_status: 'canceled',
       status: 'suspended',
       plan_type: 'free',
-      // Clear caps so team.js plan-based logic returns Free defaults (0).
+      stripe_subscription_id: null,
+      trial_ends_at: null,
       max_team_members_agency: null,
       max_team_members_client: null,
     })
@@ -429,7 +658,7 @@ async function handleAgencySubscriptionDeleted(subscription) {
       <p>Your VoiceAI Connect subscription has been cancelled. Your agency and all client AI assistants will be suspended.</p>
       <p>To reactivate, visit your dashboard.</p>
     `,
-  });
+  }).catch((e) => console.error('Failed to send cancellation email:', e.message));
 }
 
 async function handleAgencyPaymentSucceeded(invoice) {
@@ -469,7 +698,7 @@ async function handleAgencyPaymentFailed(invoice) {
       <p>We couldn't process your payment. Please update your payment method to avoid service interruption.</p>
       <p><a href="${invoice.hosted_invoice_url}">Update Payment Method</a></p>
     `,
-  });
+  }).catch((e) => console.error('Failed to send payment-failed email:', e.message));
 }
 
 async function handleAgencyTrialEnding(subscription) {
@@ -490,7 +719,7 @@ async function handleAgencyTrialEnding(subscription) {
       <p>Your 14-day trial ends on ${trialEnd.toLocaleDateString()}.</p>
       <p>Add a payment method to continue growing your AI agency.</p>
     `,
-  });
+  }).catch((e) => console.error('Failed to send trial-ending email:', e.message));
 }
 
 // ============================================================================
