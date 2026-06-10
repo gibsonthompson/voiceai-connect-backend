@@ -13,7 +13,7 @@
 // ============================================================================
 const Stripe = require('stripe');
 const { supabase, getAgencyByStripeCustomerId } = require('../lib/supabase');
-const { sendEmail } = require('../lib/notifications');
+const { sendEmail, sendPlatformNotificationSMS } = require('../lib/notifications');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -649,6 +649,83 @@ async function handleAgencySubscriptionDeleted(subscription) {
     })
     .eq('id', agency.id);
 
+  // Capture cancellation details. Both paths land here eventually:
+  //   1. In-app cancel: cancelAgencySubscription already inserted a row keyed
+  //      on stripe_subscription_id. Our upsert with ignoreDuplicates:false
+  //      will update the same row with effective_at = now if we get newer
+  //      data from Stripe (e.g., paid user's period actually ended).
+  //   2. Stripe portal cancel: no row exists yet. This insert creates it
+  //      with the reason+comment the user supplied in the portal survey.
+  //      We also fire the admin SMS so portal-driven churn is visible.
+  try {
+    const details = subscription.cancellation_details || {};
+    const reason = details.feedback || null;           // enum value
+    const comment = details.comment || null;           // free text
+    const mrrLost =
+      agency.plan_type === 'pro'   ? 9900  :
+      agency.plan_type === 'scale' ? 49900 :
+      0;
+    const effectiveAt = subscription.ended_at
+      ? new Date(subscription.ended_at * 1000)
+      : new Date();
+
+    // Find any existing record from the in-app path before upserting, so
+    // we know whether to SMS the admin (we don't want a duplicate SMS for
+    // the same cancellation).
+    const { data: existing } = await supabase
+      .from('subscription_cancellations')
+      .select('id, source')
+      .eq('stripe_subscription_id', subscription.id)
+      .maybeSingle();
+
+    await supabase
+      .from('subscription_cancellations')
+      .upsert(
+        {
+          agency_id: agency.id,
+          stripe_subscription_id: subscription.id,
+          source: existing?.source || 'stripe_portal',
+          reason,
+          feedback: comment,
+          plan_type: agency.plan_type,
+          mrr_lost: mrrLost,
+          canceled_at: subscription.canceled_at
+            ? new Date(subscription.canceled_at * 1000).toISOString()
+            : new Date().toISOString(),
+          effective_at: effectiveAt.toISOString(),
+        },
+        { onConflict: 'stripe_subscription_id', ignoreDuplicates: false }
+      );
+
+    // Only send admin SMS for portal-driven cancellations (in-app path
+    // already sent one in cancelAgencySubscription).
+    if (!existing) {
+      const reasonLabel = CANCELLATION_REASON_LABELS[reason] || reason || 'No reason given (Stripe portal)';
+      const planLabel =
+        agency.plan_type === 'pro'   ? 'Pro ($99/mo)' :
+        agency.plan_type === 'scale' ? 'Scale ($499/mo)' :
+        agency.plan_type || 'Free';
+
+      let msg = `❌ Agency Cancellation (via Stripe Portal)\n`;
+      msg += `Agency: ${agency.name}\n`;
+      msg += `Email: ${agency.email}\n`;
+      msg += `Plan: ${planLabel}\n`;
+      msg += `Reason: ${reasonLabel}\n`;
+      if (comment && comment.trim()) {
+        msg += `\n"${comment.trim()}"\n`;
+      }
+      if (mrrLost > 0) {
+        msg += `\nMRR lost: $${(mrrLost / 100).toFixed(0)}/mo`;
+      }
+
+      await sendPlatformNotificationSMS(msg).catch((e) =>
+        console.error('Failed to send portal-cancel SMS:', e.message)
+      );
+    }
+  } catch (e) {
+    console.error('Failed to capture cancellation details:', e.message);
+  }
+
   await sendEmail({
     to: agency.email,
     subject: 'VoiceAI Connect Subscription Cancelled',
@@ -837,6 +914,27 @@ async function canAgencyAddClient(agencyId) {
 }
 
 // ============================================================================
+// CANCELLATION REASON LABELS
+// ----------------------------------------------------------------------------
+// Reason values match Stripe's cancellation_details.feedback enum so the
+// in-app cancel path (server.js inline /api/agency/cancel handler) and the
+// Stripe portal cancel path produce the same vocabulary in our
+// subscription_cancellations table. SMS uses friendly labels for readability.
+// Used by handleAgencySubscriptionDeleted to format the admin SMS for
+// portal-driven cancellations.
+// ============================================================================
+const CANCELLATION_REASON_LABELS = {
+  too_expensive:     'Too expensive',
+  missing_features:  'Missing features',
+  switched_service:  'Switched to another service',
+  unused:            'Not using it enough',
+  customer_service:  'Customer service issues',
+  too_complex:       'Too complex',
+  low_quality:       'Quality issues',
+  other:             'Other',
+};
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 module.exports = {
@@ -845,6 +943,7 @@ module.exports = {
   handlePlatformStripeWebhook,
   warnExpiringAgencyTrials,
   canAgencyAddClient,
+  CANCELLATION_REASON_LABELS,
   PLATFORM_PLANS,
   PLATFORM_PRICES,
   PLAN_DETAILS,

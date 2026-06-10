@@ -6,6 +6,8 @@
 // UPDATED: 2026-06-03 — /api/agency/cancel now releases the agency demo number
 // UPDATED: 2026-06-07 — Generic client field update endpoint (business_name, owner_phone, etc.)
 // UPDATED: 2026-06-07 — Exclude test clients from dashboard/analytics MRR and stats
+// UPDATED: 2026-06-10 — /api/agency/cancel now captures reason + feedback,
+//                       writes to subscription_cancellations, SMS's platform owner.
 // Destination: src/server.js (or src/index.js) — FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -15,6 +17,7 @@ const cors = require('cors');
 const { supabase } = require('./lib/supabase');
 const { fullyReleaseNumber } = require('./lib/vapi');
 const { expressErrorHandler, setupProcessErrorHandlers } = require('./lib/error-monitor');
+const { sendPlatformNotificationSMS } = require('./lib/notifications');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -266,9 +269,33 @@ app.post('/api/agency/:agencyId/domain/verify', verifyAgencyDomain);
 app.post('/api/agency/checkout', createAgencyCheckout);
 app.post('/api/agency/portal', createAgencyPortal);
 
+// ============================================================================
+// AGENCY CANCELLATION
+// ----------------------------------------------------------------------------
+// Reads { agency_id, reason, feedback } from the body. reason is the Stripe
+// cancellation_details.feedback enum value (too_expensive, missing_features,
+// switched_service, unused, too_complex, customer_service, low_quality, other)
+// chosen from the dropdown in app/agency/settings/page.tsx. feedback is the
+// optional free-text comment from the textarea below the dropdown.
+//
+// Side effects in order:
+//   1. Cancel the Stripe subscription (passing reason+feedback as
+//      cancellation_details so Stripe Dashboard shows them and the resulting
+//      customer.subscription.deleted webhook fires with the same data).
+//   2. Release the VAPI demo number + Telnyx rental + demo assistant.
+//   3. Mark the agency canceled and null out demo fields.
+//   4. Cascade-suspend all clients (status='cancelled',
+//      subscription_status='agency_canceled').
+//   5. Upsert a row in subscription_cancellations keyed on
+//      stripe_subscription_id. The webhook handler
+//      (handleAgencySubscriptionDeleted in routes/stripe-platform.js) checks
+//      for an existing row before sending its own SMS, so this path owns
+//      the admin notification for app-initiated cancellations.
+//   6. SMS the platform owner with reason, feedback, plan, MRR lost.
+// ============================================================================
 app.post('/api/agency/cancel', async (req, res) => {
-  const { agency_id } = req.body;
-  
+  const { agency_id, reason, feedback } = req.body;
+
   if (!agency_id) {
     return res.status(400).json({ error: 'agency_id required' });
   }
@@ -276,7 +303,7 @@ app.post('/api/agency/cancel', async (req, res) => {
   try {
     const { data: agency, error } = await supabase
       .from('agencies')
-      .select('id, name, stripe_subscription_id, demo_vapi_phone_id, demo_phone_number, demo_assistant_id')
+      .select('id, name, email, plan_type, subscription_status, stripe_subscription_id, demo_vapi_phone_id, demo_phone_number, demo_assistant_id')
       .eq('id', agency_id)
       .single();
 
@@ -286,10 +313,19 @@ app.post('/api/agency/cancel', async (req, res) => {
 
     console.log('🛑 Canceling subscription for:', agency.name);
 
+    const isTrialing =
+      agency.subscription_status === 'trial' ||
+      agency.subscription_status === 'trialing';
+
     if (agency.stripe_subscription_id) {
       const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
       try {
-        await stripe.subscriptions.cancel(agency.stripe_subscription_id);
+        await stripe.subscriptions.cancel(agency.stripe_subscription_id, {
+          cancellation_details: {
+            feedback: reason || undefined,    // Stripe enum
+            comment:  feedback || undefined,  // free-text
+          },
+        });
         console.log('✅ Stripe subscription canceled');
       } catch (stripeErr) {
         console.error('Stripe cancel error (continuing):', stripeErr.message);
@@ -303,7 +339,7 @@ app.post('/api/agency/cancel', async (req, res) => {
         const release = await fullyReleaseNumber(agency.demo_vapi_phone_id, agency.demo_phone_number);
         console.log(`📞 Demo released for ${agency.name}: VAPI=${release.vapiDeleted} Telnyx=${release.telnyxReleased}`);
         if (!release.telnyxReleased) {
-          console.error(`⚠️ Telnyx demo NOT released for ${agency.name} (${agency.demo_phone_number}) — orphan sweep will catch it`);
+          console.error(`⚠️ Telnyx demo NOT released for ${agency.name} (${agency.demo_phone_number}), orphan sweep will catch it`);
         }
         if (agency.demo_assistant_id && process.env.VAPI_API_KEY) {
           try {
@@ -345,6 +381,70 @@ app.post('/api/agency/cancel', async (req, res) => {
         .eq('agency_id', agency_id);
       
       console.log(`⚠️ Suspended ${clients.length} clients`);
+    }
+
+    // Record cancellation with reason + feedback. Upsert keyed on
+    // stripe_subscription_id so the subsequent webhook won't duplicate.
+    const mrrLost =
+      agency.plan_type === 'pro'   ? 9900  :
+      agency.plan_type === 'scale' ? 49900 :
+      0;
+
+    try {
+      await supabase
+        .from('subscription_cancellations')
+        .upsert(
+          {
+            agency_id: agency.id,
+            stripe_subscription_id: agency.stripe_subscription_id || null,
+            source: 'app',
+            reason: reason || null,
+            feedback: feedback || null,
+            plan_type: agency.plan_type,
+            mrr_lost: mrrLost,
+            canceled_at: new Date().toISOString(),
+            effective_at: new Date().toISOString(),
+          },
+          { onConflict: 'stripe_subscription_id', ignoreDuplicates: false }
+        );
+    } catch (recordErr) {
+      console.error('Failed to record cancellation:', recordErr.message);
+    }
+
+    // SMS the platform owner with structured cancellation details.
+    try {
+      const REASON_LABELS = {
+        too_expensive:     'Too expensive',
+        missing_features:  'Missing features',
+        switched_service:  'Switched to another service',
+        unused:            'Not using it enough',
+        customer_service:  'Customer service issues',
+        too_complex:       'Too complex',
+        low_quality:       'Quality issues',
+        other:             'Other',
+      };
+      const reasonLabel = REASON_LABELS[reason] || reason || 'No reason given';
+      const planLabel =
+        agency.plan_type === 'pro'   ? 'Pro ($99/mo)' :
+        agency.plan_type === 'scale' ? 'Scale ($499/mo)' :
+        agency.plan_type || 'Free';
+
+      let msg = `❌ Agency Cancellation\n`;
+      msg += `Agency: ${agency.name}\n`;
+      msg += `Email: ${agency.email}\n`;
+      msg += `Plan: ${planLabel}\n`;
+      msg += `Status: ${isTrialing ? 'TRIAL' : 'PAID'}\n`;
+      msg += `Reason: ${reasonLabel}\n`;
+      if (feedback && feedback.trim()) {
+        msg += `\n"${feedback.trim()}"\n`;
+      }
+      if (mrrLost > 0) {
+        msg += `\nMRR lost: $${(mrrLost / 100).toFixed(0)}/mo`;
+      }
+
+      await sendPlatformNotificationSMS(msg);
+    } catch (smsErr) {
+      console.error('Failed to send cancellation SMS to platform owner:', smsErr.message);
     }
 
     console.log('✅ Agency subscription canceled:', agency.name);
