@@ -300,6 +300,12 @@ async function handleAgencyCheckoutCompleted(session) {
       plan_type: plan,
       stripe_subscription_id: session.subscription,
       trial_ends_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+      // Clear per-row team caps so plan-based defaults in routes/team.js
+      // (checkTeamLimit) take effect. The column is treated as a hard
+      // override when non-null, including the value 0 which would block
+      // adding team members on an otherwise unlimited Pro/Scale plan.
+      max_team_members_agency: null,
+      max_team_members_client: null,
       updated_at: new Date().toISOString(),
     })
     .eq('id', agencyId);
@@ -356,6 +362,10 @@ async function handleAgencySubscriptionCreated(subscription) {
       stripe_subscription_id: subscription.id,
       subscription_status: subscription.status,
       plan_type: plan,
+      // See handleAgencyCheckoutCompleted comment. Clear caps so plan
+      // defaults apply (Pro=3, Scale=unlimited via team.js).
+      max_team_members_agency: null,
+      max_team_members_client: null,
     })
     .eq('id', agency.id);
 }
@@ -404,6 +414,9 @@ async function handleAgencySubscriptionDeleted(subscription) {
       subscription_status: 'canceled',
       status: 'suspended',
       plan_type: 'free',
+      // Clear caps so team.js plan-based logic returns Free defaults (0).
+      max_team_members_agency: null,
+      max_team_members_client: null,
     })
     .eq('id', agency.id);
 
