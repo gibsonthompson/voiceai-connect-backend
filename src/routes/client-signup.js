@@ -26,6 +26,20 @@
 //          In-memory token bucket (single-instance safe). Public embed widget
 //          makes this endpoint internet-exposed without auth, so a basic
 //          rate limit is the bare minimum before CAPTCHA / fraud detection.
+// UPDATED: 2026-06-10 — Card-required trial support in handleClientSignup.
+//          When agency.require_card_for_trial=true AND stripe_charges_enabled,
+//          handleClientSignup creates a Stripe Connect Checkout with
+//          trial_period_days=7 via createTrialCheckoutForSignup (imported
+//          inline from ./stripe-connect to avoid circular import), flips the
+//          client to subscription_status='pending_payment', defers the
+//          welcome SMS to the checkout webhook, and returns checkout_url in
+//          the response. The embed widget redirects the top-level window
+//          to checkout_url. Toggle is no-op when stripe_charges_enabled is
+//          false (falls back to no-card trial, signup never breaks). This
+//          branch ONLY affects /api/client/signup (embed widget path).
+//          handleAgencyAddClient still uses the no-card flow regardless of
+//          the toggle, since agency-added clients need a different UX
+//          (agency doesn't have client's card on file at add time).
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -707,6 +721,52 @@ async function handleClientSignup(req, res) {
     const passwordToken = await createPasswordToken(newUser.id, email.toLowerCase());
 
     // ============================================
+    // STEP 6b: CARD-REQUIRED TRIAL CHECKOUT (if agency toggle on)
+    // ────────────────────────────────────────────
+    // When agency.require_card_for_trial=true AND stripe_charges_enabled=true,
+    // create a Stripe Connect Checkout with trial_period_days=7 and flip the
+    // client to subscription_status='pending_payment'. The checkout.session
+    // .completed webhook (handleClientCheckoutCompleted in stripe-connect.js)
+    // then transitions to 'trial' with trial_ends_at from Stripe and sends
+    // the deferred welcome SMS.
+    //
+    // VAPI + phone are already provisioned above. Abandoned checkouts leave
+    // those active; a Phase 2 cleanup cron sweeps pending_payment >24h old.
+    //
+    // If toggle is on but Stripe Connect isn't ready, we log a warning and
+    // fall back to the no-card flow so signup never breaks.
+    // ============================================
+    let cardRequiredCheckoutUrl = null;
+    const cardRequired = agency.require_card_for_trial === true && agency.stripe_charges_enabled === true;
+
+    if (agency.require_card_for_trial === true && agency.stripe_charges_enabled !== true) {
+      console.warn(`⚠️ Agency ${agency.name} has require_card_for_trial=true but stripe_charges_enabled=false — falling back to no-card trial`);
+    }
+
+    if (cardRequired) {
+      try {
+        const { createTrialCheckoutForSignup } = require('./stripe-connect');
+        const checkout = await createTrialCheckoutForSignup({ client: newClient, agency, plan: planType });
+        cardRequiredCheckoutUrl = checkout.url;
+
+        const { error: pendingErr } = await supabase
+          .from('clients')
+          .update({ subscription_status: 'pending_payment', trial_ends_at: null })
+          .eq('id', newClient.id);
+        if (pendingErr) {
+          console.error('❌ Failed to set client to pending_payment:', pendingErr.message);
+        } else {
+          console.log(`🔐 Card-required trial: client ${newClient.id} → pending_payment, checkout URL ready`);
+        }
+      } catch (checkoutErr) {
+        // Fall back to DB-only trial so signup doesn't break. Agency owner
+        // can troubleshoot Stripe Connect from logs.
+        console.error('❌ Failed to create trial checkout, falling back to no-card trial:', checkoutErr.message);
+        cardRequiredCheckoutUrl = null;
+      }
+    }
+
+    // ============================================
     // STEP 7: SEND WELCOME EMAIL
     // ============================================
     console.log('📧 Sending welcome email...');
@@ -714,8 +774,15 @@ async function handleClientSignup(req, res) {
 
     // ============================================
     // STEP 8: SEND WELCOME SMS (guarded)
+    // ────────────────────────────────────────────
+    // Skipped for card-required pending_payment signups. Welcome SMS is
+    // deferred to handleClientCheckoutCompleted (after the user actually
+    // enters their card), so we don't tell them "your AI is live at [num]"
+    // before payment is on file.
     // ============================================
-    if (formattedOwnerPhone && formattedOwnerPhone !== 'undefined') {
+    if (cardRequiredCheckoutUrl) {
+      console.log('📱 Welcome SMS deferred (card-required pending_payment); webhook will send after activation');
+    } else if (formattedOwnerPhone && formattedOwnerPhone !== 'undefined') {
       console.log('📱 Sending welcome SMS...');
       await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneResult.number, agency);
     } else {
@@ -730,14 +797,21 @@ async function handleClientSignup(req, res) {
 
     // ============================================
     // RETURN SUCCESS
+    // ────────────────────────────────────────────
+    // For card-required signups, response includes checkout_url. The embed
+    // widget redirects the top-level window to this URL so the user enters
+    // their card on Stripe. After completion, Stripe redirects to
+    // {agencyUrl}/client/welcome?trial=started and our webhook activates.
     // ============================================
-    console.log('🎉 Client onboarding complete:', businessName);
+    console.log('🎉 Client onboarding complete:', businessName, cardRequiredCheckoutUrl ? '(card-required, awaiting payment)' : '(no-card trial active)');
 
     res.status(200).json({
       success: true,
       message: 'Account created successfully!',
       token: passwordToken,
       hasPassword: !!hasPassword,
+      checkout_url: cardRequiredCheckoutUrl, // null for no-card mode, Stripe URL for card-required
+      requires_card: !!cardRequiredCheckoutUrl,
       client: {
         id: newClient.id,
         business_name: newClient.business_name,
@@ -745,8 +819,8 @@ async function handleClientSignup(req, res) {
         email: newClient.email,
         country: clientCountry,
         location: `${businessCity}, ${businessState}`,
-        trial_ends_at: newClient.trial_ends_at,
-        subscription_status: 'trial',
+        trial_ends_at: cardRequiredCheckoutUrl ? null : newClient.trial_ends_at,
+        subscription_status: cardRequiredCheckoutUrl ? 'pending_payment' : 'trial',
         plan_type: planType,
         monthly_call_limit: callLimit,
         agency: agency.name

@@ -407,6 +407,11 @@ async function updateAgencySettings(req, res) {
       'plan_features',
       // Calendar plan gating (which client plans can connect Google Calendar)
       'calendar_enabled_plans',
+      // Client trial card requirement (require_card_for_trial)
+      // When true, /api/client/signup creates Stripe Connect Checkout with
+      // trial_period_days=7. When false (default), trials are DB-only.
+      // Backend silently no-ops if stripe_charges_enabled is false.
+      'require_card_for_trial',
       // Marketing page currency override
       'display_currency',
       // Analytics & Tracking

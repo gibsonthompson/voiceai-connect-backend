@@ -14,11 +14,20 @@
 //          only the VAPI object left the Telnyx rental billing monthly forever.
 // UPDATED: 2026-06-08 — Phase 1 double-billing fix: createClientCheckout
 //          rejects with 409 if client.stripe_connected_subscription_id already
-//          points to an active|trialing|past_due Stripe subscription. Stale IDs
-//          (resource_missing) fall through to a fresh checkout. This is the
-//          direct cause of Neil at Apex Law getting billed $249 + $499 in
-//          19 minutes — same client clicked Pro, completed Stripe, came back
-//          to /upgrade-required (state lost), clicked Growth, got a second sub.
+//          points to an active|trialing|past_due Stripe subscription.
+// UPDATED: 2026-06-10 — require_card_for_trial support:
+//          (a) createTrialCheckoutForSignup creates a Stripe Connect Checkout
+//              with trial_period_days=7 for card-required signups, called from
+//              handleClientSignup in routes/client-signup.js.
+//          (b) handleClientCheckoutCompleted detects trial-mode sessions
+//              (subscription.status='trialing') and writes subscription_status
+//              ='trial' (not 'active'), setting trial_ends_at from Stripe.
+//              Sends welcome SMS when status flips from 'pending_payment'.
+//          (c) expireTrials skips Stripe-managed trials via
+//              .is('stripe_connected_subscription_id', null) so it only
+//              touches DB-only trials.
+//          (d) disconnectConnectAccount auto-sets require_card_for_trial=false
+//              since the toggle is meaningless without Stripe Connect.
 // ============================================================================
 const Stripe = require('stripe');
 const fetch = require('node-fetch');
@@ -31,6 +40,7 @@ const {
 } = require('../lib/supabase');
 const {
   sendEmail,
+  sendWelcomeSMS,
   sendClientTrialExpiredSMS,
   sendClientPaymentFailedSMS,
   sendClientSubscriptionActivatedSMS,
@@ -165,6 +175,10 @@ async function getConnectStatus(req, res) {
 
 // ============================================================================
 // DISCONNECT CONNECT ACCOUNT
+// ----------------------------------------------------------------------------
+// Also disables require_card_for_trial since the toggle is meaningless without
+// Stripe Connect. Without this, an agency could disconnect Stripe and then
+// the embed widget would throw 500 trying to create a checkout session.
 // ============================================================================
 async function disconnectConnectAccount(req, res) {
   try {
@@ -188,8 +202,11 @@ async function disconnectConnectAccount(req, res) {
     console.log('Disconnecting Stripe Connect for:', agency.name);
 
     const { error: updateError } = await supabase.from('agencies').update({
-      stripe_account_id: null, stripe_onboarding_complete: false,
-      stripe_charges_enabled: false, stripe_payouts_enabled: false,
+      stripe_account_id: null,
+      stripe_onboarding_complete: false,
+      stripe_charges_enabled: false,
+      stripe_payouts_enabled: false,
+      require_card_for_trial: false, // auto-disable, meaningless without Connect
       updated_at: new Date().toISOString()
     }).eq('id', agencyId);
 
@@ -208,12 +225,102 @@ async function disconnectConnectAccount(req, res) {
 }
 
 // ============================================================================
-// CREATE CLIENT CHECKOUT
-// UPDATED 2026-06-08 — Phase 1 active-subscription guard. If the client
-// already has a Stripe Connect subscription that's active|trialing|past_due,
-// reject with 409 before creating a new product/price/session. The frontend
-// turns 409 into a billing-portal redirect. resource_missing (stale ID from
-// a deleted Stripe sub) falls through to a fresh checkout.
+// CREATE TRIAL CHECKOUT FOR SIGNUP (card-required trial mode)
+// ----------------------------------------------------------------------------
+// Called from handleClientSignup in routes/client-signup.js when the agency
+// has require_card_for_trial=true. Creates a Stripe Connect Checkout session
+// with trial_period_days=7. Client enters card, gets 7-day free trial, Stripe
+// auto-charges at trial end.
+//
+// On success, the subsequent checkout.session.completed webhook fires
+// handleClientCheckoutCompleted below, which detects the trialing status and
+// transitions the client from 'pending_payment' to 'trial' (not 'active').
+//
+// Mirrors createClientCheckout structure but adds trial_period_days and uses
+// different status_url paths since this is a fresh signup, not an upgrade.
+//
+// Returns: { url } on success, throws on error. Caller handles errors.
+// ============================================================================
+async function createTrialCheckoutForSignup({ client, agency, plan }) {
+  if (!agency.stripe_account_id || !agency.stripe_charges_enabled) {
+    throw new Error('Agency Stripe Connect not configured');
+  }
+
+  const priceAmounts = {
+    starter: agency.price_starter || 9900,
+    pro: agency.price_pro || 14900,
+    growth: agency.price_growth || 29900,
+  };
+  const callLimits = {
+    starter: agency.limit_starter || 50,
+    pro: agency.limit_pro || 150,
+    growth: agency.limit_growth || 500,
+  };
+  const priceAmount = priceAmounts[plan];
+  if (!priceAmount) throw new Error(`Invalid plan: ${plan}`);
+
+  const currency = getCurrencyForCountry(agency.country || 'US');
+
+  // Create customer on the connected account
+  let connectedCustomerId = client.stripe_connected_customer_id;
+  if (!connectedCustomerId) {
+    const customer = await stripe.customers.create({
+      email: client.email,
+      name: client.owner_name || client.business_name,
+      metadata: { client_id: client.id, business_name: client.business_name },
+    }, { stripeAccount: agency.stripe_account_id });
+    connectedCustomerId = customer.id;
+
+    await supabase
+      .from('clients')
+      .update({ stripe_connected_customer_id: connectedCustomerId })
+      .eq('id', client.id);
+  }
+
+  // Create product + price on connected account (per-client pricing matches createClientCheckout)
+  const product = await stripe.products.create({
+    name: `AI Receptionist - ${plan.charAt(0).toUpperCase() + plan.slice(1)}`,
+    metadata: { client_id: client.id, plan },
+  }, { stripeAccount: agency.stripe_account_id });
+
+  const price = await stripe.prices.create({
+    product: product.id,
+    unit_amount: priceAmount,
+    currency,
+    recurring: { interval: 'month' },
+  }, { stripeAccount: agency.stripe_account_id });
+
+  const agencyUrl = agency.marketing_domain && agency.domain_verified
+    ? `https://${agency.marketing_domain}`
+    : `https://${agency.slug}.myvoiceaiconnect.com`;
+
+  const session = await stripe.checkout.sessions.create({
+    customer: connectedCustomerId,
+    mode: 'subscription',
+    payment_method_types: ['card'],
+    line_items: [{ price: price.id, quantity: 1 }],
+    success_url: `${agencyUrl}/client/welcome?trial=started`,
+    cancel_url: `${agencyUrl}/client/signup?canceled=true`,
+    metadata: {
+      client_id: client.id,
+      agency_id: agency.id,
+      plan,
+      call_limit: callLimits[plan].toString(),
+      type: 'trial_signup', // distinguishes from upgrade-mode checkouts
+    },
+    subscription_data: {
+      trial_period_days: 7,
+      metadata: { client_id: client.id, agency_id: agency.id, plan, type: 'trial_signup' },
+    },
+  }, { stripeAccount: agency.stripe_account_id });
+
+  console.log(`✅ Trial checkout created for client ${client.id}: session ${session.id}, plan ${plan}, currency ${currency}`);
+  return { url: session.url, sessionId: session.id };
+}
+
+// ============================================================================
+// CREATE CLIENT CHECKOUT (upgrade flow, used by /api/client/checkout)
+// UPDATED 2026-06-08 — Phase 1 active-subscription guard.
 // ============================================================================
 async function createClientCheckout(req, res) {
   try {
@@ -239,18 +346,7 @@ async function createClientCheckout(req, res) {
       return res.status(400).json({ error: 'Agency has not completed Stripe Connect setup' });
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // Phase 1: Active-subscription guard — prevents double-billing.
-    // The webhook handler `handleClientCheckoutCompleted` writes
-    // `stripe_connected_subscription_id` after a successful checkout. If a
-    // user returns to /upgrade-required after that webhook has fired (state
-    // lost, two tabs, back-button), the next checkout attempt would create
-    // a SECOND subscription on the same Connect customer. This guard reads
-    // the live Stripe status and refuses if there's already a live sub.
-    //
-    // 'resource_missing' = the sub was deleted on Stripe but the DB still
-    // has the ID. Safe to fall through to a fresh checkout.
-    // ────────────────────────────────────────────────────────────────────
+    // Phase 1 active-subscription guard
     if (client.stripe_connected_subscription_id) {
       try {
         const existingSub = await stripe.subscriptions.retrieve(
@@ -361,15 +457,15 @@ async function createClientPortal(req, res) {
 }
 
 // ============================================================================
-// EXPIRE TRIALS
-// UPDATED 2026-05-16: DELETES VAPI phone number + assistant instead of just
-// disabling them. Nulls out resource IDs so the VAPI slot is freed for reuse.
-// If a client later upgrades, they get a new number provisioned at that point.
-// UPDATED 2026-06-03: Also RELEASES the underlying Telnyx number (the monthly
-// rental) via fullyReleaseNumber. This runs BEFORE the DB null-out because the
-// stored E.164 (vapi_phone_number) is the only handle to the Telnyx number —
-// no Telnyx ID is persisted. Deleting only the VAPI object left the Telnyx
-// number renting forever, which was the silent cost leak.
+// EXPIRE TRIALS (DB-only trials)
+// ----------------------------------------------------------------------------
+// UPDATED 2026-05-16: DELETES VAPI phone + assistant, frees slots
+// UPDATED 2026-06-03: RELEASES underlying Telnyx number
+// UPDATED 2026-06-10: Skips Stripe-managed trials. When an agency has
+//   require_card_for_trial=true, the client has a Stripe Connect subscription
+//   whose trial Stripe converts automatically via invoice.payment_succeeded
+//   (or invoice.payment_failed). The DB-only cron must not touch those.
+//   Filter: stripe_connected_subscription_id IS NULL.
 // ============================================================================
 async function expireTrials() {
   console.log('Checking for expired trials...');
@@ -377,21 +473,21 @@ async function expireTrials() {
   const now = new Date().toISOString();
 
   const { data: expiredClients, error } = await supabase
-    .from('clients').select('*, agencies!clients_agency_id_fkey(*)').in('subscription_status', ['trial', 'trialing']).lt('trial_ends_at', now);
+    .from('clients')
+    .select('*, agencies!clients_agency_id_fkey(*)')
+    .in('subscription_status', ['trial', 'trialing'])
+    .is('stripe_connected_subscription_id', null) // skip Stripe-managed trials
+    .lt('trial_ends_at', now);
 
   if (error) { console.error('Error fetching expired trials:', error); return { success: false, error: error.message }; }
 
-  console.log(`Found ${expiredClients?.length || 0} expired trials`);
+  console.log(`Found ${expiredClients?.length || 0} expired trials (DB-only)`);
 
   const results = [];
 
   for (const client of expiredClients || []) {
     try {
-      // ── RELEASE the phone number: delete the VAPI object AND release the
-      //    underlying Telnyx number. Must run BEFORE we null vapi_phone_number
-      //    below, since the E.164 is the only handle to the Telnyx number
-      //    (no Telnyx ID is stored). Deleting only the VAPI object left the
-      //    Telnyx rental billing monthly forever — that was the leak.
+      // ── RELEASE the phone number: delete VAPI + release Telnyx ──
       if (client.vapi_phone_id || client.vapi_phone_number) {
         try {
           const release = await fullyReleaseNumber(client.vapi_phone_id, client.vapi_phone_number);
@@ -441,7 +537,7 @@ async function expireTrials() {
         continue;
       }
 
-      // ── Verify the update actually took effect ──
+      // ── Verify update persisted (RLS check) ──
       const { data: verifyClient } = await supabase
         .from('clients')
         .select('subscription_status')
@@ -456,7 +552,7 @@ async function expireTrials() {
         continue;
       }
 
-      // ── Only send SMS after confirmed status change ──
+      // ── Send SMS after confirmed status change ──
       const agency = client.agencies;
       await sendClientTrialExpiredSMS(client, agency);
 
@@ -537,6 +633,25 @@ async function handleAccountUpdated(account) {
   }
 }
 
+// ----------------------------------------------------------------------------
+// handleClientCheckoutCompleted
+// ----------------------------------------------------------------------------
+// Two flows converge here:
+//
+//   1. UPGRADE: client was on a no-card DB trial (or expired/canceled), went
+//      to /client/upgrade-required, picked a plan, completed Stripe checkout
+//      with no trial. We set subscription_status='active' immediately.
+//
+//   2. CARD-REQUIRED TRIAL SIGNUP: client filled embed widget on agency with
+//      require_card_for_trial=true. Backend set client to 'pending_payment'
+//      and created a Stripe checkout with trial_period_days=7. Client entered
+//      card. We must set subscription_status='trial' (not 'active') with
+//      trial_ends_at from Stripe, and send the welcome SMS now (deferred at
+//      signup since they hadn't paid yet).
+//
+// Discriminator: retrieve the subscription, check status. 'trialing' = card-
+// required trial signup. 'active' (or anything else) = upgrade flow.
+// ----------------------------------------------------------------------------
 async function handleClientCheckoutCompleted(session, stripeAccountId) {
   console.log('Client checkout completed:', session.id);
 
@@ -545,34 +660,61 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
   const callLimit = parseInt(session.metadata?.call_limit) || 50;
   if (!clientId) { console.error('No client_id in checkout metadata'); return; }
 
-  const { data: client, error } = await supabase.from('clients').select('*, agencies!clients_agency_id_fkey(*)').eq('id', clientId).single();
+  const { data: client, error } = await supabase
+    .from('clients').select('*, agencies!clients_agency_id_fkey(*)').eq('id', clientId).single();
   if (error || !client) { console.error('Client not found:', clientId); return; }
 
-  const isUpgrade = client.subscription_status === 'trial_expired' || client.subscription_status === 'canceled' || client.subscription_status === 'past_due';
+  const wasPendingPayment = client.subscription_status === 'pending_payment';
+  const isUpgrade = client.subscription_status === 'trial_expired'
+    || client.subscription_status === 'canceled'
+    || client.subscription_status === 'past_due';
+
+  // Inspect subscription to know if Stripe started it in trialing or active
+  let subStatus = 'active';
+  let subTrialEnd = null;
+  if (session.subscription) {
+    try {
+      const sub = await stripe.subscriptions.retrieve(session.subscription, { stripeAccount: stripeAccountId });
+      subStatus = sub.status; // 'trialing' or 'active' typically
+      subTrialEnd = sub.trial_end ? new Date(sub.trial_end * 1000).toISOString() : null;
+    } catch (subErr) {
+      console.error('Failed to retrieve subscription for status check:', subErr.message);
+      // Fall back to assuming active so we don't block activation
+    }
+  }
+
+  const isTrialing = subStatus === 'trialing' && subTrialEnd;
+  const dbStatus = isTrialing ? 'trial' : 'active';
 
   const { error: updateError } = await supabase.from('clients').update({
-    subscription_status: 'active', plan_type: plan, monthly_call_limit: callLimit,
-    stripe_connected_subscription_id: session.subscription, trial_ends_at: null,
-    status: 'active', calls_this_month: 0
+    subscription_status: dbStatus,
+    plan_type: plan,
+    monthly_call_limit: callLimit,
+    stripe_connected_subscription_id: session.subscription,
+    trial_ends_at: isTrialing ? subTrialEnd : null,
+    status: 'active',
+    calls_this_month: 0,
   }).eq('id', clientId);
 
   if (updateError) { console.error('Failed to update client:', updateError); return; }
 
-  console.log(`Client ${isUpgrade ? 'upgraded' : 'activated'}:`, client.business_name);
+  console.log(`Client ${wasPendingPayment ? 'trial-activated' : (isUpgrade ? 'upgraded' : 'activated')}:`, client.business_name, `(${dbStatus})`);
 
-  // Update agency per-client billing (client reactivated = increase quantity)
+  // Update agency per-client billing
   try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
 
+  // Re-enable VAPI resources (idempotent if they were never disabled)
   if (client.vapi_phone_id) {
-    try { await enablePhoneNumber(client.vapi_phone_id); console.log('✅ VAPI phone number re-enabled:', client.vapi_phone_id); }
-    catch (phoneError) { console.error('❌ Failed to re-enable VAPI phone number:', phoneError.message); }
+    try { await enablePhoneNumber(client.vapi_phone_id); console.log('✅ VAPI phone number enabled:', client.vapi_phone_id); }
+    catch (phoneError) { console.error('❌ Failed to enable VAPI phone number:', phoneError.message); }
   }
 
   if (client.vapi_assistant_id) {
-    try { await enableAssistant(client.vapi_assistant_id); console.log('✅ VAPI assistant re-enabled:', client.vapi_assistant_id); }
-    catch (vapiError) { console.error('⚠️ Failed to re-enable VAPI assistant (non-critical):', vapiError.message); }
+    try { await enableAssistant(client.vapi_assistant_id); console.log('✅ VAPI assistant enabled:', client.vapi_assistant_id); }
+    catch (vapiError) { console.error('⚠️ Failed to enable VAPI assistant (non-critical):', vapiError.message); }
   }
 
+  // Record payment if Stripe collected money on this session (not for trial signups, amount_total=0)
   if (session.amount_total > 0) {
     await supabase.from('payments').insert({
       client_id: clientId, agency_id: client.agency_id, stripe_payment_intent_id: session.payment_intent,
@@ -585,6 +727,20 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
   }
 
   const agency = client.agencies;
+
+  // Card-required trial signups: send the welcome SMS NOW since it was
+  // deferred at signup time (we didn't know if they'd complete checkout).
+  if (wasPendingPayment && client.owner_phone && client.vapi_phone_number) {
+    try {
+      await sendWelcomeSMS(client.owner_phone, client.business_name, client.vapi_phone_number, agency);
+      console.log('✅ Deferred welcome SMS sent to', client.owner_phone);
+    } catch (e) {
+      console.error('Failed to send deferred welcome SMS:', e.message);
+    }
+  }
+
+  // Always send the subscription-activated notification (this is a different
+  // message from the welcome SMS and goes to the client either way).
   await sendClientSubscriptionActivatedSMS(client, agency, plan);
 }
 
@@ -607,8 +763,12 @@ async function handleClientSubscriptionUpdated(subscription, stripeAccountId) {
     if (client.vapi_assistant_id) { await disableAssistant(client.vapi_assistant_id); }
   }
 
+  // Map Stripe 'trialing' to our 'trial' for consistency with DB-only trials.
+  // Other statuses ('active', 'canceled', 'past_due', etc.) pass through.
+  const dbSubStatus = status === 'trialing' ? 'trial' : status;
+
   await supabase.from('clients').update({
-    subscription_status: status, status: clientStatus,
+    subscription_status: dbSubStatus, status: clientStatus,
     trial_ends_at: subscription.trial_end ? new Date(subscription.trial_end * 1000) : null
   }).eq('id', client.id);
 
@@ -678,6 +838,7 @@ module.exports = {
   getConnectStatus,
   disconnectConnectAccount,
   createClientCheckout,
+  createTrialCheckoutForSignup, // NEW: called from routes/client-signup.js
   createClientPortal,
   handleConnectStripeWebhook,
   expireTrials
