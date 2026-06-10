@@ -1,246 +1,213 @@
 // ============================================================================
 // STRIPE PLATFORM BILLING - Agencies Pay Platform
-// REWRITTEN: 2026-05-06 — Pricing Restructure (free/pro/scale + metered billing)
-// UPDATED: 2026-05-09 — Trial warning guards, sendAndLogSMS
-// UPDATED: 2026-05-10 — alertError() in all catch blocks for SMS alerts
-// UPDATED: 2026-06-03 — handleAgencySubscriptionDeleted now releases the agency
-//   demo number (VAPI object + Telnyx rental) so it stops billing on cancel
-// UPDATED: 2026-06-09 — Pro tier agency team-member cap dropped from 5 → 3.
-//   Scale stays unlimited (-1). Mirror in lib/plan-limits.ts (maxTeamMembers),
-//   lib/plan-features.ts (AGENCY_PLAN_TIERS.pro.features), and
-//   src/routes/team.js (checkTeamLimit defaults).
-//
-// NEW MODEL:
-//   Free  = $0 platform + $29.99/client + $0.12/min (no Stripe sub until first client)
-//   Pro   = $179 platform + $9.99/client + $0.10/min (14-day trial)
-//   Scale = $499 platform + $0/client + $0.05/min   (14-day trial)
 // ============================================================================
 const Stripe = require('stripe');
 const { supabase, getAgencyByStripeCustomerId } = require('../lib/supabase');
-const {
-  sendEmail,
-  sendAgencyTrialEndingSMS,
-  sendAgencyPaymentFailedSMS,
-  sendAgencySubscriptionCanceledSMS,
-  sendPlatformNotificationSMS
-} = require('../lib/notifications');
-const { getSmsTemplate } = require('../lib/sms-templates');
-const { sendAndLogSMS } = require('../lib/sms-logger');
-const { getPlanRates } = require('../lib/usage-tracker');
-const { alertError } = require('../lib/error-monitor');
-const { fullyReleaseNumber } = require('../lib/vapi');
+const { sendEmail } = require('../lib/notifications');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// ============================================================================
-// PLAN CONFIGURATION
-// ============================================================================
+// Platform subscription price IDs (agencies pay these)
+const PLATFORM_PRICES = {
+  starter: process.env.STRIPE_PRICE_AGENCY_STARTER,       // $99/mo
+  professional: process.env.STRIPE_PRICE_AGENCY_PRO,      // $199/mo
+  enterprise: process.env.STRIPE_PRICE_AGENCY_ENTERPRISE  // $299/mo
+};
+
 const PLAN_DETAILS = {
-  free: { name: 'Free', platformFeeCents: 0, perClientCents: 2999, perMinuteCents: 12, trial: false, requiresCardAtSignup: false, whiteLabel: false },
-  pro: { name: 'Pro', platformFeeCents: 9900, perClientCents: 999, perMinuteCents: 10, trial: true, trialDays: 14, requiresCardAtSignup: true, whiteLabel: true },
-  scale: { name: 'Scale', platformFeeCents: 49900, perClientCents: 0, perMinuteCents: 5, trial: true, trialDays: 14, requiresCardAtSignup: true, whiteLabel: true },
-};
-
-const TEAM_MEMBER_LIMITS = {
-  free:  { agency: 0, client: 0 },
-  pro:   { agency: 3, client: 2 },
-  scale: { agency: -1, client: -1 },
-};
-
-function getStripePriceIds(plan) {
-  const ids = {
-    free: { platform: null, client: process.env.STRIPE_PRICE_FREE_CLIENT, minute: process.env.STRIPE_PRICE_FREE_MINUTE },
-    pro: { platform: process.env.STRIPE_PRICE_PRO_PLATFORM, client: process.env.STRIPE_PRICE_PRO_CLIENT, minute: process.env.STRIPE_PRICE_PRO_MINUTE },
-    scale: { platform: process.env.STRIPE_PRICE_SCALE_PLATFORM, client: null, minute: process.env.STRIPE_PRICE_SCALE_MINUTE },
-  };
-  return ids[plan] || ids.free;
-}
-
-const LEGACY_PLAN_MAP = { starter: 'free', professional: 'pro', enterprise: 'scale' };
-function normalizePlan(plan) { return LEGACY_PLAN_MAP[plan] || plan || 'free'; }
-
-const COMMISSION_RATE = 0.40;
+  starter: { name: 'Starter', clientLimit: 50, price: 9900 },        // $99/mo - 50 clients max
+  professional: { name: 'Professional', clientLimit: -1, price: 19900 }, // $199/mo - unlimited
+  enterprise: { name: 'Enterprise', clientLimit: -1, price: 29900 }      // $299/mo - unlimited + priority support
+}; // -1 = unlimited
 
 // ============================================================================
-// CREATE CHECKOUT SESSION
+// CREATE CHECKOUT SESSION (Agency subscribes to platform)
 // ============================================================================
 async function createAgencyCheckout(req, res) {
   try {
-    const { agency_id, plan: rawPlan, skipTrial, successUrl, cancelUrl } = req.body;
-    if (!agency_id || !rawPlan) return res.status(400).json({ error: 'Missing required fields', required: ['agency_id', 'plan'] });
+    const { agency_id, plan } = req.body;
 
-    const plan = normalizePlan(rawPlan);
-    const planDetails = PLAN_DETAILS[plan];
-    if (!planDetails) return res.status(400).json({ error: 'Invalid plan', valid_plans: Object.keys(PLAN_DETAILS) });
-
-    const priceIds = getStripePriceIds(plan);
-    const { data: agency, error } = await supabase.from('agencies').select('*').eq('id', agency_id).single();
-    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
-
-    console.log(`Creating checkout for: ${agency.email} | Plan: ${plan} | Skip trial: ${!!skipTrial}`);
-
-    let customerId = agency.stripe_customer_id;
-    if (!customerId) {
-      const customer = await stripe.customers.create({ email: agency.email, name: agency.name, metadata: { agency_id, type: 'agency' } });
-      customerId = customer.id;
-      await supabase.from('agencies').update({ stripe_customer_id: customerId }).eq('id', agency_id);
-      console.log('Stripe customer created:', customerId);
+    if (!agency_id || !plan) {
+      return res.status(400).json({ 
+        error: 'Missing required fields',
+        required: ['agency_id', 'plan']
+      });
     }
 
-    // Per-client price is intentionally NOT added at checkout. Adding it with
-    // quantity:1 would bill the agency for a phantom client on day one of the
-    // trial (or first invoice for skipTrial). The per-client subscription item
-    // is created by updateClientBillingQuantity() in lib/usage-tracker.js when
-    // the agency provisions their first real client — at which point the
-    // quantity reflects actual billable client count and grows/shrinks from
-    // there. Per-minute is a metered Price (no quantity) and stays — it's
-    // free until usage is reported via the voice_minutes meter.
-    const lineItems = [];
-    if (priceIds.platform) lineItems.push({ price: priceIds.platform, quantity: 1 });
-    if (priceIds.minute) lineItems.push({ price: priceIds.minute });
-    if (lineItems.length === 0) return res.status(400).json({ error: 'No Stripe prices configured for this plan. Set STRIPE_PRICE_* env vars.' });
+    if (!PLATFORM_PRICES[plan]) {
+      return res.status(400).json({ 
+        error: 'Invalid plan',
+        valid_plans: Object.keys(PLATFORM_PRICES)
+      });
+    }
 
-    const subscriptionData = { metadata: { agency_id, plan } };
-    const alreadyTrialed = !!agency.trial_ends_at;
-    if (planDetails.trial && !skipTrial && !alreadyTrialed) subscriptionData.trial_period_days = planDetails.trialDays || 14;
+    // Get agency
+    const { data: agency, error } = await supabase
+      .from('agencies')
+      .select('*')
+      .eq('id', agency_id)
+      .single();
 
+    if (error || !agency) {
+      return res.status(404).json({ error: 'Agency not found' });
+    }
+
+    console.log('🛒 Creating platform checkout for:', agency.email, 'Plan:', plan);
+
+    // Create or get Stripe customer
+    let customerId = agency.stripe_customer_id;
+    
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: agency.email,
+        name: agency.name,
+        metadata: {
+          agency_id: agency_id,
+          type: 'agency'
+        }
+      });
+      customerId = customer.id;
+
+      await supabase
+        .from('agencies')
+        .update({ stripe_customer_id: customerId })
+        .eq('id', agency_id);
+    }
+
+    // Create checkout session with 14-day trial
     const session = await stripe.checkout.sessions.create({
-      customer: customerId, mode: 'subscription', payment_method_types: ['card'],
-      line_items: lineItems, subscription_data: subscriptionData,
-      success_url: successUrl || `${process.env.FRONTEND_URL}/agency/settings?tab=billing&subscribed=true`,
-      cancel_url: cancelUrl || `${process.env.FRONTEND_URL}/agency/settings?tab=billing`,
-      metadata: { agency_id, plan, type: 'agency_subscription' },
+      customer: customerId,
+      mode: 'subscription',
+      payment_method_types: ['card'],
+      line_items: [{
+        price: PLATFORM_PRICES[plan],
+        quantity: 1
+      }],
+      subscription_data: {
+        trial_period_days: 14,
+        metadata: {
+          agency_id: agency_id,
+          plan: plan
+        }
+      },
+      success_url: `${process.env.FRONTEND_URL}/onboarding?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL}/signup?canceled=true`,
+      metadata: {
+        agency_id: agency_id,
+        plan: plan,
+        type: 'agency_subscription'
+      }
     });
 
-    console.log('Checkout session created:', session.id);
-    res.json({ success: true, sessionId: session.id, url: session.url });
+    console.log('✅ Checkout session created:', session.id);
+
+    res.json({
+      success: true,
+      sessionId: session.id,
+      url: session.url
+    });
+
   } catch (error) {
-    console.error('Checkout error:', error);
-    alertError('stripe-checkout', error, { body: JSON.stringify(req.body).slice(0, 200) });
+    console.error('❌ Checkout error:', error);
     res.status(500).json({ error: 'Failed to create checkout session' });
   }
 }
 
 // ============================================================================
-// CREATE FREE TIER METERED SUBSCRIPTION
-// ============================================================================
-async function createFreeUsageSubscription(agencyId) {
-  const priceIds = getStripePriceIds('free');
-  if (!priceIds.client && !priceIds.minute) { console.warn('⚠️ Free tier Stripe prices not configured'); return null; }
-
-  const { data: agency } = await supabase.from('agencies').select('*').eq('id', agencyId).single();
-  if (!agency) return null;
-
-  let customerId = agency.stripe_customer_id;
-  if (!customerId) {
-    const customer = await stripe.customers.create({ email: agency.email, name: agency.name, metadata: { agency_id: agencyId, type: 'agency' } });
-    customerId = customer.id;
-    await supabase.from('agencies').update({ stripe_customer_id: customerId }).eq('id', agencyId);
-  }
-
-  // Per-client price is intentionally NOT added here. The Free subscription
-  // is created when the agency unlocks billing (canAgencyAddClient gate) at
-  // the moment they're about to add their first client. The client row hasn't
-  // been inserted yet, so quantity:1 would either undercount (if client gets
-  // created next) or charge for nothing. updateClientBillingQuantity() runs
-  // after client insert and creates the per-client subscription item at the
-  // correct live count.
-  const items = [];
-  if (priceIds.minute) items.push({ price: priceIds.minute });
-
-  try {
-    const subscription = await stripe.subscriptions.create({ customer: customerId, items, metadata: { agency_id: agencyId, plan: 'free' } });
-    const updateData = { stripe_subscription_id: subscription.id, usage_billing_enabled: true, subscription_status: 'active', status: 'active' };
-    for (const item of subscription.items.data) {
-      if (item.price.id === priceIds.client) updateData.stripe_client_meter_item_id = item.id;
-      else if (item.price.id === priceIds.minute) updateData.stripe_minute_meter_item_id = item.id;
-    }
-    await supabase.from('agencies').update(updateData).eq('id', agencyId);
-    console.log(`✅ Free usage subscription created for ${agency.name}: ${subscription.id}`);
-    return subscription;
-  } catch (err) {
-    console.error(`❌ Free usage subscription failed for ${agency.name}:`, err.message);
-    alertError('free-subscription-create', err, { agencyId, agencyName: agency.name });
-    return null;
-  }
-}
-
-// ============================================================================
-// CREATE PORTAL SESSION
+// CREATE PORTAL SESSION (Agency manages subscription)
 // ============================================================================
 async function createAgencyPortal(req, res) {
   try {
     const { agency_id } = req.body;
-    if (!agency_id) return res.status(400).json({ error: 'agency_id required' });
 
-    const { data: agency, error } = await supabase.from('agencies').select('*').eq('id', agency_id).single();
-    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
-
-    if (agency.stripe_customer_id) {
-      console.log('Opening billing portal for:', agency.name);
-      const session = await stripe.billingPortal.sessions.create({ customer: agency.stripe_customer_id, return_url: `${process.env.FRONTEND_URL}/agency/settings?tab=billing` });
-      return res.json({ success: true, url: session.url });
+    if (!agency_id) {
+      return res.status(400).json({ error: 'agency_id required' });
     }
 
-    const plan = normalizePlan(agency.plan_type);
-    if (plan === 'free') return res.json({ success: false, needs_payment_method: true, message: 'Add a payment method to start billing.' });
+    const { data: agency, error } = await supabase
+      .from('agencies')
+      .select('*')
+      .eq('id', agency_id)
+      .single();
 
-    const priceIds = getStripePriceIds(plan);
-    const customer = await stripe.customers.create({ email: agency.email, name: agency.name, metadata: { agency_id, type: 'agency' } });
-    await supabase.from('agencies').update({ stripe_customer_id: customer.id }).eq('id', agency_id);
+    if (error || !agency) {
+      return res.status(404).json({ error: 'Agency not found' });
+    }
 
-    // Per-client intentionally omitted — see createAgencyCheckout above for
-    // the full reasoning. updateClientBillingQuantity creates the per-client
-    // subscription item on first real client provision.
-    const lineItems = [];
-    if (priceIds.platform) lineItems.push({ price: priceIds.platform, quantity: 1 });
-    if (priceIds.minute) lineItems.push({ price: priceIds.minute });
+    if (!agency.stripe_customer_id) {
+      return res.status(400).json({ error: 'No Stripe customer found' });
+    }
 
-    const session = await stripe.checkout.sessions.create({
-      customer: customer.id, mode: 'subscription', payment_method_types: ['card'],
-      line_items: lineItems, subscription_data: { metadata: { agency_id, plan } },
-      success_url: `${process.env.FRONTEND_URL}/agency/settings?tab=billing&subscribed=true`,
-      cancel_url: `${process.env.FRONTEND_URL}/agency/settings?tab=billing`,
-      metadata: { agency_id, plan, type: 'agency_subscription' },
+    const session = await stripe.billingPortal.sessions.create({
+      customer: agency.stripe_customer_id,
+      return_url: `${process.env.FRONTEND_URL}/agency/settings/billing`
     });
-    return res.json({ success: true, url: session.url });
+
+    res.json({
+      success: true,
+      url: session.url
+    });
+
   } catch (error) {
-    console.error('Portal/checkout error:', error);
-    alertError('stripe-portal', error, { agency_id: req.body?.agency_id });
-    res.status(500).json({ error: 'Failed to create billing session' });
+    console.error('❌ Portal error:', error);
+    res.status(500).json({ error: 'Failed to create portal session' });
   }
 }
 
 // ============================================================================
-// WEBHOOK HANDLER
+// WEBHOOK HANDLER - Platform Stripe Events
 // ============================================================================
 async function handlePlatformStripeWebhook(req, res) {
   const sig = req.headers['stripe-signature'];
+  
   let event;
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    event = stripe.webhooks.constructEvent(
+      req.body, 
+      sig, 
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
   } catch (err) {
-    console.error('Webhook signature failed:', err.message);
-    alertError('stripe-webhook-signature', err);
+    console.error('⚠️ Webhook signature failed:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  console.log('Platform Stripe webhook:', event.type);
+  console.log('📥 Platform Stripe webhook:', event.type);
 
   try {
     switch (event.type) {
-      case 'checkout.session.completed': await handleAgencyCheckoutCompleted(event.data.object); break;
-      case 'customer.subscription.created': await handleAgencySubscriptionCreated(event.data.object); break;
-      case 'customer.subscription.updated': await handleAgencySubscriptionUpdated(event.data.object); break;
-      case 'customer.subscription.deleted': await handleAgencySubscriptionDeleted(event.data.object); break;
-      case 'invoice.payment_succeeded': await handleAgencyPaymentSucceeded(event.data.object); break;
-      case 'invoice.payment_failed': await handleAgencyPaymentFailed(event.data.object); break;
-      case 'customer.subscription.trial_will_end': await handleAgencyTrialEnding(event.data.object); break;
+      case 'checkout.session.completed':
+        await handleAgencyCheckoutCompleted(event.data.object);
+        break;
+
+      case 'customer.subscription.created':
+        await handleAgencySubscriptionCreated(event.data.object);
+        break;
+
+      case 'customer.subscription.updated':
+        await handleAgencySubscriptionUpdated(event.data.object);
+        break;
+
+      case 'customer.subscription.deleted':
+        await handleAgencySubscriptionDeleted(event.data.object);
+        break;
+
+      case 'invoice.payment_succeeded':
+        await handleAgencyPaymentSucceeded(event.data.object);
+        break;
+
+      case 'invoice.payment_failed':
+        await handleAgencyPaymentFailed(event.data.object);
+        break;
+
+      case 'customer.subscription.trial_will_end':
+        await handleAgencyTrialEnding(event.data.object);
+        break;
     }
+
     res.json({ received: true });
   } catch (error) {
-    console.error('Webhook processing error:', error);
-    alertError('stripe-webhook-processing', error, { eventType: event.type, eventId: event.id });
+    console.error('❌ Webhook processing error:', error);
     res.status(500).json({ error: 'Webhook processing failed' });
   }
 }
@@ -248,272 +215,184 @@ async function handlePlatformStripeWebhook(req, res) {
 // ============================================================================
 // WEBHOOK HANDLERS
 // ============================================================================
+
 async function handleAgencyCheckoutCompleted(session) {
-  console.log('Agency checkout completed:', session.id);
+  console.log('🎉 Agency checkout completed:', session.id);
+  
   const agencyId = session.metadata?.agency_id;
-  const plan = normalizePlan(session.metadata?.plan_type || session.metadata?.plan);
+  const plan = session.metadata?.plan || 'starter';
+  
   if (!agencyId) return;
-
-  const teamLimits = TEAM_MEMBER_LIMITS[plan] || TEAM_MEMBER_LIMITS.free;
-  let updateData = { plan_type: plan, stripe_subscription_id: session.subscription, usage_billing_enabled: true, onboarding_completed: true, updated_at: new Date().toISOString(), max_team_members_agency: teamLimits.agency, max_team_members_client: teamLimits.client };
-
-  if (session.subscription) {
-    try {
-      const sub = await stripe.subscriptions.retrieve(session.subscription);
-      const priceIds = getStripePriceIds(plan);
-      for (const item of sub.items.data) {
-        if (priceIds.client && item.price.id === priceIds.client) updateData.stripe_client_meter_item_id = item.id;
-        if (priceIds.minute && item.price.id === priceIds.minute) updateData.stripe_minute_meter_item_id = item.id;
-      }
-      if (sub.status === 'trialing') { updateData.status = 'trial'; updateData.subscription_status = 'trialing'; updateData.trial_ends_at = new Date(sub.trial_end * 1000).toISOString(); }
-      else if (sub.status === 'active') { updateData.status = 'active'; updateData.subscription_status = 'active'; updateData.trial_ends_at = null; }
-    } catch (subErr) {
-      console.warn('Could not fetch subscription status:', subErr.message);
-      alertError('checkout-sub-fetch', subErr, { agencyId, subscriptionId: session.subscription });
-      updateData.status = 'active'; updateData.subscription_status = 'active';
-    }
-  }
-
-  await supabase.from('agencies').update(updateData).eq('id', agencyId);
-  try { await supabase.from('agency_subscription_events').insert({ agency_id: agencyId, event_type: 'checkout_completed', stripe_event_id: session.id, metadata: { plan } }); } catch (e) { /* Non-critical */ }
-  console.log(`Agency activated: ${agencyId} | Plan: ${plan} | Status: ${updateData.subscription_status} | Team: ${teamLimits.agency}/${teamLimits.client}`);
+  
+  const planDetails = PLAN_DETAILS[plan];
+  
+  await supabase
+    .from('agencies')
+    .update({
+      status: 'trial',
+      subscription_status: 'trial',
+      plan_type: plan,
+      stripe_subscription_id: session.subscription,
+      trial_ends_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', agencyId);
+  
+  // Log event
+  await supabase.from('agency_subscription_events').insert({
+    agency_id: agencyId,
+    event_type: 'checkout_completed',
+    stripe_event_id: session.id,
+    metadata: { plan }
+  });
+  
+  console.log('✅ Agency activated:', agencyId);
 }
 
 async function handleAgencySubscriptionCreated(subscription) {
-  console.log('Agency subscription created:', subscription.id);
+  console.log('📝 Agency subscription created:', subscription.id);
+  
   const agency = await getAgencyByStripeCustomerId(subscription.customer);
   if (!agency) return;
-
-  const plan = normalizePlan(subscription.metadata?.plan_type || subscription.metadata?.plan);
-  const teamLimits = TEAM_MEMBER_LIMITS[plan] || TEAM_MEMBER_LIMITS.free;
-  const priceIds = getStripePriceIds(plan);
-  const updateData = { stripe_subscription_id: subscription.id, subscription_status: subscription.status, plan_type: plan, usage_billing_enabled: true, max_team_members_agency: teamLimits.agency, max_team_members_client: teamLimits.client };
-  for (const item of subscription.items.data) {
-    if (priceIds.client && item.price.id === priceIds.client) updateData.stripe_client_meter_item_id = item.id;
-    if (priceIds.minute && item.price.id === priceIds.minute) updateData.stripe_minute_meter_item_id = item.id;
-  }
-  await supabase.from('agencies').update(updateData).eq('id', agency.id);
-  console.log(`   Status: ${subscription.status} | Plan: ${plan} | Team: ${teamLimits.agency}/${teamLimits.client}`);
+  
+  const plan = subscription.metadata?.plan || 'starter';
+  
+  await supabase
+    .from('agencies')
+    .update({
+      stripe_subscription_id: subscription.id,
+      subscription_status: subscription.status,
+      plan_type: plan
+    })
+    .eq('id', agency.id);
 }
 
 async function handleAgencySubscriptionUpdated(subscription) {
-  console.log('Agency subscription updated:', subscription.id);
+  console.log('🔄 Agency subscription updated:', subscription.id);
+  
   const agency = await getAgencyByStripeCustomerId(subscription.customer);
   if (!agency) return;
+  
   let status = subscription.status;
   let agencyStatus = agency.status;
-  if (status === 'active') agencyStatus = 'active';
-  else if (status === 'trialing') agencyStatus = 'trial';
-  else if (status === 'past_due') agencyStatus = 'active';
-  else if (status === 'canceled' || status === 'unpaid') agencyStatus = 'suspended';
-  await supabase.from('agencies').update({ subscription_status: status, status: agencyStatus, trial_ends_at: subscription.trial_end ? new Date(subscription.trial_end * 1000) : null }).eq('id', agency.id);
-  console.log(`   Stripe: ${status} → agency: ${agencyStatus}`);
+  
+  // Map Stripe status to our status
+  if (status === 'active') {
+    agencyStatus = 'active';
+  } else if (status === 'past_due') {
+    agencyStatus = 'active'; // Keep active but flag past_due
+  } else if (status === 'canceled' || status === 'unpaid') {
+    agencyStatus = 'suspended';
+  }
+  
+  await supabase
+    .from('agencies')
+    .update({
+      subscription_status: status,
+      status: agencyStatus,
+      trial_ends_at: subscription.trial_end 
+        ? new Date(subscription.trial_end * 1000) 
+        : null
+    })
+    .eq('id', agency.id);
 }
 
 async function handleAgencySubscriptionDeleted(subscription) {
-  console.log('Agency subscription deleted:', subscription.id);
+  console.log('❌ Agency subscription deleted:', subscription.id);
+  
   const agency = await getAgencyByStripeCustomerId(subscription.customer);
   if (!agency) return;
-
-  // Release the agency demo number (VAPI object + underlying Telnyx rental)
-  // before nulling the fields — otherwise the Telnyx number keeps billing
-  // every month on a canceled agency.
-  try {
-    const { data: demo } = await supabase
-      .from('agencies')
-      .select('demo_vapi_phone_id, demo_phone_number, demo_assistant_id')
-      .eq('id', agency.id)
-      .single();
-
-    if (demo && (demo.demo_vapi_phone_id || demo.demo_phone_number)) {
-      const release = await fullyReleaseNumber(demo.demo_vapi_phone_id, demo.demo_phone_number);
-      console.log(`   📞 Demo released for ${agency.name}: VAPI=${release.vapiDeleted} Telnyx=${release.telnyxReleased}`);
-      if (!release.telnyxReleased) {
-        console.error(`   ⚠️ Telnyx demo NOT released for ${agency.name} (${demo.demo_phone_number}) — orphan sweep will catch it`);
-      }
-      if (demo.demo_assistant_id && process.env.VAPI_API_KEY) {
-        try {
-          await fetch(`https://api.vapi.ai/assistant/${demo.demo_assistant_id}`, {
-            method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${process.env.VAPI_API_KEY}` },
-          });
-        } catch (e) { /* non-blocking */ }
-      }
-    }
-  } catch (relErr) {
-    console.error(`   ⚠️ Demo release failed for ${agency.name}:`, relErr.message);
-  }
-
-  await supabase.from('agencies').update({
-    subscription_status: 'canceled',
-    status: 'suspended',
-    usage_billing_enabled: false,
-    demo_phone_number: null,
-    demo_assistant_id: null,
-    demo_vapi_phone_id: null,
-  }).eq('id', agency.id);
-  await sendAgencySubscriptionCanceledSMS(agency);
+  
+  await supabase
+    .from('agencies')
+    .update({
+      subscription_status: 'canceled',
+      status: 'suspended'
+    })
+    .eq('id', agency.id);
+  
+  // TODO: Disable all agency's client assistants
+  
+  await sendEmail({
+    to: agency.email,
+    subject: 'VoiceAI Connect Subscription Cancelled',
+    html: `
+      <h2>Your subscription has been cancelled</h2>
+      <p>Hi ${agency.name},</p>
+      <p>Your VoiceAI Connect subscription has been cancelled. Your agency and all client AI assistants will be suspended.</p>
+      <p>To reactivate, visit your dashboard.</p>
+    `
+  });
 }
 
 async function handleAgencyPaymentSucceeded(invoice) {
-  const amountDisplay = `${(invoice.currency || 'usd').toUpperCase()} ${(invoice.amount_paid / 100).toFixed(2)}`;
-  console.log('Agency payment succeeded:', invoice.id, amountDisplay);
+  console.log('✅ Agency payment succeeded:', invoice.id);
+  
   const agency = await getAgencyByStripeCustomerId(invoice.customer);
   if (!agency) return;
-  if (invoice.amount_paid === 0) { console.log(`$0 invoice (trial) for ${agency.name} — skipping`); return; }
-
-  console.log(`Real payment from ${agency.name}: ${amountDisplay}`);
-  await supabase.from('agencies').update({ subscription_status: 'active', status: 'active', updated_at: new Date().toISOString() }).eq('id', agency.id);
-
-  const templateMsg = await getSmsTemplate('admin_agency_payment', { name: agency.name, amount: amountDisplay, plan: agency.plan_type || 'unknown' });
-  sendPlatformNotificationSMS(templateMsg || `Agency Payment Received\nName: ${agency.name}\nAmount: ${amountDisplay}\nPlan: ${agency.plan_type || 'unknown'}`).catch(err => console.error('Failed to send payment notification:', err));
-
-  if (agency.referred_by) {
-    try {
-      const { data: referrer } = await supabase.from('agencies').select('id, name, referral_earnings_cents, referral_balance_cents').eq('referral_code', agency.referred_by).single();
-      if (referrer) {
-        const { data: existingCommission } = await supabase.from('referral_commissions').select('id').eq('stripe_invoice_id', invoice.id).single();
-        if (!existingCommission) {
-          const commissionAmount = Math.round(invoice.amount_paid * COMMISSION_RATE);
-          await supabase.from('referral_commissions').insert({ referrer_id: referrer.id, referred_id: agency.id, payment_amount_cents: invoice.amount_paid, commission_rate: COMMISSION_RATE, commission_amount_cents: commissionAmount, stripe_invoice_id: invoice.id, status: 'pending' });
-          await supabase.from('agencies').update({ referral_earnings_cents: (referrer.referral_earnings_cents || 0) + commissionAmount, referral_balance_cents: (referrer.referral_balance_cents || 0) + commissionAmount }).eq('id', referrer.id);
-          console.log(`Referral commission: $${(commissionAmount / 100).toFixed(2)} for ${referrer.name}`);
-        }
-      }
-    } catch (commErr) {
-      console.error('Referral commission error:', commErr);
-      alertError('referral-commission', commErr, { agencyId: agency.id, invoiceId: invoice.id });
-    }
-  }
+  
+  await supabase
+    .from('agencies')
+    .update({
+      subscription_status: 'active',
+      status: 'active'
+    })
+    .eq('id', agency.id);
 }
 
 async function handleAgencyPaymentFailed(invoice) {
-  console.log('Agency payment failed:', invoice.id);
+  console.log('❌ Agency payment failed:', invoice.id);
+  
   const agency = await getAgencyByStripeCustomerId(invoice.customer);
   if (!agency) return;
-  if (invoice.amount_due === 0) return;
-  await supabase.from('agencies').update({ subscription_status: 'past_due' }).eq('id', agency.id);
-  await sendAgencyPaymentFailedSMS(agency);
-  alertError('stripe-payment-failed', new Error(`Payment failed for ${agency.name}`), { agencyId: agency.id, invoiceId: invoice.id, amount: invoice.amount_due });
+  
+  await supabase
+    .from('agencies')
+    .update({
+      subscription_status: 'past_due'
+    })
+    .eq('id', agency.id);
+  
+  await sendEmail({
+    to: agency.email,
+    subject: '🚨 VoiceAI Connect Payment Failed - Action Required',
+    html: `
+      <h2>Payment Failed</h2>
+      <p>Hi ${agency.name},</p>
+      <p>We couldn't process your payment. Please update your payment method to avoid service interruption.</p>
+      <p><a href="${invoice.hosted_invoice_url}">Update Payment Method</a></p>
+    `
+  });
 }
 
 async function handleAgencyTrialEnding(subscription) {
-  console.log('Agency trial ending:', subscription.id);
+  console.log('⏰ Agency trial ending:', subscription.id);
+  
   const agency = await getAgencyByStripeCustomerId(subscription.customer);
   if (!agency) return;
+  
   const trialEnd = new Date(subscription.trial_end * 1000);
   const daysLeft = Math.ceil((trialEnd - new Date()) / (1000 * 60 * 60 * 24));
-  await sendAgencyTrialEndingSMS(agency, daysLeft);
-}
-
-// ============================================================================
-// WARN NO-CARD TRIAL AGENCIES (3 days before expiry)
-// ============================================================================
-async function warnExpiringAgencyTrials() {
-  console.log('Checking for expiring agency trials (no-card)...');
-  const now = new Date();
-  const threeDaysFromNow = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
-
-  const { data: expiringAgencies, error } = await supabase
-    .from('agencies')
-    .select('id, name, email, phone, plan_type, trial_ends_at, country, trial_warning_last_sent_at')
-    .in('subscription_status', ['trial', 'trialing'])
-    .is('stripe_subscription_id', null)
-    .lt('trial_ends_at', threeDaysFromNow.toISOString())
-    .gt('trial_ends_at', now.toISOString());
-
-  if (error) { console.error('Error fetching expiring trials:', error); return { success: false, error: error.message }; }
-  console.log(`Found ${expiringAgencies?.length || 0} expiring no-card agency trials`);
-  const results = [];
-
-  for (const agency of expiringAgencies || []) {
-    try {
-      const plan = agency.plan_type || 'free';
-      if (plan === 'free' || plan === 'starter') { console.log(`⏭️ Skipping ${agency.name} — Free plan, no trial`); continue; }
-      if (agency.trial_warning_last_sent_at) {
-        const hoursSinceLastWarning = (now.getTime() - new Date(agency.trial_warning_last_sent_at).getTime()) / (1000 * 60 * 60);
-        if (hoursSinceLastWarning < 20) { console.log(`⏭️ Skipping ${agency.name} — already warned ${Math.round(hoursSinceLastWarning)}h ago`); continue; }
-      }
-
-      const trialEnd = new Date(agency.trial_ends_at);
-      const hoursLeft = (trialEnd.getTime() - now.getTime()) / (1000 * 60 * 60);
-      const daysLeft = Math.ceil(hoursLeft / 24);
-      const trialEndDate = trialEnd.toLocaleDateString();
-      let agencyMessage = null;
-
-      if (daysLeft >= 3) {
-        const templateMsg = await getSmsTemplate('agency_trial_warning_day3', { name: agency.name, trial_end_date: trialEndDate });
-        agencyMessage = templateMsg || `Hey ${agency.name} — quick heads up, your VoiceAI Connect trial wraps up on ${trialEndDate}.\n\nYour agency is fully set up — branding, pricing, signup page, all of it. You're ready to start bringing on clients whenever you want.\n\nIf you'd like to keep everything as-is, you can subscribe here:\nmyvoiceaiconnect.com/agency/settings?tab=billing\n\nAny questions, just reply to this text.`;
-      } else if (daysLeft === 2) {
-        const templateMsg = await getSmsTemplate('agency_trial_warning_day2', { name: agency.name, trial_end_date: trialEndDate });
-        agencyMessage = templateMsg || `Hey ${agency.name} — just wanted to make sure this doesn't catch you off guard. Your VoiceAI Connect trial ends ${trialEndDate}.\n\nAfter that, your dashboard and client signup page will go offline, and any active AI receptionists will stop taking calls.\n\nIf you're planning to keep going, subscribing takes about 30 seconds:\nmyvoiceaiconnect.com/agency/settings?tab=billing\n\nAnd if it's not the right time, no worries at all.`;
-      } else if (daysLeft <= 1) {
-        const templateMsg = await getSmsTemplate('agency_trial_warning_day1', { name: agency.name });
-        agencyMessage = templateMsg || `Hey ${agency.name} — your VoiceAI Connect trial ends tomorrow. After that your agency goes offline and any AI receptionists stop answering.\n\nIf you want to keep things running:\nmyvoiceaiconnect.com/agency/settings?tab=billing\n\nTakes less than a minute. Let me know if you need anything.`;
-      }
-
-      if (agency.phone && agencyMessage) {
-        await sendAndLogSMS({ phone: agency.phone, message: agencyMessage, agencyId: agency.id, recipientType: 'agency_owner', messageType: `trial_warning_day${daysLeft}`, metadata: { daysLeft, plan, trialEndDate } });
-        await supabase.from('agencies').update({ trial_warning_last_sent_at: now.toISOString() }).eq('id', agency.id);
-      }
-
-      const adminTemplate = await getSmsTemplate('admin_agency_trial_expiring', { days_left: daysLeft, name: agency.name, email: agency.email, plan: plan });
-      await sendPlatformNotificationSMS(adminTemplate || `Agency Trial Expiring (${daysLeft}d)\n${agency.name}\n${agency.email}\nPlan: ${plan}`);
-      results.push({ id: agency.id, name: agency.name, daysLeft, success: true });
-    } catch (err) {
-      console.error(`Error warning agency ${agency.id}:`, err);
-      alertError('trial-warning', err, { agencyId: agency.id, agencyName: agency.name });
-      results.push({ id: agency.id, name: agency.name, success: false, error: err.message });
-    }
-  }
-
-  return { success: true, processed: results.length, results };
-}
-
-// ============================================================================
-// HELPER: CAN AGENCY ADD CLIENT
-// ============================================================================
-async function canAgencyAddClient(agencyId) {
-  const { data: agency, error } = await supabase.from('agencies').select('plan_type, subscription_status, stripe_subscription_id').eq('id', agencyId).single();
-  if (error || !agency) return { allowed: false, reason: 'Agency not found' };
-  if (!['active', 'trialing', 'trial'].includes(agency.subscription_status)) return { allowed: false, reason: 'Subscription not active' };
-  const plan = normalizePlan(agency.plan_type);
-  if (plan === 'free' && !agency.stripe_subscription_id) {
-    return { allowed: false, reason: 'billing_required', message: 'Add a payment method to start adding clients. You will be charged per client and per minute of voice usage.' };
-  }
-
-  // During the free trial, an agency can onboard only ONE real client (to
-  // validate the product). To add more, the trial must convert to a paid
-  // subscription. Caps free resource consumption (Telnyx number + voice
-  // minutes) during the trial. The sandbox test client (is_test_client = true)
-  // is a separate, opt-in "try it" tool — it is NOT counted here, so it never
-  // consumes the real-client slot.
-  if (['trialing', 'trial'].includes(agency.subscription_status)) {
-    const { count } = await supabase
-      .from('clients')
-      .select('id', { count: 'exact', head: true })
-      .eq('agency_id', agencyId)
-      .eq('is_test_client', false);
-    if ((count || 0) >= 1) {
-      return {
-        allowed: false,
-        reason: 'trial_client_limit',
-        message: 'Your free trial includes one client. Add more once your trial converts to a paid plan.',
-        limit: 1,
-        current: count || 0,
-      };
-    }
-  }
-
-  return { allowed: true, limit: 'unlimited' };
+  
+  await sendEmail({
+    to: agency.email,
+    subject: `⏰ Your VoiceAI Connect trial ends in ${daysLeft} days`,
+    html: `
+      <h2>Your trial is ending soon</h2>
+      <p>Hi ${agency.name},</p>
+      <p>Your 14-day trial ends on ${trialEnd.toLocaleDateString()}.</p>
+      <p>Add a payment method to continue growing your AI agency.</p>
+    `
+  });
 }
 
 // ============================================================================
 // EXPORTS
 // ============================================================================
 module.exports = {
-  PLAN_DETAILS, TEAM_MEMBER_LIMITS,
-  createAgencyCheckout, createAgencyPortal, createFreeUsageSubscription,
-  handlePlatformStripeWebhook, canAgencyAddClient, warnExpiringAgencyTrials,
-  normalizePlan, getStripePriceIds,
+  createAgencyCheckout,
+  createAgencyPortal,
+  handlePlatformStripeWebhook,
+  PLATFORM_PRICES,
+  PLAN_DETAILS
 };
