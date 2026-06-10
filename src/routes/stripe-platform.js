@@ -549,6 +549,65 @@ async function warnExpiringAgencyTrials() {
 }
 
 // ============================================================================
+// CAN AGENCY ADD CLIENT
+// ----------------------------------------------------------------------------
+// Called by routes/client-signup.js when an agency tries to add a new client.
+// In the current pricing model all plans (Free/Pro/Scale) have unlimited
+// clients, they are billed per-unit (Free $29.99, Pro $9.99, Scale $0) rather
+// than capped. The only gate is that Free agencies with no stripe_customer_id
+// can't attach per-client billing yet, so they need to upgrade first.
+//
+// Returns { allowed, reason?, message?, limit, current } so the call site can
+// distinguish a hard block (no agency, no billing) from a soft "you can add".
+// ============================================================================
+async function canAgencyAddClient(agencyId) {
+  const { data: agency, error } = await supabase
+    .from('agencies')
+    .select('id, plan_type, status, stripe_customer_id')
+    .eq('id', agencyId)
+    .single();
+
+  if (error || !agency) {
+    return {
+      allowed: false,
+      reason: 'agency_not_found',
+      message: 'Agency not found',
+      limit: 0,
+      current: 0,
+    };
+  }
+
+  const { count } = await supabase
+    .from('clients')
+    .select('id', { count: 'exact', head: true })
+    .eq('agency_id', agencyId)
+    .eq('is_test_client', false);
+
+  const current = count || 0;
+
+  // Free agencies need a Stripe customer before they can add real clients,
+  // because per-client billing attaches a subscription item that requires
+  // a payment source. Pro/Scale agencies always have stripe_customer_id
+  // from the checkout flow, so this gate only ever fires on Free.
+  const isFree = !agency.plan_type || agency.plan_type === 'free';
+  if (isFree && !agency.stripe_customer_id) {
+    return {
+      allowed: false,
+      reason: 'billing_required',
+      message: 'Set up billing to add your first client',
+      limit: -1,
+      current,
+    };
+  }
+
+  return {
+    allowed: true,
+    current,
+    limit: -1, // unlimited on all plans in the new pricing model
+  };
+}
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 module.exports = {
@@ -556,6 +615,7 @@ module.exports = {
   createAgencyPortal,
   handlePlatformStripeWebhook,
   warnExpiringAgencyTrials,
+  canAgencyAddClient,
   PLATFORM_PLANS,
   PLATFORM_PRICES,
   PLAN_DETAILS,
