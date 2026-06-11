@@ -205,7 +205,7 @@ async function changePassword(req, res) {
 
     console.log('✅ Password changed for:', user.email);
     res.json({ success: true, message: 'Password changed successfully' });
-  } catch (error) { console.error('❌ Change password error:', error); res.status(500).json({ error: 'Failed to change password' }); }
+  } catch (error) { console.error('❌ Change password error:', error); res.status(500).json({ error: 'Failed to update password' }); }
 }
 
 // ============================================================================
@@ -251,4 +251,139 @@ function authMiddleware(requiredRoles = []) {
   };
 }
 
-module.exports = { agencyLogin, clientLogin, verifyToken, setPassword, changePassword, requestPasswordReset, authMiddleware, generateToken };
+// ============================================================================
+// PERMISSION MIDDLEWARE
+// ----------------------------------------------------------------------------
+// Enforces a single Page Access permission on a route. This is the SERVER-SIDE
+// half of the per-member gating — the sidebar/route guards in the frontend are
+// UX only; this is what actually stops a staff member from hitting an endpoint
+// their toggles don't allow (e.g. a direct curl to the settings/billing API).
+//
+// Owners (agency_owner / client) and super_admin always pass. For *_staff
+// roles it loads team_members.permissions for the member's entity and 403s
+// when the key is explicitly false, or when the member has been disabled.
+//
+// Must be mounted AFTER authMiddleware so req.user (the decoded token) exists.
+// Example:
+//   router.put('/:id/settings',
+//     authMiddleware(['agency_owner','agency_staff']),
+//     requirePermission('settings'),
+//     handler);
+//
+// Permission keys (agency): dashboard, clients, leads, outreach, analytics,
+//   marketing, settings, billing.
+// Permission keys (client):  dashboard, calls, contacts, ai_agent, settings,
+//   billing.
+// ============================================================================
+function requirePermission(permissionKey) {
+  return async (req, res, next) => {
+    try {
+      const u = req.user;
+      if (!u) return res.status(401).json({ error: 'Authentication required' });
+
+      // Owners and super admins are never gated by Page Access toggles.
+      if (u.role === 'agency_owner' || u.role === 'client' || u.role === 'super_admin') return next();
+
+      let entityType = null;
+      let entityId = null;
+      if (u.role === 'agency_staff') { entityType = 'agency'; entityId = u.agencyId; }
+      else if (u.role === 'client_staff') { entityType = 'client'; entityId = u.clientId; }
+      else return res.status(403).json({ error: 'Insufficient permissions' });
+
+      if (!entityId) return res.status(403).json({ error: 'Insufficient permissions' });
+
+      const { data: member } = await supabase
+        .from('team_members')
+        .select('permissions, status')
+        .eq('member_user_id', u.userId)
+        .eq('entity_type', entityType)
+        .eq('entity_id', entityId)
+        .single();
+
+      // Fail closed: no member row, disabled, or an explicit false on the key
+      // all deny. An absent key on an existing permissions object is allowed,
+      // matching how the UI toggles default (only an explicit off blocks).
+      if (!member || member.status === 'disabled') {
+        return res.status(403).json({ error: 'Access disabled' });
+      }
+      if (member.permissions && member.permissions[permissionKey] === false) {
+        return res.status(403).json({ error: `You do not have permission to access ${permissionKey}.` });
+      }
+
+      next();
+    } catch (error) {
+      console.error('❌ requirePermission error:', error);
+      return res.status(500).json({ error: 'Permission check failed' });
+    }
+  };
+}
+
+// ============================================================================
+// SOFT PERMISSION MIDDLEWARE (for dual-use routes)
+// ----------------------------------------------------------------------------
+// Same policy as requirePermission, but for routes that legitimately run BOTH
+// authenticated (dashboard) and unauthenticated (signup) — e.g. the agency
+// checkout endpoint is hit during signup before the user has a token. This
+// guard reads the token itself rather than relying on a prior authMiddleware:
+//
+//   - No Authorization header (signup path)      → next() (defer to handler)
+//   - Invalid/expired token                      → next() (defer to handler)
+//   - Owner / client owner / super_admin token   → next()
+//   - *_staff token WITH the key explicitly off  → 403
+//   - *_staff token disabled                      → 403
+//
+// Because a missing token passes through, mounting this on a currently-open
+// route introduces ZERO regression for existing callers (anonymous calls
+// behave exactly as before) while still blocking an authenticated staff
+// member whose Page Access toggles don't include the action. Closing the
+// broader anonymous-access gap on these routes is a separate security item.
+// ============================================================================
+function requirePermissionIfAuthed(permissionKey) {
+  return async (req, res, next) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) return next();
+
+      const token = authHeader.split(' ')[1];
+      let decoded;
+      try { decoded = jwt.verify(token, JWT_SECRET); } catch { return next(); }
+      req.user = decoded;
+
+      // Owners and super admins are never gated by Page Access toggles.
+      if (decoded.role === 'agency_owner' || decoded.role === 'client' || decoded.role === 'super_admin') return next();
+
+      let entityType = null;
+      let entityId = null;
+      if (decoded.role === 'agency_staff') { entityType = 'agency'; entityId = decoded.agencyId; }
+      else if (decoded.role === 'client_staff') { entityType = 'client'; entityId = decoded.clientId; }
+      else return next(); // unknown role on a dual-use route — defer to handler
+
+      if (!entityId) return next();
+
+      const { data: member } = await supabase
+        .from('team_members')
+        .select('permissions, status')
+        .eq('member_user_id', decoded.userId)
+        .eq('entity_type', entityType)
+        .eq('entity_id', entityId)
+        .single();
+
+      if (!member || member.status === 'disabled') {
+        return res.status(403).json({ error: 'Access disabled' });
+      }
+      if (member.permissions && member.permissions[permissionKey] === false) {
+        return res.status(403).json({ error: `You do not have permission to access ${permissionKey}.` });
+      }
+
+      return next();
+    } catch (error) {
+      // Fail open ONLY on unexpected errors so a transient DB blip can't lock
+      // a paying owner out of billing. The explicit-false / disabled denials
+      // above already returned before reaching here.
+      console.error('❌ requirePermissionIfAuthed error:', error);
+      return next();
+    }
+  };
+}
+
+module.exports = { agencyLogin, clientLogin, verifyToken, setPassword, changePassword, requestPasswordReset, authMiddleware, requirePermission, requirePermissionIfAuthed, generateToken };

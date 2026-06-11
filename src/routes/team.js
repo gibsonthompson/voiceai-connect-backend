@@ -85,19 +85,21 @@ async function checkTeamLimit(entityType, entityId) {
 
     let maxAllowed = agency?.max_team_members_agency;
 
-    // Derive from plan + status only when nothing was explicitly set in the
-    // DB. Strict null/undefined check (NOT !maxAllowed) so that 0 (Free tier
-    // explicit cap) and -1 (Scale tier unlimited sentinel set by
-    // TEAM_MEMBER_LIMITS in stripe-platform.js) are both respected.
+    // Derive from plan only when nothing was explicitly set in the DB. Strict
+    // null/undefined check (NOT !maxAllowed) so that 0 (Free tier explicit cap)
+    // and -1 (Scale tier unlimited sentinel set by TEAM_MEMBER_LIMITS in
+    // stripe-platform.js) are both respected.
     if (maxAllowed === null || maxAllowed === undefined) {
-      const isTrial = agency?.subscription_status === 'trial' || agency?.subscription_status === 'trialing';
       const plan = (agency?.plan_type || 'free').toLowerCase();
 
-      if (isTrial) {
-        // Trial agencies get Scale-level access (unlimited) so they can
-        // genuinely evaluate the product before committing.
-        maxAllowed = -1;
-      } else if (plan === 'scale' || plan === 'enterprise') {
+      // Seat caps follow the SELECTED plan, including during the trial. We do
+      // NOT grant unlimited just because subscription_status is trial — that
+      // bypassed the cap for the whole 14-day window and made a Pro trial look
+      // uncapped, then snap down to 3 on conversion. Gating by the chosen plan
+      // from day one keeps the limit real and avoids destructive post-trial
+      // disabling for Pro. Scale stays unlimited, Free stays 0. Keep this in
+      // sync with deriveAgencyTeamLimit() in lib/plan-limits.ts.
+      if (plan === 'scale' || plan === 'enterprise') {
         maxAllowed = -1;
       } else if (plan === 'pro' || plan === 'professional') {
         maxAllowed = 3;

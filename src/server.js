@@ -193,6 +193,8 @@ const {
   setPassword,
   changePassword,
   authMiddleware,
+  requirePermission,
+  requirePermissionIfAuthed,
   generateToken
 } = require('./routes/auth');
 
@@ -264,10 +266,16 @@ app.get('/api/agency/by-host', getAgencyByHost);
 // and looks the agency up by ID since there's no host-based context to derive.
 app.get('/api/agency/by-id', getAgencyByIdPublic);
 app.get('/api/agency/:agencyId/settings', getAgencySettings);
-app.put('/api/agency/:agencyId/settings', updateAgencySettings);
+// Page Access gating: a logged-in agency_staff member without the 'settings'
+// toggle can't write settings. Unauthenticated/owner calls pass through (the
+// guard is a no-op without a staff token), so no existing caller breaks.
+app.put('/api/agency/:agencyId/settings', requirePermissionIfAuthed('settings'), updateAgencySettings);
 app.post('/api/agency/:agencyId/domain/verify', verifyAgencyDomain);
-app.post('/api/agency/checkout', createAgencyCheckout);
-app.post('/api/agency/portal', createAgencyPortal);
+// 'billing' gates the agency's own subscription actions. checkout is also hit
+// during signup before a token exists, so the soft guard is required here —
+// it only blocks an authenticated staff member who lacks 'billing'.
+app.post('/api/agency/checkout', requirePermissionIfAuthed('billing'), createAgencyCheckout);
+app.post('/api/agency/portal', requirePermissionIfAuthed('billing'), createAgencyPortal);
 
 // ============================================================================
 // AGENCY CANCELLATION
@@ -293,7 +301,7 @@ app.post('/api/agency/portal', createAgencyPortal);
 //      the admin notification for app-initiated cancellations.
 //   6. SMS the platform owner with reason, feedback, plan, MRR lost.
 // ============================================================================
-app.post('/api/agency/cancel', async (req, res) => {
+app.post('/api/agency/cancel', requirePermissionIfAuthed('billing'), async (req, res) => {
   const { agency_id, reason, feedback } = req.body;
 
   if (!agency_id) {
@@ -456,9 +464,11 @@ app.post('/api/agency/cancel', async (req, res) => {
   }
 });
 
-app.post('/api/agency/connect/onboard', createConnectAccountLink);
+// Stripe Connect = the Payments tab, which is grouped under the 'settings'
+// permission in the settings page tab gating. status (GET) stays open.
+app.post('/api/agency/connect/onboard', requirePermissionIfAuthed('settings'), createConnectAccountLink);
 app.get('/api/agency/connect/status/:agencyId', getConnectStatus);
-app.post('/api/agency/:agencyId/connect/disconnect', disconnectConnectAccount);
+app.post('/api/agency/:agencyId/connect/disconnect', requirePermissionIfAuthed('settings'), disconnectConnectAccount);
 
 // ============================================================================
 // AGENCY DASHBOARD & CLIENTS ROUTES

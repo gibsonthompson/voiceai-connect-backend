@@ -194,6 +194,75 @@ async function syncPerClientSubscriptionItem(agencyId, planId, subscriptionId) {
 }
 
 // ============================================================================
+// RECONCILE AGENCY TEAM SEATS
+// ----------------------------------------------------------------------------
+// Enforces the agency team-member seat cap after a plan change or cancel.
+// checkTeamLimit() in routes/team.js gates seats at ADD time, but members
+// already added under a roomier plan would otherwise keep logging in after a
+// downgrade — agencyLogin only blocks team_members whose status is 'disabled'.
+// This disables the newest-over-cap members so that existing login gate takes
+// over, with NO change needed in auth.js.
+//
+// Policy (approved): oldest kept, newest disabled. Caps by plan:
+//   scale / enterprise → unlimited (no-op)
+//   pro / professional → 3
+//   free / anything else → 0  (disable every active agency staff member)
+//
+// Notes:
+//   - Only agency-scope team_members are touched. Client team members and the
+//     agency OWNER (a users row, not a team_members row) are never affected.
+//   - We disable rather than delete so a later re-upgrade can re-enable the
+//     same people and their credentials/data survive.
+//   - Counts match checkTeamLimit(): the cap is a number of staff seats, the
+//     owner is not counted.
+// ============================================================================
+async function reconcileAgencyTeamSeats(agencyId, plan) {
+  if (!agencyId) return;
+
+  const p = (plan || 'free').toLowerCase();
+  const cap =
+    (p === 'scale' || p === 'enterprise')   ? -1 :
+    (p === 'pro' || p === 'professional')    ? 3  :
+    0;
+
+  // Unlimited — nothing to enforce.
+  if (cap === -1) return;
+
+  // Active (non-disabled) agency members, oldest first so the first `cap`
+  // rows are the keepers and everything after them is over the cap.
+  const { data: members, error } = await supabase
+    .from('team_members')
+    .select('id, created_at, status')
+    .eq('entity_type', 'agency')
+    .eq('entity_id', agencyId)
+    .neq('status', 'disabled')
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    console.error(`reconcileAgencyTeamSeats: failed to list members for ${agencyId}:`, error.message);
+    return;
+  }
+
+  const active = members || [];
+  if (active.length <= cap) return; // within cap, nothing to do
+
+  const overCap = active.slice(cap); // everything past the first `cap` keepers
+  const ids = overCap.map((m) => m.id);
+
+  const { error: updErr } = await supabase
+    .from('team_members')
+    .update({ status: 'disabled', updated_at: new Date().toISOString() })
+    .in('id', ids);
+
+  if (updErr) {
+    console.error(`reconcileAgencyTeamSeats: failed to disable ${ids.length} member(s) for ${agencyId}:`, updErr.message);
+    return;
+  }
+
+  console.log(`🔒 Seat reconcile (plan=${p}, cap=${cap}): disabled ${ids.length} over-cap agency member(s) for ${agencyId}`);
+}
+
+// ============================================================================
 // CREATE CHECKOUT SESSION (Agency subscribes to platform)
 // ============================================================================
 async function createAgencyCheckout(req, res) {
@@ -609,6 +678,10 @@ async function handleAgencySubscriptionUpdated(subscription) {
 
   if (planChanged) {
     await syncPerClientSubscriptionItem(agency.id, detectedPlan, subscription.id);
+    // Downgrade enforcement: if the new plan's cap is lower than the current
+    // active staff count (e.g. Scale → Pro), disable the newest over-cap
+    // members so they can no longer log in.
+    await reconcileAgencyTeamSeats(agency.id, detectedPlan);
   }
 }
 
@@ -648,6 +721,12 @@ async function handleAgencySubscriptionDeleted(subscription) {
       max_team_members_client: null,
     })
     .eq('id', agency.id);
+
+  // Cancel drops the agency to Free (0 staff seats). Disable every active
+  // agency staff member so none of them can keep logging in. The agency is
+  // also suspended above, but reconciling here keeps the seat state correct
+  // for a later reactivation/upgrade.
+  await reconcileAgencyTeamSeats(agency.id, 'free');
 
   // Capture cancellation details. Both paths land here eventually:
   //   1. In-app cancel: cancelAgencySubscription already inserted a row keyed
@@ -943,6 +1022,7 @@ module.exports = {
   handlePlatformStripeWebhook,
   warnExpiringAgencyTrials,
   canAgencyAddClient,
+  reconcileAgencyTeamSeats,
   CANCELLATION_REASON_LABELS,
   PLATFORM_PLANS,
   PLATFORM_PRICES,
