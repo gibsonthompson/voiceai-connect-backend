@@ -520,6 +520,11 @@ async function expireTrials() {
       }
 
       // ── Update status + null out VAPI resource IDs ──
+      //    Also null phone_number + phone_area_code. The number was just
+      //    released back to Telnyx's pool, so this dead row must stop claiming
+      //    it. The clients_phone_number_key unique constraint sits on
+      //    phone_number, and leaving it populated makes the released number
+      //    un-reassignable when Telnyx recycles it into a future signup (23505).
       const { error: updateError } = await supabase
         .from('clients')
         .update({
@@ -528,6 +533,8 @@ async function expireTrials() {
           vapi_phone_id: null,
           vapi_phone_number: null,
           vapi_assistant_id: null,
+          phone_number: null,
+          phone_area_code: null,
         })
         .eq('id', client.id);
 

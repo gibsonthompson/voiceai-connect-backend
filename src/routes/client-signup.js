@@ -48,7 +48,8 @@ const { supabase, getAgencyById, getClientByEmail } = require('../lib/supabase')
 const { 
   createIndustryAssistant, 
   provisionLocalPhone,
-  createKnowledgeBaseFromWebsite 
+  createKnowledgeBaseFromWebsite,
+  fullyReleaseNumber
 } = require('../lib/vapi');
 const { 
   formatPhoneE164,
@@ -447,6 +448,85 @@ async function provisionPhoneForClient(agency, clientData, assistantId) {
 }
 
 // ============================================================================
+// INSERT CLIENT WITH STALE-NUMBER RECOVERY
+// ----------------------------------------------------------------------------
+// clients.phone_number carries a UNIQUE constraint (clients_phone_number_key).
+// When a trial expires we release the Telnyx number back to the carrier pool.
+// Historically the dead row kept its phone_number populated (the vapi_* columns
+// were nulled, this one was not), so when Telnyx ages the number back into its
+// available inventory and re-sells it to a later signup, the fresh insert
+// collides (Postgres 23505) with the stale dead row.
+//
+// This helper runs the insert and, on a phone_number 23505, splits two cases:
+//   (1) Stale dead row(s) only (status expired / trial_expired, vapi_phone_id
+//       already null): the row no longer owns the number (it was released,
+//       proven by the fact that we just bought it). Null its phone_number and
+//       retry, reusing the number we already paid for.
+//   (2) Anything else (a live or unknown row): do NOT stomp it. Throw a typed
+//       error so the caller releases the just-bought Telnyx number and fails
+//       cleanly instead of leaking the purchase.
+// ============================================================================
+const DEAD_CLIENT_STATUSES = ['expired'];
+const DEAD_SUBSCRIPTION_STATUSES = ['trial_expired', 'expired'];
+
+async function insertClientWithStaleNumberRecovery(payload) {
+  const number = payload.phone_number;
+
+  const first = await supabase.from('clients').insert(payload).select().single();
+  if (!first.error) return first;
+
+  const err = first.error;
+  const isPhoneCollision =
+    err.code === '23505' &&
+    ((err.message && err.message.includes('clients_phone_number_key')) ||
+     (err.details && err.details.includes('phone_number')));
+
+  if (!isPhoneCollision || !number) return first;
+
+  console.warn(`⚠️ phone_number collision on ${number}, inspecting existing row(s)`);
+
+  const { data: colliding, error: lookupErr } = await supabase
+    .from('clients')
+    .select('id, business_name, status, subscription_status, vapi_phone_id')
+    .eq('phone_number', number);
+
+  if (lookupErr) {
+    console.error('❌ Collision lookup failed:', lookupErr.message);
+    return first;
+  }
+
+  const rows = colliding || [];
+  const allDead = rows.length > 0 && rows.every(r =>
+    !r.vapi_phone_id &&
+    (DEAD_CLIENT_STATUSES.includes(r.status) ||
+     DEAD_SUBSCRIPTION_STATUSES.includes(r.subscription_status))
+  );
+
+  if (!allDead) {
+    const conflict = new Error(`phone_number ${number} is held by a live or unknown client row`);
+    conflict.code = 'PHONE_NUMBER_LIVE_CONFLICT';
+    throw conflict;
+  }
+
+  const ids = rows.map(r => r.id);
+  console.log(`🧹 Clearing stale phone_number on dead row(s): ${ids.join(', ')}`);
+  const { error: clearErr } = await supabase
+    .from('clients')
+    .update({ phone_number: null, phone_area_code: null })
+    .in('id', ids);
+
+  if (clearErr) {
+    console.error('❌ Failed to clear stale phone_number:', clearErr.message);
+    return first;
+  }
+
+  const retry = await supabase.from('clients').insert(payload).select().single();
+  if (retry.error) console.error('❌ Retry after clearing stale number failed:', retry.error.message);
+  else console.log(`✅ Recovered stale-number collision, ${number} reassigned`);
+  return retry;
+}
+
+// ============================================================================
 // MAIN CLIENT SIGNUP HANDLER (from agency marketing site)
 // UPDATED 2026-06-08 — Phase 1: now honors req.body.planType so plan selection
 // in /signup/plan is no longer theater. Same validation pattern as
@@ -633,43 +713,59 @@ async function handleClientSignup(req, res) {
     const callLimitKey = `limit_${planType}`;
     const callLimit = agency[callLimitKey] ?? agency.limit_starter ?? 50;
     
-    const { data: newClient, error: clientError } = await supabase
-      .from('clients')
-      .insert({
-        agency_id: agencyId,
-        business_name: businessName,
-        business_city: businessCity,
-        business_state: businessState,
-        country: clientCountry,
-        phone_number: phoneResult.number,
-        phone_area_code: phoneResult.number.length >= 5 ? phoneResult.number.substring(2, 5) : null,
-        owner_name: ownerName,
-        owner_phone: formattedOwnerPhone,
-        email: email.toLowerCase(),
-        industry: industry,
-        vapi_assistant_id: assistant.id,
-        vapi_phone_number: phoneResult.number,
-        vapi_phone_id: phoneResult.vapiPhoneId || null,
-        vapi_query_tool_id: queryToolId,
-        knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
-        knowledge_base_data: templateKB,
-        subscription_status: 'trial',
-        trial_ends_at: trialEndsAt,
-        status: 'active',
-        plan_type: planType,
-        monthly_call_limit: callLimit,
-        calls_this_month: 0,
-        business_website: websiteUrl || null,
-        provisioning_method: phoneResult.provisioningMethod || 'platform',
-        // Inherit nav defaults from agency so new clients match agency's preferred nav style
-        nav_bg: agency.default_client_nav_bg || null,
-        nav_text: agency.default_client_nav_text || null,
-      })
-      .select()
-      .single();
+    const clientInsertPayload = {
+      agency_id: agencyId,
+      business_name: businessName,
+      business_city: businessCity,
+      business_state: businessState,
+      country: clientCountry,
+      phone_number: phoneResult.number,
+      phone_area_code: phoneResult.number.length >= 5 ? phoneResult.number.substring(2, 5) : null,
+      owner_name: ownerName,
+      owner_phone: formattedOwnerPhone,
+      email: email.toLowerCase(),
+      industry: industry,
+      vapi_assistant_id: assistant.id,
+      vapi_phone_number: phoneResult.number,
+      vapi_phone_id: phoneResult.vapiPhoneId || null,
+      vapi_query_tool_id: queryToolId,
+      knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
+      knowledge_base_data: templateKB,
+      subscription_status: 'trial',
+      trial_ends_at: trialEndsAt,
+      status: 'active',
+      plan_type: planType,
+      monthly_call_limit: callLimit,
+      calls_this_month: 0,
+      business_website: websiteUrl || null,
+      provisioning_method: phoneResult.provisioningMethod || 'platform',
+      // Inherit nav defaults from agency so new clients match agency's preferred nav style
+      nav_bg: agency.default_client_nav_bg || null,
+      nav_text: agency.default_client_nav_text || null,
+    };
+
+    let newClient, clientError;
+    try {
+      ({ data: newClient, error: clientError } = await insertClientWithStaleNumberRecovery(clientInsertPayload));
+    } catch (recoveryErr) {
+      if (recoveryErr.code === 'PHONE_NUMBER_LIVE_CONFLICT') {
+        // The number Telnyx sold us is claimed by a live row. Release what we
+        // just bought so we don't leak it, then fail cleanly.
+        console.error('❌ Live phone_number conflict, releasing the number we just purchased');
+        try { await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release of conflicted number failed:', e.message); }
+        await cleanupVapiResources(createdAssistantId, createdQueryToolId, 'phone-collision');
+        createdAssistantId = null;
+        createdQueryToolId = null;
+        return res.status(503).json({ error: 'Provisioning failed', message: 'We hit a phone number conflict setting up your line. Please try again.' });
+      }
+      throw recoveryErr;
+    }
 
     if (clientError) {
       console.error('❌ Database error:', clientError);
+      // The number was already purchased; release it so a failed insert does
+      // not leak a billable Telnyx number.
+      try { await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release after insert failure failed:', e.message); }
       throw clientError;
     }
 
@@ -1009,43 +1105,59 @@ async function handleAgencyAddClient(req, res) {
     const callLimitKey = `limit_${resolvedPlanType}`;
     const callLimit = agency[callLimitKey] ?? agency.limit_starter ?? 50;
 
-    const { data: newClient, error: clientError } = await supabase
-      .from('clients')
-      .insert({
-        agency_id: agencyId,
-        business_name: businessName,
-        business_city: businessCity,
-        business_state: businessState,
-        country: clientCountry,
-        phone_number: phoneResult.number,
-        phone_area_code: phoneResult.number.length >= 5 ? phoneResult.number.substring(2, 5) : null,
-        owner_name: ownerName,
-        owner_phone: formattedOwnerPhone,
-        email: email.toLowerCase(),
-        industry: industry,
-        vapi_assistant_id: assistant.id,
-        vapi_phone_number: phoneResult.number,
-        vapi_phone_id: phoneResult.vapiPhoneId || null,
-        vapi_query_tool_id: queryToolId,
-        knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
-        knowledge_base_data: templateKB,
-        subscription_status: 'trial',
-        trial_ends_at: trialEndsAt,
-        status: 'active',
-        plan_type: resolvedPlanType,
-        monthly_call_limit: callLimit,
-        calls_this_month: 0,
-        business_website: websiteUrl || null,
-        provisioning_method: phoneResult.provisioningMethod || 'platform',
-        // Inherit nav defaults from agency
-        nav_bg: agency.default_client_nav_bg || null,
-        nav_text: agency.default_client_nav_text || null,
-      })
-      .select()
-      .single();
+    const clientInsertPayload = {
+      agency_id: agencyId,
+      business_name: businessName,
+      business_city: businessCity,
+      business_state: businessState,
+      country: clientCountry,
+      phone_number: phoneResult.number,
+      phone_area_code: phoneResult.number.length >= 5 ? phoneResult.number.substring(2, 5) : null,
+      owner_name: ownerName,
+      owner_phone: formattedOwnerPhone,
+      email: email.toLowerCase(),
+      industry: industry,
+      vapi_assistant_id: assistant.id,
+      vapi_phone_number: phoneResult.number,
+      vapi_phone_id: phoneResult.vapiPhoneId || null,
+      vapi_query_tool_id: queryToolId,
+      knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
+      knowledge_base_data: templateKB,
+      subscription_status: 'trial',
+      trial_ends_at: trialEndsAt,
+      status: 'active',
+      plan_type: resolvedPlanType,
+      monthly_call_limit: callLimit,
+      calls_this_month: 0,
+      business_website: websiteUrl || null,
+      provisioning_method: phoneResult.provisioningMethod || 'platform',
+      // Inherit nav defaults from agency
+      nav_bg: agency.default_client_nav_bg || null,
+      nav_text: agency.default_client_nav_text || null,
+    };
+
+    let newClient, clientError;
+    try {
+      ({ data: newClient, error: clientError } = await insertClientWithStaleNumberRecovery(clientInsertPayload));
+    } catch (recoveryErr) {
+      if (recoveryErr.code === 'PHONE_NUMBER_LIVE_CONFLICT') {
+        // The number Telnyx sold us is claimed by a live row. Release what we
+        // just bought so we don't leak it, then fail cleanly.
+        console.error('❌ Live phone_number conflict, releasing the number we just purchased');
+        try { await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release of conflicted number failed:', e.message); }
+        await cleanupVapiResources(createdAssistantId, createdQueryToolId, 'phone-collision');
+        createdAssistantId = null;
+        createdQueryToolId = null;
+        return res.status(503).json({ error: 'Provisioning failed', message: 'We hit a phone number conflict setting up your line. Please try again.' });
+      }
+      throw recoveryErr;
+    }
 
     if (clientError) {
       console.error('❌ Database error:', clientError);
+      // The number was already purchased; release it so a failed insert does
+      // not leak a billable Telnyx number.
+      try { await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release after insert failure failed:', e.message); }
       throw clientError;
     }
 
