@@ -562,6 +562,28 @@ app.get('/api/agency/:agencyId/clients/:clientId', async (req, res) => {
       .single();
 
     if (error || !client) return res.status(404).json({ error: 'Client not found' });
+
+    // Attach the primary client login (username = email, plus any agency-set
+    // visible password) so the client page can show and manage credentials.
+    // visible_password is only ever populated for passwords the agency set; it
+    // is nulled the moment the client changes their own (see auth.js). If the
+    // column does not exist yet, this degrades gracefully to email-only.
+    try {
+      const { data: loginUsers } = await supabase
+        .from('users')
+        .select('email, visible_password')
+        .eq('client_id', clientId)
+        .eq('role', 'client')
+        .order('created_at', { ascending: true })
+        .limit(1);
+      const loginUser = (loginUsers && loginUsers[0]) || null;
+      client.login_email = loginUser?.email || client.email || null;
+      client.login_password = loginUser?.visible_password || null;
+    } catch (e) {
+      client.login_email = client.email || null;
+      client.login_password = null;
+    }
+
     res.json({ client });
   } catch (error) {
     console.error('Error fetching client:', error);
@@ -712,6 +734,74 @@ app.put('/api/agency/:agencyId/clients/:clientId', async (req, res) => {
     res.json({ success: true, client });
   } catch (error) {
     console.error('Error updating client:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// RESET CLIENT LOGIN PASSWORD (agency-initiated)
+// ----------------------------------------------------------------------------
+// Sets a NEW password on the client's primary login user (role='client').
+// Stores the bcrypt hash for login AND a plaintext visible_password so the
+// agency can read it back on the client page. The visible copy is nulled the
+// moment the client changes their own password (auth.js changePassword /
+// setPassword). Mirrors the team-member reset-password pattern. Requires the
+// users.visible_password column (see migration). Auto-generates a readable
+// password unless the body supplies one (>= 6 chars).
+// ============================================================================
+app.post('/api/agency/:agencyId/clients/:clientId/reset-password', async (req, res) => {
+  try {
+    const { agencyId, clientId } = req.params;
+
+    // Verify the client belongs to this agency
+    const { data: client, error: clientErr } = await supabase
+      .from('clients')
+      .select('id, email, business_name')
+      .eq('id', clientId)
+      .eq('agency_id', agencyId)
+      .single();
+    if (clientErr || !client) return res.status(404).json({ error: 'Client not found' });
+
+    // Find the primary client login user
+    const { data: users } = await supabase
+      .from('users')
+      .select('id, email')
+      .eq('client_id', clientId)
+      .eq('role', 'client')
+      .order('created_at', { ascending: true })
+      .limit(1);
+    const loginUser = (users && users[0]) || null;
+    if (!loginUser) return res.status(404).json({ error: 'No login account found for this client' });
+
+    const bcrypt = require('bcryptjs');
+    const crypto = require('crypto');
+    function generatePassword() {
+      // No ambiguous characters (0/O/1/l/I) so it's easy to read and dictate.
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+      const bytes = crypto.randomBytes(14);
+      let p = '';
+      for (let i = 0; i < 14; i++) p += chars[bytes[i] % chars.length];
+      return p;
+    }
+    const provided = typeof req.body?.password === 'string' ? req.body.password.trim() : '';
+    const newPassword = provided.length >= 6 ? provided : generatePassword();
+
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(newPassword, salt);
+
+    const { error: updErr } = await supabase
+      .from('users')
+      .update({ password_hash: passwordHash, visible_password: newPassword })
+      .eq('id', loginUser.id);
+    if (updErr) {
+      console.error('❌ Client password reset error:', updErr);
+      return res.status(500).json({ error: 'Failed to reset password' });
+    }
+
+    console.log(`✅ Client login password reset by agency for ${client.business_name} (${loginUser.email})`);
+    res.json({ success: true, username: loginUser.email, password: newPassword });
+  } catch (error) {
+    console.error('Error resetting client password:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });

@@ -160,6 +160,10 @@ async function setPassword(req, res) {
 
     await supabase.from('password_reset_tokens').update({ used: true }).eq('id', tokenRecord.id);
 
+    // Clear any agency-set visible password now that the user has set their own.
+    // Separate, non-fatal call so a missing column never blocks password set.
+    await supabase.from('users').update({ visible_password: null }).eq('id', tokenRecord.user_id);
+
     const user = await getUserById(tokenRecord.user_id);
 
     if (user && user.agency_id && (user.role === 'agency_owner' || user.role === 'agency_staff')) {
@@ -202,6 +206,10 @@ async function changePassword(req, res) {
     if (updateError) { console.error('❌ Password update error:', updateError); return res.status(500).json({ error: 'Failed to update password' }); }
 
     await supabase.from('team_members').update({ visible_password: null, updated_at: new Date().toISOString() }).eq('member_user_id', user.id);
+
+    // Clear any agency-set visible password now that the user has chosen their
+    // own. Separate, non-fatal call so a missing column never blocks the change.
+    await supabase.from('users').update({ visible_password: null }).eq('id', user.id);
 
     console.log('✅ Password changed for:', user.email);
     res.json({ success: true, message: 'Password changed successfully' });
