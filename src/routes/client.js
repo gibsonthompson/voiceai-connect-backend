@@ -14,6 +14,17 @@ const { supabase, getClientById } = require('../lib/supabase');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+
+function decodeToken(req) {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) return null;
+    return jwt.verify(token, JWT_SECRET);
+  } catch { return null; }
+}
+
 // ============================================================================
 // VOICE OPTIONS
 // ============================================================================
@@ -72,12 +83,65 @@ router.put('/:id/settings', async (req, res) => {
 });
 
 // ============================================================================
+// GET /api/client/:id/my-credentials - The signed-in user's OWN login
+// Identity is derived from the JWT (never the URL param), so a caller can only
+// ever read their own credentials. visible_password is null when the user has
+// set their own password.
+// ============================================================================
+router.get('/:id/my-credentials', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const decoded = decodeToken(req);
+    if (!decoded) return res.status(401).json({ error: 'Authentication required' });
+    if (decoded.clientId !== id) return res.status(403).json({ error: 'Forbidden' });
+
+    const { data: user } = await supabase
+      .from('users')
+      .select('id, email, first_name, last_name, role')
+      .eq('id', decoded.userId)
+      .single();
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    let visiblePassword = null;
+    if (user.role === 'client') {
+      // users.visible_password may not exist if the migration hasn't been run;
+      // the query then returns no value and we degrade to null (owner sees the
+      // "set your own password" note rather than a value).
+      const { data: pwRow } = await supabase.from('users').select('visible_password').eq('id', user.id).single();
+      visiblePassword = pwRow?.visible_password || null;
+    } else if (user.role === 'client_staff') {
+      const { data: member } = await supabase
+        .from('team_members')
+        .select('visible_password')
+        .eq('member_user_id', user.id)
+        .eq('entity_type', 'client')
+        .eq('entity_id', id)
+        .single();
+      visiblePassword = member?.visible_password || null;
+    }
+
+    res.json({
+      success: true,
+      email: user.email,
+      name: [user.first_name, user.last_name].filter(Boolean).join(' ') || null,
+      role: user.role,
+      is_owner: user.role === 'client',
+      visible_password: visiblePassword,
+      has_custom_password: visiblePassword === null,
+    });
+  } catch (error) {
+    console.error('Error fetching my-credentials:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
 // PUT /api/client/:id/branding - Update client-level branding
 // ============================================================================
 router.put('/:id/branding', async (req, res) => {
   try {
     const { id } = req.params;
-    const { logo_url, business_name, primary_color, secondary_color, accent_color, nav_bg, nav_text, button_text, page_bg, card_bg, card_border, theme_mode } = req.body;
+    const { logo_url, business_name, primary_color, secondary_color, accent_color, hipaa_mode, nav_bg, nav_text, button_text, page_bg, card_bg, card_border, theme_mode } = req.body;
     const updates = {};
     if (logo_url !== undefined) updates.logo_url = logo_url || null;
     if (primary_color !== undefined) updates.primary_color = primary_color || null;
