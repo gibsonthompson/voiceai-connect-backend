@@ -58,7 +58,7 @@ function generateTempPassword() {
 
 const DEFAULT_PERMISSIONS = {
   agency: { dashboard: true, clients: true, leads: true, outreach: false, analytics: true, marketing: false, settings: false, billing: false },
-  client: { dashboard: true, calls: true, contacts: true, ai_agent: false, settings: false, billing: false },
+  client: { dashboard: true, calls: true, contacts: true, messages: false, my_business: false, ai_agent: false, settings: false, billing: false },
 };
 
 function sanitizePermissions(perms, entityType) {
