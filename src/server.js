@@ -12,6 +12,12 @@
 // ============================================================================
 require('dotenv').config();
 
+// Force IPv4-first DNS resolution. In the DigitalOcean container, resolving a
+// Cloudflare-fronted host (e.g. api.elevenlabs.io) to an IPv6 address that the
+// container cannot route makes outbound fetches hang on connect until the
+// gateway times out (502/504). IPv4-first avoids that dead IPv6 path.
+require('dns').setDefaultResultOrder('ipv4first');
+
 const express = require('express');
 const cors = require('cors');
 const { supabase } = require('./lib/supabase');
@@ -1092,13 +1098,22 @@ app.post('/api/voices/preview', async (req, res) => {
     const hit = _ttsCache.get(cacheKey);
     if (hit) { res.set('Content-Type', 'audio/mpeg'); res.set('Cache-Control', 'public, max-age=86400'); return res.send(hit); }
 
-    const ttsRes = await _ttsFetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice_id)}?output_format=mp3_44100_128`,
-      { method: 'POST',
-        timeout: 10000,
-        headers: { 'xi-api-key': ELEVENLABS_API_KEY, 'Content-Type': 'application/json', 'Accept': 'audio/mpeg' },
-        body: JSON.stringify({ text: clean, model_id: TTS_MODEL_ID, voice_settings: { stability: 0.5, similarity_boost: 0.75 } }) }
-    );
+    // Hard timeout via AbortController so the request can never hang to the
+    // gateway timeout, regardless of fetch implementation. Aborts at 8s.
+    const _ttsController = new AbortController();
+    const _ttsTimeout = setTimeout(() => _ttsController.abort(), 8000);
+    let ttsRes;
+    try {
+      ttsRes = await _ttsFetch(
+        `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice_id)}?output_format=mp3_44100_128`,
+        { method: 'POST',
+          signal: _ttsController.signal,
+          headers: { 'xi-api-key': ELEVENLABS_API_KEY, 'Content-Type': 'application/json', 'Accept': 'audio/mpeg' },
+          body: JSON.stringify({ text: clean, model_id: TTS_MODEL_ID, voice_settings: { stability: 0.5, similarity_boost: 0.75 } }) }
+      );
+    } finally {
+      clearTimeout(_ttsTimeout);
+    }
     if (!ttsRes.ok) { const e = await ttsRes.text().catch(() => ''); console.error(`ElevenLabs TTS failed (HTTP ${ttsRes.status}): ${e.slice(0,200)}`); return res.status(502).json({ success: false, error: 'Voice synthesis failed' }); }
 
     const audio = Buffer.from(await ttsRes.arrayBuffer());
@@ -1108,6 +1123,10 @@ app.post('/api/voices/preview', async (req, res) => {
     res.set('Content-Type', 'audio/mpeg'); res.set('Cache-Control', 'public, max-age=86400');
     return res.send(audio);
   } catch (err) {
+    if (err.name === 'AbortError') {
+      console.error('Voice preview timed out reaching ElevenLabs (8s) — outbound connect likely blocked');
+      return res.status(504).json({ success: false, error: 'Voice synthesis timed out' });
+    }
     console.error('Voice preview error:', err.message);
     return res.status(500).json({ success: false, error: 'Server error' });
   }
