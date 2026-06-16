@@ -1058,6 +1058,60 @@ app.get('/api/voices', (req, res) => {
 });
 
 // ============================================================================
+// VOICE PREVIEW — greeting spoken in the selected voice via ElevenLabs TTS.
+// Inline because GET /api/voices is inline here and routes/voices.js is NOT
+// mounted. POST /api/voices/preview  body { voice_id, text }  -> audio/mpeg
+// Uses the global fetch already used in this file (see the VAPI assistant
+// delete in /api/agency/cancel), so there is no node-fetch require and thus
+// no ESM boot-crash risk.
+// ============================================================================
+const _ttsCrypto = require('crypto');
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const TTS_MODEL_ID = process.env.ELEVENLABS_TTS_MODEL || 'eleven_flash_v2_5';
+const _ttsCache = new Map();   // voiceId+hash -> mp3 Buffer
+const _ttsRate = new Map();    // ip -> [timestamps]
+const _TTS_CACHE_MAX = 200, _TTS_RATE_MAX = 40, _TTS_RATE_WINDOW = 60 * 1000;
+
+app.post('/api/voices/preview', async (req, res) => {
+  try {
+    if (!ELEVENLABS_API_KEY) return res.status(503).json({ success: false, error: 'Voice preview not configured' });
+
+    const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || 'unknown';
+    const now = Date.now();
+    const recent = (_ttsRate.get(ip) || []).filter(t => now - t < _TTS_RATE_WINDOW);
+    recent.push(now); _ttsRate.set(ip, recent);
+    if (recent.length > _TTS_RATE_MAX) return res.status(429).json({ success: false, error: 'Too many previews' });
+
+    const { voice_id, text } = req.body || {};
+    if (!voice_id || typeof voice_id !== 'string') return res.status(400).json({ success: false, error: 'voice_id required' });
+    const clean = String(text || '').trim().slice(0, 500);
+    if (clean.length < 2) return res.status(400).json({ success: false, error: 'text required' });
+
+    const cacheKey = `${voice_id}:${_ttsCrypto.createHash('sha1').update(clean).digest('hex')}`;
+    const hit = _ttsCache.get(cacheKey);
+    if (hit) { res.set('Content-Type', 'audio/mpeg'); res.set('Cache-Control', 'public, max-age=86400'); return res.send(hit); }
+
+    const ttsRes = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice_id)}?output_format=mp3_44100_128`,
+      { method: 'POST',
+        headers: { 'xi-api-key': ELEVENLABS_API_KEY, 'Content-Type': 'application/json', 'Accept': 'audio/mpeg' },
+        body: JSON.stringify({ text: clean, model_id: TTS_MODEL_ID, voice_settings: { stability: 0.5, similarity_boost: 0.75 } }) }
+    );
+    if (!ttsRes.ok) { const e = await ttsRes.text().catch(() => ''); console.error(`ElevenLabs TTS failed (HTTP ${ttsRes.status}): ${e.slice(0,200)}`); return res.status(502).json({ success: false, error: 'Voice synthesis failed' }); }
+
+    const audio = Buffer.from(await ttsRes.arrayBuffer());
+    _ttsCache.set(cacheKey, audio);
+    if (_ttsCache.size > _TTS_CACHE_MAX) _ttsCache.delete(_ttsCache.keys().next().value);
+
+    res.set('Content-Type', 'audio/mpeg'); res.set('Cache-Control', 'public, max-age=86400');
+    return res.send(audio);
+  } catch (err) {
+    console.error('Voice preview error:', err.message);
+    return res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+// ============================================================================
 // AUTH ROUTES
 // ============================================================================
 
