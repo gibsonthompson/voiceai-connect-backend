@@ -6,6 +6,16 @@
 //          service areas, priority rules, dashboard access)
 // UPDATED: 2026-05-22 — Added allow_client_branding to agency select
 // UPDATED: 2026-05-22 — Added onboarding_completed to PUT settings
+// UPDATED: 2026-06-16 — Per-tab Page Access enforcement. requirePermissionIfAuthed
+//          mounted per route so a client_staff member whose Page Access toggle
+//          for that tab is OFF (or who is disabled) gets a 403 from the API,
+//          not just a hidden nav link. Owners/agency owners/super_admin pass
+//          through; untokened calls pass through unchanged (no regression).
+//          Key map: calls→calls, voice/greeting/ai-settings→ai_agent,
+//          business-hours/knowledge-base→my_business, settings/branding→settings.
+//          NOTE: GET /:id (bootstrap) and /:id/my-credentials (self-scoped) are
+//          intentionally ungated. /:id/dashboard-access is an AGENCY action and
+//          still needs agency-owner auth + tenant check (separate item).
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -16,6 +26,8 @@ const VAPI_API_KEY = process.env.VAPI_API_KEY;
 
 const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+
+const { requirePermissionIfAuthed } = require('./auth');
 
 function decodeToken(req) {
   try {
@@ -43,6 +55,8 @@ const VOICE_OPTIONS = [
 
 // ============================================================================
 // GET /api/client/:id - Full client data with agency
+// Ungated: this is the dashboard bootstrap every authenticated user needs,
+// including staff who only have one tab. Tab gating happens on the data routes.
 // ============================================================================
 router.get('/:id', async (req, res) => {
   try {
@@ -63,7 +77,7 @@ router.get('/:id', async (req, res) => {
 // ============================================================================
 // PUT /api/client/:id/settings - Update client settings
 // ============================================================================
-router.put('/:id/settings', async (req, res) => {
+router.put('/:id/settings', requirePermissionIfAuthed('settings'), async (req, res) => {
   try {
     const { id } = req.params;
     const { email, owner_phone, business_name, hipaa_mode, onboarding_completed } = req.body;
@@ -87,6 +101,7 @@ router.put('/:id/settings', async (req, res) => {
 // Identity is derived from the JWT (never the URL param), so a caller can only
 // ever read their own credentials. visible_password is null when the user has
 // set their own password.
+// Ungated: self-scoped — every user (including staff) reads only their own row.
 // ============================================================================
 router.get('/:id/my-credentials', async (req, res) => {
   try {
@@ -138,7 +153,7 @@ router.get('/:id/my-credentials', async (req, res) => {
 // ============================================================================
 // PUT /api/client/:id/branding - Update client-level branding
 // ============================================================================
-router.put('/:id/branding', async (req, res) => {
+router.put('/:id/branding', requirePermissionIfAuthed('settings'), async (req, res) => {
   try {
     const { id } = req.params;
     const { logo_url, business_name, primary_color, secondary_color, accent_color, hipaa_mode, nav_bg, nav_text, button_text, page_bg, card_bg, card_border, theme_mode } = req.body;
@@ -170,7 +185,7 @@ router.put('/:id/branding', async (req, res) => {
 // ============================================================================
 // GET /api/client/:id/voice - Get current voice
 // ============================================================================
-router.get('/:id/voice', async (req, res) => {
+router.get('/:id/voice', requirePermissionIfAuthed('ai_agent'), async (req, res) => {
   try {
     const { id } = req.params;
     const { data: client } = await supabase.from('clients').select('vapi_assistant_id, voice_id').eq('id', id).single();
@@ -190,7 +205,7 @@ router.get('/:id/voice', async (req, res) => {
 // ============================================================================
 // PUT /api/client/:id/voice - Update voice
 // ============================================================================
-router.put('/:id/voice', async (req, res) => {
+router.put('/:id/voice', requirePermissionIfAuthed('ai_agent'), async (req, res) => {
   try {
     const { id } = req.params;
     const voiceId = req.body.voice_id || req.body.voiceId;
@@ -210,7 +225,7 @@ router.put('/:id/voice', async (req, res) => {
 // ============================================================================
 // GET /api/client/:id/greeting
 // ============================================================================
-router.get('/:id/greeting', async (req, res) => {
+router.get('/:id/greeting', requirePermissionIfAuthed('ai_agent'), async (req, res) => {
   try {
     const { id } = req.params;
     const { data: client } = await supabase.from('clients').select('vapi_assistant_id, greeting_message, business_name').eq('id', id).single();
@@ -228,7 +243,7 @@ router.get('/:id/greeting', async (req, res) => {
 // ============================================================================
 // PUT /api/client/:id/greeting
 // ============================================================================
-router.put('/:id/greeting', async (req, res) => {
+router.put('/:id/greeting', requirePermissionIfAuthed('ai_agent'), async (req, res) => {
   try {
     const { id } = req.params;
     const greeting = req.body.greeting_message || req.body.greeting;
@@ -246,7 +261,7 @@ router.put('/:id/greeting', async (req, res) => {
 // ============================================================================
 // PUT /api/client/:id/business-hours
 // ============================================================================
-router.put('/:id/business-hours', async (req, res) => {
+router.put('/:id/business-hours', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { id } = req.params;
     const businessHours = req.body.business_hours || req.body.businessHours;
@@ -261,7 +276,7 @@ router.put('/:id/business-hours', async (req, res) => {
 // ============================================================================
 // GET /api/client/:id/knowledge-base
 // ============================================================================
-router.get('/:id/knowledge-base', async (req, res) => {
+router.get('/:id/knowledge-base', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { id } = req.params;
     const { data: client } = await supabase.from('clients').select('knowledge_base_data, knowledge_base_id, knowledge_base_updated_at, business_website').eq('id', id).single();
@@ -279,7 +294,7 @@ router.get('/:id/knowledge-base', async (req, res) => {
 // ============================================================================
 // PUT /api/client/:id/knowledge-base
 // ============================================================================
-router.put('/:id/knowledge-base', async (req, res) => {
+router.put('/:id/knowledge-base', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { id } = req.params;
     const { content, services, faqs, businessHours, additionalInfo } = req.body;
@@ -296,7 +311,7 @@ router.put('/:id/knowledge-base', async (req, res) => {
 // ============================================================================
 // GET /api/client/:id/calls/:callId - Single call detail
 // ============================================================================
-router.get('/:id/calls/:callId', async (req, res) => {
+router.get('/:id/calls/:callId', requirePermissionIfAuthed('calls'), async (req, res) => {
   try {
     const { id, callId } = req.params;
     const { data: call, error } = await supabase.from('calls').select('*').eq('id', callId).eq('client_id', id).single();
@@ -308,7 +323,7 @@ router.get('/:id/calls/:callId', async (req, res) => {
 // ============================================================================
 // GET /api/client/:id/calls - Client calls with stats
 // ============================================================================
-router.get('/:id/calls', async (req, res) => {
+router.get('/:id/calls', requirePermissionIfAuthed('calls'), async (req, res) => {
   try {
     const { id } = req.params;
     const { data: calls, error } = await supabase.from('calls').select('*').eq('client_id', id).order('created_at', { ascending: false });
@@ -325,7 +340,7 @@ router.get('/:id/calls', async (req, res) => {
 // ============================================================================
 
 // GET /api/client/:id/ai-settings
-router.get('/:id/ai-settings', async (req, res) => {
+router.get('/:id/ai-settings', requirePermissionIfAuthed('ai_agent'), async (req, res) => {
   try {
     const { id } = req.params;
     const { data: client, error } = await supabase
@@ -348,7 +363,7 @@ router.get('/:id/ai-settings', async (req, res) => {
 });
 
 // PUT /api/client/:id/ai-settings
-router.put('/:id/ai-settings', async (req, res) => {
+router.put('/:id/ai-settings', requirePermissionIfAuthed('ai_agent'), async (req, res) => {
   try {
     const { id } = req.params;
     const { ai_tone, booking_mode, service_areas, priority_rules } = req.body;
@@ -382,6 +397,9 @@ router.put('/:id/ai-settings', async (req, res) => {
 });
 
 // PUT /api/client/:id/dashboard-access — Agency sets client access level
+// NOTE: This is an AGENCY-owner action, not a client one. It is intentionally
+// NOT gated with a client Page Access key. It still needs proper agency-owner
+// auth + a check that the agency owns this client (separate security item).
 router.put('/:id/dashboard-access', async (req, res) => {
   try {
     const { id } = req.params;

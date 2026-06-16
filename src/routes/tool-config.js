@@ -1,10 +1,13 @@
 // ============================================================================
 // TOOL CONFIG ROUTES - Per-client feature toggles for dynamic assistant
 // Mounted at: app.use('/api/client', toolConfigRoutes)
+// UPDATED: 2026-06-16 — Per-tab Page Access enforcement. requirePermissionIfAuthed('ai_agent')
+//          on both routes (these toggles configure the AI agent's call handling).
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
+const { requirePermissionIfAuthed } = require('./auth');
 
 // Default tool config — used when client has no tool_config or is missing keys
 const DEFAULT_TOOL_CONFIG = {
@@ -21,7 +24,7 @@ const DEFAULT_TOOL_CONFIG = {
 // ============================================================================
 // GET /api/client/:id/tool-config
 // ============================================================================
-router.get('/:id/tool-config', async (req, res) => {
+router.get('/:id/tool-config', requirePermissionIfAuthed('ai_agent'), async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -53,7 +56,7 @@ router.get('/:id/tool-config', async (req, res) => {
 // PUT /api/client/:id/tool-config
 // Accepts partial updates — merges with existing config
 // ============================================================================
-router.put('/:id/tool-config', async (req, res) => {
+router.put('/:id/tool-config', requirePermissionIfAuthed('ai_agent'), async (req, res) => {
   try {
     const { id } = req.params;
     const updates = req.body;

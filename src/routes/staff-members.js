@@ -8,15 +8,21 @@
 //   POST   /api/client/:clientId/staff
 //   PUT    /api/client/:clientId/staff/:staffId
 //   DELETE /api/client/:clientId/staff/:staffId
+//
+// UPDATED: 2026-06-16 — Per-tab Page Access enforcement. requirePermissionIfAuthed('my_business')
+//          on every route (Staff Directory lives under the My Business tab).
+//          NOTE: this is the AI's staff DIRECTORY (providers the AI references
+//          on calls), NOT dashboard login users — those are team_members.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
+const { requirePermissionIfAuthed } = require('./auth');
 
 // ============================================================================
 // GET /api/client/:clientId/staff — List all staff for a client
 // ============================================================================
-router.get('/:clientId/staff', async (req, res) => {
+router.get('/:clientId/staff', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { clientId } = req.params;
 
@@ -41,7 +47,7 @@ router.get('/:clientId/staff', async (req, res) => {
 // ============================================================================
 // POST /api/client/:clientId/staff — Create a new staff member
 // ============================================================================
-router.post('/:clientId/staff', async (req, res) => {
+router.post('/:clientId/staff', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { clientId } = req.params;
     const { name, role, phone, email, notes, available_hours } = req.body;
@@ -84,7 +90,7 @@ router.post('/:clientId/staff', async (req, res) => {
 // ============================================================================
 // PUT /api/client/:clientId/staff/:staffId — Update a staff member
 // ============================================================================
-router.put('/:clientId/staff/:staffId', async (req, res) => {
+router.put('/:clientId/staff/:staffId', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { clientId, staffId } = req.params;
     const { name, role, phone, email, notes, available_hours, is_active } = req.body;
@@ -133,7 +139,7 @@ router.put('/:clientId/staff/:staffId', async (req, res) => {
 // ============================================================================
 // DELETE /api/client/:clientId/staff/:staffId — Delete a staff member
 // ============================================================================
-router.delete('/:clientId/staff/:staffId', async (req, res) => {
+router.delete('/:clientId/staff/:staffId', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { clientId, staffId } = req.params;
 

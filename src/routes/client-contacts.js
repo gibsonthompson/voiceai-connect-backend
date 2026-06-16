@@ -1,16 +1,21 @@
 // ============================================================================
 // CLIENT CONTACTS ROUTES - Lead Capture / Mini-CRM for Clients
 // VoiceAI Connect Multi-Tenant
+// UPDATED: 2026-06-16 — Per-tab Page Access enforcement. requirePermissionIfAuthed('contacts')
+//          on every route so a client_staff member without the Contacts toggle
+//          gets a 403 from the API, not just a hidden nav link. Owners and
+//          untokened callers pass through unchanged.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
+const { requirePermissionIfAuthed } = require('./auth');
 
 // ============================================================================
 // GET /api/client/:id/contacts - List all contacts with stats
 // Supports: ?search=, ?status=, ?sort=recent|calls|name, ?limit=, ?offset=
 // ============================================================================
-router.get('/:id/contacts', async (req, res) => {
+router.get('/:id/contacts', requirePermissionIfAuthed('contacts'), async (req, res) => {
   try {
     const { id } = req.params;
     const { search, status, sort = 'recent', limit = '50', offset = '0' } = req.query;
@@ -89,7 +94,7 @@ router.get('/:id/contacts', async (req, res) => {
 // ============================================================================
 // GET /api/client/:id/contacts/:contactId - Single contact with call history
 // ============================================================================
-router.get('/:id/contacts/:contactId', async (req, res) => {
+router.get('/:id/contacts/:contactId', requirePermissionIfAuthed('contacts'), async (req, res) => {
   try {
     const { id, contactId } = req.params;
 
@@ -126,7 +131,7 @@ router.get('/:id/contacts/:contactId', async (req, res) => {
 // PUT /api/client/:id/contacts/:contactId - Update contact
 // Supports: status, notes, tags, name, email, address
 // ============================================================================
-router.put('/:id/contacts/:contactId', async (req, res) => {
+router.put('/:id/contacts/:contactId', requirePermissionIfAuthed('contacts'), async (req, res) => {
   try {
     const { id, contactId } = req.params;
     const { status, notes, tags, name, email, address } = req.body;
@@ -166,7 +171,7 @@ router.put('/:id/contacts/:contactId', async (req, res) => {
 // ============================================================================
 // POST /api/client/:id/contacts - Manually create a contact
 // ============================================================================
-router.post('/:id/contacts', async (req, res) => {
+router.post('/:id/contacts', requirePermissionIfAuthed('contacts'), async (req, res) => {
   try {
     const { id } = req.params;
     const { name, phone, email, address, notes, status } = req.body;
@@ -234,7 +239,7 @@ router.post('/:id/contacts', async (req, res) => {
 // ============================================================================
 // DELETE /api/client/:id/contacts/:contactId - Delete a contact
 // ============================================================================
-router.delete('/:id/contacts/:contactId', async (req, res) => {
+router.delete('/:id/contacts/:contactId', requirePermissionIfAuthed('contacts'), async (req, res) => {
   try {
     const { id, contactId } = req.params;
 

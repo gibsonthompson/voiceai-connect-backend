@@ -9,15 +9,19 @@
 //   PUT    /api/client/:clientId/services/:serviceId
 //   DELETE /api/client/:clientId/services/:serviceId
 //   PUT    /api/client/:clientId/services/reorder
+//
+// UPDATED: 2026-06-16 — Per-tab Page Access enforcement. requirePermissionIfAuthed('my_business')
+//          on every route (Services live under the My Business tab).
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
+const { requirePermissionIfAuthed } = require('./auth');
 
 // ============================================================================
 // GET /api/client/:clientId/services — List all services for a client
 // ============================================================================
-router.get('/:clientId/services', async (req, res) => {
+router.get('/:clientId/services', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { clientId } = req.params;
 
@@ -52,7 +56,7 @@ router.get('/:clientId/services', async (req, res) => {
 // ============================================================================
 // POST /api/client/:clientId/services — Create a new service
 // ============================================================================
-router.post('/:clientId/services', async (req, res) => {
+router.post('/:clientId/services', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { clientId } = req.params;
     const { name, duration_minutes, buffer_minutes, booking_mode, assigned_staff } = req.body;
@@ -109,7 +113,7 @@ router.post('/:clientId/services', async (req, res) => {
 // PUT /api/client/:clientId/services/reorder — Reorder services
 // Must be defined BEFORE the /:serviceId route to avoid matching "reorder" as a UUID
 // ============================================================================
-router.put('/:clientId/services/reorder', async (req, res) => {
+router.put('/:clientId/services/reorder', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { clientId } = req.params;
     const { order } = req.body; // Array of { id, sort_order }
@@ -137,7 +141,7 @@ router.put('/:clientId/services/reorder', async (req, res) => {
 // ============================================================================
 // PUT /api/client/:clientId/services/:serviceId — Update a service
 // ============================================================================
-router.put('/:clientId/services/:serviceId', async (req, res) => {
+router.put('/:clientId/services/:serviceId', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { clientId, serviceId } = req.params;
     const { name, duration_minutes, buffer_minutes, booking_mode, assigned_staff, is_active } = req.body;
@@ -199,7 +203,7 @@ router.put('/:clientId/services/:serviceId', async (req, res) => {
 // ============================================================================
 // DELETE /api/client/:clientId/services/:serviceId — Delete a service
 // ============================================================================
-router.delete('/:clientId/services/:serviceId', async (req, res) => {
+router.delete('/:clientId/services/:serviceId', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { clientId, serviceId } = req.params;
 

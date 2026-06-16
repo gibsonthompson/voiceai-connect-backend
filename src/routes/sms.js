@@ -2,11 +2,18 @@
 // TWO-WAY SMS ROUTES
 // Handles inbound SMS from Telnyx webhook, outbound SMS from dashboard,
 // and conversation CRUD for the Messages tab.
+// UPDATED: 2026-06-16 — Per-tab Page Access enforcement. requirePermissionIfAuthed('messages')
+//          on the dashboard-facing routes so a client_staff member without the
+//          Messages toggle gets a 403, not just a hidden nav link. Owners and
+//          untokened callers pass through. The Telnyx inbound webhook
+//          (handleTelnyxSMSWebhook) is intentionally NOT gated — it is Telnyx
+//          calling in, not a dashboard user.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const fetch = require('node-fetch');
 const { supabase } = require('../lib/supabase');
+const { requirePermissionIfAuthed } = require('./auth');
 
 const TELNYX_API_KEY = process.env.TELNYX_API_KEY;
 
@@ -140,7 +147,7 @@ async function notifyOwnerOfInboundSMS(client, callerPhone, messageContent) {
 // ============================================================================
 // POST /api/sms/send — Business owner sends a text to a caller
 // ============================================================================
-router.post('/send', async (req, res) => {
+router.post('/send', requirePermissionIfAuthed('messages'), async (req, res) => {
   try {
     const { client_id, to, message, conversation_id } = req.body;
 
@@ -247,7 +254,7 @@ router.post('/send', async (req, res) => {
 // ============================================================================
 // GET /api/sms/conversations/:clientId — List all conversations for a client
 // ============================================================================
-router.get('/conversations/:clientId', async (req, res) => {
+router.get('/conversations/:clientId', requirePermissionIfAuthed('messages'), async (req, res) => {
   try {
     const { clientId } = req.params;
     const { archived } = req.query;
@@ -273,7 +280,7 @@ router.get('/conversations/:clientId', async (req, res) => {
 // ============================================================================
 // GET /api/sms/conversations/:clientId/:conversationId — Get messages in thread
 // ============================================================================
-router.get('/conversations/:clientId/:conversationId', async (req, res) => {
+router.get('/conversations/:clientId/:conversationId', requirePermissionIfAuthed('messages'), async (req, res) => {
   try {
     const { clientId, conversationId } = req.params;
     const { limit = 50, before } = req.query;
@@ -317,7 +324,7 @@ router.get('/conversations/:clientId/:conversationId', async (req, res) => {
 // ============================================================================
 // PUT /api/sms/conversations/:conversationId/read — Mark conversation as read
 // ============================================================================
-router.put('/conversations/:conversationId/read', async (req, res) => {
+router.put('/conversations/:conversationId/read', requirePermissionIfAuthed('messages'), async (req, res) => {
   try {
     const { conversationId } = req.params;
 
@@ -338,7 +345,7 @@ router.put('/conversations/:conversationId/read', async (req, res) => {
 // ============================================================================
 // PUT /api/sms/conversations/:conversationId/archive — Toggle archive
 // ============================================================================
-router.put('/conversations/:conversationId/archive', async (req, res) => {
+router.put('/conversations/:conversationId/archive', requirePermissionIfAuthed('messages'), async (req, res) => {
   try {
     const { conversationId } = req.params;
     const { archived } = req.body;
@@ -360,7 +367,7 @@ router.put('/conversations/:conversationId/archive', async (req, res) => {
 // ============================================================================
 // GET /api/sms/unread/:clientId — Get total unread count for badge
 // ============================================================================
-router.get('/unread/:clientId', async (req, res) => {
+router.get('/unread/:clientId', requirePermissionIfAuthed('messages'), async (req, res) => {
   try {
     const { clientId } = req.params;
 
@@ -388,6 +395,7 @@ module.exports = router;
 // TELNYX INBOUND SMS WEBHOOK HANDLER
 // Mount this at POST /webhook/telnyx-sms in server.js
 // Telnyx sends webhooks for inbound messages to the messaging profile URL
+// NOT gated — this is Telnyx calling in, no user token involved.
 // ============================================================================
 module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(req, res) {
   try {
