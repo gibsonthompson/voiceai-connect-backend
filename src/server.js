@@ -1061,10 +1061,11 @@ app.get('/api/voices', (req, res) => {
 // VOICE PREVIEW — greeting spoken in the selected voice via ElevenLabs TTS.
 // Inline because GET /api/voices is inline here and routes/voices.js is NOT
 // mounted. POST /api/voices/preview  body { voice_id, text }  -> audio/mpeg
-// Uses the global fetch already used in this file (see the VAPI assistant
-// delete in /api/agency/cancel), so there is no node-fetch require and thus
-// no ESM boot-crash risk.
+// Uses node-fetch (the same egress path proven in lib/vapi.js) plus a hard
+// timeout, so a stalled ElevenLabs connection fails fast with a clean error
+// instead of hanging until DigitalOcean's gateway kills it (502/504).
 // ============================================================================
+const _ttsFetch = require('node-fetch');
 const _ttsCrypto = require('crypto');
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const TTS_MODEL_ID = process.env.ELEVENLABS_TTS_MODEL || 'eleven_flash_v2_5';
@@ -1091,9 +1092,10 @@ app.post('/api/voices/preview', async (req, res) => {
     const hit = _ttsCache.get(cacheKey);
     if (hit) { res.set('Content-Type', 'audio/mpeg'); res.set('Cache-Control', 'public, max-age=86400'); return res.send(hit); }
 
-    const ttsRes = await fetch(
+    const ttsRes = await _ttsFetch(
       `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice_id)}?output_format=mp3_44100_128`,
       { method: 'POST',
+        timeout: 10000,
         headers: { 'xi-api-key': ELEVENLABS_API_KEY, 'Content-Type': 'application/json', 'Accept': 'audio/mpeg' },
         body: JSON.stringify({ text: clean, model_id: TTS_MODEL_ID, voice_settings: { stability: 0.5, similarity_boost: 0.75 } }) }
     );
