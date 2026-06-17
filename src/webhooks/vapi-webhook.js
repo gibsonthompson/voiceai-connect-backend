@@ -13,10 +13,12 @@
 // UPDATED: 2026-05-22 — Fix: Claude model string claude-sonnet-4-6 (was 404ing
 //   with invalid dated version). Fix: demo_calls insert now checks Supabase
 //   error return instead of silently succeeding.
-// UPDATED: 2026-06-17 — DIAGNOSTIC: every silent exit in the end-of-call path
-//   now logs why it returned (gate blocks + insert errors with full Postgres
-//   message/code/details/hint). Nothing in the save path can fail invisibly
-//   anymore. No behavior change, logging only.
+// UPDATED: 2026-06-17 — FIX: round duration_seconds before insert. VAPI sends
+//   fractional seconds (e.g. 50.573) but duration_seconds is an INTEGER
+//   column, so every client-call insert failed with Postgres 22P02 and the
+//   code returned a silent 500 — no row saved, and therefore no SMS (SMS is
+//   the step after the save). Also added diagnostic logging so gate blocks
+//   and the real insert error print instead of dying silently.
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -722,11 +724,7 @@ async function handleVapiWebhook(req, res) {
       return res.status(200).json({ received: true });
     }
 
-    console.log('📞 VAPI webhook received');
-    // DIAGNOSTIC: show what type every non-assistant/non-tool message is, so a
-    // missing end-of-call-report (e.g. VAPI only sending status-update) is
-    // obvious in the logs instead of looking like a dropped call.
-    console.log(`   message.type = ${message?.type}`);
+    console.log('📞 VAPI webhook received:', message?.type);
     if (message?.type !== 'end-of-call-report') return res.status(200).json({ received: true });
 
     const call = message.call;
@@ -757,7 +755,7 @@ async function handleVapiWebhook(req, res) {
     // DIAGNOSTIC: print every value the gates below read, so a block is never
     // a mystery. If the call dies after this line with no "Call saved" log,
     // the next line printed tells you exactly which gate (or the insert).
-    console.log(`🔎 Gate values — client.subscription_status=${client.subscription_status}, client.trial_ends_at=${client.trial_ends_at}, agency.subscription_status=${agency?.subscription_status ?? 'NO-AGENCY'}, agency.trial_ends_at=${agency?.trial_ends_at ?? 'n/a'}, calls_this_month=${client.calls_this_month}, monthly_call_limit=${client.monthly_call_limit}, owner_phone=${client.owner_phone ? client.owner_phone : 'MISSING'}, hipaa_mode=${client.hipaa_mode === true}`);
+    console.log(`🔎 Gate values — client.subscription_status=${client.subscription_status}, client.trial_ends_at=${client.trial_ends_at}, agency.subscription_status=${agency?.subscription_status ?? 'NO-AGENCY'}, agency.trial_ends_at=${agency?.trial_ends_at ?? 'n/a'}, calls_this_month=${client.calls_this_month}, monthly_call_limit=${client.monthly_call_limit}, owner_phone=${client.owner_phone ? 'set' : 'MISSING'}, hipaa_mode=${client.hipaa_mode === true}`);
 
     if (agency) {
       if (!['active', 'trial', 'trialing'].includes(agency.subscription_status)) {
@@ -795,7 +793,13 @@ async function handleVapiWebhook(req, res) {
     const transcript = message.transcript || '';
     const callerPhone = call.customer?.number || 'Unknown';
     const recordingUrl = message.recordingUrl || message.artifact?.recordingUrl || call.recordingUrl || null;
-    const durationSeconds = call.duration || message.duration || message.artifact?.duration || message.durationSeconds || null;
+    let durationSeconds = call.duration || message.duration || message.artifact?.duration || message.durationSeconds || null;
+    // duration_seconds is an INTEGER column. VAPI sends fractional seconds
+    // (e.g. 50.573), which Postgres rejects with 22P02. Round to a whole
+    // number (or null) before it is used anywhere below.
+    durationSeconds = (durationSeconds != null && !Number.isNaN(Number(durationSeconds)))
+      ? Math.round(Number(durationSeconds))
+      : null;
     const endedReason = call.endedReason || message.endedReason || null;
     const { transferStatus, wasTransferred } = detectTransferStatus(endedReason, transcript);
 
