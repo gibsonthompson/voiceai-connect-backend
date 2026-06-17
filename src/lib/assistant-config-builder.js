@@ -12,6 +12,12 @@
 //          from INDUSTRY_CONFIGS. Custom prompt edits are now respected at
 //          call time. Includes-checks prevent double-appending blocks that
 //          may already exist in the cached prompt.
+// UPDATED: 2026-06-16 — CRITICAL FIX: the dynamic builder now respects the
+//          client's saved greeting (client.greeting_message) and voice
+//          (client.voice_id). Previously buildFirstMessage regenerated the
+//          greeting from the industry default and the voice was the industry
+//          default / agency template only, so the dashboard's greeting and
+//          voice edits never reached live calls.
 // ============================================================================
 
 const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, TRANSFER_KEYWORDS_BLOCK, VOICES,
@@ -404,9 +410,26 @@ If you transfer a call and the transfer fails or is not answered (you'll know be
 
 // ============================================================================
 // BUILD PERSONALIZED FIRST MESSAGE
+//
+// UPDATED 2026-06-16: accepts customGreeting (client.greeting_message) and
+// gates returning-caller personalization on the Caller Recognition toggle
+// (tool_config.callerRecognition).
+// Precedence: HIPAA message > after-hours message > recognized returning
+// caller's "welcome back, {name}" (ONLY when Caller Recognition is on) >
+// client's custom greeting > industry default. When Caller Recognition is off
+// (or in HIPAA mode, where it is force-disabled), the caller's name is never
+// used and the custom greeting governs every open-hours call.
 // ============================================================================
-function buildFirstMessage(businessName, industryKey, contact, isAfterHours, toolConfig, hipaaMode) {
+function buildFirstMessage(businessName, industryKey, contact, isAfterHours, toolConfig, hipaaMode, customGreeting) {
   const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
+
+  // Caller Recognition toggle (tool_config.callerRecognition, defaults on).
+  // This is the single gate for greeting a returning caller by name. When the
+  // toggle is off, knownName is null and no personalization happens anywhere
+  // below. HIPAA mode force-disables callerRecognition upstream, so knownName
+  // is null there too.
+  const recognizeCallers = toolConfig.callerRecognition !== false;
+  const knownName = (recognizeCallers && contact?.name && contact.name !== 'Unknown') ? contact.name : null;
 
   if (hipaaMode) {
     if (isAfterHours && toolConfig.businessHoursRouting) {
@@ -418,15 +441,23 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
   const defaultMessage = config.firstMessage(businessName);
 
   if (isAfterHours && toolConfig.businessHoursRouting) {
-    if (contact?.name && contact.name !== 'Unknown') {
-      return `Hi ${contact.name}, thanks for calling ${businessName}. We're currently closed, but I can help you leave a message. This call may be recorded.`;
+    if (knownName) {
+      return `Hi ${knownName}, thanks for calling ${businessName}. We're currently closed, but I can help you leave a message. This call may be recorded.`;
     }
     return `Hi, thanks for calling ${businessName}. We're currently closed, but I can help you leave a message. This call may be recorded.`;
   }
 
-  if (contact?.name && contact.name !== 'Unknown') {
-    return `Hi ${contact.name}, welcome back to ${businessName}! This call may be recorded. How can I help you today?`;
+  // Recognized returning caller (Caller Recognition ON) — the personalized
+  // welcome-back wins over the custom greeting, since the custom greeting is a
+  // fixed line that can't include the caller's name.
+  if (knownName) {
+    return `Hi ${knownName}, welcome back to ${businessName}! This call may be recorded. How can I help you today?`;
   }
+
+  // New caller, or Caller Recognition off: the client's custom greeting governs,
+  // falling back to the industry default.
+  const trimmedGreeting = typeof customGreeting === 'string' ? customGreeting.trim() : '';
+  if (trimmedGreeting) return trimmedGreeting;
 
   return defaultMessage;
 }
@@ -728,8 +759,15 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     } catch { /* Use defaults */ }
   }
 
+  // Client's own voice selection (dashboard voice picker -> client.voice_id)
+  // takes final precedence over the industry default and any agency template.
+  // Without this, calls always used the industry default voice regardless of
+  // what the client picked. (The picker itself is plan-gated in the dashboard;
+  // here we simply honor whatever value was saved.)
+  if (client.voice_id) voiceId = client.voice_id;
+
   const systemPrompt = await buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours);
-  const firstMessage = buildFirstMessage(client.business_name, industryKey, callerContext, isAfterHours, toolConfig, hipaaMode);
+  const firstMessage = buildFirstMessage(client.business_name, industryKey, callerContext, isAfterHours, toolConfig, hipaaMode, client.greeting_message);
   const tools = buildTools(client, toolConfig, isAfterHours);
   const hooks = buildHooks(client, toolConfig, isAfterHours);
 
