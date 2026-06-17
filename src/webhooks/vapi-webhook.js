@@ -13,6 +13,10 @@
 // UPDATED: 2026-05-22 — Fix: Claude model string claude-sonnet-4-6 (was 404ing
 //   with invalid dated version). Fix: demo_calls insert now checks Supabase
 //   error return instead of silently succeeding.
+// UPDATED: 2026-06-17 — DIAGNOSTIC: every silent exit in the end-of-call path
+//   now logs why it returned (gate blocks + insert errors with full Postgres
+//   message/code/details/hint). Nothing in the save path can fail invisibly
+//   anymore. No behavior change, logging only.
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -719,11 +723,18 @@ async function handleVapiWebhook(req, res) {
     }
 
     console.log('📞 VAPI webhook received');
+    // DIAGNOSTIC: show what type every non-assistant/non-tool message is, so a
+    // missing end-of-call-report (e.g. VAPI only sending status-update) is
+    // obvious in the logs instead of looking like a dropped call.
+    console.log(`   message.type = ${message?.type}`);
     if (message?.type !== 'end-of-call-report') return res.status(200).json({ received: true });
 
     const call = message.call;
     const phoneNumber = await getPhoneNumberFromVapi(call.phoneNumberId);
-    if (!phoneNumber) return res.status(200).json({ received: true });
+    if (!phoneNumber) {
+      console.log(`🚫 EXIT: getPhoneNumberFromVapi returned null for phoneNumberId=${call?.phoneNumberId}`);
+      return res.status(200).json({ received: true });
+    }
 
     console.log('📱 Phone number:', phoneNumber);
     const client = await getClientByVapiPhoneNumber(phoneNumber);
@@ -736,24 +747,36 @@ async function handleVapiWebhook(req, res) {
         const result = await handleDemoCall(demoAgency, message, industryKey);
         return res.status(200).json({ received: true, demo: true, industry: industryKey, ...result });
       }
+      console.log(`🚫 EXIT: not a client and not a demo number — nothing saved`);
       return res.status(200).json({ received: true });
     }
 
-    console.log('✅ Client found:', client.business_name);
+    console.log('✅ Client found:', client.business_name, '| client_id:', client.id);
     const agency = client.agencies;
 
+    // DIAGNOSTIC: print every value the gates below read, so a block is never
+    // a mystery. If the call dies after this line with no "Call saved" log,
+    // the next line printed tells you exactly which gate (or the insert).
+    console.log(`🔎 Gate values — client.subscription_status=${client.subscription_status}, client.trial_ends_at=${client.trial_ends_at}, agency.subscription_status=${agency?.subscription_status ?? 'NO-AGENCY'}, agency.trial_ends_at=${agency?.trial_ends_at ?? 'n/a'}, calls_this_month=${client.calls_this_month}, monthly_call_limit=${client.monthly_call_limit}, owner_phone=${client.owner_phone ? client.owner_phone : 'MISSING'}, hipaa_mode=${client.hipaa_mode === true}`);
+
     if (agency) {
-      if (!['active', 'trial', 'trialing'].includes(agency.subscription_status))
+      if (!['active', 'trial', 'trialing'].includes(agency.subscription_status)) {
+        console.log(`🚫 BLOCKED at agency-status gate: agency.subscription_status='${agency.subscription_status}' not in [active,trial,trialing]`);
         return res.status(200).json({ received: true, blocked: true, reason: 'Agency not active' });
+      }
       if (['trial', 'trialing'].includes(agency.subscription_status) && isTrialExpired(agency.trial_ends_at)) {
+        console.log(`🚫 BLOCKED at agency-trial-expired gate: trial_ends_at=${agency.trial_ends_at}`);
         await supabase.from('agencies').update({ subscription_status: 'expired' }).eq('id', agency.id);
         return res.status(200).json({ received: true, blocked: true, reason: 'Agency trial expired' });
       }
     }
 
-    if (!['active', 'trial'].includes(client.subscription_status))
+    if (!['active', 'trial'].includes(client.subscription_status)) {
+      console.log(`🚫 BLOCKED at client-status gate: client.subscription_status='${client.subscription_status}' not in [active,trial]`);
       return res.status(200).json({ received: true, blocked: true, reason: 'Not active' });
+    }
     if (client.subscription_status === 'trial' && isTrialExpired(client.trial_ends_at)) {
+      console.log(`🚫 BLOCKED at client-trial-expired gate: trial_ends_at=${client.trial_ends_at}`);
       await supabase.from('clients').update({ subscription_status: 'trial_expired', status: 'suspended' }).eq('id', client.id);
       return res.status(200).json({ received: true, blocked: true, reason: 'Trial expired' });
     }
@@ -761,9 +784,12 @@ async function handleVapiWebhook(req, res) {
     const currentCallCount = client.calls_this_month || 0;
     const callLimit = client.monthly_call_limit ?? 50;
     if (callLimit !== -1 && currentCallCount >= callLimit) {
+      console.log(`🚫 BLOCKED at call-limit gate: ${currentCallCount}/${callLimit}`);
       if (currentCallCount === callLimit) await sendLimitReachedEmail(client, agency, callLimit);
       return res.status(200).json({ received: true, blocked: true, reason: 'Limit reached' });
     }
+
+    console.log(`✅ All gates passed — proceeding to save`);
 
     // ── EXTRACT CALL DATA (before AI, so we can save immediately) ──────
     const transcript = message.transcript || '';
@@ -797,13 +823,21 @@ async function handleVapiWebhook(req, res) {
     {
       const { data: insertedCall, error: insertError } = await supabase.from('calls').insert([initialRec]).select();
       if (insertError) {
+        // DIAGNOSTIC: surface the real Postgres failure instead of returning
+        // a silent 500. This is the line that tells you WHY the save dies.
+        console.error('❌ calls INSERT failed:', insertError.message, '| code:', insertError.code, '| details:', insertError.details, '| hint:', insertError.hint);
+        console.error('   attempted columns:', Object.keys(initialRec).join(', '));
         if (insertError.message && (insertError.message.includes('ended_reason') || insertError.message.includes('transfer_status') || insertError.message.includes('is_spam') || insertError.message.includes('spam_reason') || insertError.message.includes('call_language'))) {
+          console.log('↩️ Retrying insert without optional columns (ended_reason/transfer_status/is_spam/spam_reason/call_language)');
           delete initialRec.ended_reason; delete initialRec.transfer_status; delete initialRec.is_spam; delete initialRec.spam_reason; delete initialRec.call_language; initialRec.call_status = 'completed';
           const { data: retried, error: retryError } = await supabase.from('calls').insert([initialRec]).select();
-          if (retryError) return res.status(500).json({ error: 'Failed to save call' });
+          if (retryError) {
+            console.error('❌ calls INSERT RETRY failed:', retryError.message, '| code:', retryError.code, '| details:', retryError.details, '| hint:', retryError.hint);
+            return res.status(500).json({ error: 'Failed to save call', detail: retryError.message });
+          }
           savedCallId = retried?.[0]?.id || null;
         } else {
-          return res.status(500).json({ error: 'Failed to save call' });
+          return res.status(500).json({ error: 'Failed to save call', detail: insertError.message });
         }
       } else {
         savedCallId = insertedCall?.[0]?.id || null;
@@ -895,7 +929,12 @@ async function handleVapiWebhook(req, res) {
 
     // ── STEP 8: NOTIFICATIONS ─────────────────────────────────────────
     let smsSent = false, emailSent = false;
-    if (client.owner_phone) smsSent = await sendCallNotificationSMS(client, agency, aiData);
+    if (client.owner_phone) {
+      smsSent = await sendCallNotificationSMS(client, agency, aiData);
+      console.log(`📲 Owner SMS to ${client.owner_phone}: ${smsSent ? 'sent' : 'FAILED'}`);
+    } else {
+      console.log(`📲 No owner_phone on client — skipping owner SMS`);
+    }
     await notifyTeamMembers(client.id, aiData, agency);
     if (isFeatureEnabled(client, agency, 'email_summaries') && client.email) {
       const r = await sendCallSummaryEmail(client, agency, aiData, { duration_seconds: durationSeconds, transcript: storedTranscript, created_at: new Date().toISOString() });
