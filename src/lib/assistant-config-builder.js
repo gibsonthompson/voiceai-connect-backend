@@ -18,6 +18,18 @@
 //          greeting from the industry default and the voice was the industry
 //          default / agency template only, so the dashboard's greeting and
 //          voice edits never reached live calls.
+// UPDATED: 2026-06-17 — CALENDAR FIX: live calls can now actually book.
+//          Previously check_availability/book_appointment were attached only to
+//          the static assistant (via updateAssistantCalendar), which live calls
+//          never use, so the AI could talk about booking but had no tool to do
+//          it. The dynamic builder now attaches those two tools inline (pointed
+//          at /api/calendar/availability/:id and /book/:id) and injects the
+//          date-safe booking instructions, but ONLY when booking_mode is
+//          auto_book AND client.google_calendar_connected is true. Auto_book
+//          without a connected calendar degrades to collect-request so the AI
+//          never promises a booking it can't make. Also fixed: the KB query
+//          tool was gated on booking_mode !== 'disabled', which stripped the
+//          knowledge base whenever booking was off. KB now always attaches.
 // ============================================================================
 
 const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, TRANSFER_KEYWORDS_BLOCK, VOICES,
@@ -47,6 +59,38 @@ const LANGUAGE_DETECTION_BLOCK = `
 
 # Language
 If the caller speaks Spanish, immediately switch to Spanish for the remainder of the call. Respond naturally in whatever language the caller uses. All information collection — name, phone number, address, reason for calling — should continue in the caller's language. Do not ask the caller what language they prefer. Just match them automatically. If the caller switches languages mid-conversation, follow them.`;
+
+// ============================================================================
+// APPOINTMENT BOOKING BLOCK
+// Injected ONLY when canAutoBook is true (auto_book mode + Google Calendar
+// connected). Mirrors the date-safe instructions the calendar tools rely on:
+// the model has no clock, so it must never speak a date until the
+// check_availability tool response gives it the correct one. The server side
+// (routes/calendar.js resolveDate) does the real date resolution.
+// ============================================================================
+const APPOINTMENT_BOOKING_BLOCK = `
+
+## APPOINTMENT BOOKING
+You can book appointments directly to the business calendar using your tools.
+
+CRITICAL DATE RULES:
+- You do NOT know today's date. Do NOT guess or say any date to the caller until AFTER you receive the tool response.
+- When a caller asks to book, say "Let me check that for you" — do NOT repeat back any date.
+- The check_availability tool response will tell you the EXACT correct date. ONLY use that date when speaking to the caller.
+- NEVER say a date like "October", "November", or any date from your own memory. ONLY say the date that appears in the tool response.
+
+Booking flow:
+1. Caller wants to book — ask what service they need (if not already stated)
+2. Ask if they have a preferred provider/staff member (if staff are listed above)
+3. Ask for their preferred date
+4. Call check_availability with the date and service type
+5. Read the tool response — it contains the CORRECT date and available times
+6. Tell the caller the date and times FROM THE TOOL RESPONSE ONLY
+7. Collect: name, phone number
+8. Use book_appointment with all details including staff_name if they chose one
+9. Read the booking confirmation from the tool response and repeat it to the caller
+
+If no slots are available, offer alternative dates or take their info for a callback.`;
 
 // ============================================================================
 // TONE BLOCK — Overrides default tone based on client ai_tone setting
@@ -478,8 +522,13 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
 //
 // Blocks that may already exist in the cached prompt (spam detection,
 // transfer keywords, language) use includes-checks to avoid duplication.
+//
+// canAutoBook (added 2026-06-17): true only when booking_mode is auto_book AND
+// the client's Google Calendar is connected. When true, the date-safe
+// APPOINTMENT BOOKING block is injected (the matching tools are attached in
+// buildTools). When false, the collect_request / disabled prompt blocks govern.
 // ============================================================================
-async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours) {
+async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook = false) {
   const hipaaMode = client.hipaa_mode === true;
   const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
   const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
@@ -555,9 +604,23 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
   // Phase 1: Tone override
   systemPrompt += buildToneBlock(client.ai_tone);
 
-  // Phase 1: Booking mode override (client-level default)
-  // HIPAA mode forces collect_request regardless of client setting.
-  systemPrompt += buildBookingModeBlock(hipaaMode ? 'collect_request' : client.booking_mode);
+  // Booking behavior (updated 2026-06-17):
+  //  - canAutoBook (auto_book + Google Calendar connected): inject the
+  //    date-safe APPOINTMENT BOOKING instructions; the tools are attached in
+  //    buildTools so the AI can actually check availability and book.
+  //  - otherwise: fall back to the collect_request / disabled prompt blocks.
+  //    HIPAA always forces collect_request. auto_book WITHOUT a connected
+  //    calendar degrades to collect_request so the AI never promises a booking
+  //    it cannot make.
+  if (canAutoBook && !hipaaMode) {
+    if (!systemPrompt.includes('## APPOINTMENT BOOKING')) {
+      systemPrompt += APPOINTMENT_BOOKING_BLOCK;
+    }
+  } else {
+    const rawMode = hipaaMode ? 'collect_request' : (client.booking_mode || 'auto_book');
+    const effectiveMode = rawMode === 'auto_book' ? 'collect_request' : rawMode;
+    systemPrompt += buildBookingModeBlock(effectiveMode);
+  }
 
   // HIPAA mode — injected before services/staff so it takes precedence
   if (hipaaMode) {
@@ -607,8 +670,15 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
 
 // ============================================================================
 // BUILD TOOLS ARRAY
+//
+// canAutoBook (added 2026-06-17): when true, the calendar tools
+// (check_availability, book_appointment) are attached inline, pointed at the
+// per-client /api/calendar endpoints. These were previously only ever attached
+// to the static assistant (via updateAssistantCalendar), which live calls do
+// not use — so the AI could never actually book on a call. Attaching them here
+// puts them on the transient assistant that actually runs the call.
 // ============================================================================
-function buildTools(client, toolConfig, isAfterHours) {
+function buildTools(client, toolConfig, isAfterHours, canAutoBook = false) {
   const tools = [];
 
   if (toolConfig.transferCall && !isAfterHours) {
@@ -631,6 +701,60 @@ function buildTools(client, toolConfig, isAfterHours) {
         });
       }
     }
+  }
+
+  // Calendar booking tools — only when auto_book is on AND the calendar is
+  // connected. Never during after-hours (the office is closed; after-hours
+  // mode already tells the AI not to book). The server URLs route to the
+  // per-client calendar endpoints, which do the real date resolution and
+  // Google Calendar work.
+  if (canAutoBook && !isAfterHours) {
+    const calendarBase = `${BACKEND_URL}/api/calendar`;
+
+    tools.push({
+      type: 'function',
+      function: {
+        name: 'check_availability',
+        description: 'Check available appointment times for a specific date. Use this when a customer wants to book an appointment. If you know what service they need, include it so the system can use the correct appointment duration.',
+        parameters: {
+          type: 'object',
+          properties: {
+            date: {
+              type: 'string',
+              description: 'The date the caller wants, in YYYY-MM-DD format if known, or natural language like "tomorrow", "next Tuesday", or "the 15th". The server resolves it to the correct upcoming date.'
+            },
+            service_type: {
+              type: 'string',
+              description: 'The service the caller wants to book (e.g., "Gym Tour", "Consultation"). Include this if known so availability reflects the correct appointment duration.'
+            }
+          },
+          required: ['date']
+        }
+      },
+      server: { url: `${calendarBase}/availability/${client.id}` }
+    });
+
+    tools.push({
+      type: 'function',
+      function: {
+        name: 'book_appointment',
+        description: 'Book an appointment after confirming availability and collecting customer details.',
+        parameters: {
+          type: 'object',
+          properties: {
+            customer_name: { type: 'string', description: 'Full name of the customer' },
+            customer_phone: { type: 'string', description: 'Customer phone number' },
+            date: { type: 'string', description: 'Appointment date (YYYY-MM-DD if known, otherwise natural language)' },
+            time: { type: 'string', description: 'Appointment time (e.g., 2:00 PM)' },
+            service_type: { type: 'string', description: 'Type of service or reason for appointment' },
+            staff_name: { type: 'string', description: 'Name of the preferred staff member or provider, if the caller specified one' },
+            notes: { type: 'string', description: 'Any special requests or notes' }
+          },
+          required: ['customer_name', 'customer_phone', 'date', 'time']
+        }
+      },
+      server: { url: `${calendarBase}/book/${client.id}` }
+    });
   }
 
   tools.push({
@@ -732,6 +856,21 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     console.log('🌙 After-hours mode active — transfer disabled, message-taking mode');
   }
 
+  // ── Calendar booking gating (added 2026-06-17) ──────────────────────
+  // canAutoBook is true only when the client wants auto-book AND has actually
+  // connected Google Calendar. The plan gate is already enforced at connect
+  // time (google-calendar-auth.js checkPlanAccess), so if connected is true the
+  // plan allowed it. HIPAA forces collect-request, so it can never auto-book.
+  const calendarConnected = client.google_calendar_connected === true;
+  const bookingMode = hipaaMode ? 'collect_request' : (client.booking_mode || 'auto_book');
+  const canAutoBook = bookingMode === 'auto_book' && calendarConnected;
+
+  if (bookingMode === 'auto_book' && !calendarConnected && !hipaaMode) {
+    console.log('📅 Auto-book requested but Google Calendar NOT connected — degrading to collect-request (no booking tools)');
+  } else if (canAutoBook) {
+    console.log('📅 Auto-book active (calendar connected) — booking tools attached');
+  }
+
   let voiceId = config.voiceId;
   let temperature = config.temperature;
   let modelId = 'gpt-4o-mini';
@@ -766,13 +905,16 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   // here we simply honor whatever value was saved.)
   if (client.voice_id) voiceId = client.voice_id;
 
-  const systemPrompt = await buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours);
+  const systemPrompt = await buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook);
   const firstMessage = buildFirstMessage(client.business_name, industryKey, callerContext, isAfterHours, toolConfig, hipaaMode, client.greeting_message);
-  const tools = buildTools(client, toolConfig, isAfterHours);
+  const tools = buildTools(client, toolConfig, isAfterHours, canAutoBook);
   const hooks = buildHooks(client, toolConfig, isAfterHours);
 
+  // KB query tool: always attach when present. (Previously gated on
+  // booking_mode !== 'disabled', which incorrectly stripped the knowledge base
+  // whenever a client turned booking off.)
   const toolIds = [];
-  if (client.vapi_query_tool_id && client.booking_mode !== 'disabled') {
+  if (client.vapi_query_tool_id) {
     toolIds.push(client.vapi_query_tool_id);
   }
 
@@ -825,4 +967,5 @@ module.exports = {
   enforceAgencyPlanFeatures,
   DEFAULT_TOOL_CONFIG,
   LANGUAGE_DETECTION_BLOCK,
+  APPOINTMENT_BOOKING_BLOCK,
 };
