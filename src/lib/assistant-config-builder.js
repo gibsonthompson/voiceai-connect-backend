@@ -379,13 +379,24 @@ function buildCallerContextBlock(contact) {
     lines.push(`Last call: ${lastCallDate}.`);
   }
 
+  // Rolling AI summary log — each prior call is appended as "[date] summary",
+  // joined by blank lines. Surface the most recent few (not just the last one)
+  // so the AI actually has this caller's history to work with.
   if (contact.ai_summary) {
-    const summaryEntries = contact.ai_summary.split('\n\n').filter(s => s.trim());
-    const latestEntry = summaryEntries[summaryEntries.length - 1];
-    if (latestEntry) lines.push(`Last interaction: ${latestEntry}`);
+    const summaryEntries = contact.ai_summary.split('\n\n').map(s => s.trim()).filter(Boolean);
+    if (summaryEntries.length > 0) {
+      const recent = summaryEntries.slice(-3); // last few interactions, oldest to newest
+      lines.push('');
+      lines.push(`What you know from their ${summaryEntries.length > 1 ? 'previous calls' : 'previous call'} (oldest to newest):`);
+      recent.forEach(entry => lines.push(`- ${entry}`));
+    }
   }
 
-  if (contact.notes) lines.push(`Notes: ${contact.notes}`);
+  // Staff-entered notes on the contact record — always surface these in full.
+  if (contact.notes && contact.notes.trim()) {
+    lines.push('');
+    lines.push(`Notes saved about this caller: ${contact.notes.trim()}`);
+  }
 
   lines.push('');
   if (name) {

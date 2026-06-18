@@ -5,6 +5,14 @@
 //          on every route so a client_staff member without the Contacts toggle
 //          gets a 403 from the API, not just a hidden nav link. Owners and
 //          untokened callers pass through unchanged.
+// UPDATED: 2026-06-18 — FIX: contact detail call history was always empty. The
+//          old query used .or(customer_phone.eq.X,caller_phone.eq.X); caller_phone
+//          is not a column on calls, so the whole query errored and returned
+//          nothing, and the exact-string match also missed because customer_phone
+//          is stored AI-formatted ("(305) 555-1234") while contact.phone is
+//          normalized ("+13055551234"). Now matched by calls.contact_id AND a set
+//          of phone-format candidates, merged + de-duped. Also added GET
+//          /:id/contacts/export (CSV) so the dashboard Export button stops 404ing.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -62,19 +70,14 @@ router.get('/:id/contacts', requirePermissionIfAuthed('contacts'), async (req, r
       return res.status(400).json({ error: error.message });
     }
 
-    // Calculate aggregate stats
-    const { data: statsData } = await supabase
+    // Total contacts for this client (unfiltered). The contacts UI only reads
+    // stats.total, so the old per-status breakdown was dropped.
+    const { count: totalCount } = await supabase
       .from('client_contacts')
-      .select('status')
+      .select('id', { count: 'exact', head: true })
       .eq('client_id', id);
 
-    const stats = {
-      total: statsData?.length || 0,
-      new: statsData?.filter(c => c.status === 'new').length || 0,
-      active: statsData?.filter(c => c.status === 'active').length || 0,
-      converted: statsData?.filter(c => c.status === 'converted').length || 0,
-      inactive: statsData?.filter(c => c.status === 'inactive').length || 0,
-    };
+    const stats = { total: totalCount || 0 };
 
     res.json({
       contacts: contacts || [],
@@ -87,6 +90,55 @@ router.get('/:id/contacts', requirePermissionIfAuthed('contacts'), async (req, r
     });
   } catch (error) {
     console.error('Error fetching contacts:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// GET /api/client/:id/contacts/export - CSV export of all contacts
+// Defined BEFORE /:contactId so "export" is not matched as a contact id.
+// ============================================================================
+router.get('/:id/contacts/export', requirePermissionIfAuthed('contacts'), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: contacts, error } = await supabase
+      .from('client_contacts')
+      .select('name, phone, email, address, total_calls, last_call_at, tags, source, created_at')
+      .eq('client_id', id)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error exporting contacts:', error);
+      return res.status(400).json({ error: error.message });
+    }
+
+    const esc = (v) => {
+      if (v === null || v === undefined) return '';
+      const s = Array.isArray(v) ? v.join('; ') : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+
+    const header = ['Name', 'Phone', 'Email', 'Address', 'Total Calls', 'Last Call', 'Tags', 'Source', 'Created'];
+    const rows = (contacts || []).map(c => [
+      esc(c.name),
+      esc(c.phone),
+      esc(c.email),
+      esc(c.address),
+      esc(c.total_calls),
+      esc(c.last_call_at ? new Date(c.last_call_at).toISOString() : ''),
+      esc(c.tags),
+      esc(c.source),
+      esc(c.created_at ? new Date(c.created_at).toISOString() : ''),
+    ].join(','));
+
+    const csv = [header.join(','), ...rows].join('\n');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="contacts-${new Date().toISOString().split('T')[0]}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Error exporting contacts:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -109,17 +161,43 @@ router.get('/:id/contacts/:contactId', requirePermissionIfAuthed('contacts'), as
       return res.status(404).json({ error: 'Contact not found' });
     }
 
-    // Get all calls from this contact (match by phone + client_id)
-    const { data: calls } = await supabase
+    // Call history. Match BOTH by calls.contact_id (set by contact-upsert.js)
+    // AND by phone, then merge + de-dupe. The phone fallback matters because
+    // customer_phone is stored in several shapes (raw E.164 like +13055551234,
+    // AI-formatted like "(305) 555-1234", etc.) and older calls predate the
+    // contact_id link. Candidate phone strings are built from the contact's
+    // normalized number.
+    const byId = new Map();
+
+    // Linked calls. If the contact_id column does not exist yet (pre-migration)
+    // this returns an error, which we ignore so the phone fallback still runs.
+    const linked = await supabase
       .from('calls')
       .select('*')
       .eq('client_id', id)
-      .or(`customer_phone.eq.${contact.phone},caller_phone.eq.${contact.phone}`)
-      .order('created_at', { ascending: false });
+      .eq('contact_id', contactId);
+    if (!linked.error && Array.isArray(linked.data)) {
+      linked.data.forEach(c => byId.set(c.id, c));
+    }
+
+    const candidates = phoneCandidates(contact.phone);
+    if (candidates.length) {
+      const byPhone = await supabase
+        .from('calls')
+        .select('*')
+        .eq('client_id', id)
+        .in('customer_phone', candidates);
+      if (!byPhone.error && Array.isArray(byPhone.data)) {
+        byPhone.data.forEach(c => byId.set(c.id, c));
+      }
+    }
+
+    const calls = Array.from(byId.values())
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
     res.json({
       contact,
-      calls: calls || [],
+      calls,
     });
   } catch (error) {
     console.error('Error fetching contact detail:', error);
@@ -275,6 +353,29 @@ function normalizePhone(phone) {
   // If 11 digits starting with 1, prepend +
   if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
   return digits;
+}
+
+// ============================================================================
+// HELPER: Candidate phone strings for matching calls.customer_phone, which is
+// stored in several shapes across the lifetime of a call. Built from the
+// contact's (normalized) phone so history matches regardless of format.
+// ============================================================================
+function phoneCandidates(stored) {
+  const digits = (stored || '').replace(/\D/g, '');
+  const last10 = digits.slice(-10);
+  const out = new Set();
+  if (stored) out.add(stored);
+  if (last10.length === 10) {
+    const a = last10.slice(0, 3), b = last10.slice(3, 6), c = last10.slice(6);
+    out.add(`+1${last10}`);
+    out.add(`1${last10}`);
+    out.add(last10);
+    out.add(`(${a}) ${b}-${c}`);
+    out.add(`+1 (${a}) ${b}-${c}`);
+    out.add(`${a}-${b}-${c}`);
+    out.add(`${a}.${b}.${c}`);
+  }
+  return Array.from(out);
 }
 
 module.exports = router;

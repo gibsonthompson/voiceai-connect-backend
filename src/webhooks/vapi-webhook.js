@@ -681,8 +681,13 @@ async function handleAssistantRequest(req, res, message) {
         const { data: contact, error } = await supabase
           .from('client_contacts').select('name, phone, email, total_calls, last_call_at, ai_summary, notes, tags, status')
           .eq('client_id', client.id).eq('phone', n).single();
-        if (!error && contact && contact.name !== 'Unknown') { callerContext = contact; console.log(`📇 Recognized: ${contact.name}`); }
-        else console.log(`📇 Unknown caller: ${callerPhone}`);
+        if (!error && contact) {
+          callerContext = contact;
+          const who = contact.name && contact.name !== 'Unknown' ? contact.name : 'returning caller (name not captured)';
+          console.log(`📇 Recognized: ${who} (${contact.total_calls || 0} prior call(s))`);
+        } else {
+          console.log(`📇 New/unknown caller: ${callerPhone}`);
+        }
       } catch (e) { console.warn('⚠️ Contact lookup failed:', e.message); }
     }
 

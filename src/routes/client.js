@@ -16,6 +16,9 @@
 //          NOTE: GET /:id (bootstrap) and /:id/my-credentials (self-scoped) are
 //          intentionally ungated. /:id/dashboard-access is an AGENCY action and
 //          still needs agency-owner auth + tenant check (separate item).
+// UPDATED: 2026-06-17 — Added PUT /:id/forwarding (self-scoped) so the client
+//          dashboard can persist that call forwarding was set up. Drives the
+//          activation card and the forwarding_confirmed_at metric.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -93,6 +96,41 @@ router.put('/:id/settings', requirePermissionIfAuthed('settings'), async (req, r
   } catch (error) {
     console.error('Error updating settings:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// PUT /api/client/:id/forwarding - Mark call forwarding as set up (or undo)
+// Self-scoped: identity comes from the JWT (never the URL param), so a caller
+// can only ever flip their OWN client. This is a dashboard activation action,
+// not a tab, so it is intentionally not Page-Access gated. Owners and staff on
+// the same client can both confirm it; cross-tenant calls get 403.
+// ============================================================================
+router.put('/:id/forwarding', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const decoded = decodeToken(req);
+    if (!decoded) return res.status(401).json({ error: 'Authentication required' });
+    if (decoded.clientId !== id) return res.status(403).json({ error: 'Forbidden' });
+
+    const confirmed = req.body.forwarding_confirmed === true;
+    const updates = {
+      forwarding_confirmed: confirmed,
+      forwarding_confirmed_at: confirmed ? new Date().toISOString() : null,
+    };
+    const { data, error } = await supabase
+      .from('clients')
+      .update(updates)
+      .eq('id', id)
+      .select('id, forwarding_confirmed, forwarding_confirmed_at')
+      .single();
+    if (error) return res.status(400).json({ success: false, error: error.message });
+
+    console.log(`✅ Forwarding ${confirmed ? 'confirmed' : 'reset'} for client ${id}`);
+    res.json({ success: true, client: data });
+  } catch (error) {
+    console.error('Error updating forwarding:', error);
+    res.status(500).json({ success: false, error: 'Server error' });
   }
 });
 
