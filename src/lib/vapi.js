@@ -41,6 +41,7 @@ const { createKnowledgeBaseFromWebsite } = require('./website-scraper');
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 const TELNYX_API_KEY = process.env.TELNYX_API_KEY;
+const TELNYX_MESSAGING_PROFILE_ID = process.env.TELNYX_MESSAGING_PROFILE_ID;
 
 // ============================================================================
 // INDUSTRY MAPPING - Each industry has its own unique key
@@ -1921,6 +1922,129 @@ async function getTelnyxCredentialId() {
   }
 }
 
+// ============================================================================
+// 10DLC CAMPAIGN ID. Resolved once per process.
+// Prefers TELNYX_10DLC_CAMPAIGN_ID if set; otherwise derives it from the
+// platform SMS number (which already sends on the approved campaign) by reading
+// that number's campaign assignment. Cached so we only look it up once.
+// ============================================================================
+let _telnyx10dlcCampaignIdCache = null;
+
+async function getTelnyx10dlcCampaignId() {
+  if (process.env.TELNYX_10DLC_CAMPAIGN_ID) return process.env.TELNYX_10DLC_CAMPAIGN_ID;
+  if (_telnyx10dlcCampaignIdCache) return _telnyx10dlcCampaignIdCache;
+  if (!TELNYX_API_KEY) return null;
+
+  const fromNumber = process.env.TELNYX_SMS_FROM_NUMBER || '+15054317109';
+  try {
+    const res = await fetch(`https://api.telnyx.com/v2/10dlc/phoneNumberCampaign/${encodeURIComponent(fromNumber)}`, {
+      headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}` }
+    });
+    if (!res.ok) {
+      console.warn(`⚠️ Could not derive 10DLC campaign from platform number ${fromNumber}: HTTP ${res.status}. Set TELNYX_10DLC_CAMPAIGN_ID to pin it.`);
+      return null;
+    }
+    const data = (await res.json()).data || {};
+    const campaignId = data.campaignId || data.campaign_id || null;
+    if (!campaignId) {
+      console.warn(`⚠️ Platform number ${fromNumber} has no campaignId in its assignment record.`);
+      return null;
+    }
+    _telnyx10dlcCampaignIdCache = campaignId;
+    console.log(`✅ 10DLC campaign ID resolved from platform number: ${campaignId}`);
+    return campaignId;
+  } catch (err) {
+    console.warn('⚠️ getTelnyx10dlcCampaignId failed:', err.message);
+    return null;
+  }
+}
+
+// ============================================================================
+// ASSIGN A NUMBER FOR TWO-WAY SMS
+// Puts the number on the platform messaging profile (required first), then
+// assigns it to the approved 10DLC campaign. Without the profile, inbound texts
+// have no webhook to route to and outbound is unauthorized; without the campaign,
+// US carriers (AT&T/T-Mobile) filter or block outbound.
+// Fully non-fatal: any failure is logged and returned, never thrown, so voice
+// provisioning is never blocked by an SMS-setup hiccup.
+// ============================================================================
+async function assignNumberForSMS(e164) {
+  const result = { profileAssigned: false, campaignAssigned: false };
+
+  if (!TELNYX_API_KEY) { console.warn('⚠️ assignNumberForSMS: TELNYX_API_KEY not set'); return result; }
+  if (!TELNYX_MESSAGING_PROFILE_ID) { console.warn('⚠️ assignNumberForSMS: TELNYX_MESSAGING_PROFILE_ID not set, skipping SMS assignment'); return result; }
+  if (!e164) { console.warn('⚠️ assignNumberForSMS: no number provided'); return result; }
+
+  // Normalize to E.164 (+1XXXXXXXXXX)
+  let number = String(e164).trim();
+  if (!number.startsWith('+')) {
+    const d = number.replace(/\D/g, '');
+    if (d.length === 10) number = `+1${d}`;
+    else if (d.length === 11 && d.startsWith('1')) number = `+${d}`;
+    else number = `+${d}`;
+  }
+
+  try {
+    // 1. Find the Telnyx phone-number resource id for this E.164.
+    const lookupRes = await fetch(
+      `https://api.telnyx.com/v2/phone_numbers?filter[phone_number]=${encodeURIComponent(number)}`,
+      { headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}` } }
+    );
+    if (!lookupRes.ok) {
+      console.warn(`⚠️ assignNumberForSMS lookup failed for ${number}: HTTP ${lookupRes.status}`);
+      return result;
+    }
+    const record = ((await lookupRes.json()).data || [])[0];
+    if (!record) {
+      console.warn(`⚠️ assignNumberForSMS: ${number} not found on Telnyx account, cannot assign for SMS`);
+      return result;
+    }
+
+    // 2. Assign the number to the platform messaging profile (prerequisite for
+    //    campaign assignment and for inbound webhook routing).
+    const patchRes = await fetch(`https://api.telnyx.com/v2/phone_numbers/${record.id}`, {
+      method: 'PATCH',
+      headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messaging_profile_id: TELNYX_MESSAGING_PROFILE_ID })
+    });
+    if (patchRes.ok) {
+      result.profileAssigned = true;
+      console.log(`✅ ${number} assigned to messaging profile`);
+    } else {
+      const t = await patchRes.text().catch(() => '');
+      console.warn(`⚠️ Messaging-profile assign failed for ${number}: HTTP ${patchRes.status} ${t.slice(0, 160)}`);
+    }
+
+    // 3. Assign the number to the approved 10DLC campaign.
+    const campaignId = await getTelnyx10dlcCampaignId();
+    if (!campaignId) {
+      console.warn(`⚠️ No 10DLC campaign id available, ${number} left unassigned to a campaign (outbound will be carrier-filtered)`);
+      return result;
+    }
+
+    const campRes = await fetch('https://api.telnyx.com/v2/10dlc/phoneNumberCampaign', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phoneNumber: number, campaignId })
+    });
+    if (campRes.ok) {
+      result.campaignAssigned = true;
+      console.log(`✅ ${number} assigned to 10DLC campaign ${campaignId}`);
+    } else {
+      const t = await campRes.text().catch(() => '');
+      if (campRes.status === 409 || /already/i.test(t)) {
+        result.campaignAssigned = true;
+        console.log(`ℹ️ ${number} already assigned to a 10DLC campaign`);
+      } else {
+        console.warn(`⚠️ 10DLC campaign assign failed for ${number}: HTTP ${campRes.status} ${t.slice(0, 160)}`);
+      }
+    }
+  } catch (err) {
+    console.warn(`⚠️ assignNumberForSMS error for ${number}:`, err.message);
+  }
+
+  return result;
+}
 // ============================================================================
 // PHONE PROVISIONING — Telnyx Purchase + VAPI Import
 // UPDATED 2026-05-20: Replaces VAPI free number approach (10-number cap).

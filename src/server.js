@@ -108,7 +108,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 app.use((req, res, next) => {
-  if (req.originalUrl === '/webhook/stripe' || req.originalUrl === '/webhook/stripe-connect') {
+  if (req.originalUrl === '/webhook/stripe' || req.originalUrl === '/webhook/stripe-connect' || req.originalUrl === '/webhook/telnyx-sms') {
     next();
   } else {
     express.json({ limit: '10mb' })(req, res, next);
@@ -1210,7 +1210,7 @@ app.post('/webhook/vapi', handleVapiWebhook);
 
 // SUPPORT LINE ADDITION: Voice support webhook (shared number, dynamic agency context + whisper)
 app.post('/webhook/vapi-support', handleSupportWebhook);
-app.post('/webhook/telnyx-sms', handleTelnyxSMSWebhook);
+app.post('/webhook/telnyx-sms', express.raw({ type: '*/*', limit: '2mb' }), handleTelnyxSMSWebhook);
 // Stripe platform webhooks (agency subscriptions)
 app.post('/webhook/stripe', 
   express.raw({ type: 'application/json' }), 

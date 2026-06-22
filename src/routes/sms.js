@@ -2,20 +2,84 @@
 // TWO-WAY SMS ROUTES
 // Handles inbound SMS from Telnyx webhook, outbound SMS from dashboard,
 // and conversation CRUD for the Messages tab.
-// UPDATED: 2026-06-16 — Per-tab Page Access enforcement. requirePermissionIfAuthed('messages')
+// UPDATED: 2026-06-16 - Per-tab Page Access enforcement. requirePermissionIfAuthed('messages')
 //          on the dashboard-facing routes so a client_staff member without the
 //          Messages toggle gets a 403, not just a hidden nav link. Owners and
 //          untokened callers pass through. The Telnyx inbound webhook
-//          (handleTelnyxSMSWebhook) is intentionally NOT gated — it is Telnyx
+//          (handleTelnyxSMSWebhook) is intentionally NOT gated - it is Telnyx
 //          calling in, not a dashboard user.
+// UPDATED: 2026-06-19 - Two-way SMS made functional:
+//          (1) outbound /send now passes messaging_profile_id (without it the
+//              client number is not authorized to send, so replies never left);
+//          (2) findOrCreateConversation reads client_contacts (was a non-existent
+//              'contacts' table, so caller names never populated);
+//          (3) owner inbound-notify now uses sendTelnyxSMS (it was reading
+//              TELNYX_SMS_FROM / SMS_FROM_NUMBER which do not exist, so the
+//              platform number was always undefined and the notify silently
+//              no-oped);
+//          (4) delivery-status webhook maps Telnyx delivery_failed/sending_failed
+//              to the UI's 'failed' so failed sends actually show as failed;
+//          (5) findClientByPhone LIKE fallback bounded with limit(1).maybeSingle().
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const fetch = require('node-fetch');
 const { supabase } = require('../lib/supabase');
 const { requirePermissionIfAuthed } = require('./auth');
+const { sendTelnyxSMS } = require('../lib/notifications');
+
+const crypto = require('crypto');
 
 const TELNYX_API_KEY = process.env.TELNYX_API_KEY;
+const TELNYX_MESSAGING_PROFILE_ID = process.env.TELNYX_MESSAGING_PROFILE_ID;
+// Optional. The base64 Ed25519 public key from Telnyx (Portal -> Account ->
+// Public Key). When set, inbound webhooks are signature-verified and forged
+// POSTs are rejected. When unset, verification is skipped (fail-open) so the
+// feature keeps working until you wire the key in.
+const TELNYX_PUBLIC_KEY = process.env.TELNYX_PUBLIC_KEY;
+
+// Standard SPKI DER prefix for a raw 32-byte Ed25519 public key. Telnyx hands
+// out the raw key base64-encoded, so we wrap it to build a Node KeyObject.
+const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+
+// ============================================================================
+// HELPER: Verify a Telnyx webhook Ed25519 signature.
+// Returns true (valid), false (present key but bad/missing signature), or
+// null (no key configured -> caller should skip verification).
+// ============================================================================
+function verifyTelnyxSignature(rawBody, signatureB64, timestamp) {
+  if (!TELNYX_PUBLIC_KEY) return null;
+  if (!signatureB64 || !timestamp || rawBody == null) return false;
+  try {
+    const key = crypto.createPublicKey({
+      key: Buffer.concat([ED25519_SPKI_PREFIX, Buffer.from(TELNYX_PUBLIC_KEY, 'base64')]),
+      format: 'der',
+      type: 'spki',
+    });
+    const signed = Buffer.from(`${timestamp}|${rawBody}`, 'utf8');
+    return crypto.verify(null, signed, key, Buffer.from(signatureB64, 'base64'));
+  } catch (err) {
+    console.warn('Telnyx signature verify error:', err.message);
+    return false;
+  }
+}
+
+// ============================================================================
+// HELPER: Get raw body + parsed body regardless of how the route is mounted.
+// If server.js mounts this route with express.raw, req.body is a Buffer and we
+// get the raw bytes needed for signature verification. If it is still on the
+// global express.json (raw unavailable), req.body is already an object and we
+// proceed without verification. Either way the handler works.
+// ============================================================================
+function getRawAndBody(req) {
+  if (Buffer.isBuffer(req.body)) {
+    const raw = req.body.toString('utf8');
+    let parsed = {};
+    try { parsed = JSON.parse(raw || '{}'); } catch { parsed = {}; }
+    return { raw, body: parsed };
+  }
+  return { raw: null, body: req.body || {} };
+}
 
 // ============================================================================
 // HELPER: Normalize phone number to E.164
@@ -27,6 +91,28 @@ function normalizePhone(phone) {
   if (digits.length === 10) return `+1${digits}`;
   if (phone.startsWith('+')) return phone;
   return `+${digits}`;
+}
+
+// ============================================================================
+// HELPER: Map a Telnyx message status to the UI's vocabulary
+// UI knows: queued | sent | delivered | failed | received. Telnyx emits a
+// wider set (delivery_failed, sending_failed, etc.), so collapse them here.
+// ============================================================================
+function mapTelnyxStatus(s) {
+  switch ((s || '').toLowerCase()) {
+    case 'delivered':
+      return 'delivered';
+    case 'sent':
+    case 'sending':
+    case 'queued':
+      return 'sent';
+    case 'delivery_failed':
+    case 'sending_failed':
+    case 'failed':
+      return 'failed';
+    default:
+      return s || 'sent';
+  }
 }
 
 // ============================================================================
@@ -45,13 +131,15 @@ async function findClientByPhone(phoneNumber) {
 
   if (!error && data) return data;
 
-  // Try without +1 prefix
+  // Try without +1 prefix. Bounded with limit(1).maybeSingle() so a LIKE that
+  // matches more than one row returns the first instead of erroring.
   const without1 = normalized.startsWith('+1') ? normalized.slice(2) : normalized;
   const { data: d2 } = await supabase
     .from('clients')
     .select('id, business_name, owner_phone, agency_id, hipaa_mode, vapi_phone_number')
     .like('vapi_phone_number', `%${without1}`)
-    .single();
+    .limit(1)
+    .maybeSingle();
 
   return d2 || null;
 }
@@ -72,11 +160,11 @@ async function findOrCreateConversation(clientId, callerPhone, callerName) {
 
   if (existing) return existing;
 
-  // Try to get caller name from contacts
+  // Try to get caller name from contacts (client_contacts is the real table)
   let name = callerName || null;
   if (!name) {
     const { data: contact } = await supabase
-      .from('contacts')
+      .from('client_contacts')
       .select('name')
       .eq('client_id', clientId)
       .eq('phone', normalized)
@@ -96,7 +184,7 @@ async function findOrCreateConversation(clientId, callerPhone, callerName) {
     .single();
 
   if (error) {
-    console.error('❌ Failed to create conversation:', error.message);
+    console.error('Failed to create conversation:', error.message);
     // Race condition: another request may have created it
     const { data: retry } = await supabase
       .from('sms_conversations')
@@ -112,40 +200,30 @@ async function findOrCreateConversation(clientId, callerPhone, callerName) {
 
 // ============================================================================
 // HELPER: Send SMS notification to business owner about new inbound text
+// Reuses sendTelnyxSMS (lib/notifications), which sends from the platform
+// number with the messaging profile already attached, and logs nothing extra.
 // ============================================================================
 async function notifyOwnerOfInboundSMS(client, callerPhone, messageContent) {
-  if (!client.owner_phone || !TELNYX_API_KEY) return;
+  if (!client.owner_phone) return;
 
   try {
-    // Use the existing platform SMS number (same one used for call notifications)
-    const platformNumber = process.env.TELNYX_SMS_FROM || process.env.SMS_FROM_NUMBER;
-    if (!platformNumber) return;
-
     const preview = messageContent.length > 100
       ? messageContent.substring(0, 100) + '...'
       : messageContent;
 
-    const formatted = callerPhone.replace(/(\+1)(\d{3})(\d{3})(\d{4})/, '($2) $3-$4');
+    const formatted = (callerPhone || '').replace(/(\+1)(\d{3})(\d{3})(\d{4})/, '($2) $3-$4');
 
-    await fetch('https://api.telnyx.com/v2/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${TELNYX_API_KEY}`,
-      },
-      body: JSON.stringify({
-        from: platformNumber,
-        to: normalizePhone(client.owner_phone),
-        text: `💬 New text from ${formatted}:\n"${preview}"\n\nReply from your dashboard.`,
-      }),
-    });
+    await sendTelnyxSMS(
+      client.owner_phone,
+      `💬 New text from ${formatted}:\n"${preview}"\n\nReply from your dashboard.`
+    );
   } catch (err) {
-    console.warn('⚠️ Failed to notify owner of inbound SMS:', err.message);
+    console.warn('Failed to notify owner of inbound SMS:', err.message);
   }
 }
 
 // ============================================================================
-// POST /api/sms/send — Business owner sends a text to a caller
+// POST /api/sms/send - Business owner sends a text to a caller
 // ============================================================================
 router.post('/send', requirePermissionIfAuthed('messages'), async (req, res) => {
   try {
@@ -177,7 +255,10 @@ router.post('/send', requirePermissionIfAuthed('messages'), async (req, res) => 
       return res.status(400).json({ error: 'Invalid phone number' });
     }
 
-    // Send via Telnyx Messaging API
+    // Send via Telnyx Messaging API.
+    // messaging_profile_id is REQUIRED: the client number must be on the profile
+    // (and its 10DLC campaign) to be authorized to send. Without it Telnyx
+    // rejects the send, which is why outbound replies never went out.
     const telnyxResponse = await fetch('https://api.telnyx.com/v2/messages', {
       method: 'POST',
       headers: {
@@ -188,13 +269,14 @@ router.post('/send', requirePermissionIfAuthed('messages'), async (req, res) => 
         from: fromNumber,
         to: toNumber,
         text: message,
+        messaging_profile_id: TELNYX_MESSAGING_PROFILE_ID,
       }),
     });
 
     const telnyxData = await telnyxResponse.json();
 
     if (!telnyxResponse.ok) {
-      console.error('❌ Telnyx send failed:', JSON.stringify(telnyxData));
+      console.error('Telnyx send failed:', JSON.stringify(telnyxData));
       return res.status(500).json({ error: 'Failed to send SMS', details: telnyxData.errors?.[0]?.detail || 'Unknown error' });
     }
 
@@ -223,7 +305,7 @@ router.post('/send', requirePermissionIfAuthed('messages'), async (req, res) => 
       .single();
 
     if (msgError) {
-      console.error('❌ Failed to save outbound message:', msgError.message);
+      console.error('Failed to save outbound message:', msgError.message);
     }
 
     // Update conversation metadata
@@ -236,7 +318,7 @@ router.post('/send', requirePermissionIfAuthed('messages'), async (req, res) => 
       })
       .eq('id', conversation.id);
 
-    console.log(`✅ SMS sent from ${fromNumber} to ${toNumber} (${telnyxMessageId})`);
+    console.log(`SMS sent from ${fromNumber} to ${toNumber} (${telnyxMessageId})`);
 
     res.json({
       success: true,
@@ -246,13 +328,13 @@ router.post('/send', requirePermissionIfAuthed('messages'), async (req, res) => 
     });
 
   } catch (error) {
-    console.error('❌ SMS send error:', error);
+    console.error('SMS send error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
 // ============================================================================
-// GET /api/sms/conversations/:clientId — List all conversations for a client
+// GET /api/sms/conversations/:clientId - List all conversations for a client
 // ============================================================================
 router.get('/conversations/:clientId', requirePermissionIfAuthed('messages'), async (req, res) => {
   try {
@@ -278,7 +360,7 @@ router.get('/conversations/:clientId', requirePermissionIfAuthed('messages'), as
 });
 
 // ============================================================================
-// GET /api/sms/conversations/:clientId/:conversationId — Get messages in thread
+// GET /api/sms/conversations/:clientId/:conversationId - Get messages in thread
 // ============================================================================
 router.get('/conversations/:clientId/:conversationId', requirePermissionIfAuthed('messages'), async (req, res) => {
   try {
@@ -322,16 +404,19 @@ router.get('/conversations/:clientId/:conversationId', requirePermissionIfAuthed
 });
 
 // ============================================================================
-// PUT /api/sms/conversations/:conversationId/read — Mark conversation as read
+// PUT /api/sms/conversations/:clientId/:conversationId/read - Mark read
+// clientId in the path + scoped update so a staff member with the messages
+// permission cannot mark another client's thread by guessing a UUID.
 // ============================================================================
-router.put('/conversations/:conversationId/read', requirePermissionIfAuthed('messages'), async (req, res) => {
+router.put('/conversations/:clientId/:conversationId/read', requirePermissionIfAuthed('messages'), async (req, res) => {
   try {
-    const { conversationId } = req.params;
+    const { clientId, conversationId } = req.params;
 
     const { error } = await supabase
       .from('sms_conversations')
       .update({ unread_count: 0 })
-      .eq('id', conversationId);
+      .eq('id', conversationId)
+      .eq('client_id', clientId);
 
     if (error) return res.status(400).json({ error: error.message });
 
@@ -343,17 +428,19 @@ router.put('/conversations/:conversationId/read', requirePermissionIfAuthed('mes
 });
 
 // ============================================================================
-// PUT /api/sms/conversations/:conversationId/archive — Toggle archive
+// PUT /api/sms/conversations/:clientId/:conversationId/archive - Toggle archive
+// clientId in the path + scoped update for the same cross-tenant reason as read.
 // ============================================================================
-router.put('/conversations/:conversationId/archive', requirePermissionIfAuthed('messages'), async (req, res) => {
+router.put('/conversations/:clientId/:conversationId/archive', requirePermissionIfAuthed('messages'), async (req, res) => {
   try {
-    const { conversationId } = req.params;
+    const { clientId, conversationId } = req.params;
     const { archived } = req.body;
 
     const { error } = await supabase
       .from('sms_conversations')
       .update({ is_archived: archived === true })
-      .eq('id', conversationId);
+      .eq('id', conversationId)
+      .eq('client_id', clientId);
 
     if (error) return res.status(400).json({ error: error.message });
 
@@ -365,7 +452,7 @@ router.put('/conversations/:conversationId/archive', requirePermissionIfAuthed('
 });
 
 // ============================================================================
-// GET /api/sms/unread/:clientId — Get total unread count for badge
+// GET /api/sms/unread/:clientId - Get total unread count for badge
 // ============================================================================
 router.get('/unread/:clientId', requirePermissionIfAuthed('messages'), async (req, res) => {
   try {
@@ -395,27 +482,51 @@ module.exports = router;
 // TELNYX INBOUND SMS WEBHOOK HANDLER
 // Mount this at POST /webhook/telnyx-sms in server.js
 // Telnyx sends webhooks for inbound messages to the messaging profile URL
-// NOT gated — this is Telnyx calling in, no user token involved.
+// NOT gated - this is Telnyx calling in, no user token involved.
 // ============================================================================
 module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(req, res) {
   try {
-    const event = req.body?.data;
+    const { raw, body } = getRawAndBody(req);
+
+    // Verify the Telnyx signature when a public key is configured AND we have
+    // the raw bytes (route mounted with express.raw). A configured key with a
+    // bad or missing signature is rejected; no key means we skip (fail-open).
+    if (TELNYX_PUBLIC_KEY && raw !== null) {
+      const valid = verifyTelnyxSignature(
+        raw,
+        req.headers['telnyx-signature-ed25519'],
+        req.headers['telnyx-timestamp']
+      );
+      if (valid === false) {
+        console.warn('Telnyx webhook signature invalid - rejecting');
+        return res.status(401).json({ error: 'invalid signature' });
+      }
+    }
+
+    const event = body?.data;
 
     if (!event) {
       return res.status(200).json({ received: true });
     }
 
-    const eventType = event.event_type || req.body?.event_type;
+    const eventType = event.event_type || body?.event_type;
 
     // Handle delivery status updates
     if (eventType === 'message.finalized' || eventType === 'message.sent' || eventType === 'message.delivered') {
       const telnyxMessageId = event.payload?.id;
-      const status = event.payload?.to?.[0]?.status || 'delivered';
+      const rawStatus = event.payload?.to?.[0]?.status || 'delivered';
+      const status = mapTelnyxStatus(rawStatus);
 
       if (telnyxMessageId) {
+        const update = { status };
+        if (status === 'failed') {
+          update.error_message = event.payload?.errors?.[0]?.detail
+            || event.payload?.to?.[0]?.status
+            || 'delivery failed';
+        }
         await supabase
           .from('sms_messages')
-          .update({ status })
+          .update(update)
           .eq('telnyx_message_id', telnyxMessageId);
       }
 
@@ -433,17 +544,17 @@ module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(re
     const messageText = payload.text || '';
 
     if (!callerPhone || !clientPhone || !messageText.trim()) {
-      console.log('⚠️ Inbound SMS missing required fields');
+      console.log('Inbound SMS missing required fields');
       return res.status(200).json({ received: true, skipped: true });
     }
 
-    console.log(`📱 Inbound SMS: ${callerPhone} → ${clientPhone}: "${messageText.substring(0, 50)}..."`);
+    console.log(`Inbound SMS: ${callerPhone} -> ${clientPhone}: "${messageText.substring(0, 50)}..."`);
 
     // Find which client owns this phone number
     const client = await findClientByPhone(clientPhone);
 
     if (!client) {
-      console.warn(`⚠️ No client found for number ${clientPhone} — ignoring inbound SMS`);
+      console.warn(`No client found for number ${clientPhone} - ignoring inbound SMS`);
       return res.status(200).json({ received: true, noClient: true });
     }
 
@@ -451,7 +562,7 @@ module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(re
     const conversation = await findOrCreateConversation(client.id, callerPhone);
 
     if (!conversation) {
-      console.error('❌ Failed to find/create conversation for inbound SMS');
+      console.error('Failed to find/create conversation for inbound SMS');
       return res.status(200).json({ received: true, error: 'conversation_failed' });
     }
 
@@ -470,7 +581,7 @@ module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(re
       });
 
     if (msgError) {
-      console.error('❌ Failed to save inbound message:', msgError.message);
+      console.error('Failed to save inbound message:', msgError.message);
     }
 
     // Update conversation metadata
@@ -487,12 +598,12 @@ module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(re
     // Notify business owner
     await notifyOwnerOfInboundSMS(client, callerPhone, messageText);
 
-    console.log(`✅ Inbound SMS saved for client ${client.business_name}`);
+    console.log(`Inbound SMS saved for client ${client.business_name}`);
 
     return res.status(200).json({ received: true, saved: true, conversationId: conversation.id });
 
   } catch (error) {
-    console.error('❌ Telnyx SMS webhook error:', error);
+    console.error('Telnyx SMS webhook error:', error);
     return res.status(200).json({ received: true, error: error.message });
   }
 };
