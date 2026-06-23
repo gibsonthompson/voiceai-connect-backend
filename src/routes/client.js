@@ -100,11 +100,20 @@ router.put('/:id/settings', requirePermissionIfAuthed('settings'), async (req, r
 });
 
 // ============================================================================
-// PUT /api/client/:id/forwarding - Mark call forwarding as set up (or undo)
+// PUT /api/client/:id/forwarding - Persist call forwarding setup state
 // Self-scoped: identity comes from the JWT (never the URL param), so a caller
 // can only ever flip their OWN client. This is a dashboard activation action,
 // not a tab, so it is intentionally not Page-Access gated. Owners and staff on
 // the same client can both confirm it; cross-tenant calls get 403.
+//
+// Accepts any subset of:
+//   forwarding_confirmed : boolean   (also stamps/clears forwarding_confirmed_at)
+//   forwarding_carrier   : 'verizon' | 'gsm' | 'other' | null  (null clears)
+//   forwarding_mode      : 'all' | 'missed'
+// Partial-update safe: only the fields present in the body are written, so the
+// card can persist the carrier/mode pick on selection and the confirm flag
+// separately without one clobbering the other. Backward compatible with the
+// old body of just { forwarding_confirmed }.
 // ============================================================================
 router.put('/:id/forwarding', async (req, res) => {
   try {
@@ -113,20 +122,45 @@ router.put('/:id/forwarding', async (req, res) => {
     if (!decoded) return res.status(401).json({ error: 'Authentication required' });
     if (decoded.clientId !== id) return res.status(403).json({ error: 'Forbidden' });
 
-    const confirmed = req.body.forwarding_confirmed === true;
-    const updates = {
-      forwarding_confirmed: confirmed,
-      forwarding_confirmed_at: confirmed ? new Date().toISOString() : null,
-    };
+    const updates = {};
+
+    if (req.body.forwarding_confirmed !== undefined) {
+      const confirmed = req.body.forwarding_confirmed === true;
+      updates.forwarding_confirmed = confirmed;
+      updates.forwarding_confirmed_at = confirmed ? new Date().toISOString() : null;
+    }
+
+    if (req.body.forwarding_carrier !== undefined) {
+      const c = req.body.forwarding_carrier;
+      if (c === null || ['verizon', 'gsm', 'other'].includes(c)) {
+        updates.forwarding_carrier = c;
+      } else {
+        return res.status(400).json({ success: false, error: 'Invalid forwarding_carrier' });
+      }
+    }
+
+    if (req.body.forwarding_mode !== undefined) {
+      const m = req.body.forwarding_mode;
+      if (['all', 'missed'].includes(m)) {
+        updates.forwarding_mode = m;
+      } else {
+        return res.status(400).json({ success: false, error: 'Invalid forwarding_mode' });
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, error: 'No valid fields to update' });
+    }
+
     const { data, error } = await supabase
       .from('clients')
       .update(updates)
       .eq('id', id)
-      .select('id, forwarding_confirmed, forwarding_confirmed_at')
+      .select('id, forwarding_confirmed, forwarding_confirmed_at, forwarding_carrier, forwarding_mode')
       .single();
     if (error) return res.status(400).json({ success: false, error: error.message });
 
-    console.log(`✅ Forwarding ${confirmed ? 'confirmed' : 'reset'} for client ${id}`);
+    console.log(`✅ Forwarding updated for client ${id}: ${Object.keys(updates).join(', ')}`);
     res.json({ success: true, client: data });
   } catch (error) {
     console.error('Error updating forwarding:', error);
