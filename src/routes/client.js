@@ -486,5 +486,90 @@ router.put('/:id/dashboard-access', async (req, res) => {
   } catch (error) { console.error('Error updating dashboard access:', error); res.status(500).json({ error: 'Server error' }); }
 });
 
+// ============================================================================
+// GET /api/client/:id/kb-document - Read-only view of the assembled knowledge
+// base the AI actually uses on calls. Self-scoped (identity from the JWT, never
+// the URL param), so a caller only ever reads their OWN client.
+// Source priority: cached knowledge_base_content -> live VAPI file (walked via
+// vapi_query_tool_id) -> none. When pulled from VAPI it is cached back so the
+// next read is instant. Returns the full document text; the dashboard parses
+// out the structured summary for display.
+// ============================================================================
+async function fetchKbContentByToolId(toolId) {
+  try {
+    if (!toolId) return null;
+    const tRes = await fetch(`https://api.vapi.ai/tool/${toolId}`, {
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` },
+    });
+    if (!tRes.ok) return null;
+    const tool = await tRes.json();
+    const fileId = tool.knowledgeBases?.[0]?.fileIds?.[0];
+    if (!fileId) return null;
+    const fRes = await fetch(`https://api.vapi.ai/file/${fileId}/content`, {
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` },
+    });
+    if (!fRes.ok) return null;
+    const content = await fRes.text();
+    return content && content.trim().length > 0 ? content : null;
+  } catch (err) {
+    console.error('Failed to fetch KB content from VAPI:', err.message);
+    return null;
+  }
+}
+
+router.get('/:id/kb-document', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const decoded = decodeToken(req);
+    if (!decoded) return res.status(401).json({ error: 'Authentication required' });
+    if (decoded.clientId !== id) return res.status(403).json({ error: 'Forbidden' });
+
+    const { data: client, error } = await supabase
+      .from('clients')
+      .select('id, business_name, business_website, knowledge_base_content, knowledge_base_updated_at, vapi_query_tool_id')
+      .eq('id', id)
+      .single();
+    if (error || !client) return res.status(404).json({ success: false, error: 'Client not found' });
+
+    // 1. Cached content
+    if (client.knowledge_base_content && client.knowledge_base_content.trim().length > 0) {
+      return res.json({
+        success: true,
+        content: client.knowledge_base_content,
+        updated_at: client.knowledge_base_updated_at || null,
+        has_website: !!client.business_website,
+        source: 'cache',
+      });
+    }
+
+    // 2. Live VAPI file (cache it back for next time)
+    if (client.vapi_query_tool_id) {
+      const content = await fetchKbContentByToolId(client.vapi_query_tool_id);
+      if (content) {
+        await supabase.from('clients').update({ knowledge_base_content: content }).eq('id', id);
+        return res.json({
+          success: true,
+          content,
+          updated_at: client.knowledge_base_updated_at || null,
+          has_website: !!client.business_website,
+          source: 'vapi',
+        });
+      }
+    }
+
+    // 3. Nothing yet
+    return res.json({
+      success: true,
+      content: null,
+      updated_at: null,
+      has_website: !!client.business_website,
+      source: 'none',
+    });
+  } catch (error) {
+    console.error('Error fetching KB document:', error);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
 module.exports = router;
 module.exports.VOICE_OPTIONS = VOICE_OPTIONS;
