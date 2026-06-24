@@ -1396,6 +1396,193 @@ These warrant same-day or next-day attention:
 - **Serpentine Belt**: Single belt that drives multiple engine components (AC, alternator, power steering)
 `,
 
+  waterproofing: (businessName) => `# ${businessName} (AI Receptionist Knowledge Base)
+
+## Company Overview
+${businessName} is a waterproofing, foundation repair, and mold company. We help homeowners keep water out, stabilize and repair foundations, and deal with mold and moisture, so their homes stay dry, healthy, and structurally sound. We offer free, no-obligation inspections.
+
+## Common Services
+
+### Basement Waterproofing
+- Interior drainage systems (perimeter drain / French drain)
+- Sump pump installation and replacement, with battery backup options
+- Wall vapor barriers and waterproof wall membranes
+- Foundation wall crack repair and crack injection
+- Discharge line and freeze-guard solutions
+
+### Crawl Space
+- Crawl space encapsulation (sealed vapor barrier system)
+- Crawl space drainage and sump systems
+- Dehumidifier installation for humidity and musty odors
+- Insulation removal and replacement
+- Standing-water and moisture cleanup
+
+### Foundation Repair
+- Foundation settlement repair (push piers and helical piers)
+- Bowing or leaning wall stabilization (carbon fiber straps, wall anchors)
+- Foundation and basement wall crack repair
+- Sagging or soft floor and floor-joist support
+- Structural evaluations
+
+### Concrete
+- Concrete lifting and leveling (polyurethane foam)
+- Driveways, sidewalks, patios, pool decks, and slabs
+- Concrete sealing
+
+### Mold and Moisture
+- Mold inspection and testing
+- Mold remediation and removal
+- Soda blasting for crawl space and basement mold
+- Containment and HEPA air filtration during remediation
+- Moisture source identification and humidity control
+
+### Drainage
+- Exterior and yard drainage
+- Downspout and gutter tie-ins
+- Grading and water management around the foundation
+
+## Frequently Asked Questions
+
+**Q: Do you offer free inspections?**
+A: Yes. We provide a free, no-obligation inspection. A specialist comes out, looks at the problem, and gives you a clear assessment and estimate.
+
+**Q: How much will it cost?**
+A: It depends on what's found, since every home is different. That's why the inspection is free, it's how we give you an accurate price.
+
+**Q: Do you offer financing?**
+A: Financing options are commonly available for larger projects. The team can walk you through the options during or after your inspection.
+
+**Q: Do you offer a warranty?**
+A: Yes, our repairs are backed by a warranty. The specifics depend on the solution, and the team will go over the details for your project.
+
+**Q: Will my homeowners insurance cover this?**
+A: Foundation and waterproofing work is often not covered by standard homeowners insurance, though some sudden water-damage events may be. The best step is to check your policy and let our team help you figure it out.
+
+**Q: What are the warning signs I should watch for?**
+A: Water or dampness in the basement or crawl space, a musty smell, cracks in walls or floors, stair-step cracks in brick, bowing walls, sticking doors or windows, sloping or bouncy floors, and visible mold. If you're seeing any of these, it's worth a free inspection.
+
+**Q: How long does the work take?**
+A: It depends on the scope. Many jobs are completed in a day or two, larger structural projects take longer. The inspector will give you a realistic timeline.
+
+## Urgency Guidelines
+
+### Urgent (get the team on it fast)
+- Active flooding or standing water entering the home right now
+- Sewage backup
+- Water actively pouring in during a storm
+
+### Soon (new-lead intake, book the inspection promptly)
+- A wet or damp basement or crawl space that is ongoing
+- Visible mold or a strong musty smell
+- A new or growing crack, a bowing wall, sloping floors
+- A failed or failing sump pump (no active flood)
+
+### Routine (book the free inspection)
+- Concrete leveling
+- Preventive waterproofing or encapsulation quotes
+- General questions and estimates
+
+## What to Expect at the Free Inspection
+1. A specialist inspects the affected areas (basement, crawl space, foundation, drainage)
+2. They identify the source of the water or movement, not just the symptom
+3. They explain what they found in plain language
+4. They provide a written estimate and, if wanted, financing options
+5. You decide, with no obligation
+
+## Terminology
+- **Encapsulation**: fully sealing a crawl space with a heavy vapor barrier to lock out moisture
+- **Vapor barrier**: a liner that stops ground moisture from rising into the home
+- **Sump pump**: a pump that collects and expels water that drains into a basin
+- **French drain / interior drainage**: a perimeter channel that routes water to the sump pump
+- **Foundation settlement**: the foundation sinking or shifting as soil moves
+- **Push piers / helical piers**: steel piers driven down to stable soil to stabilize and lift a foundation
+- **Bowing wall**: a foundation wall pushed inward by soil pressure, stabilized with carbon fiber or anchors
+- **Stair-step cracks**: diagonal cracks following mortar joints in brick or block, a settlement sign
+- **Efflorescence**: white mineral residue left on masonry by water, a moisture indicator
+- **Hydrostatic pressure**: water pressure in the soil that pushes water through foundation walls and floors
+- **Concrete leveling**: lifting sunken concrete back into place, often with polyurethane foam
+- **Remediation**: the professional removal and cleanup of mold, plus addressing its moisture source
+`,
+
+  junk_removal: (businessName) => `# ${businessName} (AI Receptionist Knowledge Base)
+
+## Company Overview
+${businessName} provides junk removal and dumpster rental. We offer two ways to clear out junk: full-service removal, where our crew loads and hauls everything away for you, and roll-off dumpster rental, where we drop off a container, you fill it on your own schedule, and we haul it away when you're done.
+
+## Full-Service Junk Removal (we load and haul)
+
+### What We Remove
+- Single-item pickups (a couch, a fridge, a mattress)
+- Furniture removal (sofas, beds, tables, dressers)
+- Appliance removal (washers, dryers, stoves, refrigerators)
+- Mattress and box spring removal
+- Electronics and e-waste (TVs, monitors, computers)
+- Hot tub, shed, deck, and fence removal (light demolition)
+- Yard waste and landscaping debris
+- Garage, attic, and basement cleanouts
+- Whole-home cleanouts
+- Estate cleanouts
+- Hoarder cleanouts
+- Eviction and foreclosure / property-management cleanouts
+- Commercial and office cleanouts
+- Construction and renovation debris
+- Donation and recycling hauling when items can be reused
+
+### How Pricing Works
+Full-service pricing is based on volume, that is, how much of the truck your items fill. The crew confirms the price on site before they load. We don't charge by the hour.
+
+## Roll-Off Dumpster Rental (you load it)
+
+### Sizes and Typical Uses
+- **10 yard**: small cleanouts, a single room, or heavy material like concrete or dirt. Holds about 3 to 4 pickup-truck loads.
+- **15 yard**: medium cleanouts, flooring or small remodel debris.
+- **20 yard**: the most popular size for home projects, remodels, garage and yard cleanouts, roofing. Shorter walls make it easy to load.
+- **30 yard**: large cleanouts, whole-home projects, big remodels and additions.
+- **40 yard**: major construction, demolition, or large commercial jobs.
+
+A good rule of thumb: when stuck between two sizes, the larger one is usually the better value, since most of the cost is delivery and hauling, not the size of the can.
+
+### Rental Periods and Weight
+- Rentals typically include a set number of days (commonly 7 to 14, varies by area). Extra days are charged at a flat daily rate.
+- Each dumpster has an included weight limit. Going over the limit adds an overage charge per ton.
+- Heavy material (concrete, dirt, brick, asphalt, roofing shingles) is dense, so it usually goes in a smaller "heavy" can to stay within weight limits.
+
+### Delivery and Placement
+- We drop the dumpster where you want it, usually a driveway. The driver needs a clear, flat spot with room to access it.
+- If the dumpster has to sit on a public street, a permit may be required. The team will let you know and help with that.
+
+## What Cannot Go in a Dumpster or Truck
+For safety and landfill rules, these are generally not allowed: hazardous chemicals, paint, oil, flammables, liquids, car and other batteries, tires, propane tanks, asbestos, medical waste, and appliances containing refrigerant (refrigerators, freezers, AC units) unless arranged for special handling. If a caller mentions these, flag them and have the team confirm what can be taken and how.
+
+## Frequently Asked Questions
+
+**Q: How much does it cost?**
+A: Full-service removal is priced by how much your items fill the truck, and the crew confirms it on site. Dumpsters are a flat rate based on the size and your area, including delivery, pickup, a rental period, and a weight limit. The team will give you the exact number.
+
+**Q: Do I need to be home?**
+A: For full-service pickups, it helps for someone to be there to point out what's going, but the team can often make arrangements. For dumpster drop-off, you just need the placement spot clear.
+
+**Q: How soon can you come?**
+A: Often same-day or next-day depending on the schedule and your area. The team will confirm availability.
+
+**Q: How long can I keep a dumpster?**
+A: The rental includes a set number of days, and you can keep it longer for a flat daily rate. Just let the team know.
+
+**Q: What do you do with the stuff?**
+A: We donate and recycle whatever we can, and dispose of the rest responsibly.
+
+**Q: Can you take just one item?**
+A: Yes, single-item pickups are no problem.
+
+## Terminology
+- **Roll-off**: the open-top dumpster that's delivered and picked up by truck
+- **Yard**: a cubic yard, the unit dumpster size is measured in (a 20 yard holds 20 cubic yards)
+- **Truckload**: the unit full-service junk removal is priced in, based on how much of the truck fills
+- **Weight limit / tonnage**: the included weight for a dumpster, with overage charged per ton beyond it
+- **Overage**: an extra charge for going over the included weight or rental days
+- **Cleanout**: clearing an entire space, such as an estate, hoarder, eviction, or foreclosure cleanout
+- **Curbside**: items placed at the curb for an easier, lower-cost pickup
+`,
 };
 
 module.exports = { INDUSTRY_KNOWLEDGE_BASES };
