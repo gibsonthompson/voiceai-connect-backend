@@ -587,6 +587,28 @@ async function handleDemoToolCall(req, res, message) {
 // ============================================================================
 // ASSISTANT-REQUEST HANDLER
 // ============================================================================
+
+// Read a custom SIP header (case-insensitive) from a VAPI assistant-request.
+// telnyx_cc calls stamp X-Client-Id and X-Session-Id on the SIP INVITE; VAPI
+// surfaces them here so one shared SIP endpoint can serve every client.
+function readSipHeader(message, name) {
+  const want = String(name).toLowerCase();
+  const sources = [
+    message?.call?.sipHeaders,
+    message?.call?.phoneCallProviderDetails?.sipHeaders,
+    message?.sipHeaders,
+    message?.call?.transport?.sipHeaders,
+  ];
+  for (const src of sources) {
+    if (src && typeof src === 'object') {
+      for (const k of Object.keys(src)) {
+        if (k.toLowerCase() === want) return src[k];
+      }
+    }
+  }
+  return null;
+}
+
 async function handleAssistantRequest(req, res, message) {
   const startTime = Date.now();
   try {
@@ -597,7 +619,14 @@ async function handleAssistantRequest(req, res, message) {
     console.log(`   VAPI number: ${vapiPhoneNumber}`);
     console.log(`   Caller: ${callerPhone || 'Unknown'}`);
 
-    if (!vapiPhoneNumber) {
+    // telnyx_cc whisper path: the call came in over the shared VAPI SIP
+    // endpoint and carries the client id as a SIP header. Resolve the client
+    // directly from it, and link this VAPI call to the Telnyx session so
+    // end-of-call logging (and nothing else) can find it later.
+    const sipClientId = readSipHeader(message, 'x-client-id');
+    const sipSessionId = readSipHeader(message, 'x-session-id');
+
+    if (!vapiPhoneNumber && !sipClientId) {
       const phoneNumberId = message.call?.phoneNumberId || message.phoneNumber?.id;
       if (phoneNumberId) {
         const lookedUpNumber = await getPhoneNumberFromVapi(phoneNumberId);
@@ -609,7 +638,20 @@ async function handleAssistantRequest(req, res, message) {
       return res.status(200).json({ error: 'No phone number' });
     }
 
-    const client = await getClientByVapiPhoneNumber(vapiPhoneNumber);
+    let client;
+    if (sipClientId) {
+      console.log(`🔀 telnyx_cc call - resolving client by SIP header X-Client-Id=${sipClientId}`);
+      const { data: byId } = await supabase.from('clients').select('*, agencies(*)').eq('id', sipClientId).single();
+      client = byId || null;
+      if (client && sipSessionId && message.call?.id) {
+        await supabase.from('call_sessions')
+          .update({ vapi_call_id: message.call.id, updated_at: new Date().toISOString() })
+          .eq('id', sipSessionId);
+        console.log(`🔗 Linked VAPI call ${message.call.id} to session ${sipSessionId}`);
+      }
+    } else {
+      client = await getClientByVapiPhoneNumber(vapiPhoneNumber);
+    }
 
     if (!client) {
       console.log('⚠️ No client found for:', vapiPhoneNumber);
@@ -735,14 +777,37 @@ async function handleVapiWebhook(req, res) {
     if (message?.type !== 'end-of-call-report') return res.status(200).json({ received: true });
 
     const call = message.call;
-    const phoneNumber = await getPhoneNumberFromVapi(call.phoneNumberId);
-    if (!phoneNumber) {
-      console.log(`🚫 EXIT: getPhoneNumberFromVapi returned null for phoneNumberId=${call?.phoneNumberId}`);
-      return res.status(200).json({ received: true });
+
+    // telnyx_cc whisper calls arrive over a shared VAPI SIP number, so the
+    // phoneNumberId does NOT map to a client. Resolve those by the session we
+    // tagged at assistant-request time (vapi_call_id was stored then). Everyone
+    // else falls through to the normal phone-number lookup, unchanged.
+    let client = null;
+    if (call?.id) {
+      const { data: session } = await supabase
+        .from('call_sessions')
+        .select('client_id')
+        .eq('vapi_call_id', call.id)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (session?.client_id) {
+        const { data: c } = await supabase.from('clients').select('*, agencies(*)').eq('id', session.client_id).single();
+        if (c) { client = c; console.log('✅ Resolved client via call_sessions (telnyx_cc):', c.business_name); }
+      }
     }
 
-    console.log('📱 Phone number:', phoneNumber);
-    const client = await getClientByVapiPhoneNumber(phoneNumber);
+    let phoneNumber = null;
+    if (!client) {
+      phoneNumber = await getPhoneNumberFromVapi(call.phoneNumberId);
+      if (!phoneNumber) {
+        console.log(`🚫 EXIT: getPhoneNumberFromVapi returned null for phoneNumberId=${call?.phoneNumberId}`);
+        return res.status(200).json({ received: true });
+      }
+
+      console.log('📱 Phone number:', phoneNumber);
+      client = await getClientByVapiPhoneNumber(phoneNumber);
+    }
 
     if (!client) {
       console.log('⚠️ No client found for:', phoneNumber);

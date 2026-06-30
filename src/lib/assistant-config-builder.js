@@ -30,6 +30,14 @@
 //          never promises a booking it can't make. Also fixed: the KB query
 //          tool was gated on booking_mode !== 'disabled', which stripped the
 //          knowledge base whenever booking was off. KB now always attaches.
+// UPDATED: 2026-06-30 — WHISPER TRANSFER: clients with voice_routing ==
+//          'telnyx_cc' no longer get the native VAPI transferCall tool (which
+//          uses SIP REFER and drops on Telnyx). Instead they get a
+//          request_human_transfer FUNCTION tool that calls our backend, which
+//          owns the call legs on Telnyx and does a real whisper warm transfer
+//          (dial the office, brief them privately, then bridge the caller in).
+//          vapi_direct clients are completely unchanged: same native transfer,
+//          same fallback. The switch is the single client.voice_routing flag.
 // ============================================================================
 
 const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, TRANSFER_KEYWORDS_BLOCK, VOICES,
@@ -59,6 +67,24 @@ const LANGUAGE_DETECTION_BLOCK = `
 
 # Language
 If the caller speaks Spanish, immediately switch to Spanish for the remainder of the call. Respond naturally in whatever language the caller uses. All information collection — name, phone number, address, reason for calling — should continue in the caller's language. Do not ask the caller what language they prefer. Just match them automatically. If the caller switches languages mid-conversation, follow them.`;
+
+// ============================================================================
+// WHISPER TRANSFER BLOCK (telnyx_cc clients only)
+// Injected when client.voice_routing == 'telnyx_cc'. Tells the AI how to behave
+// around the request_human_transfer tool: say one short line, call the tool
+// with a summary, then stay quiet because the backend takes over the connection.
+// This REPLACES the generic transfer-fallback block for these clients (that
+// block describes the old "you will still be on the line" behavior, which does
+// not apply when the backend owns the bridge).
+// ============================================================================
+const WHISPER_TRANSFER_BLOCK = `
+
+# Connecting a Caller to a Person
+When the caller needs a real person (they ask to speak to someone, it is urgent, or you cannot help them), do this:
+1. Say one short line, exactly like: "Sure, let me connect you with the team. One moment."
+2. Immediately call the request_human_transfer tool. For its summary, give one or two sentences covering who is calling and what they need, so the team member knows the situation before they pick up. Example summary: "Maria Lopez is calling about a burst pipe in her basement and needs someone out today."
+3. After you call the tool, do NOT keep talking. The system connects the call for you. Only speak again if the tool result tells you no one was available, in which case apologize briefly and take a detailed message (name, number, and reason for calling).
+Never read the summary out loud to the caller. It is only for the team member.`;
 
 // ============================================================================
 // APPOINTMENT BOOKING BLOCK
@@ -545,6 +571,9 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
   const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
   const businessName = client.business_name;
 
+  // Whisper transfer applies to telnyx_cc clients (the backend owns the bridge).
+  const isWhisperTransfer = client.voice_routing === 'telnyx_cc';
+
   let systemPrompt;
 
   // ── Priority 1: Enterprise agency custom template ───────────────────
@@ -666,8 +695,14 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     systemPrompt += buildAfterHoursBlock(client, toolConfig);
   }
 
-  // Transfer fallback (always dynamic — never in cached prompt)
-  if (toolConfig.transferFallbackToMessage && toolConfig.transferCall) {
+  // Transfer behavior (always dynamic — never in cached prompt).
+  // telnyx_cc clients use the whisper-transfer block (backend owns the bridge);
+  // everyone else uses the generic "you'll still be on the line" fallback.
+  if (toolConfig.transferCall && !isAfterHours && isWhisperTransfer) {
+    if (!systemPrompt.includes('# Connecting a Caller to a Person')) {
+      systemPrompt += WHISPER_TRANSFER_BLOCK;
+    }
+  } else if (toolConfig.transferFallbackToMessage && toolConfig.transferCall) {
     systemPrompt += buildTransferFallbackBlock();
   }
 
@@ -688,28 +723,60 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
 // to the static assistant (via updateAssistantCalendar), which live calls do
 // not use — so the AI could never actually book on a call. Attaching them here
 // puts them on the transient assistant that actually runs the call.
+//
+// TRANSFER (updated 2026-06-30):
+//  - telnyx_cc clients get the request_human_transfer FUNCTION tool, which
+//    calls our backend. The backend owns the Telnyx legs and does the whisper
+//    warm transfer. No phone number is put on the tool; the backend resolves
+//    transfer_phone || owner_phone itself.
+//  - everyone else gets the native VAPI transferCall tool to owner_phone,
+//    exactly as before.
 // ============================================================================
 function buildTools(client, toolConfig, isAfterHours, canAutoBook = false) {
   const tools = [];
+  const isWhisperTransfer = client.voice_routing === 'telnyx_cc';
 
   if (toolConfig.transferCall && !isAfterHours) {
-    const ownerPhone = client.owner_phone;
-    if (ownerPhone) {
-      const formattedPhone = isValidE164(ownerPhone) ? ownerPhone : formatPhoneE164(ownerPhone);
-      if (formattedPhone && isValidE164(formattedPhone)) {
-        tools.push({
-          type: 'transferCall',
-          function: {
-            name: 'transferCall',
-            description: 'Transfer the call to the business team. Use this when the caller needs to speak with someone directly, has an emergency, billing question, existing account issue, or when you cannot fully help them.',
+    if (isWhisperTransfer) {
+      // Whisper warm transfer via our backend (Telnyx Call Control).
+      tools.push({
+        type: 'function',
+        function: {
+          name: 'request_human_transfer',
+          description: 'Connect the caller to a real person on the team. Use this when the caller asks to speak with someone, has an emergency, or you cannot help them. Provide a short summary so the team member knows who is calling and why before they pick up. After calling this tool, stop talking; the system connects the call.',
+          parameters: {
+            type: 'object',
+            properties: {
+              summary: {
+                type: 'string',
+                description: 'One or two sentences describing who is calling and what they need, to brief the team member before they are connected. Example: "Maria Lopez is calling about a burst pipe in her basement and needs someone out today."',
+              },
+            },
+            required: ['summary'],
           },
-          destinations: [{
-            type: 'number',
-            number: formattedPhone,
-            description: 'Transfer to business owner',
-            message: 'One moment, let me connect you.'
-          }]
-        });
+        },
+        server: { url: `${BACKEND_URL}/api/voice/request-transfer`, timeoutSeconds: 25 },
+      });
+    } else {
+      // Native VAPI transfer (vapi_direct clients) — unchanged.
+      const ownerPhone = client.owner_phone;
+      if (ownerPhone) {
+        const formattedPhone = isValidE164(ownerPhone) ? ownerPhone : formatPhoneE164(ownerPhone);
+        if (formattedPhone && isValidE164(formattedPhone)) {
+          tools.push({
+            type: 'transferCall',
+            function: {
+              name: 'transferCall',
+              description: 'Transfer the call to the business team. Use this when the caller needs to speak with someone directly, has an emergency, billing question, existing account issue, or when you cannot fully help them.',
+            },
+            destinations: [{
+              type: 'number',
+              number: formattedPhone,
+              description: 'Transfer to business owner',
+              message: 'One moment, let me connect you.'
+            }]
+          });
+        }
       }
     }
   }
@@ -781,9 +848,16 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false) {
 
 // ============================================================================
 // BUILD HOOKS ARRAY
+//
+// The pipeline-error transfer hook below uses the native VAPI transferCall
+// (SIP REFER), which does not work on Telnyx. So it is only attached for
+// vapi_direct clients. telnyx_cc clients rely on the request_human_transfer
+// tool and the backend whisper flow instead; on a pipeline error they simply
+// fall through to the AI taking a message.
 // ============================================================================
 function buildHooks(client, toolConfig, isAfterHours) {
   const hooks = [];
+  const isWhisperTransfer = client.voice_routing === 'telnyx_cc';
 
   if (toolConfig.speechTimeout) {
     hooks.push({
@@ -797,7 +871,7 @@ function buildHooks(client, toolConfig, isAfterHours) {
     });
   }
 
-  if (toolConfig.transferCall && !isAfterHours) {
+  if (toolConfig.transferCall && !isAfterHours && !isWhisperTransfer) {
     const ownerPhone = client.owner_phone;
     if (ownerPhone) {
       const formattedPhone = isValidE164(ownerPhone) ? ownerPhone : formatPhoneE164(ownerPhone);
@@ -979,4 +1053,5 @@ module.exports = {
   DEFAULT_TOOL_CONFIG,
   LANGUAGE_DETECTION_BLOCK,
   APPOINTMENT_BOOKING_BLOCK,
+  WHISPER_TRANSFER_BLOCK,
 };

@@ -40,6 +40,12 @@
 //          handleAgencyAddClient still uses the no-card flow regardless of
 //          the toggle, since agency-added clients need a different UX
 //          (agency doesn't have client's card on file at add time).
+// UPDATED: 2026-06-30 - Whisper transfer: provisioning now honors a per-client
+//          voice_routing. telnyx_cc clients get their number routed to the
+//          Telnyx Call Control app (no VAPI import, no webhook config) and the
+//          client row is stamped voice_routing='telnyx_cc'. vapi_direct is the
+//          default and is unchanged. Resolved from req.body.voiceRouting (or
+//          an optional agency.default_voice_routing), via resolveVoiceRouting.
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -72,6 +78,24 @@ const { updateClientBillingQuantity } = require('../lib/usage-tracker');
 // across handleClientSignup, handleAgencyAddClient, and provisionClient.
 // ============================================================================
 const VALID_CLIENT_PLANS = ['starter', 'pro', 'growth'];
+
+// ============================================================================
+// VALID VOICE ROUTING - vapi_direct (default; native VAPI) vs telnyx_cc
+// (whisper warm transfer through the Telnyx Call Control app). Resolved per
+// client from the request body (voiceRouting / voice_routing), falling back to
+// an optional agency-level default (agency.default_voice_routing), then
+// 'vapi_direct'. Reading a missing agency column is safe (returns undefined),
+// so no schema change is required to keep the default behavior.
+// ============================================================================
+const VALID_VOICE_ROUTING = ['vapi_direct', 'telnyx_cc'];
+
+function resolveVoiceRouting(source, agency) {
+  const v = source?.voiceRouting || source?.voice_routing;
+  if (VALID_VOICE_ROUTING.includes(v)) return v;
+  const a = agency?.default_voice_routing;
+  if (VALID_VOICE_ROUTING.includes(a)) return a;
+  return 'vapi_direct';
+}
 
 // ============================================================================
 // RATE LIMITER (Phase 5) — in-memory token bucket for /api/client/signup
@@ -396,21 +420,42 @@ async function extractQueryToolId(assistantId) {
 
 // ============================================================================
 // UNIFIED PHONE PROVISIONING
+//
+// voiceRouting (added 2026-06-30): 'vapi_direct' (default) imports the number
+// into VAPI and points it at the assistant-request webhook, exactly as before.
+// 'telnyx_cc' routes the number to the Telnyx Call Control app for whisper warm
+// transfer instead, so there is NO VAPI phone object (vapiPhoneId is null) and
+// no webhook to configure. telnyx_cc only applies to platform (Telnyx)
+// provisioning; BYOT (Twilio) numbers always return vapi_direct.
 // ============================================================================
-async function provisionPhoneForClient(agency, clientData, assistantId) {
+async function provisionPhoneForClient(agency, clientData, assistantId, voiceRouting = 'vapi_direct') {
   const agencyCountry = (agency.country || 'US').toUpperCase();
 
   // PATH 1: Platform provisioning (US agencies)
   if (canPlatformProvision(agencyCountry)) {
-    console.log(`📞 Platform provisioning (${agencyCountry}) for ${clientData.businessName}`);
+    console.log(`📞 Platform provisioning (${agencyCountry}) for ${clientData.businessName} [routing: ${voiceRouting}]`);
 
     const phoneData = await provisionLocalPhone(
       clientData.businessCity,
       clientData.businessState,
       assistantId,
       clientData.businessName,
-      clientData.phone
+      clientData.phone,
+      { voiceRouting }
     );
+
+    // telnyx_cc: the number is routed to the Call Control app, NOT imported
+    // into VAPI, so there is no VAPI phone object to webhook-configure and no
+    // vapi_phone_id. The Telnyx number record id comes back as phoneData.id.
+    if (voiceRouting === 'telnyx_cc') {
+      return {
+        number: phoneData.number,
+        vapiPhoneId: null,
+        telnyxNumberId: phoneData.telnyx_number_id || phoneData.id || null,
+        provisioningMethod: 'telnyx_cc',
+        voiceRouting: 'telnyx_cc'
+      };
+    }
 
     // Configure webhook — serverUrl only, no assistantId
     await configurePhoneWebhook(phoneData.id, assistantId);
@@ -418,7 +463,8 @@ async function provisionPhoneForClient(agency, clientData, assistantId) {
     return {
       number: phoneData.number,
       vapiPhoneId: phoneData.id,
-      provisioningMethod: 'platform'
+      provisioningMethod: 'platform',
+      voiceRouting: 'vapi_direct'
     };
   }
 
@@ -436,7 +482,8 @@ async function provisionPhoneForClient(agency, clientData, assistantId) {
     return {
       number: result.number,
       vapiPhoneId: result.vapiPhoneId,
-      provisioningMethod: 'byot'
+      provisioningMethod: 'byot',
+      voiceRouting: 'vapi_direct'
     };
   }
 
@@ -585,6 +632,9 @@ async function handleClientSignup(req, res) {
 
     const clientCountry = (businessCountry || agency.country || 'US').toUpperCase();
 
+    // Whisper vs native transfer for this client (defaults to vapi_direct).
+    const voiceRouting = resolveVoiceRouting(req.body, agency);
+
     const limitCheck = await canAgencyAddClient(agencyId);
     if (!limitCheck.allowed) {
       const isBilling = limitCheck.reason === 'billing_required';
@@ -600,7 +650,7 @@ async function handleClientSignup(req, res) {
     }
     
     console.log(`✅ Client limit check passed: ${limitCheck.current}/${limitCheck.limit === -1 ? 'unlimited' : limitCheck.limit}`);
-    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Client country: ${clientCountry} | Plan: ${planType}`);
+    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Client country: ${clientCountry} | Plan: ${planType} | Routing: ${voiceRouting}`);
 
     let websiteUrl = rawWebsiteUrl;
     if (websiteUrl && !websiteUrl.startsWith('http')) {
@@ -684,7 +734,7 @@ async function handleClientSignup(req, res) {
         businessState,
         businessName,
         phone
-      }, assistant.id);
+      }, assistant.id, voiceRouting);
     } catch (phoneError) {
       // Phone provisioning failed — clean up VAPI resources
       await cleanupVapiResources(createdAssistantId, createdQueryToolId, businessName);
@@ -739,6 +789,7 @@ async function handleClientSignup(req, res) {
       calls_this_month: 0,
       business_website: websiteUrl || null,
       provisioning_method: phoneResult.provisioningMethod || 'platform',
+      voice_routing: phoneResult.voiceRouting || 'vapi_direct',
       // Inherit nav defaults from agency so new clients match agency's preferred nav style
       nav_bg: agency.default_client_nav_bg || null,
       nav_text: agency.default_client_nav_text || null,
@@ -1002,6 +1053,9 @@ async function handleAgencyAddClient(req, res) {
 
     const clientCountry = (businessCountry || agency.country || 'US').toUpperCase();
 
+    // Whisper vs native transfer for this client (defaults to vapi_direct).
+    const voiceRouting = resolveVoiceRouting(req.body, agency);
+
     const limitCheck = await canAgencyAddClient(agencyId);
     if (!limitCheck.allowed) {
       const isBilling = limitCheck.reason === 'billing_required';
@@ -1015,7 +1069,7 @@ async function handleAgencyAddClient(req, res) {
     }
 
     console.log(`✅ Limit check passed: ${limitCheck.current}/${limitCheck.limit === -1 ? 'unlimited' : limitCheck.limit}`);
-    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Adding: ${businessName} (${clientCountry}, ${resolvedPlanType})`);
+    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Adding: ${businessName} (${clientCountry}, ${resolvedPlanType}, routing: ${voiceRouting})`);
 
     let websiteUrl = rawWebsiteUrl;
     if (websiteUrl && !websiteUrl.startsWith('http')) {
@@ -1081,7 +1135,7 @@ async function handleAgencyAddClient(req, res) {
         businessState,
         businessName,
         phone
-      }, assistant.id);
+      }, assistant.id, voiceRouting);
     } catch (phoneError) {
       // Phone provisioning failed — clean up orphaned VAPI resources
       await cleanupVapiResources(createdAssistantId, createdQueryToolId, businessName);
@@ -1131,6 +1185,7 @@ async function handleAgencyAddClient(req, res) {
       calls_this_month: 0,
       business_website: websiteUrl || null,
       provisioning_method: phoneResult.provisioningMethod || 'platform',
+      voice_routing: phoneResult.voiceRouting || 'vapi_direct',
       // Inherit nav defaults from agency
       nav_bg: agency.default_client_nav_bg || null,
       nav_text: agency.default_client_nav_text || null,
@@ -1274,6 +1329,10 @@ async function provisionClient(clientId) {
     }
     
     const agency = client.agencies;
+
+    // Routing was chosen at signup and stored on the client row; honor it here
+    // (fall back to agency default, then vapi_direct).
+    const voiceRouting = resolveVoiceRouting(client, agency);
     
     let knowledgeBaseData = null;
     if (client.business_website) {
@@ -1308,7 +1367,7 @@ async function provisionClient(clientId) {
         businessState: client.business_state,
         businessName: client.business_name,
         phone: client.owner_phone
-      }, assistant.id);
+      }, assistant.id, voiceRouting);
     } catch (phoneError) {
       await cleanupVapiResources(createdAssistantId, createdQueryToolId, client.business_name);
       throw phoneError;
@@ -1330,6 +1389,7 @@ async function provisionClient(clientId) {
         knowledge_base_data: templateKB || client.knowledge_base_data || null,
         status: 'active',
         provisioning_method: phoneResult.provisioningMethod || 'platform',
+        voice_routing: phoneResult.voiceRouting || client.voice_routing || 'vapi_direct',
         // Inherit nav defaults if not already set
         nav_bg: client.nav_bg || agency.default_client_nav_bg || null,
         nav_text: client.nav_text || agency.default_client_nav_text || null,

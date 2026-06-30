@@ -8,6 +8,8 @@
 // UPDATED: 2026-06-07 — Exclude test clients from dashboard/analytics MRR and stats
 // UPDATED: 2026-06-10 — /api/agency/cancel now captures reason + feedback,
 //                       writes to subscription_cancellations, SMS's platform owner.
+// UPDATED: 2026-06-30 — Telnyx whisper warm transfer: /webhook/telnyx-voice
+//                       (raw body) + /api/voice/request-transfer mounted.
 // Destination: src/server.js (or src/index.js) — FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -108,7 +110,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 app.use((req, res, next) => {
-  if (req.originalUrl === '/webhook/stripe' || req.originalUrl === '/webhook/stripe-connect' || req.originalUrl === '/webhook/telnyx-sms') {
+  if (req.originalUrl === '/webhook/stripe' || req.originalUrl === '/webhook/stripe-connect' || req.originalUrl === '/webhook/telnyx-sms' || req.originalUrl === '/webhook/telnyx-voice') {
     next();
   } else {
     express.json({ limit: '10mb' })(req, res, next);
@@ -1213,6 +1215,15 @@ app.post('/webhook/vapi', handleVapiWebhook);
 // SUPPORT LINE ADDITION: Voice support webhook (shared number, dynamic agency context + whisper)
 app.post('/webhook/vapi-support', handleSupportWebhook);
 app.post('/webhook/telnyx-sms', express.raw({ type: '*/*', limit: '2mb' }), handleTelnyxSMSWebhook);
+
+// Telnyx Call Control (whisper warm transfer) for telnyx_cc clients.
+//   /webhook/telnyx-voice       -> raw body (Ed25519 signature verification)
+//   /api/voice/request-transfer -> normal JSON (VAPI function-tool target)
+// The raw parser is scoped to the webhook path only, so the transfer endpoint
+// still gets the JSON body parsed by the global middleware above.
+app.use('/webhook/telnyx-voice', express.raw({ type: '*/*', limit: '5mb' }));
+app.use('/', require('./routes/telnyx-voice'));
+
 // Stripe platform webhooks (agency subscriptions)
 app.post('/webhook/stripe', 
   express.raw({ type: 'application/json' }), 
