@@ -1,61 +1,78 @@
 // ============================================================================
 // RESTORATION PLATFORM ROUTES  (mounted at /api/resto)
-// Lives inside voiceai-connect-backend. Reuses the existing Supabase service
-// client and CORS. Namespaced under /api/resto so nothing collides with the
-// VoiceAI routes. All four endpoints are stubs (501) until the matching feature
-// is built; the structure is here so wiring is a one-line change later.
+// Lives in voiceai-connect-backend/src/routes/. Reuses the existing Supabase
+// service client and CORS. /report is implemented; scope/ocr/esx are stubs.
 // ============================================================================
 
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const { supabase } = require('../lib/supabase'); // service-role client (bypasses RLS)
 
-// Anthropic client. Requires ANTHROPIC_API_KEY in the DigitalOcean env and
-// `npm install @anthropic-ai/sdk` on the box. Lazy-loaded so a missing key only
-// breaks the AI endpoints, not the whole backend.
-let anthropic = null;
-function getAnthropic() {
-  if (!anthropic) {
-    const Anthropic = require('@anthropic-ai/sdk');
-    anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  }
-  return anthropic;
+// Verify the caller's Supabase JWT and confirm they belong to the claim's org.
+// Returns { user, claim } or sends an error response and returns null.
+async function authClaim(req, res) {
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+  if (!token) { res.status(401).json({ error: 'missing token' }); return null; }
+
+  const { data: { user } = {}, error: uErr } = await supabase.auth.getUser(token);
+  if (uErr || !user) { res.status(401).json({ error: 'invalid token' }); return null; }
+
+  const { claimId } = req.body || {};
+  if (!claimId) { res.status(400).json({ error: 'claimId required' }); return null; }
+
+  const { data: claim } = await supabase
+    .from('resto_claims').select('id, org_id, policyholder_name').eq('id', claimId).single();
+  if (!claim) { res.status(404).json({ error: 'claim not found' }); return null; }
+
+  const { data: member } = await supabase
+    .from('resto_org_members').select('role')
+    .eq('org_id', claim.org_id).eq('user_id', user.id).maybeSingle();
+  if (!member) { res.status(403).json({ error: 'forbidden' }); return null; }
+
+  return { user, claim };
 }
 
-// Cost discipline (standing rule): Haiku for extraction/drafts, Sonnet for final.
-const MODELS = {
-  draft: 'claude-haiku-4-5-20251001',
-  final: 'claude-sonnet-4-6',
-};
-
-// POST /api/resto/scope
-// Body: { roomId } -> structured IICRC scope (narrative + line items).
-// TODO: load room notes/photos/readings via supabase, build prompt with IICRC
-// corpus, Haiku draft -> Sonnet final, validation pass (no invented line items).
-router.post('/scope', async (req, res) => {
-  res.status(501).json({ error: 'not implemented', module: 'scopes' });
-});
-
-// POST /api/resto/ocr
-// Body: { imageBase64 } -> { tempF, rhPct }. Claude vision reads the meter.
-router.post('/ocr', async (req, res) => {
-  res.status(501).json({ error: 'not implemented', module: 'hydro/meter-ocr' });
-});
-
-// POST /api/resto/report
-// Body: { claimId, type } -> branded PDF from REAL captured data.
-// type: preliminary_report | drying_report | schedule_of_loss | full_export.
+// POST /api/resto/report  { claimId } -> generates the full carrier-ready PDF,
+// stores it, records a resto_documents row, returns the document.
 router.post('/report', async (req, res) => {
-  res.status(501).json({ error: 'not implemented', module: 'reports' });
+  try {
+    const ctx = await authClaim(req, res);
+    if (!ctx) return;
+    const { user, claim } = ctx;
+
+    const { buildClaimReport } = require('../lib/resto-report');
+    const { pdf } = await buildClaimReport(claim.id);
+
+    const path = `${claim.org_id}/${claim.id}/reports/${crypto.randomUUID()}.pdf`;
+    const { error: upErr } = await supabase.storage.from('resto-media')
+      .upload(path, pdf, { contentType: 'application/pdf', upsert: false });
+    if (upErr) { console.error('resto report upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
+
+    const title = `Full Report - ${claim.policyholder_name || 'Claim'} - ${new Date().toLocaleDateString()}`;
+    const { data: doc } = await supabase.from('resto_documents').insert({
+      org_id: claim.org_id, claim_id: claim.id, type: 'full_export',
+      storage_path: path, title, status: 'final',
+      generated_at: new Date().toISOString(), created_by: user.id
+    }).select('*').single();
+
+    res.json({ ok: true, document: doc });
+  } catch (e) {
+    console.error('resto report error:', e.message);
+    res.status(500).json({ error: 'report generation failed' });
+  }
 });
 
-// POST /api/resto/esx
-// Body: { claimId } -> Xactimate ESX (zipped XML). No Verisk partnership needed.
-router.post('/esx', async (req, res) => {
-  res.status(501).json({ error: 'not implemented', module: 'esx' });
-});
+// POST /api/resto/scope  -> structured IICRC scope (stub)
+router.post('/scope', async (_req, res) => res.status(501).json({ error: 'not implemented', module: 'scopes' }));
 
-// Health check so you can confirm the mount: GET /api/resto/health
-router.get('/health', (req, res) => res.json({ ok: true, scope: 'resto' }));
+// POST /api/resto/ocr  -> meter reading OCR (stub)
+router.post('/ocr', async (_req, res) => res.status(501).json({ error: 'not implemented', module: 'hydro/meter-ocr' }));
+
+// POST /api/resto/esx  -> Xactimate ESX export (stub)
+router.post('/esx', async (_req, res) => res.status(501).json({ error: 'not implemented', module: 'esx' }));
+
+router.get('/health', (_req, res) => res.json({ ok: true, scope: 'resto' }));
 
 module.exports = router;
