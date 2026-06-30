@@ -160,6 +160,7 @@ const helpRoutes = require('./routes/help');
 const ytContentRoutes = require('./routes/yt-content');
 const teamRoutes = require('./routes/team');
 const contentRender = require('./content-render');  // Content render service
+const restoRoutes = require('./routes/resto');  // Restoration platform routes
 
 // Usage tracking (Phase 1 — metered billing)
 const usageReporterRoutes = require('./cron/usage-reporter');
@@ -260,6 +261,7 @@ const mediaUpload = require('./media-upload');
 app.use('/api/media', mediaUpload);
 
 app.use('/api/content-render', contentRender);
+app.use('/api/resto', restoRoutes);
 
 // ============================================================================
 // AGENCY ROUTES (Platform → Agencies)
