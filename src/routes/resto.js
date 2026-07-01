@@ -1,7 +1,8 @@
 // ============================================================================
 // RESTORATION PLATFORM ROUTES  (mounted at /api/resto)
 // Lives in voiceai-connect-backend/src/routes/. Reuses the existing Supabase
-// service client and CORS. /report is implemented; scope/ocr/esx are stubs.
+// service client and CORS. /report, /mold-scan, /ocr, /scope are implemented;
+// esx remains a stub.
 // ============================================================================
 
 const express = require('express');
@@ -64,11 +65,64 @@ router.post('/report', async (req, res) => {
   }
 });
 
-// POST /api/resto/scope  -> structured IICRC scope (stub)
-router.post('/scope', async (_req, res) => res.status(501).json({ error: 'not implemented', module: 'scopes' }));
+// POST /api/resto/mold-scan  { claimId, mediaId } -> Claude-vision mold screening
+// of one photo. Records a resto_mold_scans row and returns it.
+router.post('/mold-scan', async (req, res) => {
+  try {
+    const ctx = await authClaim(req, res);
+    if (!ctx) return;
+    const { user, claim } = ctx;
 
-// POST /api/resto/ocr  -> meter reading OCR (stub)
-router.post('/ocr', async (_req, res) => res.status(501).json({ error: 'not implemented', module: 'hydro/meter-ocr' }));
+    const { mediaId } = req.body || {};
+    if (!mediaId) return res.status(400).json({ error: 'mediaId required' });
+
+    const { scanMedia } = require('../lib/resto-mold');
+    const scan = await scanMedia({ mediaId, orgId: claim.org_id, userId: user.id });
+    res.json({ ok: true, scan });
+  } catch (e) {
+    const msg = e.message || 'mold scan failed';
+    const code = msg === 'forbidden' ? 403
+      : msg === 'media not found' || msg === 'not a photo' ? 400
+      : msg === 'mold scanner not configured' ? 503 : 500;
+    if (code === 500) console.error('resto mold-scan error:', msg);
+    res.status(code).json({ error: msg });
+  }
+});
+
+// POST /api/resto/scope  { claimId } -> AI IICRC scope of work (Haiku draft -> Sonnet final)
+router.post('/scope', async (req, res) => {
+  try {
+    const ctx = await authClaim(req, res);
+    if (!ctx) return;
+    const { user, claim } = ctx;
+    const { generateScope } = require('../lib/resto-scope');
+    const scope = await generateScope({ claimId: claim.id, orgId: claim.org_id, userId: user.id });
+    res.json({ ok: true, scope });
+  } catch (e) {
+    const msg = e.message || 'scope failed';
+    const code = msg === 'scope not configured' ? 503 : msg === 'claim not found' ? 404 : 500;
+    if (code === 500) console.error('resto scope error:', msg);
+    res.status(code).json({ error: msg });
+  }
+});
+
+// POST /api/resto/ocr  { claimId, imageBase64, mediaType } -> meter reading OCR
+router.post('/ocr', async (req, res) => {
+  try {
+    const ctx = await authClaim(req, res);
+    if (!ctx) return;
+    const { imageBase64, mediaType } = req.body || {};
+    if (!imageBase64) return res.status(400).json({ error: 'image required' });
+    const { scanMeter } = require('../lib/resto-ocr');
+    const reading = await scanMeter({ imageBase64, mediaType });
+    res.json({ ok: true, reading });
+  } catch (e) {
+    const msg = e.message || 'ocr failed';
+    const code = msg === 'ocr not configured' ? 503 : msg === 'image required' ? 400 : 500;
+    if (code === 500) console.error('resto ocr error:', msg);
+    res.status(code).json({ error: msg });
+  }
+});
 
 // POST /api/resto/esx  -> Xactimate ESX export (stub)
 router.post('/esx', async (_req, res) => res.status(501).json({ error: 'not implemented', module: 'esx' }));

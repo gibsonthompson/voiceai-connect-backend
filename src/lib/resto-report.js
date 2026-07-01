@@ -52,15 +52,26 @@ function drawScene(doc, scene, ox, oy, size) {
     doc.closePath().lineWidth(2).stroke('#111827');
     doc.restore();
   });
+  const EQ_FILL = { air_mover: '#29ABE6', dehumidifier: '#11B5C6', air_scrubber: '#64748B' };
   (scene.equipment || []).forEach((eq) => {
     const x = ox + eq.x * sc, y = oy + eq.y * sc, r = 22 * sc;
-    doc.circle(x, y, r).lineWidth(1).stroke('#374151');
-    doc.fontSize(Math.max(6, r)).fillColor('#374151').text(EQUIP_LABEL[eq.type] || '', x - r, y - r / 1.6, { width: r * 2, align: 'center' });
+    doc.save().circle(x, y, r).fill(EQ_FILL[eq.type] || '#64748B').restore();
+    doc.fillColor('#ffffff').fontSize(Math.max(6, r)).text(EQUIP_LABEL[eq.type] || '', x - r, y - r / 1.7, { width: r * 2, align: 'center' });
+  });
+  (scene.moisturePoints || []).forEach((mp) => {
+    const x = ox + mp.x * sc, y = oy + mp.y * sc, r = 15 * sc;
+    doc.save().circle(x, y, r).fill('#F26B3A').restore();
+    doc.fillColor('#ffffff').fontSize(Math.max(5, r * 0.85)).text(String(mp.label || '').slice(0, 4), x - r, y - r / 1.9, { width: r * 2, align: 'center' });
   });
 }
 
+const MOLD_LABEL = {
+  mold_likely: 'Mold likely', mold_possible: 'Mold possible',
+  mold_unlikely: 'Mold unlikely', inconclusive: 'Inconclusive'
+};
+
 async function generateReportPdf(graph, downloadImage) {
-  const { claim, structures, rooms, media, notes, contents, sketches, chambers, readings, dryStandards } = graph;
+  const { claim, structures, rooms, media, notes, contents, sketches, chambers, readings, dryStandards, moldScans } = graph;
   const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
   const bufP = docToBuffer(doc);
   const W = doc.page.width - 100; // content width
@@ -101,6 +112,7 @@ async function generateReportPdf(graph, downloadImage) {
       const rMedia = media.filter((m) => m.room_id === room.id);
       const rContents = contents.filter((c) => c.room_id === room.id);
       const rSketches = sketches.filter((s) => s.room_id === room.id);
+      const rScans = (moldScans || []).filter((sc) => rMedia.some((m) => m.id === sc.media_id));
 
       if (rNotes.length) {
         doc.fontSize(9).fillColor(DARK);
@@ -123,6 +135,19 @@ async function generateReportPdf(graph, downloadImage) {
           if (col === 3) { col = 0; doc.y = rowY + cell + gap; }
         }
         if (col !== 0) doc.y = rowY + cell + gap;
+      }
+
+      // AI mold screening (visual, not a lab diagnosis)
+      if (rScans.length) {
+        h2('Mold Screening');
+        doc.fontSize(8).fillColor(GRAY).text('AI visual screening only, not a lab diagnosis. Confirm suspected growth with lab or air sampling.');
+        rScans.forEach((sc) => {
+          ensure(16);
+          const lab = sc.recommend_lab_sampling ? ' · lab sampling recommended' : '';
+          doc.fontSize(9).fillColor(DARK).text(
+            `${MOLD_LABEL[sc.verdict] || sc.verdict} (${sc.confidence ?? 0}% confidence)${lab}${sc.summary ? ' — ' + sc.summary : ''}`
+          );
+        });
       }
 
       // contents (Schedule of Loss rows)
@@ -197,6 +222,13 @@ async function generateReportPdf(graph, downloadImage) {
 // --- Supabase-backed helpers (lazy require so generateReportPdf stays testable) ---
 function db() { return require('./supabase').supabase; }
 
+// Keep only the most recent scan per media (rows arrive newest-first).
+function dedupeLatest(rows) {
+  const seen = new Set(); const out = [];
+  for (const r of rows) { if (!seen.has(r.media_id)) { seen.add(r.media_id); out.push(r); } }
+  return out;
+}
+
 async function fetchClaimGraph(claimId) {
   const supabase = db();
   const { data: claim } = await supabase.from('resto_claims').select('*').eq('id', claimId).single();
@@ -210,6 +242,10 @@ async function fetchClaimGraph(claimId) {
   const [{ data: media }, { data: notes }, { data: contents }, { data: sketches }] = await Promise.all([
     byRoom('resto_media'), byRoom('resto_notes'), byRoom('resto_contents_items'), byRoom('resto_sketches')
   ]);
+  const mediaIds = (media || []).map((m) => m.id);
+  const { data: moldScans } = mediaIds.length
+    ? await supabase.from('resto_mold_scans').select('*').in('media_id', mediaIds).order('created_at', { ascending: false })
+    : { data: [] };
   const { data: chambers } = structureIds.length
     ? await supabase.from('resto_drying_chambers').select('*').in('structure_id', structureIds)
     : { data: [] };
@@ -221,7 +257,8 @@ async function fetchClaimGraph(claimId) {
   return {
     claim, structures: structures || [], rooms: rooms || [], media: media || [],
     notes: notes || [], contents: contents || [], sketches: sketches || [],
-    chambers: chambers || [], readings: readings || [], dryStandards: dryStandards || []
+    chambers: chambers || [], readings: readings || [], dryStandards: dryStandards || [],
+    moldScans: dedupeLatest(moldScans || [])
   };
 }
 
