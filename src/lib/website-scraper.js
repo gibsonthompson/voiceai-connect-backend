@@ -14,10 +14,17 @@
 //
 // Destination: src/lib/website-scraper.js
 // FIXED: knownLength on VAPI file upload for large KB documents (2026-04-15)
+// FIXED: 2026-07-01 - use node-fetch (not the global undici fetch) so the
+//        form-data multipart upload to VAPI sends a proper body. The built-in
+//        global fetch does not reliably stream the form-data package's body,
+//        which truncated the multipart boundary and made VAPI reject the
+//        upload with "Multipart: Unexpected end of form". vapi.js already uses
+//        node-fetch for the same reason; this makes the scraper consistent.
 // ============================================================================
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const FormData = require('form-data');
+const fetch = require('node-fetch');
 
 // ============================================================================
 // JINA READER — Fetch a single page as clean markdown
