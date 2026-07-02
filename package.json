@@ -28,6 +28,7 @@
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "resend": "^2.0.0",
     "stripe": "^14.0.0",
+    "svg-to-pdfkit": "^0.1.8",
     "uuid": "^13.0.0"
   },
   "devDependencies": {
