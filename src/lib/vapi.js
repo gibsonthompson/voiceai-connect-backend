@@ -2032,11 +2032,22 @@ async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
+          // assistantId null forces VAPI to fire assistant-request on every
+          // call, so the dynamic V3 demo config (which carries the
+          // send_demo_sms tool and both end-of-call-report + tool-calls server
+          // messages) is what answers. Without this, VAPI can fall back to the
+          // stale static demo assistant, which has no tools and never sends the
+          // mid-call text.
+          assistantId: null,
           serverUrl: `${BACKEND_URL}/webhook/vapi`
         })
       });
       if (webhookResponse.ok) {
-        console.log('✅ Demo phone configured for dynamic assistant-request');
+        console.log('✅ Demo phone pinned to dynamic assistant-request (assistantId null, serverUrl set)');
+      } else {
+        const errText = await webhookResponse.text().catch(() => '');
+        console.error(`❌ Demo phone config PATCH failed (HTTP ${webhookResponse.status}): ${errText.slice(0, 300)}`);
+        console.error('   The demo will not answer with the dynamic config until this succeeds.');
       }
     } catch (whErr) {
       console.warn('⚠️ Demo phone webhook config failed (non-blocking):', whErr.message);
@@ -2270,7 +2281,179 @@ async function assignNumberForSMS(e164) {
 // Flow: Search Telnyx → Buy from Telnyx → Import into VAPI
 // No cap. ~$1-2/month per number billed to your Telnyx account.
 // ============================================================================
-async function provisionPhoneNumber(areaCode) {
+// ============================================================================
+// WHISPER WARM TRANSFER INFRASTRUCTURE (telnyx_cc clients)
+// ----------------------------------------------------------------------------
+// telnyx_cc numbers are NOT imported into VAPI. Their inbound calls route to a
+// single platform-wide Telnyx Call Control application, which dials VAPI over a
+// shared SIP door and can do a real whisper warm transfer.
+//
+// The two platform-wide ids (the Call Control app id = the voice connection id,
+// and the VAPI SIP door uri) are created ONCE, lazily, the first time a
+// telnyx_cc number is provisioned, and stored in the platform_settings table so
+// every part of the backend can read them with no env-var pasting and no setup
+// script. Re-runs are no-ops once the ids exist.
+// ============================================================================
+
+const PS = {
+  CONNECTION_ID: 'telnyx_voice_connection_id',
+  SIP_URI: 'vapi_sip_uri',
+  OVP_ID: 'telnyx_outbound_voice_profile_id',
+  SIP_PHONE_ID: 'vapi_sip_phone_id',
+};
+
+async function getPlatformSetting(key) {
+  if (!supabase) return null;
+  try {
+    const { data } = await supabase.from('platform_settings').select('value').eq('key', key).maybeSingle();
+    return data?.value ?? null;
+  } catch (err) {
+    console.warn(`⚠️ getPlatformSetting(${key}) failed:`, err.message);
+    return null;
+  }
+}
+
+async function setPlatformSetting(key, value) {
+  if (!supabase) return;
+  try {
+    await supabase.from('platform_settings').upsert(
+      { key, value, updated_at: new Date().toISOString() },
+      { onConflict: 'key' }
+    );
+  } catch (err) {
+    console.warn(`⚠️ setPlatformSetting(${key}) failed:`, err.message);
+  }
+}
+
+// Create (or reuse) the platform-wide Telnyx Call Control app + VAPI SIP door.
+// Idempotent: if both ids already exist in platform_settings, returns them.
+// Returns { connectionId, sipUri }.
+async function ensureWhisperInfra() {
+  let connectionId = await getPlatformSetting(PS.CONNECTION_ID);
+  let sipUri = await getPlatformSetting(PS.SIP_URI);
+
+  if (connectionId && sipUri) {
+    return { connectionId, sipUri };
+  }
+
+  if (!TELNYX_API_KEY) throw new Error('TELNYX_API_KEY not set - cannot create whisper infra');
+  if (!VAPI_API_KEY) throw new Error('VAPI_API_KEY not set - cannot create whisper infra');
+
+  console.log('🛠️ Creating whisper-transfer infrastructure (one-time)...');
+
+  // 1) Outbound Voice Profile (lets the Call Control app place outbound calls)
+  let ovpId = await getPlatformSetting(PS.OVP_ID);
+  if (!ovpId) {
+    const ovpRes = await fetch('https://api.telnyx.com/v2/outbound_voice_profiles', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: `VoiceAI Whisper Transfer ${new Date().toISOString().slice(0, 10)}`,
+        traffic_type: 'conversational',
+        service_plan: 'global',
+        enabled: true,
+      }),
+    });
+    if (!ovpRes.ok) {
+      const t = await ovpRes.text().catch(() => '');
+      throw new Error(`Telnyx outbound voice profile failed (HTTP ${ovpRes.status}): ${t.slice(0, 200)}`);
+    }
+    const ovp = await ovpRes.json();
+    ovpId = ovp.data?.id || ovp.id;
+    await setPlatformSetting(PS.OVP_ID, ovpId);
+    console.log(`   ✅ Outbound voice profile: ${ovpId}`);
+  }
+
+  // 2) Call Control Application (its id is the voice connection id we dial with)
+  if (!connectionId) {
+    const appRes = await fetch('https://api.telnyx.com/v2/call_control_applications', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        application_name: `VoiceAI Whisper Transfer ${new Date().toISOString().slice(0, 10)}`,
+        webhook_event_url: `${BACKEND_URL}/webhook/telnyx-voice`,
+        webhook_api_version: '2',
+        first_command_timeout: true,
+        first_command_timeout_secs: 30,
+        anchorsite_override: 'Latency',
+        dtmf_type: 'RFC 2833',
+        outbound: { outbound_voice_profile_id: ovpId, channel_limit: 10 },
+      }),
+    });
+    if (!appRes.ok) {
+      const t = await appRes.text().catch(() => '');
+      throw new Error(`Telnyx call control application failed (HTTP ${appRes.status}): ${t.slice(0, 200)}`);
+    }
+    const appData = await appRes.json();
+    connectionId = appData.data?.id || appData.id;
+    await setPlatformSetting(PS.CONNECTION_ID, connectionId);
+    console.log(`   ✅ Call Control app (connection id): ${connectionId}`);
+  }
+
+  // 3) VAPI SIP door (shared inbound endpoint every telnyx_cc call rings into).
+  // No assistantId: an inbound SIP call with a server url fires assistant-request
+  // so the backend can pick the client from the X-Client-Id SIP header.
+  if (!sipUri) {
+    const handle = `voiceai-${Date.now().toString(36)}`;
+    const wantUri = `sip:${handle}@sip.vapi.ai`;
+    const numRes = await fetch('https://api.vapi.ai/phone-number', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: 'vapi',
+        sipUri: wantUri,
+        server: { url: `${BACKEND_URL}/webhook/vapi` },
+        name: 'VoiceAI Whisper Shared SIP',
+      }),
+    });
+    if (!numRes.ok) {
+      const t = await numRes.text().catch(() => '');
+      throw new Error(`VAPI SIP number failed (HTTP ${numRes.status}): ${t.slice(0, 200)}`);
+    }
+    const num = await numRes.json();
+    sipUri = num.sipUri || wantUri;
+    await setPlatformSetting(PS.SIP_URI, sipUri);
+    if (num.id) await setPlatformSetting(PS.SIP_PHONE_ID, num.id);
+    console.log(`   ✅ VAPI SIP door: ${sipUri}`);
+  }
+
+  console.log('🛠️ Whisper infrastructure ready.');
+  return { connectionId, sipUri };
+}
+
+// Point a Telnyx number (E.164) at the Call Control app so inbound calls hit our
+// whisper webhook instead of going straight to VAPI. Returns the Telnyx number
+// record id.
+async function pointNumberAtCallControl(e164, connectionId) {
+  if (!TELNYX_API_KEY) throw new Error('TELNYX_API_KEY not set');
+  const number = e164.startsWith('+') ? e164 : `+${e164.replace(/\D/g, '')}`;
+
+  const lookupRes = await fetch(
+    `https://api.telnyx.com/v2/phone_numbers?filter[phone_number]=${encodeURIComponent(number)}`,
+    { headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}` } }
+  );
+  if (!lookupRes.ok) {
+    const t = await lookupRes.text().catch(() => '');
+    throw new Error(`Telnyx number lookup failed (HTTP ${lookupRes.status}): ${t.slice(0, 200)}`);
+  }
+  const lookup = await lookupRes.json();
+  const record = (lookup.data || [])[0];
+  if (!record) throw new Error(`Telnyx number ${number} not found on account`);
+
+  const patchRes = await fetch(`https://api.telnyx.com/v2/phone_numbers/${record.id}`, {
+    method: 'PATCH',
+    headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ connection_id: connectionId }),
+  });
+  if (!patchRes.ok) {
+    const t = await patchRes.text().catch(() => '');
+    throw new Error(`Telnyx connection assign failed (HTTP ${patchRes.status}): ${t.slice(0, 200)}`);
+  }
+  console.log(`   🔗 ${number} routed to Call Control app ${connectionId}`);
+  return record.id;
+}
+
+async function provisionPhoneNumber(areaCode, options = {}) {
   if (!TELNYX_API_KEY) {
     throw new Error('TELNYX_API_KEY not configured — cannot provision phone numbers');
   }
@@ -2330,6 +2513,25 @@ async function provisionPhoneNumber(areaCode) {
   if (orderStatus === 'pending') {
     console.log(`   ⏳ Waiting for Telnyx to activate number...`);
     await new Promise(resolve => setTimeout(resolve, 3000));
+  }
+
+  // ── telnyx_cc (whisper) branch ────────────────────────────────────
+  // Instead of importing into VAPI, route the number to the platform-wide
+  // Call Control app so our whisper webhook owns the inbound call. The number
+  // stays on Telnyx; SMS still works. Returns a VAPI-import-shaped object so
+  // callers can store .number and .id the same way.
+  if ((options.voiceRouting || 'vapi_direct') === 'telnyx_cc') {
+    const { connectionId } = await ensureWhisperInfra();
+    const telnyxNumberId = await pointNumberAtCallControl(selectedNumber, connectionId);
+    await assignNumberForSMS(selectedNumber); // two-way SMS still applies
+    console.log(`✅ telnyx_cc number provisioned (whisper): ${selectedNumber} → Telnyx ${telnyxNumberId}`);
+    return {
+      number: selectedNumber,
+      id: telnyxNumberId,          // Telnyx number record id (there is no VAPI phone id)
+      provider: 'telnyx_cc',
+      voice_routing: 'telnyx_cc',
+      telnyx_number_id: telnyxNumberId,
+    };
   }
 
   // ── Step 3: Get VAPI credential ID for Telnyx ─────────────────────
@@ -2413,7 +2615,7 @@ const CITY_AREA_CODES = {"atlanta":["404","470","678","770"],"savannah":["912"],
 // PROVISION LOCAL PHONE
 // FIXED: Logs actual error messages, bails early on account-level errors
 // ============================================================================
-async function provisionLocalPhone(city, state, assistantId, businessName, ownerPhone = null) {
+async function provisionLocalPhone(city, state, assistantId, businessName, ownerPhone = null, options = {}) {
   console.log(`📞 Provisioning phone for ${businessName} in ${city}, ${state}`);
   
   const areaCodesToTry = [];
@@ -2451,7 +2653,7 @@ async function provisionLocalPhone(city, state, assistantId, businessName, owner
   
   for (const areaCode of areaCodesToTry) {
     try {
-      const phoneData = await provisionPhoneNumber(areaCode);
+      const phoneData = await provisionPhoneNumber(areaCode, options);
       console.log(`✅ Phone provisioned: ${phoneData.number} (area code: ${areaCode})`);
       return phoneData;
     } catch (error) {
@@ -2475,7 +2677,7 @@ async function provisionLocalPhone(city, state, assistantId, businessName, owner
     console.log(`   🔄 Trying ${suggestedCodes.size} suggested area codes: ${[...suggestedCodes].join(', ')}`);
     for (const areaCode of suggestedCodes) {
       try {
-        const phoneData = await provisionPhoneNumber(areaCode);
+        const phoneData = await provisionPhoneNumber(areaCode, options);
         console.log(`✅ Phone provisioned (suggested): ${phoneData.number} (area code: ${areaCode})`);
         return phoneData;
       } catch (error) {
@@ -2696,6 +2898,11 @@ module.exports = {
   createIndustryAssistant,
   provisionPhoneNumber,
   provisionLocalPhone,
+  // Whisper warm transfer (telnyx_cc) infrastructure
+  ensureWhisperInfra,
+  pointNumberAtCallControl,
+  getPlatformSetting,
+  setPlatformSetting,
   createKnowledgeBaseFromWebsite,
   getPhoneNumberFromVapi,
   disableAssistant,

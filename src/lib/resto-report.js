@@ -2,18 +2,16 @@
 // RESTORATION CLAIM REPORT GENERATOR  (pdfkit, no headless browser)
 // Builds the carrier-ready full project export from the claim graph:
 // header + per structure/room photos, notes, contents (Schedule of Loss),
-// moisture maps (rendered as vectors), and S500 drying logs.
-//
-// Used by routes/resto.js. Pure-ish: generateReportPdf(graph, downloadImage)
-// takes an injected async image downloader so it is testable without storage.
+// moisture maps (embedded single-source SVG), and S500 drying logs.
 // ============================================================================
 const PDFDocument = require('pdfkit');
+const SVGtoPDF = require('svg-to-pdfkit');
+const { buildMapSvg } = require('./resto-map-svg');
 const { Writable } = require('stream');
 
 const NAVY = '#0E2A4D';
 const DARK = '#16243B';
 const GRAY = '#6b7280';
-const EQUIP_LABEL = { air_mover: 'AM', dehumidifier: 'DH', air_scrubber: 'AS' };
 const READING_LABEL = {
   psychrometric: 'Affected', exterior: 'Exterior', dehu_outlet: 'Dehu outlet', material_mc: 'Material MC'
 };
@@ -21,8 +19,6 @@ const money = (n) => (n == null ? '-' : '$' + Number(n).toFixed(0));
 const dateOnly = (d) => (d ? new Date(d).toLocaleDateString() : '-');
 
 function docToBuffer(doc) {
-  // Pipe into a collecting Writable (robust across Node versions; a direct
-  // 'data' listener can race pdfkit's internal stream finalization).
   return new Promise((resolve, reject) => {
     const chunks = [];
     const sink = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
@@ -33,36 +29,17 @@ function docToBuffer(doc) {
   });
 }
 
-// Render a moisture-map scene (canvas_json) as vectors at (ox,oy) within `size`.
-function drawScene(doc, scene, ox, oy, size) {
-  if (!scene) return;
-  const sc = size / 1000;
-  doc.save().rect(ox, oy, size, size).lineWidth(0.5).stroke('#e5e7eb').restore();
-  (scene.wetAreas || []).forEach((p) => {
-    if (!p.points || p.points.length < 2) return;
-    doc.save();
-    p.points.forEach((pt, i) => (i === 0 ? doc.moveTo(ox + pt[0] * sc, oy + pt[1] * sc) : doc.lineTo(ox + pt[0] * sc, oy + pt[1] * sc)));
-    doc.closePath().fill('#bae6fd');
-    doc.restore();
-  });
-  (scene.walls || []).forEach((p) => {
-    if (!p.points || p.points.length < 2) return;
-    doc.save();
-    p.points.forEach((pt, i) => (i === 0 ? doc.moveTo(ox + pt[0] * sc, oy + pt[1] * sc) : doc.lineTo(ox + pt[0] * sc, oy + pt[1] * sc)));
-    doc.closePath().lineWidth(2).stroke('#111827');
-    doc.restore();
-  });
-  const EQ_FILL = { air_mover: '#29ABE6', dehumidifier: '#11B5C6', air_scrubber: '#64748B' };
-  (scene.equipment || []).forEach((eq) => {
-    const x = ox + eq.x * sc, y = oy + eq.y * sc, r = 22 * sc;
-    doc.save().circle(x, y, r).fill(EQ_FILL[eq.type] || '#64748B').restore();
-    doc.fillColor('#ffffff').fontSize(Math.max(6, r)).text(EQUIP_LABEL[eq.type] || '', x - r, y - r / 1.7, { width: r * 2, align: 'center' });
-  });
-  (scene.moisturePoints || []).forEach((mp) => {
-    const x = ox + mp.x * sc, y = oy + mp.y * sc, r = 15 * sc;
-    doc.save().circle(x, y, r).fill('#F26B3A').restore();
-    doc.fillColor('#ffffff').fontSize(Math.max(5, r * 0.85)).text(String(mp.label || '').slice(0, 4), x - r, y - r / 1.9, { width: r * 2, align: 'center' });
-  });
+// ---- per-visit reading helpers (canvas_json.moisturePoints[].readings) ----
+const readingsOf = (mp) => (Array.isArray(mp && mp.readings) ? mp.readings : []);
+const valOn = (mp, date) => { const r = readingsOf(mp).find((x) => x.date === date); return r ? String(r.value) : ''; };
+const fmtDateShort = (d) => { try { return new Date(d + 'T00:00:00').toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' }); } catch (_e) { return String(d); } };
+const UPF = 40; // scene units per foot (matches the editor)
+function polyArea(pts) { let a = 0; for (let i = 0; i < pts.length; i++) { const p1 = pts[i], p2 = pts[(i + 1) % pts.length]; a += p1[0] * p2[1] - p2[0] * p1[1]; } return Math.abs(a) / 2; }
+function suggestEq(sqft, cls) {
+  if (!sqft || sqft <= 0) return { airMovers: 0, dehus: 0 };
+  const c = cls >= 1 && cls <= 4 ? cls : 2;
+  const perAm = { 1: 70, 2: 60, 3: 50, 4: 50 }[c], perDh = { 1: 500, 2: 400, 3: 300, 4: 300 }[c];
+  return { airMovers: Math.max(1, Math.ceil(sqft / perAm) + 1), dehus: Math.max(1, Math.ceil(sqft / perDh)) };
 }
 
 const MOLD_LABEL = {
@@ -164,12 +141,65 @@ async function generateReportPdf(graph, downloadImage) {
         });
       }
 
-      // moisture maps
+      // moisture maps — embed the single-source SVG (identical to the app)
       for (const s of rSketches) {
-        ensure(220);
+        const svg = buildMapSvg(s.canvas_json || {}, { width: 760, draw: 520 });
+        const mm = svg.match(/width="(\d+)" height="(\d+)"/);
+        const aspect = mm ? Number(mm[2]) / Number(mm[1]) : 0.6;
+        const renderH = W * aspect;
+        ensure(renderH + 28);
         h2('Moisture Map');
-        drawScene(doc, s.canvas_json, 50, doc.y, 200);
-        doc.y += 210;
+        const mapY = doc.y;
+        SVGtoPDF(doc, svg, 50, mapY, { width: W });
+        doc.y = mapY + renderH + 10;
+      }
+
+      // drying trend: per-visit moisture readings for this room
+      const roomPoints = [];
+      for (const s of rSketches) for (const mp of ((s.canvas_json && s.canvas_json.moisturePoints) || [])) roomPoints.push(mp);
+      const dateSet = new Set();
+      for (const mp of roomPoints) for (const r of readingsOf(mp)) if (r.date) dateSet.add(r.date);
+      const dates = [...dateSet].sort();
+      const trendPts = roomPoints.filter((mp) => readingsOf(mp).some((r) => r.date));
+      if (dates.length && trendPts.length) {
+        ensure(30 + trendPts.length * 14);
+        h2('Moisture Readings (Drying Trend)');
+        const startX = 50, labelW = 130;
+        const colW = Math.min(70, (W - labelW) / dates.length);
+        let ty = doc.y + 2;
+        doc.fontSize(8).font('Helvetica-Bold').fillColor(GRAY);
+        doc.text('Location', startX, ty, { width: labelW });
+        dates.forEach((d, i) => doc.text(fmtDateShort(d), startX + labelW + i * colW, ty, { width: colW, align: 'center' }));
+        ty += 13;
+        doc.font('Helvetica');
+        trendPts.forEach((mp, idx) => {
+          doc.fontSize(8).fillColor(DARK).text(mp.label || ('Point ' + (idx + 1)), startX, ty, { width: labelW });
+          dates.forEach((d, i) => doc.fillColor(DARK).text(valOn(mp, d) || '-', startX + labelW + i * colW, ty, { width: colW, align: 'center' }));
+          ty += 12;
+        });
+        doc.y = ty + 8;
+      }
+
+      // affected materials + S500 equipment adequacy (from the room's maps)
+      const wallsAll = [];
+      let placedAm = 0, placedDh = 0, clsRoom = 0;
+      for (const s of rSketches) {
+        const cj = s.canvas_json || {};
+        if (cj.classOfLoss) clsRoom = cj.classOfLoss;
+        for (const w of (cj.walls || [])) wallsAll.push(w);
+        for (const e of (cj.equipment || [])) { if (e.type === 'air_mover') placedAm++; else if (e.type === 'dehumidifier') placedDh++; }
+      }
+      const materials = [...new Set(wallsAll.map((w) => w && w.material).filter(Boolean))];
+      if (materials.length) { ensure(16); h2('Affected Materials'); doc.fontSize(9).fillColor(DARK).text(materials.join(', ')); }
+      let sqft = 0;
+      for (const w of wallsAll) if (w.points && w.points.length >= 3) sqft += polyArea(w.points);
+      sqft = sqft / (UPF * UPF);
+      if (sqft > 0) {
+        const sug = suggestEq(sqft, clsRoom);
+        ensure(16); h2('Equipment Check (S500 guide)');
+        doc.fontSize(9).fillColor(DARK).text(
+          `Class ${clsRoom || 2} · ${Math.round(sqft)} sq ft · Air movers ${placedAm} placed / ${sug.airMovers} suggested · Dehumidifiers ${placedDh} / ${sug.dehus}`
+        );
       }
     }
 
@@ -222,7 +252,6 @@ async function generateReportPdf(graph, downloadImage) {
 // --- Supabase-backed helpers (lazy require so generateReportPdf stays testable) ---
 function db() { return require('./supabase').supabase; }
 
-// Keep only the most recent scan per media (rows arrive newest-first).
 function dedupeLatest(rows) {
   const seen = new Set(); const out = [];
   for (const r of rows) { if (!seen.has(r.media_id)) { seen.add(r.media_id); out.push(r); } }
@@ -278,4 +307,4 @@ async function buildClaimReport(claimId) {
   return { pdf, claim: graph.claim };
 }
 
-module.exports = { generateReportPdf, drawScene, fetchClaimGraph, buildClaimReport };
+module.exports = { generateReportPdf, buildMapSvg, fetchClaimGraph, buildClaimReport };
