@@ -10,10 +10,18 @@
 //
 // Updated 2026-06-10 — replaces the pre-3-Product version that used the stale
 // starter/professional/enterprise keys and STRIPE_PRICE_AGENCY_* env vars.
+//
+// Updated 2026-07-02 — handleAgencySubscriptionDeleted now cascades a number
+// release to every client under the canceled agency (releaseAgencyClientNumbers).
+// Previously an agency platform-cancel suspended the agency but left all of its
+// clients' Telnyx numbers renting monthly forever. This closes the agency-level
+// half of the number-release leak (the client-level half is fixed in
+// stripe-connect.js).
 // ============================================================================
 const Stripe = require('stripe');
 const { supabase, getAgencyByStripeCustomerId } = require('../lib/supabase');
 const { sendEmail, sendPlatformNotificationSMS } = require('../lib/notifications');
+const { fullyReleaseNumber, disableAssistant } = require('../lib/vapi');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -260,6 +268,79 @@ async function reconcileAgencyTeamSeats(agencyId, plan) {
   }
 
   console.log(`🔒 Seat reconcile (plan=${p}, cap=${cap}): disabled ${ids.length} over-cap agency member(s) for ${agencyId}`);
+}
+
+// ============================================================================
+// RELEASE ALL CLIENT NUMBERS FOR A CANCELED AGENCY (cascade)
+// ----------------------------------------------------------------------------
+// When an agency's PLATFORM subscription is deleted, the agency is suspended
+// and dropped to Free, and it can no longer manage its clients. Every Telnyx
+// number held by those clients would otherwise keep renting monthly forever
+// (~$1 each). This releases each one (VAPI object + Telnyx rental via
+// fullyReleaseNumber), disables the assistant, and nulls the number fields,
+// mirroring what the client cancel path in stripe-connect.js and expireTrials
+// already do.
+//
+// TRADEOFF (intentional): this kills dial-in for the agency's end clients even
+// if those clients were still paying the agency on the connected account. An
+// agency whose platform subscription lapsed is suspended and cannot serve them
+// anyway, so releasing stops the recurring cost. If the agency reactivates,
+// clients re-provision fresh numbers (the same gap trial-expiry already has).
+// If you would rather keep numbers alive through a short dunning window, gate
+// this behind a grace period instead of calling it on delete.
+//
+// Idempotent: once a client's number fields are null, fullyReleaseNumber is a
+// no-op and the update simply re-nulls, so a webhook retry is safe.
+// ============================================================================
+async function releaseAgencyClientNumbers(agencyId) {
+  if (!agencyId) return;
+
+  const { data: clients, error } = await supabase
+    .from('clients')
+    .select('id, business_name, vapi_phone_id, vapi_phone_number, vapi_assistant_id')
+    .eq('agency_id', agencyId)
+    .or('vapi_phone_id.not.is.null,vapi_phone_number.not.is.null');
+
+  if (error) {
+    console.error(`releaseAgencyClientNumbers: failed to list clients for ${agencyId}:`, error.message);
+    return;
+  }
+
+  if (!clients || clients.length === 0) return;
+
+  console.log(`📞 Agency ${agencyId} canceled - releasing ${clients.length} client number(s)`);
+
+  for (const c of clients) {
+    try {
+      const release = await fullyReleaseNumber(c.vapi_phone_id, c.vapi_phone_number);
+      console.log(`   [agency_canceled] ${c.business_name}: VAPI=${release.vapiDeleted} Telnyx=${release.telnyxReleased}`);
+      if (!release.telnyxReleased) {
+        console.error(`   ⚠️ Telnyx NOT released for ${c.business_name} (${c.vapi_phone_number})`);
+      }
+    } catch (relErr) {
+      console.error(`   ❌ Release failed for ${c.business_name}:`, relErr.message);
+    }
+
+    if (c.vapi_assistant_id) {
+      try { await disableAssistant(c.vapi_assistant_id); } catch {}
+    }
+
+    const { error: nullErr } = await supabase
+      .from('clients')
+      .update({
+        subscription_status: 'agency_canceled',
+        status: 'suspended',
+        vapi_phone_id: null,
+        vapi_phone_number: null,
+        phone_number: null,
+        phone_area_code: null,
+      })
+      .eq('id', c.id);
+
+    if (nullErr) {
+      console.error(`   ❌ Failed to null number fields for ${c.business_name}:`, nullErr.message);
+    }
+  }
 }
 
 // ============================================================================
@@ -728,6 +809,11 @@ async function handleAgencySubscriptionDeleted(subscription) {
   // for a later reactivation/upgrade.
   await reconcileAgencyTeamSeats(agency.id, 'free');
 
+  // Cascade a number release to every client under this agency. Without this,
+  // the agency is suspended but all of its clients' Telnyx numbers keep
+  // renting monthly forever. See releaseAgencyClientNumbers for the tradeoff.
+  await releaseAgencyClientNumbers(agency.id);
+
   // Capture cancellation details. Both paths land here eventually:
   //   1. In-app cancel: cancelAgencySubscription already inserted a row keyed
   //      on stripe_subscription_id. Our upsert with ignoreDuplicates:false
@@ -1023,6 +1109,7 @@ module.exports = {
   warnExpiringAgencyTrials,
   canAgencyAddClient,
   reconcileAgencyTeamSeats,
+  releaseAgencyClientNumbers,
   CANCELLATION_REASON_LABELS,
   PLATFORM_PLANS,
   PLATFORM_PRICES,

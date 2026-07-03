@@ -2,7 +2,10 @@
 // RESTORATION CLAIM REPORT GENERATOR  (pdfkit, no headless browser)
 // Builds the carrier-ready full project export from the claim graph:
 // header + per structure/room photos, notes, contents (Schedule of Loss),
-// moisture maps (embedded single-source SVG), and S500 drying logs.
+// moisture maps (rendered as vectors), and S500 drying logs.
+//
+// Used by routes/resto.js. Pure-ish: generateReportPdf(graph, downloadImage)
+// takes an injected async image downloader so it is testable without storage.
 // ============================================================================
 const PDFDocument = require('pdfkit');
 const SVGtoPDF = require('svg-to-pdfkit');
@@ -12,6 +15,7 @@ const { Writable } = require('stream');
 const NAVY = '#0E2A4D';
 const DARK = '#16243B';
 const GRAY = '#6b7280';
+const EQUIP_LABEL = { air_mover: 'AM', dehumidifier: 'DH', air_scrubber: 'AS' };
 const READING_LABEL = {
   psychrometric: 'Affected', exterior: 'Exterior', dehu_outlet: 'Dehu outlet', material_mc: 'Material MC'
 };
@@ -19,6 +23,8 @@ const money = (n) => (n == null ? '-' : '$' + Number(n).toFixed(0));
 const dateOnly = (d) => (d ? new Date(d).toLocaleDateString() : '-');
 
 function docToBuffer(doc) {
+  // Pipe into a collecting Writable (robust across Node versions; a direct
+  // 'data' listener can race pdfkit's internal stream finalization).
   return new Promise((resolve, reject) => {
     const chunks = [];
     const sink = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
@@ -31,6 +37,11 @@ function docToBuffer(doc) {
 
 // ---- per-visit reading helpers (canvas_json.moisturePoints[].readings) ----
 const readingsOf = (mp) => (Array.isArray(mp && mp.readings) ? mp.readings : []);
+const latestVal = (mp) => {
+  const r = readingsOf(mp);
+  if (!r.length) return mp && mp.label ? String(mp.label) : '';
+  return String([...r].sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')))[r.length - 1].value || '');
+};
 const valOn = (mp, date) => { const r = readingsOf(mp).find((x) => x.date === date); return r ? String(r.value) : ''; };
 const fmtDateShort = (d) => { try { return new Date(d + 'T00:00:00').toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' }); } catch (_e) { return String(d); } };
 const UPF = 40; // scene units per foot (matches the editor)
@@ -40,6 +51,15 @@ function suggestEq(sqft, cls) {
   const c = cls >= 1 && cls <= 4 ? cls : 2;
   const perAm = { 1: 70, 2: 60, 3: 50, 4: 50 }[c], perDh = { 1: 500, 2: 400, 3: 300, 4: 300 }[c];
   return { airMovers: Math.max(1, Math.ceil(sqft / perAm) + 1), dehus: Math.max(1, Math.ceil(sqft / perDh)) };
+}
+
+// Pick a legible text color for a brand background (white on dark, navy on light).
+function contrastText(hex) {
+  try {
+    const h = String(hex).replace('#', '');
+    const r = parseInt(h.slice(0, 2), 16) / 255, g = parseInt(h.slice(2, 4), 16) / 255, b = parseInt(h.slice(4, 6), 16) / 255;
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) > 0.6 ? '#0E2A4D' : '#ffffff';
+  } catch (_e) { return '#ffffff'; }
 }
 
 const MOLD_LABEL = {
@@ -58,10 +78,23 @@ async function generateReportPdf(graph, downloadImage) {
   const h2 = (t) => { ensure(22); doc.moveDown(0.3).fillColor(DARK).fontSize(12).font('Helvetica-Bold').text(t); doc.font('Helvetica'); };
   const kv = (k, v) => { doc.fontSize(9).fillColor(GRAY).text(k + ': ', { continued: true }).fillColor(DARK).text(String(v ?? '-')); };
 
-  // ---- Cover / header ----
-  doc.rect(0, 0, doc.page.width, 90).fill(NAVY);
-  doc.fillColor('white').fontSize(20).font('Helvetica-Bold').text('Property Restoration Report', 50, 32);
-  doc.fontSize(10).font('Helvetica').text('Prepared ' + new Date().toLocaleString(), 50, 60);
+  // ---- Cover / header (org branding) ----
+  const brandCfg = graph.settings || {};
+  const brand = /^#[0-9a-fA-F]{6}$/.test(brandCfg.primary_color || '') ? brandCfg.primary_color : NAVY;
+  const onBrand = contrastText(brand);
+  doc.rect(0, 0, doc.page.width, 90).fill(brand);
+  if (brandCfg.logo_data_url) {
+    try {
+      const b64 = String(brandCfg.logo_data_url).split(',').pop();
+      if (b64) doc.image(Buffer.from(b64, 'base64'), doc.page.width - 50 - 150, 20, { fit: [150, 50], align: 'right', valign: 'center' });
+    } catch (_e) {}
+  }
+  const titleW = doc.page.width - 250;
+  doc.fillColor(onBrand).font('Helvetica-Bold').fontSize(20).text('Property Restoration Report', 50, 24, { width: titleW, lineBreak: false });
+  const headSub = [brandCfg.company_name, brandCfg.phone].filter(Boolean).join('  ·  ');
+  doc.font('Helvetica');
+  if (headSub) doc.fillColor(onBrand).fontSize(10).text(headSub, 50, 52, { width: titleW, lineBreak: false });
+  doc.fillColor(onBrand).fontSize(9).text('Prepared ' + new Date().toLocaleString(), 50, headSub ? 68 : 58, { width: titleW, lineBreak: false });
   doc.fillColor(DARK).font('Helvetica');
   doc.y = 110;
 
@@ -238,8 +271,15 @@ async function generateReportPdf(graph, downloadImage) {
   kv('Total RCV', money(solTotalRcv));
   kv('Total ACV', money(solTotalAcv));
 
+  // ---- Branding footer ----
+  {
+    const bits = [brandCfg.company_name, brandCfg.phone, brandCfg.email, brandCfg.website, brandCfg.license_number ? ('Lic# ' + brandCfg.license_number) : null].filter(Boolean).join('  ·  ');
+    if (bits) doc.moveDown(1).font('Helvetica-Bold').fontSize(8).fillColor(DARK).text(bits, { width: W, align: 'center' }).font('Helvetica');
+    if (brandCfg.report_footer) doc.moveDown(0.2).fontSize(8).fillColor(GRAY).text(brandCfg.report_footer, { width: W, align: 'center' });
+  }
+
   // ---- Integrity note ----
-  doc.moveDown(1).fontSize(7.5).fillColor(GRAY).text(
+  doc.moveDown(0.6).fontSize(7.5).fillColor(GRAY).text(
     `Generated ${new Date().toLocaleString()}. Timestamps and readings reflect captured field data.`,
     { width: W, align: 'center' }
   );
@@ -252,6 +292,7 @@ async function generateReportPdf(graph, downloadImage) {
 // --- Supabase-backed helpers (lazy require so generateReportPdf stays testable) ---
 function db() { return require('./supabase').supabase; }
 
+// Keep only the most recent scan per media (rows arrive newest-first).
 function dedupeLatest(rows) {
   const seen = new Set(); const out = [];
   for (const r of rows) { if (!seen.has(r.media_id)) { seen.add(r.media_id); out.push(r); } }
@@ -261,6 +302,8 @@ function dedupeLatest(rows) {
 async function fetchClaimGraph(claimId) {
   const supabase = db();
   const { data: claim } = await supabase.from('resto_claims').select('*').eq('id', claimId).single();
+  let settings = null;
+  if (claim) { const { data: sRows } = await supabase.from('resto_org_settings').select('*').eq('org_id', claim.org_id).limit(1); settings = (sRows && sRows[0]) || null; }
   const { data: structures } = await supabase.from('resto_structures').select('*').eq('claim_id', claimId).order('sort_order');
   const structureIds = (structures || []).map((s) => s.id);
   const { data: rooms } = structureIds.length
@@ -287,7 +330,7 @@ async function fetchClaimGraph(claimId) {
     claim, structures: structures || [], rooms: rooms || [], media: media || [],
     notes: notes || [], contents: contents || [], sketches: sketches || [],
     chambers: chambers || [], readings: readings || [], dryStandards: dryStandards || [],
-    moldScans: dedupeLatest(moldScans || [])
+    moldScans: dedupeLatest(moldScans || []), settings
   };
 }
 
