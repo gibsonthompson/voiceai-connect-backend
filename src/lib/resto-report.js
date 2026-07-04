@@ -130,22 +130,22 @@ async function generateReportPdf(graph, downloadImage) {
         rNotes.forEach((n) => { ensure(20); doc.text('• ' + (n.body || '')); });
       }
 
-      // photos (3 per row)
+      // photos (3 per row, with caption/note under each)
       const photos = rMedia.filter((m) => m.type === 'photo');
       if (photos.length && downloadImage) {
-        const cell = (W - 20) / 3, gap = 10;
+        const cell = (W - 20) / 3, gap = 10, capH = 24;
         let col = 0, rowY = 0;
         for (const p of photos) {
           let buf = null;
           try { buf = await downloadImage(p.storage_path); } catch (_) { buf = null; }
-          if (!buf) continue;
-          if (col === 0) { ensure(cell + 10); rowY = doc.y; }
+          if (col === 0) { ensure(cell + capH + 10); rowY = doc.y; }
           const x = 50 + col * (cell + gap);
-          try { doc.image(buf, x, rowY, { width: cell, height: cell, fit: [cell, cell] }); } catch (_) {}
+          if (buf) { try { doc.image(buf, x, rowY, { width: cell, height: cell, fit: [cell, cell] }); } catch (_) {} }
+          if (p.caption) { doc.fontSize(7).fillColor(GRAY).text(String(p.caption), x, rowY + cell + 2, { width: cell, height: capH, ellipsis: true }); }
           col++;
-          if (col === 3) { col = 0; doc.y = rowY + cell + gap; }
+          if (col === 3) { col = 0; doc.y = rowY + cell + capH + gap; }
         }
-        if (col !== 0) doc.y = rowY + cell + gap;
+        if (col !== 0) doc.y = rowY + cell + capH + gap;
       }
 
       // AI mold screening (visual, not a lab diagnosis)
