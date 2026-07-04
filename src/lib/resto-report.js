@@ -79,7 +79,8 @@ async function generateReportPdf(graph, downloadImage) {
   const kv = (k, v) => { doc.fontSize(9).fillColor(GRAY).text(k + ': ', { continued: true }).fillColor(DARK).text(String(v ?? '-')); };
 
   // ---- Cover / header (org branding) ----
-  const brandCfg = graph.settings || {};
+  const rawSettings = graph.settings || {};
+  const brandCfg = rawSettings.report_branding || rawSettings;   // branding stored in report_branding jsonb
   const brand = /^#[0-9a-fA-F]{6}$/.test(brandCfg.primary_color || '') ? brandCfg.primary_color : NAVY;
   const onBrand = contrastText(brand);
   doc.rect(0, 0, doc.page.width, 90).fill(brand);
