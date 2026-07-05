@@ -139,6 +139,32 @@ function buildMapSvg(scene, opts) {
     }
   });
 
+  // 3.6) flood cuts — dashed band inside the affected wall + cut height (DRYW)
+  (scene.floodCuts || []).forEach((fc) => {
+    const w = wallMap[fc.wallId]; if (!w || !w.points || w.points.length < 2) return;
+    const n = w.points.length;
+    const P0 = w.points[fc.edge], P1 = w.points[(fc.edge + 1) % n];
+    const ex = P1[0] - P0[0], ey = P1[1] - P0[1], len = Math.hypot(ex, ey) || 1;
+    let nrm = [-ey / len, ex / len]; const c = centroid(w.points);
+    const mx = (P0[0] + P1[0]) / 2, my = (P0[1] + P1[1]) / 2;
+    if ((c[0] - mx) * nrm[0] + (c[1] - my) * nrm[1] < 0) nrm = [-nrm[0], -nrm[1]];
+    const offU = 9;
+    const A = [P0[0] + nrm[0] * offU, P0[1] + nrm[1] * offU], B = [P1[0] + nrm[0] * offU, P1[1] + nrm[1] * offU];
+    P.push(`<line x1="${N(fx(A[0]))}" y1="${N(fy(A[1]))}" x2="${N(fx(B[0]))}" y2="${N(fy(B[1]))}" stroke="#F59E0B" stroke-width="6" stroke-linecap="round" stroke-dasharray="2 6" opacity="0.95"/>`);
+    const lx = fx((A[0] + B[0]) / 2 + nrm[0] * 13), ly = fy((A[1] + B[1]) / 2 + nrm[1] * 13);
+    P.push(`<text x="${N(lx)}" y="${N(ly + 4)}" text-anchor="middle" font-size="11" font-weight="800" fill="#B45309">${N(fc.heightFt)}' cut</text>`);
+  });
+
+  // 3.7) containment barriers — poly line + sq ft (PLASTIC)
+  (scene.containments || []).forEach((ct) => {
+    if (!ct.from || !ct.to) return;
+    const wft = Math.hypot(ct.to[0] - ct.from[0], ct.to[1] - ct.from[1]) / UPF;
+    const sqft = Math.round(wft * (ct.heightFt || 8));
+    P.push(`<line x1="${N(fx(ct.from[0]))}" y1="${N(fy(ct.from[1]))}" x2="${N(fx(ct.to[0]))}" y2="${N(fy(ct.to[1]))}" stroke="#8B5CF6" stroke-width="8" stroke-linecap="round" stroke-dasharray="3 8"/>`);
+    const mx = fx((ct.from[0] + ct.to[0]) / 2), my = fy((ct.from[1] + ct.to[1]) / 2);
+    P.push(`<text x="${N(mx)}" y="${N(my - 10)}" text-anchor="middle" font-size="11" font-weight="800" fill="#6D28D9">${sqft} sq ft poly</text>`);
+  });
+
   // 4) overall dimension lines (walls bounding box)
   if (walls.length) {
     let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
@@ -190,6 +216,8 @@ function buildMapSvg(scene, opts) {
   const legend = [];
   const cnt = (t) => equip.filter((e) => e.type === t).length;
   if (cnt('air_mover')) legend.push(['#29ABE6', `Air mover (${cnt('air_mover')})`]);
+  if ((scene.floodCuts || []).length) legend.push(['#F59E0B', 'Flood cut']);
+  if ((scene.containments || []).length) legend.push(['#8B5CF6', 'Containment']);
   if (cnt('dehumidifier')) legend.push(['#11B5C6', `Dehu (${cnt('dehumidifier')})`]);
   if (cnt('air_scrubber')) legend.push(['#64748B', `Air scrubber (${cnt('air_scrubber')})`]);
   if (pins.length) legend.push(['#F26B3A', 'Reading']);

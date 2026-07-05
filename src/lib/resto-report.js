@@ -235,6 +235,33 @@ async function generateReportPdf(graph, downloadImage) {
           `Class ${clsRoom || 2} · ${Math.round(sqft)} sq ft · Air movers ${placedAm} placed / ${sug.airMovers} suggested · Dehumidifiers ${placedDh} / ${sug.dehus}`
         );
       }
+
+      // demolition + containment scope — measured quantities mapped to Xactimate categories
+      let fcLf = 0, fcSqft = 0, contSqft = 0, contCount = 0; const fcByH = {};
+      for (const s of rSketches) {
+        const cj = s.canvas_json || {}; const wmap = {}; (cj.walls || []).forEach((w) => { wmap[w.id] = w; });
+        for (const fc of (cj.floodCuts || [])) {
+          const w = wmap[fc.wallId]; if (!w || !w.points) continue;
+          const n = w.points.length, A = w.points[fc.edge], B = w.points[(fc.edge + 1) % n];
+          if (!A || !B) continue;
+          const lf = Math.hypot(B[0] - A[0], B[1] - A[1]) / UPF;
+          fcLf += lf; fcSqft += lf * fc.heightFt; fcByH[fc.heightFt] = (fcByH[fc.heightFt] || 0) + lf;
+        }
+        for (const ct of (cj.containments || [])) {
+          if (!ct.from || !ct.to) continue;
+          contSqft += (Math.hypot(ct.to[0] - ct.from[0], ct.to[1] - ct.from[1]) / UPF) * (ct.heightFt || 8); contCount++;
+        }
+      }
+      if (fcLf > 0 || contCount > 0) {
+        ensure(16); h2('Demolition & Containment (Xactimate scope)');
+        if (fcLf > 0) {
+          const byH = Object.keys(fcByH).map((h) => `${Math.round(fcByH[h])} LF @ ${h}'`).join(', ');
+          doc.fontSize(9).fillColor(DARK).text(`Flood cut (DRYW): ${byH} = ${Math.round(fcSqft)} sq ft drywall removed`);
+        }
+        if (contCount > 0) {
+          doc.fontSize(9).fillColor(DARK).text(`Containment (PLASTIC 4 mil): ${contCount} barrier${contCount === 1 ? '' : 's'} = ${Math.round(contSqft)} sq ft`);
+        }
+      }
     }
 
     // ---- Hydro for this structure ----
