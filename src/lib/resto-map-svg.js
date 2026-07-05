@@ -14,9 +14,8 @@ const EQ = {
 };
 // Pictographic equipment icons (white on the colored badge), designed to sit in
 // a ~radius-9 box so they read at report scale. Shared 1:1 with the app.
-const FAN_BLADE = 'M0 0 C 2.6 -1.2 4.4 -4.4 2.5 -8.4 C 1 -6 -0.6 -3 0 0 Z';
 const ICON = {
-  air_mover: `<g fill="#fff"><path d="${FAN_BLADE}"/><path d="${FAN_BLADE}" transform="rotate(120)"/><path d="${FAN_BLADE}" transform="rotate(240)"/><circle r="1.7"/></g>`,
+  air_mover: `<g><circle cx="-0.5" cy="1" r="5.6" fill="#fff"/><path d="M3 -2.4 L8.6 -6 L10.2 -3.3 L4.6 0.3 Z" fill="#fff"/><circle cx="-0.5" cy="1" r="2.15" fill="#29ABE6"/></g>`,
   dehumidifier: '<g><rect x="-7" y="-7" width="14" height="14" rx="3" fill="#fff"/><path d="M0 -3.6 C 2.5 -0.4 3.3 1 3.3 2.4 A3.3 3.3 0 1 1 -3.3 2.4 C -3.3 1 -2.5 -0.4 0 -3.6 Z" fill="#11B5C6"/></g>',
   air_scrubber: '<g><rect x="-7" y="-7" width="14" height="14" rx="3" fill="#fff"/><g stroke="#64748B" stroke-width="1.7" stroke-linecap="round"><line x1="-4.3" y1="-3" x2="4.3" y2="-3"/><line x1="-4.3" y1="0" x2="4.3" y2="0"/><line x1="-4.3" y1="3" x2="4.3" y2="3"/></g></g>'
 };
