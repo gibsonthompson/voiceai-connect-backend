@@ -202,12 +202,14 @@ async function generateReportPdf(graph, downloadImage) {
         const colW = Math.min(70, (W - labelW) / dates.length);
         let ty = doc.y + 2;
         doc.fontSize(8).font('Helvetica-Bold').fillColor(GRAY);
-        doc.text('Location', startX, ty, { width: labelW });
+        doc.text('Location / Material', startX, ty, { width: labelW });
         dates.forEach((d, i) => doc.text(fmtDateShort(d), startX + labelW + i * colW, ty, { width: colW, align: 'center' }));
         ty += 13;
         doc.font('Helvetica');
         trendPts.forEach((mp, idx) => {
-          doc.fontSize(8).fillColor(DARK).text(mp.label || ('Point ' + (idx + 1)), startX, ty, { width: labelW });
+          const locName = mp.label || '';
+          const cell = mp.material && locName ? `${mp.material} — ${locName}` : (mp.material || locName || ('Point ' + (idx + 1)));
+          doc.fontSize(8).fillColor(DARK).text(cell, startX, ty, { width: labelW });
           dates.forEach((d, i) => doc.fillColor(DARK).text(valOn(mp, d) || '-', startX + labelW + i * colW, ty, { width: colW, align: 'center' }));
           ty += 12;
         });
