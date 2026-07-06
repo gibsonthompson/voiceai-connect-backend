@@ -152,25 +152,36 @@ function buildMapSvg(scene, opts) {
     const w = wallMap[fc.wallId]; if (!w || !w.points || w.points.length < 2) return;
     const n = w.points.length;
     const P0 = w.points[fc.edge], P1 = w.points[(fc.edge + 1) % n];
-    const ex = P1[0] - P0[0], ey = P1[1] - P0[1], len = Math.hypot(ex, ey) || 1;
-    let nrm = [-ey / len, ex / len]; const c = centroid(w.points);
+    const ex = P1[0] - P0[0], ey = P1[1] - P0[1], full = Math.hypot(ex, ey) || 1;
+    const ux = ex / full, uy = ey / full;
+    const lenU = fc.lengthFt != null ? Math.min(fc.lengthFt * UPF, full) : full;
+    let nrm = [-ey / full, ex / full]; const c = centroid(w.points);
     const mx = (P0[0] + P1[0]) / 2, my = (P0[1] + P1[1]) / 2;
     if ((c[0] - mx) * nrm[0] + (c[1] - my) * nrm[1] < 0) nrm = [-nrm[0], -nrm[1]];
     const offU = 9;
-    const A = [P0[0] + nrm[0] * offU, P0[1] + nrm[1] * offU], B = [P1[0] + nrm[0] * offU, P1[1] + nrm[1] * offU];
+    const A = [P0[0] + nrm[0] * offU, P0[1] + nrm[1] * offU], B = [P0[0] + ux * lenU + nrm[0] * offU, P0[1] + uy * lenU + nrm[1] * offU];
     P.push(`<line x1="${N(fx(A[0]))}" y1="${N(fy(A[1]))}" x2="${N(fx(B[0]))}" y2="${N(fy(B[1]))}" stroke="#F59E0B" stroke-width="6" stroke-linecap="round" stroke-dasharray="2 6" opacity="0.95"/>`);
+    const lf = Math.round(lenU / UPF), ht = fc.heightFt < 1 ? '4"' : fc.heightFt + "'";
     const lx = fx((A[0] + B[0]) / 2 + nrm[0] * 13), ly = fy((A[1] + B[1]) / 2 + nrm[1] * 13);
-    P.push(`<text x="${N(lx)}" y="${N(ly + 4)}" text-anchor="middle" font-size="11" font-weight="800" fill="#B45309">${N(fc.heightFt)}' cut</text>`);
+    P.push(`<text x="${N(lx)}" y="${N(ly + 4)}" text-anchor="middle" font-size="11" font-weight="800" fill="#B45309">${lf} LF \u00b7 ${ht} cut</text>`);
   });
 
   // 3.7) containment barriers — poly line + sq ft (PLASTIC)
   (scene.containments || []).forEach((ct) => {
-    if (!ct.from || !ct.to) return;
-    const wft = Math.hypot(ct.to[0] - ct.from[0], ct.to[1] - ct.from[1]) / UPF;
-    const sqft = Math.round(wft * (ct.heightFt || 8));
-    P.push(`<line x1="${N(fx(ct.from[0]))}" y1="${N(fy(ct.from[1]))}" x2="${N(fx(ct.to[0]))}" y2="${N(fy(ct.to[1]))}" stroke="#8B5CF6" stroke-width="8" stroke-linecap="round" stroke-dasharray="3 8"/>`);
-    const mx = fx((ct.from[0] + ct.to[0]) / 2), my = fy((ct.from[1] + ct.to[1]) / 2);
-    P.push(`<text x="${N(mx)}" y="${N(my - 10)}" text-anchor="middle" font-size="11" font-weight="800" fill="#6D28D9">${sqft} sq ft poly</text>`);
+    if (ct.x != null && ct.y != null) {
+      const sqft = Math.round((ct.widthFt || 0) * (ct.heightFt || 0));
+      const cx = fx(ct.x), cy = fy(ct.y), h = 18 * S;
+      P.push(`<rect x="${N(cx - h)}" y="${N(cy - h)}" width="${N(h * 2)}" height="${N(h * 2)}" rx="4" fill="#8B5CF6" fill-opacity="0.16" stroke="#8B5CF6" stroke-width="2.5" stroke-dasharray="4 3"/>`);
+      P.push(`<line x1="${N(cx - h)}" y1="${N(cy - h)}" x2="${N(cx + h)}" y2="${N(cy + h)}" stroke="#8B5CF6" stroke-width="2" opacity="0.5"/><line x1="${N(cx + h)}" y1="${N(cy - h)}" x2="${N(cx - h)}" y2="${N(cy + h)}" stroke="#8B5CF6" stroke-width="2" opacity="0.5"/>`);
+      P.push(`<text x="${N(cx)}" y="${N(cy - h - 6)}" text-anchor="middle" font-size="11" font-weight="800" fill="#6D28D9">${sqft} sq ft poly</text>`);
+      if (ct.label) P.push(`<text x="${N(cx)}" y="${N(cy + h + 13)}" text-anchor="middle" font-size="9" font-weight="700" fill="#7C3AED">${esc(ct.label)}</text>`);
+    } else if (ct.from && ct.to) {
+      const wft = Math.hypot(ct.to[0] - ct.from[0], ct.to[1] - ct.from[1]) / UPF;
+      const sqft = Math.round(wft * (ct.heightFt || 8));
+      P.push(`<line x1="${N(fx(ct.from[0]))}" y1="${N(fy(ct.from[1]))}" x2="${N(fx(ct.to[0]))}" y2="${N(fy(ct.to[1]))}" stroke="#8B5CF6" stroke-width="8" stroke-linecap="round" stroke-dasharray="3 8"/>`);
+      const mx = fx((ct.from[0] + ct.to[0]) / 2), my = fy((ct.from[1] + ct.to[1]) / 2);
+      P.push(`<text x="${N(mx)}" y="${N(my - 10)}" text-anchor="middle" font-size="11" font-weight="800" fill="#6D28D9">${sqft} sq ft poly</text>`);
+    }
   });
 
   // wet-area affected-material labels
