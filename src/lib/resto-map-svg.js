@@ -95,9 +95,13 @@ function buildMapSvg(scene, opts) {
 
   // 2) wet areas (Chaikin smoothed, clipped)
   wets.forEach((p) => {
-    const pts = p.points || []; if (pts.length < 2) return;
-    const use = pts.length >= 3 ? chaikin(pts, 3) : pts;
-    P.push(`<polygon${clipAttr} points="${polyStr(use)}" fill="#bfe6fb" stroke="#38bdf8" stroke-width="1.5" stroke-linejoin="round"/>`);
+    const pts = p.points || []; if (pts.length < 1) return;
+    if (p.brush) {
+      P.push(`<polyline${clipAttr} points="${polyStr(pts)}" fill="none" stroke="#7DD3FC" stroke-opacity="0.55" stroke-width="${N(p.brush * S)}" stroke-linecap="round" stroke-linejoin="round"/>`);
+    } else if (pts.length >= 2) {
+      const use = pts.length >= 3 ? chaikin(pts, 3) : pts;
+      P.push(`<polygon${clipAttr} points="${polyStr(use)}" fill="#bfe6fb" stroke="#38bdf8" stroke-width="1.5" stroke-linejoin="round"/>`);
+    }
   });
 
   // 3) walls — double-line mitered band (classic floor-plan wall): a thick dark
