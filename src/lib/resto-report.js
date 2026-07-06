@@ -223,7 +223,9 @@ async function generateReportPdf(graph, downloadImage) {
         for (const w of (cj.walls || [])) wallsAll.push(w);
         for (const e of (cj.equipment || [])) { if (e.type === 'air_mover') placedAm++; else if (e.type === 'dehumidifier') placedDh++; }
       }
-      const materials = [...new Set(wallsAll.map((w) => w && w.material).filter(Boolean))];
+      const wetMats = [];
+      for (const s2 of rSketches) for (const wa of ((s2.canvas_json || {}).wetAreas || [])) if (wa.material) wetMats.push(wa.surface && wa.surface !== 'floor' ? `${wa.surface} ${wa.material}` : wa.material);
+      const materials = [...new Set([...wallsAll.map((w) => w && w.material).filter(Boolean), ...wetMats])];
       if (materials.length) { ensure(16); h2('Affected Materials'); doc.fontSize(9).fillColor(DARK).text(materials.join(', ')); }
       let sqft = 0;
       for (const w of wallsAll) if (w.points && w.points.length >= 3) sqft += polyArea(w.points);

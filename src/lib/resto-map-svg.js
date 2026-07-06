@@ -165,6 +165,32 @@ function buildMapSvg(scene, opts) {
     P.push(`<text x="${N(mx)}" y="${N(my - 10)}" text-anchor="middle" font-size="11" font-weight="800" fill="#6D28D9">${sqft} sq ft poly</text>`);
   });
 
+  // wet-area affected-material labels
+  wets.forEach((p) => {
+    if (!p.material || !p.points || p.points.length < 3) return;
+    const c = centroid(p.points);
+    const lbl = p.surface && p.surface !== 'floor' ? `${p.surface} ${p.material}` : p.material;
+    P.push(`<text x="${N(fx(c[0]))}" y="${N(fy(c[1]) + 4)}" text-anchor="middle" font-size="11" font-weight="700" fill="#075985">${esc(lbl)}</text>`);
+  });
+  // number each wall (S500)
+  walls.forEach((w) => {
+    if (!w.points || w.points.length < 2) return;
+    const n = w.points.length; const c = centroid(w.points);
+    for (let ei = 0; ei < n; ei++) {
+      const A = w.points[ei], B = w.points[(ei + 1) % n];
+      const mx0 = (A[0] + B[0]) / 2, my0 = (A[1] + B[1]) / 2;
+      const ex = B[0] - A[0], ey = B[1] - A[1], len = Math.hypot(ex, ey) || 1;
+      let nx = -ey / len, ny = ex / len;
+      if ((c[0] - mx0) * nx + (c[1] - my0) * ny < 0) { nx = -nx; ny = -ny; }
+      P.push(`<text x="${N(fx(mx0 + nx * 16))}" y="${N(fy(my0 + ny * 16) + 4)}" text-anchor="middle" font-size="10" font-weight="800" fill="#64748B">${ei + 1}</text>`);
+    }
+  });
+  // origin of loss (X)
+  if (scene.originOfLoss) {
+    const ox = fx(scene.originOfLoss[0]), oy = fy(scene.originOfLoss[1]);
+    P.push(`<circle cx="${N(ox)}" cy="${N(oy)}" r="11" fill="#fff" stroke="#DC2626" stroke-width="2.5"/><line x1="${N(ox - 5)}" y1="${N(oy - 5)}" x2="${N(ox + 5)}" y2="${N(oy + 5)}" stroke="#DC2626" stroke-width="3" stroke-linecap="round"/><line x1="${N(ox + 5)}" y1="${N(oy - 5)}" x2="${N(ox - 5)}" y2="${N(oy + 5)}" stroke="#DC2626" stroke-width="3" stroke-linecap="round"/>`);
+  }
+
   // 4) overall dimension lines (walls bounding box)
   if (walls.length) {
     let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
