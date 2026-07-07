@@ -154,16 +154,17 @@ function buildMapSvg(scene, opts) {
     const P0 = w.points[fc.edge], P1 = w.points[(fc.edge + 1) % n];
     const ex = P1[0] - P0[0], ey = P1[1] - P0[1], full = Math.hypot(ex, ey) || 1;
     const ux = ex / full, uy = ey / full;
-    const lenU = fc.lengthFt != null ? Math.min(fc.lengthFt * UPF, full) : full;
+    const startU = Math.max(0, Math.min((fc.startFt || 0) * UPF, full));
+    const lenU = fc.lengthFt != null ? Math.min(fc.lengthFt * UPF, full - startU) : (full - startU);
     let nrm = [-ey / full, ex / full]; const c = centroid(w.points);
     const mx = (P0[0] + P1[0]) / 2, my = (P0[1] + P1[1]) / 2;
     if ((c[0] - mx) * nrm[0] + (c[1] - my) * nrm[1] < 0) nrm = [-nrm[0], -nrm[1]];
     const offU = 9;
-    const A = [P0[0] + nrm[0] * offU, P0[1] + nrm[1] * offU], B = [P0[0] + ux * lenU + nrm[0] * offU, P0[1] + uy * lenU + nrm[1] * offU];
+    const A = [P0[0] + ux * startU + nrm[0] * offU, P0[1] + uy * startU + nrm[1] * offU], B = [P0[0] + ux * (startU + lenU) + nrm[0] * offU, P0[1] + uy * (startU + lenU) + nrm[1] * offU];
     P.push(`<line x1="${N(fx(A[0]))}" y1="${N(fy(A[1]))}" x2="${N(fx(B[0]))}" y2="${N(fy(B[1]))}" stroke="#F59E0B" stroke-width="6" stroke-linecap="round" stroke-dasharray="2 6" opacity="0.95"/>`);
     const lf = Math.round(lenU / UPF), ht = fc.heightFt < 1 ? '4"' : fc.heightFt + "'";
     const lx = fx((A[0] + B[0]) / 2 + nrm[0] * 13), ly = fy((A[1] + B[1]) / 2 + nrm[1] * 13);
-    P.push(`<text x="${N(lx)}" y="${N(ly + 4)}" text-anchor="middle" font-size="11" font-weight="800" fill="#B45309">${lf} LF \u00b7 ${ht} cut</text>`);
+    P.push(`<text x="${N(lx)}" y="${N(ly + 4)}" text-anchor="middle" font-size="11" font-weight="800" fill="#B45309">${lf} linear ft \u00b7 ${ht} cut</text>`);
   });
 
   // 3.7) containment barriers — poly line + sq ft (PLASTIC)

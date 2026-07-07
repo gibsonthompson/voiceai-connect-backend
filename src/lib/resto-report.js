@@ -261,7 +261,7 @@ async function generateReportPdf(graph, downloadImage) {
       if (fcLf > 0 || contCount > 0) {
         ensure(16); h2('Demolition & Containment (Xactimate scope)');
         if (fcLf > 0) {
-          const byH = Object.keys(fcByH).map((h) => `${Math.round(fcByH[h])} LF @ ${h}`).join(', ');
+          const byH = Object.keys(fcByH).map((h) => `${Math.round(fcByH[h])} linear ft @ ${h}`).join(', ');
           doc.fontSize(9).fillColor(DARK).text(`Flood cut (DRYW): ${byH} = ${Math.round(fcSqft)} sq ft drywall removed`);
         }
         if (contCount > 0) {
