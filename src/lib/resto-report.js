@@ -112,6 +112,7 @@ async function generateReportPdf(graph, downloadImage) {
 
   // ---- Per structure ----
   let solTotalRcv = 0, solTotalAcv = 0;
+  const allContents = [];   // { room, item } for the claim-level non-salvageable inventory
 
   for (const st of structures) {
     h1('Structure: ' + st.name);
@@ -164,13 +165,19 @@ async function generateReportPdf(graph, downloadImage) {
       // contents (Schedule of Loss rows)
       if (rContents.length) {
         h2('Contents');
+        const dispLabel = (d) => d === 'non_restorable' ? 'Total loss' : d === 'disposed' ? 'Disposed' : d === 'restorable' ? 'Restorable' : '-';
         rContents.forEach((c) => {
           ensure(16);
-          const rcv = (Number(c.replacement_cost) || 0) * (c.quantity || 1);
-          const acv = (Number(c.acv) || 0) * (c.quantity || 1);
-          solTotalRcv += rcv; solTotalAcv += acv;
+          const loss = c.disposition === 'non_restorable' || c.disposition === 'disposed';
+          if (loss) {
+            solTotalRcv += (Number(c.replacement_cost) || 0) * (c.quantity || 1);
+            solTotalAcv += (Number(c.acv) || 0) * (c.quantity || 1);
+          }
+          allContents.push({ room: room.name, item: c });
+          const idParts = [c.category, [c.brand, c.model].filter(Boolean).join(' ')].filter(Boolean).join(' \u00b7 ') || 'n/a';
+          const valParts = loss ? ` \u00b7 RCV ${money(c.replacement_cost)} \u00b7 ACV ${money(c.acv)}` : '';
           doc.fontSize(9).fillColor(DARK).text(
-            `${c.description || 'Item'} (${[c.brand, c.model].filter(Boolean).join(' ') || 'n/a'}) · qty ${c.quantity ?? 1} · ${c.disposition || '-'} · RCV ${money(c.replacement_cost)} · ACV ${money(c.acv)}`
+            `${c.description || 'Item'} (${idParts}) \u00b7 qty ${c.quantity ?? 1} \u00b7 ${dispLabel(c.disposition)}${c.packed_out ? ' \u00b7 packed out' : ''}${valParts}`
           );
         });
       }
@@ -301,9 +308,38 @@ async function generateReportPdf(graph, downloadImage) {
   }
 
   // ---- Schedule of Loss total ----
+  // ---- Contents: Non-Salvageable (Total-Loss) Inventory ----
+  const lossList = allContents.filter(({ item }) => item.disposition === 'non_restorable' || item.disposition === 'disposed');
+  if (lossList.length) {
+    doc.addPage();
+    h1('Contents \u2014 Non-Salvageable Inventory');
+    doc.fontSize(8.5).fillColor(GRAY).text('Personal property documented as a total loss, for the Coverage C replacement claim.').moveDown(0.5);
+    const cols = [
+      { t: 'Room', w: 0.16 }, { t: 'Item', w: 0.26 }, { t: 'Make / model', w: 0.20 },
+      { t: 'Qty', w: 0.06 }, { t: 'Age', w: 0.08 }, { t: 'RCV', w: 0.12 }, { t: 'ACV', w: 0.12 }
+    ];
+    const x0 = doc.x, tblW = W;
+    const drawRow = (cells, bold) => {
+      ensure(15); const y = doc.y; let cx = x0;
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8).fillColor(bold ? DARK : DARK);
+      cols.forEach((c, i) => { doc.text(String(cells[i] ?? ''), cx + 2, y, { width: tblW * c.w - 4, ellipsis: true }); cx += tblW * c.w; });
+      doc.font('Helvetica');
+      doc.moveTo(x0, doc.y + 2).lineTo(x0 + tblW, doc.y + 2).strokeColor('#E5EAF0').stroke();
+      doc.moveDown(0.3);
+    };
+    drawRow(cols.map((c) => c.t), true);
+    lossList.forEach(({ room, item }) => {
+      const age = item.age_years != null ? `${item.age_years}y` : (item.year_purchased ? String(item.year_purchased) : '-');
+      drawRow([room || '-', item.description || 'Item', [item.brand, item.model].filter(Boolean).join(' ') || '-', item.quantity ?? 1, age, money(item.replacement_cost), money(item.acv)]);
+    });
+    doc.moveDown(0.4);
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(DARK).text(`Total  \u00b7  ${lossList.length} item${lossList.length === 1 ? '' : 's'}  \u00b7  RCV ${money(solTotalRcv)}  \u00b7  ACV ${money(solTotalAcv)}`).font('Helvetica');
+    doc.moveDown(0.8);
+  }
+
   h1('Schedule of Loss Summary');
-  kv('Total RCV', money(solTotalRcv));
-  kv('Total ACV', money(solTotalAcv));
+  kv('Total RCV (non-salvageable contents)', money(solTotalRcv));
+  kv('Total ACV (non-salvageable contents)', money(solTotalAcv));
 
   // ---- Branding footer ----
   {
