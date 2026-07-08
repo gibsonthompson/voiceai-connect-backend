@@ -449,7 +449,7 @@ async function fetchClaimGraph(claimId) {
   const [{ data: readings }, { data: dryStandards }] = await Promise.all([
     byChamber('resto_readings'), byChamber('resto_dry_standards')
   ]);
-  const { data: signatures } = await supabase.from('resto_signatures').select('*').eq('claim_id', claimId);
+  const { data: signatures } = await supabase.from('resto_claim_signatures').select('*').eq('claim_id', claimId);
   return {
     claim, structures: structures || [], rooms: rooms || [], media: media || [],
     notes: notes || [], contents: contents || [], sketches: sketches || [],
