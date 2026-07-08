@@ -291,6 +291,39 @@ async function generateReportPdf(graph, downloadImage) {
 
         const cReadings = readings.filter((r) => r.chamber_id === ch.id)
           .sort((a, b) => new Date(a.captured_at) - new Date(b.captured_at));
+
+        // ---- Drying analysis (the "dry map") ----
+        const affected = cReadings.filter((r) => r.reading_type === 'psychrometric');
+        const dehu = cReadings.filter((r) => r.reading_type === 'dehu_outlet');
+        const mc = cReadings.filter((r) => r.reading_type === 'material_mc' && r.material_mc != null);
+        const lastOf = (a) => (a.length ? a[a.length - 1] : null);
+        const la = lastOf(affected), ld = lastOf(dehu);
+        const prevA = affected.length >= 2 ? affected[affected.length - 2] : null;
+        if (la || mc.length) {
+          ensure(24);
+          doc.moveDown(0.2).fontSize(8.5).fillColor(DARK).font('Helvetica-Bold').text('Drying status').font('Helvetica');
+          const bits = [];
+          if (la && la.gpp != null) bits.push(`Affected ${la.gpp} GPP`);
+          if (la && prevA && la.gpp != null && prevA.gpp != null) { const t = (la.gpp - prevA.gpp).toFixed(0); bits.push(`trend ${Number(t) >= 0 ? '+' : ''}${t} GPP`); }
+          if (la && ld && la.gpp != null && ld.gpp != null) bits.push(`grain depression ${(la.gpp - ld.gpp).toFixed(0)} GPP`);
+          if (la && la.rh_pct != null) bits.push(`affected RH ${la.rh_pct}%`);
+          if (bits.length) doc.fontSize(8.5).fillColor(GRAY).text('   ' + bits.join('  \u00b7  '));
+          const trend = la && prevA && la.gpp != null && prevA.gpp != null ? la.gpp - prevA.gpp : null;
+          if (trend != null && trend >= -1 && affected.length >= 2)
+            doc.fontSize(8.5).fillColor('#B91C1C').text('   Stalled: GPP not dropping \u2014 check air infiltration, dehumidification capacity, or hidden moisture.');
+
+          const goalFor = (m) => { const x = cStd.find((z) => (z.material || '').toLowerCase() === (m || '').toLowerCase()); return x ? x.goal_value : null; };
+          const locMap = {};
+          mc.forEach((r) => { const k = (r.location_label || 'Point') + '|' + (r.material || ''); (locMap[k] = locMap[k] || []).push(r); });
+          const locs = Object.keys(locMap).map((k) => { const rs = locMap[k]; const l = rs[rs.length - 1]; const goal = goalFor(l.material); return { label: l.location_label || 'Point', material: l.material, val: l.material_mc, goal, atGoal: goal != null && l.material_mc != null ? l.material_mc <= goal : null }; });
+          const withGoal = locs.filter((l) => l.atGoal !== null);
+          const atGoalN = withGoal.filter((l) => l.atGoal).length;
+          if (locs.length) {
+            doc.moveDown(0.15).fontSize(8.5).fillColor(DARK).font('Helvetica-Bold').text('Material moisture vs dry goal').font('Helvetica');
+            locs.forEach((l) => { ensure(11); doc.fontSize(8.5).fillColor(l.atGoal === false ? '#B45309' : DARK).text(`   ${l.label}${l.material ? ' \u00b7 ' + l.material : ''}: ${l.val}${l.goal != null ? ' (goal ' + l.goal + ')' : ''}${l.atGoal === true ? ' \u2014 at goal' : l.atGoal === false ? ' \u2014 above goal' : ''}`); });
+            if (withGoal.length) doc.fontSize(8.5).fillColor(atGoalN === withGoal.length ? '#15803D' : '#B45309').font('Helvetica-Bold').text(`   ${atGoalN === withGoal.length ? 'All monitored points at dry goal' : atGoalN + ' of ' + withGoal.length + ' points at goal'}`).font('Helvetica');
+          }
+        }
         if (cReadings.length) {
           doc.moveDown(0.2).fontSize(8.5).fillColor(GRAY).text('Drying log (date · location · temp/RH · GPP · dew):');
           let lastDay = '';
