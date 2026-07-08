@@ -68,7 +68,7 @@ const MOLD_LABEL = {
 };
 
 async function generateReportPdf(graph, downloadImage) {
-  const { claim, structures, rooms, media, notes, contents, sketches, chambers, readings, dryStandards, moldScans } = graph;
+  const { claim, structures, rooms, media, notes, contents, sketches, chambers, readings, dryStandards, signatures, moldScans } = graph;
   const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
   const bufP = docToBuffer(doc);
   const W = doc.page.width - 100; // content width
@@ -374,6 +374,26 @@ async function generateReportPdf(graph, downloadImage) {
   kv('Total RCV (non-salvageable contents)', money(solTotalRcv));
   kv('Total ACV (non-salvageable contents)', money(solTotalAcv));
 
+  // ---- Authorizations & Signatures ----
+  if (signatures && signatures.length) {
+    doc.addPage();
+    h1('Authorizations & Signatures');
+    const titleFor = (t) => t === 'work_authorization' ? 'Work Authorization & Direction to Pay' : t === 'completion_certificate' ? 'Certificate of Completion & Satisfaction' : t;
+    for (const sig of signatures) {
+      ensure(70);
+      doc.fontSize(10.5).font('Helvetica-Bold').fillColor(DARK).text(titleFor(sig.doc_type)).font('Helvetica');
+      const snap = sig.doc_snapshot || {};
+      if (snap.intro) doc.moveDown(0.15).fontSize(8.5).fillColor(DARK).text(snap.intro);
+      (snap.items || []).forEach((it, i) => { ensure(12); doc.fontSize(8).fillColor(GRAY).text(`${i + 1}. ${it}`); });
+      doc.moveDown(0.3);
+      if (sig.signature_data && sig.signature_data.indexOf('base64,') >= 0) {
+        try { const buf = Buffer.from(sig.signature_data.split('base64,')[1], 'base64'); doc.image(buf, { width: 150 }); } catch (e) { /* skip bad image */ }
+      }
+      doc.fontSize(8.5).fillColor(DARK).font('Helvetica-Bold').text(`Signed by ${sig.signer_name || '-'} on ${new Date(sig.signed_at).toLocaleDateString()}`).font('Helvetica');
+      doc.moveDown(0.8);
+    }
+  }
+
   // ---- Branding footer ----
   {
     const bits = [brandCfg.company_name, brandCfg.phone, brandCfg.email, brandCfg.website, brandCfg.license_number ? ('Lic# ' + brandCfg.license_number) : null].filter(Boolean).join('  ·  ');
@@ -429,11 +449,12 @@ async function fetchClaimGraph(claimId) {
   const [{ data: readings }, { data: dryStandards }] = await Promise.all([
     byChamber('resto_readings'), byChamber('resto_dry_standards')
   ]);
+  const { data: signatures } = await supabase.from('resto_signatures').select('*').eq('claim_id', claimId);
   return {
     claim, structures: structures || [], rooms: rooms || [], media: media || [],
     notes: notes || [], contents: contents || [], sketches: sketches || [],
     chambers: chambers || [], readings: readings || [], dryStandards: dryStandards || [],
-    moldScans: dedupeLatest(moldScans || []), settings
+    signatures: signatures || [], moldScans: dedupeLatest(moldScans || []), settings
   };
 }
 
