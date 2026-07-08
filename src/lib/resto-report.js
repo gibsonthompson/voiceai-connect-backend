@@ -11,6 +11,12 @@ const PDFDocument = require('pdfkit');
 const SVGtoPDF = require('svg-to-pdfkit');
 const { buildMapSvg } = require('./resto-map-svg');
 const { Writable } = require('stream');
+let sharp = null; try { sharp = require('sharp'); } catch (_) { sharp = null; } // optional: shrinks embedded photos
+async function fitImage(buf) {
+  if (!sharp || !buf) return buf;
+  try { return await sharp(buf).rotate().resize(1100, 1100, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 70 }).toBuffer(); }
+  catch (_) { return buf; }
+}
 
 const NAVY = '#0E2A4D';
 const DARK = '#16243B';
@@ -62,14 +68,21 @@ function contrastText(hex) {
   } catch (_e) { return '#ffffff'; }
 }
 
+const EQUIP_FULL = { air_mover: 'Air mover', dehumidifier: 'Dehumidifier', air_scrubber: 'Air scrubber', heater: 'Heater' };
+function equipDays(e) {
+  if (!e.placed_at) return 0;
+  const start = new Date(e.placed_at).getTime();
+  const end = (e.removed_at ? new Date(e.removed_at) : new Date()).getTime();
+  return Math.max(1, Math.round((end - start) / 86400000) + (e.removed_at ? 1 : 0));
+}
 const MOLD_LABEL = {
   mold_likely: 'Mold likely', mold_possible: 'Mold possible',
   mold_unlikely: 'Mold unlikely', inconclusive: 'Inconclusive'
 };
 
 async function generateReportPdf(graph, downloadImage) {
-  const { claim, structures, rooms, media, notes, contents, sketches, chambers, readings, dryStandards, signatures, moldScans } = graph;
-  const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
+  const { claim, structures, rooms, media, notes, contents, sketches, chambers, readings, dryStandards, signatures, equipment, moldScans } = graph;
+  const doc = new PDFDocument({ size: 'LETTER', margin: 50, bufferPages: true });
   const bufP = docToBuffer(doc);
   const W = doc.page.width - 100; // content width
 
@@ -83,6 +96,20 @@ async function generateReportPdf(graph, downloadImage) {
   const brandCfg = rawSettings.report_branding || rawSettings;   // branding stored in report_branding jsonb
   const brand = /^#[0-9a-fA-F]{6}$/.test(brandCfg.primary_color || '') ? brandCfg.primary_color : NAVY;
   const onBrand = contrastText(brand);
+  const toc = [];
+  const currentDisplayPage = () => doc.bufferedPageRange().count; // cover=1, toc=2, body=3+
+  const section = (t) => {
+    ensure(46);
+    toc.push({ title: t, page: currentDisplayPage() });
+    doc.moveDown(0.4);
+    const y = doc.y;
+    doc.save();
+    doc.rect(50, y, W, 24).fill(brand);
+    doc.fillColor(contrastText(brand)).fontSize(12.5).font('Helvetica-Bold').text(t, 56, y + 6.5, { width: W - 12, lineBreak: false });
+    doc.restore();
+    doc.fillColor(DARK).font('Helvetica');
+    doc.y = y + 32;
+  };
   doc.rect(0, 0, doc.page.width, 90).fill(brand);
   if (brandCfg.logo_data_url) {
     try {
@@ -99,23 +126,33 @@ async function generateReportPdf(graph, downloadImage) {
   doc.fillColor(DARK).font('Helvetica');
   doc.y = 110;
 
+  doc.moveDown(0.2);
+  doc.fillColor(NAVY).fontSize(11).font('Helvetica-Bold').text('LOSS SUMMARY');
+  doc.moveTo(50, doc.y + 2).lineTo(50 + W, doc.y + 2).lineWidth(1).strokeColor(brand).stroke();
+  doc.moveDown(0.5).font('Helvetica');
   h1(claim.policyholder_name || 'Claim');
-  kv('Address', claim.address);
+  kv('Property address', claim.address);
   kv('Type of loss', claim.type_of_loss);
-  kv('Category / Class', `${claim.category_of_water ?? '-'} / ${claim.class_of_water ?? '-'}`);
+  kv('Water category / drying class', `Category ${claim.category_of_water ?? '-'} / Class ${claim.class_of_water ?? '-'}`);
   kv('Date of loss', dateOnly(claim.date_of_loss));
-  kv('Carrier / Job #', claim.carrier_identifier);
-  kv('Policy #', claim.policy_number);
   kv('Insurance company', claim.insurance_company);
+  kv('Claim / job number', claim.carrier_identifier);
+  kv('Policy number', claim.policy_number);
   kv('Adjuster', claim.adjuster);
   kv('Project manager', claim.project_manager);
 
+  const _addr = claim.address || '';
+  const _comp = brandCfg.company_name || 'Property Restoration Report';
+  doc.addPage();   // page 2: reserved for the table of contents (filled at the end)
+  doc.addPage();   // page 3: body starts here (running header stamped at the end)
+
   // ---- Per structure ----
   let solTotalRcv = 0, solTotalAcv = 0;
+  const eqTotals = {};   // type -> unit-days, for the claim-level equipment summary
   const allContents = [];   // { room, item } for the claim-level non-salvageable inventory
 
   for (const st of structures) {
-    h1('Structure: ' + st.name);
+    section('Structure: ' + st.name);
     const stRooms = rooms.filter((r) => r.structure_id === st.id);
 
     for (const room of stRooms) {
@@ -134,15 +171,31 @@ async function generateReportPdf(graph, downloadImage) {
       // photos (3 per row, with caption/note under each)
       const photos = rMedia.filter((m) => m.type === 'photo');
       if (photos.length && downloadImage) {
-        const cell = (W - 20) / 3, gap = 10, capH = 24;
+        const cell = (W - 20) / 3, gap = 10, capH = 30;
         let col = 0, rowY = 0;
         for (const p of photos) {
           let buf = null;
-          try { buf = await downloadImage(p.storage_path); } catch (_) { buf = null; }
+          try { buf = await fitImage(await downloadImage(p.storage_path)); } catch (_) { buf = null; }
           if (col === 0) { ensure(cell + capH + 10); rowY = doc.y; }
           const x = 50 + col * (cell + gap);
-          if (buf) { try { doc.image(buf, x, rowY, { width: cell, height: cell, fit: [cell, cell] }); } catch (_) {} }
-          if (p.caption) { doc.fontSize(7).fillColor(GRAY).text(String(p.caption), x, rowY + cell + 2, { width: cell, height: capH, ellipsis: true }); }
+          if (buf) {
+            try { doc.image(buf, x, rowY, { width: cell, height: cell, fit: [cell, cell] }); } catch (_) {}
+            // clickable: link the thumbnail to the full-resolution original (view/download in a browser)
+            try {
+              const { data: su } = await db().storage.from('resto-media').createSignedUrl(p.storage_path, 60 * 60 * 24 * 365);
+              if (su && su.signedUrl) {
+                doc.link(x, rowY, cell, cell, su.signedUrl);
+                doc.save().fillColor('#0E2A4D').rect(x + cell - 15, rowY + cell - 12, 15, 12).fillOpacity(0.65).fill().restore();
+                doc.fillColor('#ffffff').fontSize(8).text('\u2197', x + cell - 12, rowY + cell - 11, { lineBreak: false }).fillColor(DARK);
+              }
+            } catch (_) {}
+          }
+          // timestamp + GPS stamp (proof of when/where the photo was taken)
+          const stampParts = [];
+          if (p.captured_at) { try { stampParts.push(new Date(p.captured_at).toLocaleString(undefined, { month: 'numeric', day: 'numeric', year: '2-digit', hour: 'numeric', minute: '2-digit' })); } catch (_) {} }
+          if (p.lat != null && p.lng != null) stampParts.push(`${Number(p.lat).toFixed(5)}, ${Number(p.lng).toFixed(5)}`);
+          if (stampParts.length) doc.fontSize(6.5).fillColor('#9AA5B1').text(stampParts.join('  \u00b7  '), x, rowY + cell + 2, { width: cell, height: 9, ellipsis: true });
+          if (p.caption) doc.fontSize(7).fillColor(GRAY).text(String(p.caption), x, rowY + cell + 12, { width: cell, height: 16, ellipsis: true });
           col++;
           if (col === 3) { col = 0; doc.y = rowY + cell + capH + gap; }
         }
@@ -188,11 +241,28 @@ async function generateReportPdf(graph, downloadImage) {
         const mm = svg.match(/width="(\d+)" height="(\d+)"/);
         const aspect = mm ? Number(mm[2]) / Number(mm[1]) : 0.6;
         const renderH = W * aspect;
-        ensure(renderH + 28);
-        h2('Moisture Map');
-        const mapY = doc.y;
+        ensure(renderH + 60);
+        doc.moveDown(0.3).fillColor(NAVY).fontSize(12).font('Helvetica-Bold').text('Moisture Map \u2014 ' + (room.name || 'Room'));
+        doc.font('Helvetica');
+        const mapY = doc.y + 2;
         SVGtoPDF(doc, svg, 50, mapY, { width: W });
-        doc.y = mapY + renderH + 10;
+        doc.y = mapY + renderH + 4;
+        // legend (only the symbols actually used stay meaningful, but show the full key)
+        const legend = [
+          ['#7DD3FC', 'Wet area'], ['#29ABE6', 'Air mover'], ['#11B5C6', 'Dehumidifier'],
+          ['#64748B', 'Air scrubber'], ['#1483C2', 'Moisture reading'], ['#F59E0B', 'Flood cut'],
+          ['#8B5CF6', 'Containment'], ['#DC2626', 'Origin of loss']
+        ];
+        doc.fontSize(7.5).font('Helvetica');
+        let lx = 50, ly = doc.y;
+        legend.forEach(([c, lbl]) => {
+          const wItem = doc.widthOfString(lbl) + 16;
+          if (lx + wItem > 50 + W) { lx = 50; ly += 13; }
+          doc.circle(lx + 3, ly + 3.5, 3).fill(c);
+          doc.fillColor(GRAY).text(lbl, lx + 9, ly, { lineBreak: false });
+          lx += wItem + 8;
+        });
+        doc.y = ly + 16; doc.fillColor(DARK).font('Helvetica');
       }
 
       // drying trend: per-visit moisture readings for this room
@@ -336,6 +406,27 @@ async function generateReportPdf(graph, downloadImage) {
             );
           });
         }
+
+        // Equipment usage — the equipment-days billing justification
+        const cEquip = (equipment || []).filter((e) => e.chamber_id === ch.id);
+        if (cEquip.length) {
+          h2('Equipment usage');
+          const cols = [{ t: 'Equipment', w: 0.30 }, { t: 'Qty', w: 0.08 }, { t: 'Placed', w: 0.18 }, { t: 'Removed', w: 0.18 }, { t: 'Days', w: 0.09 }, { t: 'Unit-days', w: 0.17 }];
+          const x0 = doc.x, tblW = W;
+          const row = (cells, bold) => {
+            ensure(14); const y = doc.y; let cx = x0;
+            doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8).fillColor(DARK);
+            cols.forEach((c, i) => { doc.text(String(cells[i] ?? ''), cx + 2, y, { width: tblW * c.w - 4, ellipsis: true }); cx += tblW * c.w; });
+            doc.font('Helvetica'); doc.moveTo(x0, doc.y + 2).lineTo(x0 + tblW, doc.y + 2).strokeColor('#E5EAF0').stroke(); doc.moveDown(0.25);
+          };
+          row(cols.map((c) => c.t), true);
+          cEquip.forEach((e) => {
+            const days = equipDays(e), qty = e.actual_placed || 1;
+            row([EQUIP_FULL[e.type] || e.type, qty, e.placed_at ? dateOnly(e.placed_at) : '-', e.removed_at ? dateOnly(e.removed_at) : 'on site', days, qty * days]);
+            eqTotals[e.type] = (eqTotals[e.type] || 0) + qty * days;
+          });
+          doc.moveDown(0.3);
+        }
       }
     }
   }
@@ -345,7 +436,7 @@ async function generateReportPdf(graph, downloadImage) {
   const lossList = allContents.filter(({ item }) => item.disposition === 'non_restorable' || item.disposition === 'disposed');
   if (lossList.length) {
     doc.addPage();
-    h1('Contents \u2014 Non-Salvageable Inventory');
+    section('Contents \u2014 Non-Salvageable Inventory');
     doc.fontSize(8.5).fillColor(GRAY).text('Personal property documented as a total loss, for the Coverage C replacement claim.').moveDown(0.5);
     const cols = [
       { t: 'Room', w: 0.16 }, { t: 'Item', w: 0.26 }, { t: 'Make / model', w: 0.20 },
@@ -370,14 +461,20 @@ async function generateReportPdf(graph, downloadImage) {
     doc.moveDown(0.8);
   }
 
-  h1('Schedule of Loss Summary');
+  if (Object.keys(eqTotals).length) {
+    section('Equipment Usage Summary');
+    doc.fontSize(8.5).fillColor(GRAY).text('Total equipment-days across all drying chambers, for estimate line-item justification.').moveDown(0.3).fillColor(DARK);
+    Object.keys(eqTotals).forEach((t) => kv(EQUIP_FULL[t] || t, `${eqTotals[t]} unit-days`));
+  }
+
+  section('Schedule of Loss Summary');
   kv('Total RCV (non-salvageable contents)', money(solTotalRcv));
   kv('Total ACV (non-salvageable contents)', money(solTotalAcv));
 
   // ---- Authorizations & Signatures ----
   if (signatures && signatures.length) {
     doc.addPage();
-    h1('Authorizations & Signatures');
+    section('Authorizations & Signatures');
     const titleFor = (t) => t === 'work_authorization' ? 'Work Authorization & Direction to Pay' : t === 'completion_certificate' ? 'Certificate of Completion & Satisfaction' : t;
     for (const sig of signatures) {
       ensure(70);
@@ -406,6 +503,39 @@ async function generateReportPdf(graph, downloadImage) {
     `Generated ${new Date().toLocaleString()}. Timestamps and readings reflect captured field data.`,
     { width: W, align: 'center' }
   );
+
+  // Render the table of contents on the reserved page 2.
+  try {
+    const r0 = doc.bufferedPageRange();
+    doc.switchToPage(r0.start + 1);
+    doc.fillColor(NAVY).fontSize(15).font('Helvetica-Bold').text('Contents', 50, 60);
+    doc.moveTo(50, doc.y + 3).lineTo(50 + W, doc.y + 3).lineWidth(1).strokeColor(brand).stroke();
+    doc.moveDown(0.6).font('Helvetica');
+    toc.forEach((e) => {
+      const y = doc.y;
+      doc.fontSize(10).fillColor(DARK).text(e.title, 50, y, { width: W - 40, lineBreak: false });
+      doc.fontSize(10).fillColor(GRAY).text(String(e.page), 50, y, { width: W, align: 'right', lineBreak: false });
+      doc.moveDown(0.55);
+    });
+  } catch (_e) { /* TOC is best-effort */ }
+
+  // Stamp a running header + footer on every page except the cover (page 0).
+  try {
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      if (i === range.start) continue; // cover keeps its own header band
+      doc.switchToPage(i);
+      doc.save();
+      doc.fontSize(7).font('Helvetica').fillColor(GRAY);
+      doc.text(_comp, 50, 24, { width: W, lineBreak: false });
+      if (_addr) doc.text(_addr, 50, 24, { width: W, align: 'right', lineBreak: false });
+      doc.moveTo(50, 38).lineTo(doc.page.width - 50, 38).lineWidth(0.5).strokeColor('#E5EAF0').stroke();
+      const fy = doc.page.height - 34;
+      if (_addr) doc.text('Claim: ' + _addr, 50, fy, { width: W, lineBreak: false });
+      doc.text('Page ' + (i - range.start + 1), 50, fy, { width: W, align: 'right', lineBreak: false });
+      doc.restore();
+    }
+  } catch (_e) { /* header/footer stamping is best-effort */ }
 
   doc.end();
   return bufP;
@@ -446,15 +576,15 @@ async function fetchClaimGraph(claimId) {
     : { data: [] };
   const chamberIds = (chambers || []).map((c) => c.id);
   const byChamber = (tbl) => (chamberIds.length ? supabase.from(tbl).select('*').in('chamber_id', chamberIds) : Promise.resolve({ data: [] }));
-  const [{ data: readings }, { data: dryStandards }] = await Promise.all([
-    byChamber('resto_readings'), byChamber('resto_dry_standards')
+  const [{ data: readings }, { data: dryStandards }, { data: equipment }] = await Promise.all([
+    byChamber('resto_readings'), byChamber('resto_dry_standards'), byChamber('resto_equipment')
   ]);
   const { data: signatures } = await supabase.from('resto_claim_signatures').select('*').eq('claim_id', claimId);
   return {
     claim, structures: structures || [], rooms: rooms || [], media: media || [],
     notes: notes || [], contents: contents || [], sketches: sketches || [],
     chambers: chambers || [], readings: readings || [], dryStandards: dryStandards || [],
-    signatures: signatures || [], moldScans: dedupeLatest(moldScans || []), settings
+    signatures: signatures || [], equipment: equipment || [], moldScans: dedupeLatest(moldScans || []), settings
   };
 }
 
