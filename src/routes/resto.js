@@ -250,8 +250,40 @@ router.post('/ocr', async (req, res) => {
   }
 });
 
-// POST /api/resto/esx  -> Xactimate ESX export (stub)
-router.post('/esx', async (_req, res) => res.status(501).json({ error: 'not implemented', module: 'esx' }));
+// POST /api/resto/esx  { claimId } -> Xactimate ESX export (SCAFFOLD: geometry +
+// metadata are correct; XML element names are best-guess pending a reference .esx,
+// so the file is not import-ready yet). Stored as a resto_documents 'esx' row.
+router.post('/esx', async (req, res) => {
+  try {
+    const ctx = await authClaim(req, res);
+    if (!ctx) return;
+    const { user, claim } = ctx;
+
+    const { buildEsx } = require('../lib/resto-esx');
+    const downloadImage = async (path) => {
+      const { data } = await supabase.storage.from('resto-media').download(path);
+      return data ? Buffer.from(await data.arrayBuffer()) : null;
+    };
+    const { esx } = await buildEsx(claim.id, downloadImage);
+
+    const path = `${claim.org_id}/${claim.id}/reports/${crypto.randomUUID()}.esx`;
+    const { error: upErr } = await supabase.storage.from('resto-media')
+      .upload(path, esx, { contentType: 'application/octet-stream', upsert: false });
+    if (upErr) { console.error('resto esx upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
+
+    const title = `Xactimate Export (.esx) - ${claim.policyholder_name || 'Claim'}`;
+    const { data: doc } = await supabase.from('resto_documents').insert({
+      org_id: claim.org_id, claim_id: claim.id, type: 'esx',
+      storage_path: path, title, status: 'draft',
+      generated_at: new Date().toISOString(), created_by: user.id
+    }).select('*').single();
+
+    res.json({ ok: true, document: doc });
+  } catch (e) {
+    console.error('resto esx error:', e.message);
+    res.status(500).json({ error: e.message || 'esx generation failed' });
+  }
+});
 
 router.get('/health', (_req, res) => res.json({ ok: true, scope: 'resto' }));
 
