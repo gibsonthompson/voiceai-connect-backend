@@ -38,6 +38,21 @@
 //          (dial the office, brief them privately, then bridge the caller in).
 //          vapi_direct clients are completely unchanged: same native transfer,
 //          same fallback. The switch is the single client.voice_routing flag.
+// UPDATED: 2026-07-08 — UNIFIED HANDOFF: retired the dead call_mode/Fallback
+//          path (it PATCHed the static assistant, which live calls never use).
+//          Transfer-vs-take-a-message is now derived here, from the same
+//          forwarding_mode the client picks on the dashboard forwarding card:
+//            - forwarding_mode 'missed'  → the caller only reached us because
+//              the business line went unanswered, so a transfer would loop back
+//              to that same line. Force take-a-message and tell the model why.
+//            - forwarding_mode 'all'/unset → the AI is the front line; it may
+//              transfer a caller who needs a person to transfer_phone (or, if
+//              unset, the owner's SMS number owner_phone). Explicit
+//              human_handoff='message', a plan with transfer off, a missing
+//              destination, or a destination equal to our own AI number all
+//              downgrade to take-a-message so we never dial a loop.
+//          Mirrors the canAutoBook pattern: one decision computed here, passed
+//          into buildSystemPrompt / buildTools / buildHooks.
 // ============================================================================
 
 const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, TRANSFER_KEYWORDS_BLOCK, VOICES,
@@ -117,6 +132,40 @@ Booking flow:
 9. Read the booking confirmation from the tool response and repeat it to the caller
 
 If no slots are available, offer alternative dates or take their info for a callback.`;
+
+// ============================================================================
+// TAKE-A-MESSAGE BLOCKS
+// Injected when the resolved handoff is 'message' (never during after-hours,
+// where the after-hours block already governs message-taking).
+//
+// TAKE_MESSAGE_BLOCK: forwarding_mode 'all' but no live transfer (owner chose
+// message mode, plan has transfer off, or no safe destination). The AI simply
+// does not connect callers to a person.
+//
+// MISSED_CALL_MESSAGE_BLOCK: forwarding_mode 'missed'. The caller only reached
+// the AI because the business line rang unanswered, so there is no one to
+// transfer to and attempting it would route back to that same line. The model
+// is told this explicitly so it never offers to "connect you."
+// ============================================================================
+const TAKE_MESSAGE_BLOCK = `
+
+# Taking a Message
+This business handles calls by message, not by live transfer. When a caller asks to speak with a person, has an urgent issue, or you cannot fully resolve their need:
+- Do NOT say you will transfer, connect, or put them through to someone.
+- Say: "I can take a detailed message and have the team get back to you as soon as possible."
+- Collect their name, phone number, and the reason for their call.
+- If it sounds urgent, note that and assure them of a prompt callback.
+- Confirm someone will follow up, then wrap up the call.`;
+
+const MISSED_CALL_MESSAGE_BLOCK = `
+
+# Taking a Message (Missed-Call Coverage)
+You are answering because the caller could not reach the business directly. Their call rang through unanswered and rolled over to you, so the person they were trying to reach is not available right now.
+- Do NOT offer to transfer or connect the caller to a person. There is no one to connect them to, and attempting it would route the call back to the same line that just went unanswered.
+- Say: "Thanks for calling. I can take a message and make sure the team gets back to you as soon as possible."
+- Collect their name, phone number, and the reason for their call.
+- If it sounds urgent, note that clearly and assure them of a prompt callback.
+- Take the message and wrap up.`;
 
 // ============================================================================
 // TONE BLOCK — Overrides default tone based on client ai_tone setting
@@ -555,7 +604,7 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
 // After selecting the base, dynamic per-call blocks are appended:
 //   language, tone, booking mode, HIPAA, services, staff, service areas,
 //   priority rules, spam detection, transfer keywords, after-hours,
-//   transfer fallback, caller context
+//   transfer/take-a-message behavior, caller context
 //
 // Blocks that may already exist in the cached prompt (spam detection,
 // transfer keywords, language) use includes-checks to avoid duplication.
@@ -564,8 +613,13 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
 // the client's Google Calendar is connected. When true, the date-safe
 // APPOINTMENT BOOKING block is injected (the matching tools are attached in
 // buildTools). When false, the collect_request / disabled prompt blocks govern.
+//
+// handoff (added 2026-07-08): 'transfer' or 'message', resolved in
+// buildDynamicAssistantConfig. 'transfer' keeps the whisper/native transfer
+// instructions and transfer keywords. 'message' suppresses both and injects a
+// take-a-message block (missed-call variant when forwarding_mode is 'missed').
 // ============================================================================
-async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook = false) {
+async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook = false, handoff = 'transfer') {
   const hipaaMode = client.hipaa_mode === true;
   const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
   const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
@@ -685,8 +739,9 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     systemPrompt += SPAM_DETECTION_BLOCK;
   }
 
-  // Transfer keywords — check before appending (may already be in cached prompt)
-  if (toolConfig.transferCall && !systemPrompt.includes('# Transfer Keywords')) {
+  // Transfer keywords — only when we will actually transfer. In take-a-message
+  // mode we must NOT tell the model to transfer on these keywords.
+  if (toolConfig.transferCall && handoff === 'transfer' && !systemPrompt.includes('# Transfer Keywords')) {
     systemPrompt += TRANSFER_KEYWORDS_BLOCK;
   }
 
@@ -695,15 +750,22 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     systemPrompt += buildAfterHoursBlock(client, toolConfig);
   }
 
-  // Transfer behavior (always dynamic — never in cached prompt).
-  // telnyx_cc clients use the whisper-transfer block (backend owns the bridge);
-  // everyone else uses the generic "you'll still be on the line" fallback.
-  if (toolConfig.transferCall && !isAfterHours && isWhisperTransfer) {
+  // Transfer vs take-a-message behavior (always dynamic — never in cached prompt).
+  //  - handoff 'transfer': telnyx_cc clients use the whisper-transfer block
+  //    (backend owns the bridge); everyone else uses the "you'll still be on the
+  //    line" fallback block.
+  //  - handoff 'message': the AI does not transfer at all. Inject the
+  //    take-a-message block, with the missed-call variant when the client is in
+  //    missed-call coverage. Skipped during after-hours, where the after-hours
+  //    block already governs message-taking.
+  if (handoff === 'transfer' && toolConfig.transferCall && !isAfterHours && isWhisperTransfer) {
     if (!systemPrompt.includes('# Connecting a Caller to a Person')) {
       systemPrompt += WHISPER_TRANSFER_BLOCK;
     }
-  } else if (toolConfig.transferFallbackToMessage && toolConfig.transferCall) {
+  } else if (handoff === 'transfer' && toolConfig.transferFallbackToMessage && toolConfig.transferCall) {
     systemPrompt += buildTransferFallbackBlock();
+  } else if (handoff === 'message' && !isAfterHours) {
+    systemPrompt += (client.forwarding_mode === 'missed') ? MISSED_CALL_MESSAGE_BLOCK : TAKE_MESSAGE_BLOCK;
   }
 
   // Caller recognition — disabled in HIPAA mode (always dynamic)
@@ -724,19 +786,22 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
 // not use — so the AI could never actually book on a call. Attaching them here
 // puts them on the transient assistant that actually runs the call.
 //
-// TRANSFER (updated 2026-06-30):
+// TRANSFER (updated 2026-06-30, gated 2026-07-08):
+//  - A transfer tool is attached ONLY when handoff === 'transfer'. In
+//    take-a-message mode (missed-call coverage, plan transfer off, or no safe
+//    destination) no transfer tool is attached, so the model cannot dial anyone.
 //  - telnyx_cc clients get the request_human_transfer FUNCTION tool, which
 //    calls our backend. The backend owns the Telnyx legs and does the whisper
 //    warm transfer. No phone number is put on the tool; the backend resolves
 //    transfer_phone || owner_phone itself.
-//  - everyone else gets the native VAPI transferCall tool to owner_phone,
-//    exactly as before.
+//  - everyone else gets the native VAPI transferCall tool to transferTo
+//    (transfer_phone || owner_phone, resolved and safety-checked upstream).
 // ============================================================================
-function buildTools(client, toolConfig, isAfterHours, canAutoBook = false) {
+function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, handoff = 'transfer', transferTo = null) {
   const tools = [];
   const isWhisperTransfer = client.voice_routing === 'telnyx_cc';
 
-  if (toolConfig.transferCall && !isAfterHours) {
+  if (toolConfig.transferCall && !isAfterHours && handoff === 'transfer') {
     if (isWhisperTransfer) {
       // Whisper warm transfer via our backend (Telnyx Call Control).
       tools.push({
@@ -758,8 +823,10 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false) {
         server: { url: `${BACKEND_URL}/api/voice/request-transfer`, timeoutSeconds: 25 },
       });
     } else {
-      // Native VAPI transfer (vapi_direct clients) — unchanged.
-      const ownerPhone = client.owner_phone;
+      // Native VAPI transfer (vapi_direct clients). Destination is the resolved,
+      // safety-checked transferTo (transfer_phone || owner_phone), never the
+      // client's own AI number.
+      const ownerPhone = transferTo || client.owner_phone;
       if (ownerPhone) {
         const formattedPhone = isValidE164(ownerPhone) ? ownerPhone : formatPhoneE164(ownerPhone);
         if (formattedPhone && isValidE164(formattedPhone)) {
@@ -772,7 +839,7 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false) {
             destinations: [{
               type: 'number',
               number: formattedPhone,
-              description: 'Transfer to business owner',
+              description: 'Transfer to business team',
               message: 'One moment, let me connect you.'
             }]
           });
@@ -854,8 +921,12 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false) {
 // vapi_direct clients. telnyx_cc clients rely on the request_human_transfer
 // tool and the backend whisper flow instead; on a pipeline error they simply
 // fall through to the AI taking a message.
+//
+// Gated 2026-07-08: the pipeline-error transfer only attaches when handoff ===
+// 'transfer'. In take-a-message mode there is nowhere safe to send the caller,
+// so a pipeline error just ends the call rather than dialing a loop.
 // ============================================================================
-function buildHooks(client, toolConfig, isAfterHours) {
+function buildHooks(client, toolConfig, isAfterHours, handoff = 'transfer', transferTo = null) {
   const hooks = [];
   const isWhisperTransfer = client.voice_routing === 'telnyx_cc';
 
@@ -871,8 +942,8 @@ function buildHooks(client, toolConfig, isAfterHours) {
     });
   }
 
-  if (toolConfig.transferCall && !isAfterHours && !isWhisperTransfer) {
-    const ownerPhone = client.owner_phone;
+  if (toolConfig.transferCall && !isAfterHours && !isWhisperTransfer && handoff === 'transfer') {
+    const ownerPhone = transferTo || client.owner_phone;
     if (ownerPhone) {
       const formattedPhone = isValidE164(ownerPhone) ? ownerPhone : formatPhoneE164(ownerPhone);
       if (formattedPhone && isValidE164(formattedPhone)) {
@@ -920,6 +991,57 @@ function enforceAgencyPlanFeatures(toolConfig, client, agency) {
 }
 
 // ============================================================================
+// RESOLVE HANDOFF — transfer vs take-a-message, and the safe destination
+//
+// One decision, derived from the forwarding mode the client set on the
+// dashboard forwarding card plus an optional explicit choice. Returns
+// { handoff: 'transfer'|'message', transferTo: string|null }.
+//
+//   - forwarding_mode 'missed'  → the caller only reached us because the
+//     business line went unanswered, so transferring back would loop. Force
+//     take-a-message.
+//   - forwarding_mode 'all'/unset → the AI is the front line; it may transfer a
+//     caller who needs a person to transfer_phone (or, if unset, owner_phone,
+//     the number that also receives SMS alerts). Explicit
+//     human_handoff === 'message', a plan with call transfer off, a missing
+//     destination, or a destination that equals our own AI number all downgrade
+//     to take-a-message so we never dial a loop.
+//
+// telnyx_cc whisper clients resolve their own destination in the backend
+// (transfer_phone || owner_phone), so the native-number safety check is skipped
+// for them; transferTo stays null and buildTools attaches the whisper tool.
+// ============================================================================
+function resolveHandoff(client, toolConfig) {
+  const forwardingMode = client.forwarding_mode === 'missed' ? 'missed' : 'all';
+  const isWhisper = client.voice_routing === 'telnyx_cc';
+
+  let handoff = 'transfer';
+  if (!toolConfig.transferCall) handoff = 'message';
+  else if (forwardingMode === 'missed') handoff = 'message';
+  else if (client.human_handoff === 'message') handoff = 'message';
+
+  let transferTo = null;
+  if (handoff === 'transfer' && !isWhisper) {
+    const raw = client.transfer_phone || client.owner_phone || null;
+    const normalized = raw ? (isValidE164(raw) ? raw : formatPhoneE164(raw)) : null;
+    const aiNumber = client.vapi_phone_number
+      ? (isValidE164(client.vapi_phone_number) ? client.vapi_phone_number : formatPhoneE164(client.vapi_phone_number))
+      : null;
+
+    if (!normalized || !isValidE164(normalized) || (aiNumber && normalized === aiNumber)) {
+      // No safe destination — fall back to taking a message so we never dial a
+      // number that loops back into the AI.
+      handoff = 'message';
+      console.log('📮 Transfer requested but no safe destination — taking a message instead');
+    } else {
+      transferTo = normalized;
+    }
+  }
+
+  return { handoff, transferTo, forwardingMode };
+}
+
+// ============================================================================
 // MAIN: Build complete VAPI assistant config
 // ============================================================================
 async function buildDynamicAssistantConfig(client, agency, callerContext) {
@@ -956,6 +1078,19 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     console.log('📅 Auto-book active (calendar connected) — booking tools attached');
   }
 
+  // ── Human-handoff gating (added 2026-07-08) ─────────────────────────
+  // Transfer vs take-a-message, plus the safe destination. Replaces the dead
+  // call_mode/Fallback path. Computed once here and passed into the prompt,
+  // tools, and hooks builders (mirrors canAutoBook).
+  const { handoff, transferTo, forwardingMode } = resolveHandoff(client, toolConfig);
+  if (forwardingMode === 'missed') {
+    console.log('📮 Missed-call coverage — AI will take a message, not transfer');
+  } else if (handoff === 'transfer') {
+    console.log(`📞 Live transfer enabled → ${client.voice_routing === 'telnyx_cc' ? 'whisper (backend-resolved)' : transferTo}`);
+  } else {
+    console.log('📮 Take-a-message mode (no live transfer)');
+  }
+
   let voiceId = config.voiceId;
   let temperature = config.temperature;
   let modelId = 'gpt-4o-mini';
@@ -990,10 +1125,10 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   // here we simply honor whatever value was saved.)
   if (client.voice_id) voiceId = client.voice_id;
 
-  const systemPrompt = await buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook);
+  const systemPrompt = await buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook, handoff);
   const firstMessage = buildFirstMessage(client.business_name, industryKey, callerContext, isAfterHours, toolConfig, hipaaMode, client.greeting_message);
-  const tools = buildTools(client, toolConfig, isAfterHours, canAutoBook);
-  const hooks = buildHooks(client, toolConfig, isAfterHours);
+  const tools = buildTools(client, toolConfig, isAfterHours, canAutoBook, handoff, transferTo);
+  const hooks = buildHooks(client, toolConfig, isAfterHours, handoff, transferTo);
 
   // KB query tool: always attach when present. (Previously gated on
   // booking_mode !== 'disabled', which incorrectly stripped the knowledge base
@@ -1050,8 +1185,11 @@ module.exports = {
   buildHooks,
   checkBusinessHours,
   enforceAgencyPlanFeatures,
+  resolveHandoff,
   DEFAULT_TOOL_CONFIG,
   LANGUAGE_DETECTION_BLOCK,
   APPOINTMENT_BOOKING_BLOCK,
   WHISPER_TRANSFER_BLOCK,
+  TAKE_MESSAGE_BLOCK,
+  MISSED_CALL_MESSAGE_BLOCK,
 };

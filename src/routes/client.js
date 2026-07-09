@@ -19,6 +19,14 @@
 // UPDATED: 2026-06-17 — Added PUT /:id/forwarding (self-scoped) so the client
 //          dashboard can persist that call forwarding was set up. Drives the
 //          activation card and the forwarding_confirmed_at metric.
+// UPDATED: 2026-07-08 — PUT /:id/forwarding now also persists the human-handoff
+//          decision that the dynamic config builder reads: transfer_phone (the
+//          number the AI transfers a caller to when they need a person, custom
+//          override; null clears and falls back to owner_phone) and
+//          human_handoff ('transfer' | 'message'). This lives with the
+//          forwarding decision on purpose — one endpoint owns the whole "how
+//          calls reach you and what happens when a caller needs a person"
+//          choice, replacing the retired call_mode/Fallback path.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -38,6 +46,17 @@ function decodeToken(req) {
     if (!token) return null;
     return jwt.verify(token, JWT_SECRET);
   } catch { return null; }
+}
+
+// Normalize a US phone to E.164 (+1XXXXXXXXXX), or return null if it isn't a
+// usable 10/11-digit number. Mirrors formatPhoneE164 in lib/vapi.js so the
+// stored transfer_phone matches what the config builder validates against.
+function toE164OrNull(phone) {
+  if (!phone) return null;
+  const digits = String(phone).replace(/\D/g, '');
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  return null;
 }
 
 // ============================================================================
@@ -100,7 +119,7 @@ router.put('/:id/settings', requirePermissionIfAuthed('settings'), async (req, r
 });
 
 // ============================================================================
-// PUT /api/client/:id/forwarding - Persist call forwarding setup state
+// PUT /api/client/:id/forwarding - Persist call forwarding + human-handoff setup
 // Self-scoped: identity comes from the JWT (never the URL param), so a caller
 // can only ever flip their OWN client. This is a dashboard activation action,
 // not a tab, so it is intentionally not Page-Access gated. Owners and staff on
@@ -110,10 +129,20 @@ router.put('/:id/settings', requirePermissionIfAuthed('settings'), async (req, r
 //   forwarding_confirmed : boolean   (also stamps/clears forwarding_confirmed_at)
 //   forwarding_carrier   : 'verizon' | 'gsm' | 'other' | null  (null clears)
 //   forwarding_mode      : 'all' | 'missed'
+//   human_handoff        : 'transfer' | 'message'
+//   transfer_phone       : string (normalized to E.164) | null (null clears →
+//                          the builder falls back to owner_phone)
 // Partial-update safe: only the fields present in the body are written, so the
-// card can persist the carrier/mode pick on selection and the confirm flag
-// separately without one clobbering the other. Backward compatible with the
-// old body of just { forwarding_confirmed }.
+// card can persist each pick independently without one clobbering the other.
+// Backward compatible with the old body of just { forwarding_confirmed }.
+//
+// The config builder (lib/assistant-config-builder.js resolveHandoff) reads
+// forwarding_mode + human_handoff + transfer_phone at call time:
+//   - forwarding_mode 'missed'  → always take a message (transferring back to
+//     the line that just missed the call would loop).
+//   - forwarding_mode 'all'     → transfer to transfer_phone || owner_phone,
+//     unless human_handoff is 'message' or no safe number exists, in which case
+//     it takes a message. It never dials the client's own AI number.
 // ============================================================================
 router.put('/:id/forwarding', async (req, res) => {
   try {
@@ -148,6 +177,38 @@ router.put('/:id/forwarding', async (req, res) => {
       }
     }
 
+    // Human-handoff decision (2026-07-08). 'transfer' = the AI connects callers
+    // who need a person to a live number; 'message' = the AI takes a message
+    // and never transfers. In missed-call mode the builder forces 'message'
+    // regardless of this value, so setting it here only matters in answer-every
+    // call mode.
+    if (req.body.human_handoff !== undefined) {
+      const h = req.body.human_handoff;
+      if (['transfer', 'message'].includes(h)) {
+        updates.human_handoff = h;
+      } else {
+        return res.status(400).json({ success: false, error: 'Invalid human_handoff' });
+      }
+    }
+
+    // Custom transfer destination. Empty string / null clears it, which makes
+    // the builder fall back to owner_phone. A provided value must be a usable
+    // US number; we store it E.164-normalized so it matches what the builder
+    // validates (and so it can be compared against the AI number to block a
+    // loop).
+    if (req.body.transfer_phone !== undefined) {
+      const raw = req.body.transfer_phone;
+      if (raw === null || raw === '') {
+        updates.transfer_phone = null;
+      } else {
+        const normalized = toE164OrNull(raw);
+        if (!normalized) {
+          return res.status(400).json({ success: false, error: 'Invalid transfer_phone. Enter a 10-digit US number.' });
+        }
+        updates.transfer_phone = normalized;
+      }
+    }
+
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ success: false, error: 'No valid fields to update' });
     }
@@ -156,7 +217,7 @@ router.put('/:id/forwarding', async (req, res) => {
       .from('clients')
       .update(updates)
       .eq('id', id)
-      .select('id, forwarding_confirmed, forwarding_confirmed_at, forwarding_carrier, forwarding_mode')
+      .select('id, forwarding_confirmed, forwarding_confirmed_at, forwarding_carrier, forwarding_mode, human_handoff, transfer_phone')
       .single();
     if (error) return res.status(400).json({ success: false, error: error.message });
 

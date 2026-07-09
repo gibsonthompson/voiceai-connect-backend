@@ -95,6 +95,7 @@ async function generateReportPdf(graph, downloadImage) {
   const rawSettings = graph.settings || {};
   const brandCfg = rawSettings.report_branding || rawSettings;   // branding stored in report_branding jsonb
   const brand = /^#[0-9a-fA-F]{6}$/.test(brandCfg.primary_color || '') ? brandCfg.primary_color : NAVY;
+  const stampGps = (rawSettings.stamp_gps !== false);   // GPS stamping honors the org toggle (default on)
   const onBrand = contrastText(brand);
   const toc = [];
   const currentDisplayPage = () => doc.bufferedPageRange().count; // cover=1, toc=2, body=3+
@@ -193,7 +194,7 @@ async function generateReportPdf(graph, downloadImage) {
           // timestamp + GPS stamp (proof of when/where the photo was taken)
           const stampParts = [];
           if (p.captured_at) { try { stampParts.push(new Date(p.captured_at).toLocaleString(undefined, { month: 'numeric', day: 'numeric', year: '2-digit', hour: 'numeric', minute: '2-digit' })); } catch (_) {} }
-          if (p.lat != null && p.lng != null) stampParts.push(`${Number(p.lat).toFixed(5)}, ${Number(p.lng).toFixed(5)}`);
+          if (stampGps && p.lat != null && p.lng != null) stampParts.push(`${Number(p.lat).toFixed(5)}, ${Number(p.lng).toFixed(5)}`);
           if (stampParts.length) doc.fontSize(6.5).fillColor('#9AA5B1').text(stampParts.join('  \u00b7  '), x, rowY + cell + 2, { width: cell, height: 9, ellipsis: true });
           if (p.caption) doc.fontSize(7).fillColor(GRAY).text(String(p.caption), x, rowY + cell + 12, { width: cell, height: 16, ellipsis: true });
           col++;
