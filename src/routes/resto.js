@@ -131,20 +131,22 @@ router.post('/share-link', async (req, res) => {
 // GET /api/resto/public/:token -> serves the claim's carrier-ready report PDF
 // publicly (no login). The token is an unguessable secret; anyone with the link
 // can view the report. Generated fresh so the recipient always sees the latest.
-router.get('/public/:token', async (req, res) => {
+router.get('/public/:token/:name?', async (req, res) => {
   try {
     const { token } = req.params;
     if (!token) return res.status(400).send('missing token');
 
-    const { data: claim } = await supabase.from('resto_claims').select('id').eq('public_token', token).maybeSingle();
+    const { data: claim } = await supabase.from('resto_claims').select('id, policyholder_name').eq('public_token', token).maybeSingle();
     if (!claim) return res.status(404).send('report not found');
 
     const { buildClaimReport } = require('../lib/resto-report');
     const { pdf } = await buildClaimReport(claim.id);
 
+    const cleanName = (claim.policyholder_name || 'Report').replace(/[^\w]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    const fname = `Restoration-Report-${cleanName}.pdf`;
     const asDownload = req.query.download === '1' || req.query.download === 'true';
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `${asDownload ? 'attachment' : 'inline'}; filename="restoration-report.pdf"`);
+    res.setHeader('Content-Disposition', `${asDownload ? 'attachment' : 'inline'}; filename="${fname}"`);
     res.setHeader('Cache-Control', 'no-store');
     res.send(pdf);
   } catch (e) {
