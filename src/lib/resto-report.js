@@ -152,11 +152,29 @@ async function generateReportPdf(graph, downloadImage) {
   const eqTotals = {};   // type -> unit-days, for the claim-level equipment summary
   const allContents = [];   // { room, item } for the claim-level non-salvageable inventory
 
-  for (const st of structures) {
-    section('Structure: ' + st.name);
-    const stRooms = rooms.filter((r) => r.structure_id === st.id);
+  const sketchHasContent = (s) => {
+    const cj = s.canvas_json || {};
+    return (cj.wetAreas && cj.wetAreas.length) || (cj.moisturePoints && cj.moisturePoints.length) ||
+           (cj.equipment && cj.equipment.length) || cj.roomShape || (cj.walls && cj.walls.length) ||
+           (cj.vertices && cj.vertices.length) || (cj.lines && cj.lines.length);
+  };
+  const roomHasContent = (room) => {
+    const rMedia = media.filter((m) => m.room_id === room.id);
+    const rSketches = sketches.filter((s) => s.room_id === room.id);
+    return notes.some((n) => n.room_id === room.id) ||
+           rMedia.some((m) => m.type === 'photo') ||
+           contents.some((c) => c.room_id === room.id) ||
+           (moldScans || []).some((sc) => rMedia.some((m) => m.id === sc.media_id)) ||
+           rSketches.some(sketchHasContent);
+  };
 
-    for (const room of stRooms) {
+  for (const st of structures) {
+    const stRooms = rooms.filter((r) => r.structure_id === st.id);
+    const contentRooms = stRooms.filter(roomHasContent);
+    if (!contentRooms.length) continue;   // skip structures with no documented rooms (no blank pages)
+    section('Structure: ' + st.name);
+
+    for (const room of contentRooms) {
       h2('Room: ' + room.name);
       const rNotes = notes.filter((n) => n.room_id === room.id);
       const rMedia = media.filter((m) => m.room_id === room.id);
@@ -236,8 +254,8 @@ async function generateReportPdf(graph, downloadImage) {
         });
       }
 
-      // moisture maps — embed the single-source SVG (identical to the app)
-      for (const s of rSketches) {
+      // moisture maps — only sketches that actually contain data (skip empty grids)
+      for (const s of rSketches.filter(sketchHasContent)) {
         const svg = buildMapSvg(s.canvas_json || {}, { width: 760, draw: 520 });
         const mm = svg.match(/width="(\d+)" height="(\d+)"/);
         const aspect = mm ? Number(mm[2]) / Number(mm[1]) : 0.6;
@@ -526,6 +544,7 @@ async function generateReportPdf(graph, downloadImage) {
     for (let i = range.start; i < range.start + range.count; i++) {
       if (i === range.start) continue; // cover keeps its own header band
       doc.switchToPage(i);
+      doc.page.margins.bottom = 0;  // footer sits below the normal margin; without this pdfkit appends a blank page per draw
       doc.save();
       doc.fontSize(7).font('Helvetica').fillColor(GRAY);
       doc.text(_comp, 50, 24, { width: W, lineBreak: false });

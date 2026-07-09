@@ -77,8 +77,8 @@ function generateDryingLogPdf(graph) {
   kv('Total Dehumidifiers on Job:', totalDehus || dehus.length);
 
   // equipment summary table
-  doc.moveDown(0.8); ensure(80);
-  doc.font('Helvetica-Bold').fontSize(11).fillColor(NAVY).text('Equipment Summary');
+  doc.moveDown(0.8); ensure(80); doc.x = 46;
+  doc.font('Helvetica-Bold').fontSize(11).fillColor(NAVY).text('Equipment Summary', 46, doc.y, { width: W });
   doc.moveDown(0.3);
   const amTotal = equipment.filter((e) => e.type === 'air_mover').reduce((s, e) => s + (e.actual_placed || 1), 0);
   const asTotal = equipment.filter((e) => e.type === 'air_scrubber').reduce((s, e) => s + (e.actual_placed || 1), 0);
@@ -104,8 +104,8 @@ function generateDryingLogPdf(graph) {
   });
 
   // instructions
-  doc.moveDown(1); ensure(120);
-  doc.font('Helvetica-Bold').fontSize(11).fillColor(NAVY).text('Instructions for Technicians');
+  doc.moveDown(1); ensure(120); doc.x = 46;
+  doc.font('Helvetica-Bold').fontSize(11).fillColor(NAVY).text('Instructions for Technicians', 46, doc.y, { width: W });
   doc.moveDown(0.3).font('Helvetica').fontSize(9).fillColor(DARK);
   [
     'Each chamber has its own dedicated page (Chambers 1 to N).',
@@ -115,7 +115,7 @@ function generateDryingLogPdf(graph) {
     'Note any equipment changes, issues, or observations in the Notes column.',
     'Each daily entry is timestamped automatically when captured in the field.',
     'At the end of drying, the supervisor signs off on each chamber page.'
-  ].forEach((t, i) => { ensure(13); doc.text(`${i + 1}.  ${t}`, { width: W }); });
+  ].forEach((t, i) => { ensure(13); doc.text(`${i + 1}.  ${t}`, 46, doc.y, { width: W }); });
 
   doc.moveDown(1.2); ensure(20);
   const yy = doc.y;
