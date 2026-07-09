@@ -96,6 +96,53 @@ router.post('/drying-log', async (req, res) => {
   }
 });
 
+// POST /api/resto/share-link  { claimId } -> mints (or returns) the claim's
+// public token. The Share page builds /api/resto/public/{token} from this.
+router.post('/share-link', async (req, res) => {
+  try {
+    const ctx = await authClaim(req, res);
+    if (!ctx) return;
+    const { claim } = ctx;
+
+    const { data: row } = await supabase.from('resto_claims').select('public_token').eq('id', claim.id).single();
+    let token = row && row.public_token;
+    if (!token) {
+      token = crypto.randomBytes(24).toString('hex');
+      const { error } = await supabase.from('resto_claims').update({ public_token: token }).eq('id', claim.id);
+      if (error) { console.error('resto share-link update failed:', error.message); return res.status(500).json({ error: 'share link failed' }); }
+    }
+    res.json({ ok: true, token });
+  } catch (e) {
+    console.error('resto share-link error:', e.message);
+    res.status(500).json({ error: 'share link failed' });
+  }
+});
+
+// GET /api/resto/public/:token -> serves the claim's carrier-ready report PDF
+// publicly (no login). The token is an unguessable secret; anyone with the link
+// can view the report. Generated fresh so the recipient always sees the latest.
+router.get('/public/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+    if (!token) return res.status(400).send('missing token');
+
+    const { data: claim } = await supabase.from('resto_claims').select('id').eq('public_token', token).maybeSingle();
+    if (!claim) return res.status(404).send('report not found');
+
+    const { buildClaimReport } = require('../lib/resto-report');
+    const { pdf } = await buildClaimReport(claim.id);
+
+    const asDownload = req.query.download === '1' || req.query.download === 'true';
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `${asDownload ? 'attachment' : 'inline'}; filename="restoration-report.pdf"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(pdf);
+  } catch (e) {
+    console.error('resto public error:', e.message);
+    res.status(500).send('report unavailable');
+  }
+});
+
 // POST /api/resto/mold-scan  { claimId, mediaId } -> Claude-vision mold screening
 // of one photo. Records a resto_mold_scans row and returns it.
 router.post('/mold-scan', async (req, res) => {
