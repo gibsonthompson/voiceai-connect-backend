@@ -51,12 +51,17 @@ router.post('/report', async (req, res) => {
       .upload(path, pdf, { contentType: 'application/pdf', upsert: false });
     if (upErr) { console.error('resto report upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
 
-    const title = `Full Report - ${claim.policyholder_name || 'Claim'} - ${new Date().toLocaleDateString()}`;
+    const title = `Full Report - ${claim.policyholder_name || 'Claim'}`;
     const { data: doc } = await supabase.from('resto_documents').insert({
       org_id: claim.org_id, claim_id: claim.id, type: 'full_export',
       storage_path: path, title, status: 'final',
       generated_at: new Date().toISOString(), created_by: user.id
     }).select('*').single();
+
+    await supabase.from('resto_job_events').insert({
+      org_id: claim.org_id, claim_id: claim.id, kind: 'report',
+      message: 'Full report generated', meta: {}
+    }).then(() => {}, () => {}); // best-effort activity log
 
     res.json({ ok: true, document: doc });
   } catch (e) {
@@ -82,12 +87,17 @@ router.post('/drying-log', async (req, res) => {
       .upload(path, pdf, { contentType: 'application/pdf', upsert: false });
     if (upErr) { console.error('resto drying-log upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
 
-    const title = `Daily Drying Log - ${claim.policyholder_name || 'Claim'} - ${new Date().toLocaleDateString()}`;
+    const title = `Daily Drying Log - ${claim.policyholder_name || 'Claim'}`;
     const { data: doc } = await supabase.from('resto_documents').insert({
       org_id: claim.org_id, claim_id: claim.id, type: 'drying_report',
       storage_path: path, title, status: 'final',
       generated_at: new Date().toISOString(), created_by: user.id
     }).select('*').single();
+
+    await supabase.from('resto_job_events').insert({
+      org_id: claim.org_id, claim_id: claim.id, kind: 'report',
+      message: 'Daily drying log generated', meta: {}
+    }).then(() => {}, () => {}); // best-effort activity log
 
     res.json({ ok: true, document: doc });
   } catch (e) {
