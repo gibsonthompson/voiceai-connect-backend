@@ -155,6 +155,42 @@ router.get('/public/:token/:name?', async (req, res) => {
   }
 });
 
+// GET /api/resto/document/:id/:name? — streams a stored report PDF from OUR domain
+// (via the Vercel /api proxy) with a clean filename, so the Supabase storage host
+// and its random object name are never exposed when viewing/sharing. Authed with
+// the session token in ?t= because the in-app PDF viewer and download anchors
+// can't send an Authorization header.
+router.get('/document/:id/:name?', async (req, res) => {
+  try {
+    const token = req.query.t;
+    if (!token) return res.status(401).send('unauthorized');
+    const { data: { user } = {} } = await supabase.auth.getUser(token);
+    if (!user) return res.status(401).send('unauthorized');
+
+    const { data: doc } = await supabase.from('resto_documents')
+      .select('org_id, storage_path, title').eq('id', req.params.id).maybeSingle();
+    if (!doc || !doc.storage_path) return res.status(404).send('not found');
+
+    const { data: member } = await supabase.from('resto_org_members')
+      .select('role').eq('org_id', doc.org_id).eq('user_id', user.id).maybeSingle();
+    if (!member) return res.status(403).send('forbidden');
+
+    const { data: file, error } = await supabase.storage.from('resto-media').download(doc.storage_path);
+    if (error || !file) return res.status(404).send('file not found');
+    const buf = Buffer.from(await file.arrayBuffer());
+
+    const clean = (doc.title || 'Report').replace(/[^\w]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    const asDownload = req.query.download === '1' || req.query.download === 'true';
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `${asDownload ? 'attachment' : 'inline'}; filename="${clean}.pdf"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(buf);
+  } catch (e) {
+    console.error('resto document error:', e.message);
+    res.status(500).send('unavailable');
+  }
+});
+
 // POST /api/resto/mold-scan  { claimId, mediaId } -> Claude-vision mold screening
 // of one photo. Records a resto_mold_scans row and returns it.
 router.post('/mold-scan', async (req, res) => {
