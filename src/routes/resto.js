@@ -1,8 +1,8 @@
 // ============================================================================
 // RESTORATION PLATFORM ROUTES  (mounted at /api/resto)
 // Lives in voiceai-connect-backend/src/routes/. Reuses the existing Supabase
-// service client and CORS. /report, /mold-scan, /ocr, /scope are implemented;
-// esx remains a stub.
+// service client and CORS. /report, /drying-log, /mold-scan, /ocr, /scope are
+// implemented; esx remains a stub.
 // ============================================================================
 
 const express = require('express');
@@ -62,6 +62,37 @@ router.post('/report', async (req, res) => {
   } catch (e) {
     console.error('resto report error:', e.message);
     res.status(500).json({ error: 'report generation failed' });
+  }
+});
+
+// POST /api/resto/drying-log  { claimId } -> generates the Daily Drying Log /
+// Moisture Log PDF (cover + one page per chamber) from Hydro data, stores it,
+// records a resto_documents row, returns the document.
+router.post('/drying-log', async (req, res) => {
+  try {
+    const ctx = await authClaim(req, res);
+    if (!ctx) return;
+    const { user, claim } = ctx;
+
+    const { buildDryingLog } = require('../lib/resto-drying-log');
+    const { pdf } = await buildDryingLog(claim.id);
+
+    const path = `${claim.org_id}/${claim.id}/reports/${crypto.randomUUID()}.pdf`;
+    const { error: upErr } = await supabase.storage.from('resto-media')
+      .upload(path, pdf, { contentType: 'application/pdf', upsert: false });
+    if (upErr) { console.error('resto drying-log upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
+
+    const title = `Daily Drying Log - ${claim.policyholder_name || 'Claim'} - ${new Date().toLocaleDateString()}`;
+    const { data: doc } = await supabase.from('resto_documents').insert({
+      org_id: claim.org_id, claim_id: claim.id, type: 'drying_report',
+      storage_path: path, title, status: 'final',
+      generated_at: new Date().toISOString(), created_by: user.id
+    }).select('*').single();
+
+    res.json({ ok: true, document: doc });
+  } catch (e) {
+    console.error('resto drying-log error:', e.message);
+    res.status(500).json({ error: 'drying log generation failed' });
   }
 });
 
