@@ -1,50 +1,84 @@
 // ============================================================================
-// ESX EXPORT (Xactimate / Cotality) — SCAFFOLD
+// ESX EXPORT (Xactimate / Cotality)
 // ----------------------------------------------------------------------------
 // An .esx is a ZIP containing one project document (XACTDOC.ZIPXML, UTF-8 XML)
 // plus embedded photos (1.JPG, 2.JPG, ...). This module:
 //   1. mapClaimToProject(graph)  -> a clean, schema-INDEPENDENT project model
-//                                    (correct; reused regardless of XML shape)
+//                                    (geometry + real line items). Correct and
+//                                    reused regardless of the final XML shape.
 //   2. serializeXactdoc(model)   -> the XACTDOC XML  ***REVERSE-ENGINEERING TARGET***
 //                                    Element/attribute names + coordinate units
 //                                    are BEST-GUESS pending a real reference .esx.
 //                                    This is the ONLY part that changes once we
-//                                    can unzip a genuine XACTDOC.
+//                                    can unzip a genuine XACTDOC. See
+//                                    xactimate-integration-map.md section 8.
 //   3. packEsx(xml, photos)      -> the .esx ZIP (correct)
 //
-// Everything except serializeXactdoc is production-shaped. When a reference file
-// arrives, we adjust serializeXactdoc to match; the model + mapping stay.
+// Quantities come from the shared engine (resto-scope-quantities) so the ESX and
+// the PDF report bill identical numbers. Selector codes come from the isolated
+// lookup (resto-xactimate-codes) so only that table changes on verification.
 // Requires: jszip  (npm i jszip)
 // ============================================================================
 const { fetchClaimGraph } = require('./resto-report');
+const {
+  UPF, areaFt, perimeterFt, edgeLenFt, largestRoomPolygon, equipmentUnitDays, roomScope
+} = require('./resto-scope-quantities');
+const { EQUIP_CODE, selectorFor } = require('./resto-xactimate-codes');
 
-const UPF = 40; // scene units per foot (matches resto-map-svg)
-
-// ---------- geometry helpers ----------
-const toFeet = (v) => +(v / UPF).toFixed(3);
-function polyAreaFt(ptsFt) {
-  let a = 0;
-  for (let i = 0; i < ptsFt.length; i++) {
-    const [x1, y1] = ptsFt[i], [x2, y2] = ptsFt[(i + 1) % ptsFt.length];
-    a += x1 * y2 - x2 * y1;
-  }
-  return Math.abs(a) / 2;
-}
-function polyPerimeterFt(ptsFt) {
-  let p = 0;
-  for (let i = 0; i < ptsFt.length; i++) {
-    const [x1, y1] = ptsFt[i], [x2, y2] = ptsFt[(i + 1) % ptsFt.length];
-    p += Math.hypot(x2 - x1, y2 - y1);
-  }
-  return p;
-}
+const r2 = (n) => Math.round(n * 100) / 100;
+const r3 = (n) => Math.round(n * 1000) / 1000;
 const xmlEsc = (s) => String(s == null ? '' : s).replace(/[<>&'"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]));
+
+// ============================================================================
+// LINE ITEMS: turn a room's measured scope into Xactimate line items.
+// ----------------------------------------------------------------------------
+// Deliberately CONSERVATIVE so the estimate survives a scrub (no fabricated
+// demolition): extraction always applies to a wet floor; antimicrobial only on
+// Category 2+; drywall removal only where a flood cut was actually drawn;
+// containment where a barrier was placed. Flooring TEAR-OUT is intentionally NOT
+// auto-generated from a wet area, because a wet area carries no keep/remove
+// decision. Add a disposition field to wet areas before emitting FCC/FCV/FCW.
+// ============================================================================
+function buildRoomLineItems(roomSketches, roomName, categoryOfWater) {
+  const scope = roomScope(roomSketches);
+  const items = [];
+  const push = (key, quantity, note) => {
+    if (!quantity || quantity <= 0) return;
+    const s = selectorFor(key, categoryOfWater);
+    if (!s) return;
+    items.push({ cat: s.cat, sel: s.sel, unit: s.unit, quantity: r2(quantity), desc: s.desc, confidence: s.confidence, room: roomName, note: note || '' });
+  };
+
+  // extraction: carpet -> WTR EXT, hard surface -> WTR EXTH
+  for (const wf of scope.wetFloorByMaterial) {
+    const key = /carpet/i.test(wf.material) ? 'extraction_carpet' : 'extraction_hard';
+    push(key, wf.sqft, 'wet floor: ' + (wf.material || 'unspecified'));
+  }
+
+  // antimicrobial: only defensible on Category 2 or 3 (S500 is specific about Cat 1)
+  if (Number(categoryOfWater) >= 2 && scope.affectedFloorSqFt > 0) {
+    push('antimicrobial', scope.affectedFloorSqFt, 'antimicrobial (Cat ' + categoryOfWater + ')');
+  }
+
+  // flood cuts -> drywall removal, bucketed by cut height
+  for (const c of scope.floodCuts) {
+    if (c.heightFt <= 0.34) push('drywall_lf_4in', c.lf, 'flood cut 4 in');
+    else if (c.heightFt <= 2) push('drywall_lf_2ft', c.lf, 'flood cut ' + c.heightFt + ' ft');
+    else push('drywall_sf', c.sqft, 'flood cut ' + c.heightFt + ' ft (per SF)');
+  }
+
+  // containment barrier
+  if (scope.containment.sqft > 0) push('containment', scope.containment.sqft, scope.containment.count + ' barrier(s)');
+
+  return items;
+}
 
 // ============================================================================
 // 1) MAPPING: resto claim graph -> schema-independent project model
 // ============================================================================
 function mapClaimToProject(graph) {
-  const { claim, structures = [], rooms = [], sketches = [], contents = [], media = [] } = graph;
+  const { claim, structures = [], rooms = [], sketches = [], contents = [], media = [], equipment = [] } = graph;
+  const cat = claim.category_of_water;
 
   const [addr = '', cityStateZip = ''] = (claim.address || '').split(/,(.+)/);
 
@@ -73,44 +107,58 @@ function mapClaimToProject(graph) {
     const stRooms = rooms.filter((r) => r.structure_id === st.id);
     for (const room of stRooms) {
       const rSketches = sketches.filter((s) => s.room_id === room.id);
-      // a "wall" polygon in the scene is a room outline; take the largest one
-      let best = null, bestArea = 0;
-      for (const s of rSketches) {
-        for (const w of ((s.canvas_json || {}).walls || [])) {
-          if (!w.points || w.points.length < 3) continue;
-          const ptsFt = w.points.map((p) => [toFeet(p[0]), toFeet(p[1])]);
-          const area = polyAreaFt(ptsFt);
-          if (area > bestArea) { bestArea = area; best = { wall: w, ptsFt, sceneWalls: (s.canvas_json || {}).walls }; }
-        }
-      }
-      const r = { name: room.name || 'Room', type: room.name || 'Room', vertices: [], area: 0, perimeter: 0, wallHeight: 8, openings: [] };
-      if (best) {
+      const roomName = room.name || 'Room';
+      const poly = largestRoomPolygon(rSketches);
+
+      const r = { name: roomName, type: roomName, vertices: [], area: 0, perimeter: 0, wallHeight: 8, openings: [] };
+      if (poly) {
         // normalize so the room's min corner is the origin (Xactimate rooms are local)
-        const xs = best.ptsFt.map((p) => p[0]), ys = best.ptsFt.map((p) => p[1]);
+        const ptsFt = poly.points.map((p) => [p[0] / UPF, p[1] / UPF]);
+        const xs = ptsFt.map((p) => p[0]), ys = ptsFt.map((p) => p[1]);
         const ox = Math.min(...xs), oy = Math.min(...ys);
-        r.vertices = best.ptsFt.map((p) => [+(p[0] - ox).toFixed(3), +(p[1] - oy).toFixed(3)]);
-        r.area = +polyAreaFt(r.vertices).toFixed(2);
-        r.perimeter = +polyPerimeterFt(r.vertices).toFixed(2);
-        // openings (doors/windows) on this room's wall edges
+        r.vertices = ptsFt.map((p) => [r3(p[0] - ox), r3(p[1] - oy)]);
+        r.area = r2(areaFt(poly.points));
+        r.perimeter = r2(perimeterFt(poly.points));
+
+        // openings on this room's outline. FIX: scene stores { wallId, edge, t,
+        // widthFt, kind }. Old code read op.type/op.offsetFt/op.heightFt (which do
+        // not exist), so every opening became a 7 ft door at offset 0. Now we read
+        // the real fields: kind, t (0..1 along the edge) -> offset in feet, and a
+        // sensible default height per kind.
         for (const s of rSketches) {
           for (const op of ((s.canvas_json || {}).openings || [])) {
-            if (op.wallId === best.wall.id) {
-              r.openings.push({ type: op.type || 'door', edge: op.edge || 0, offsetFt: op.offsetFt || 0, widthFt: op.widthFt || 3, heightFt: op.heightFt || (op.type === 'window' ? 4 : 7) });
-            }
+            if (op.wallId !== poly.id) continue;
+            const kind = op.kind || 'door';
+            const edgeFt = edgeLenFt(poly.points, op.edge || 0);
+            const widthFt = op.widthFt || (kind === 'opening' ? 4 : 3);
+            const heightFt = kind === 'window' ? 4 : 6.67; // ~80 in door/opening, ~4 ft window
+            const offsetFt = r2((op.t != null ? op.t : 0.5) * edgeFt);
+            r.openings.push({ kind, edge: op.edge || 0, offsetFt, widthFt, heightFt });
           }
         }
       }
       level.rooms.push(r);
+
+      // room-scoped line items (extraction, antimicrobial, drywall, containment)
+      for (const it of buildRoomLineItems(rSketches, roomName, cat)) model.lineItems.push(it);
     }
     if (level.rooms.length) model.levels.push(level);
   }
 
-  // line items (optional): non-salvageable contents as content line items.
-  // NOTE: Xactimate price-list CODES are placeholders pending schema verification.
+  // claim-level equipment line items (Xactimate bills equipment by unit-days, not
+  // by map position; days come from resto_equipment, not the sketch icons).
+  const ud = equipmentUnitDays(equipment);
+  for (const type of Object.keys(EQUIP_CODE)) {
+    if (!ud[type]) continue;
+    const s = selectorFor(EQUIP_CODE[type], cat);
+    if (s) model.lineItems.push({ cat: s.cat, sel: s.sel, unit: s.unit, quantity: ud[type], desc: s.desc, confidence: s.confidence, room: '', note: type + ' unit-days' });
+  }
+
+  // non-salvageable contents (VERIFY code; contents usually live in XactContents)
   for (const c of contents) {
-    if (c.disposition === 'non_restorable' || c.disposition === 'disposed') {
-      model.lineItems.push({ code: 'CONTENTS', desc: c.description || 'Item', quantity: c.quantity || 1, unit: 'EA', unitPrice: Number(c.replacement_cost) || 0, room: '' });
-    }
+    if (c.disposition !== 'non_restorable' && c.disposition !== 'disposed') continue;
+    const s = selectorFor('contents_loss', cat);
+    if (s) model.lineItems.push({ cat: s.cat, sel: s.sel, unit: s.unit, quantity: c.quantity || 1, unitPrice: Number(c.replacement_cost) || 0, desc: c.description || s.desc, confidence: s.confidence, room: '', note: 'non-salvageable content' });
   }
 
   // photos placeholder (buffers filled by the caller which has storage access)
@@ -122,13 +170,15 @@ function mapClaimToProject(graph) {
 // ============================================================================
 // 2) SERIALIZER: project model -> XACTDOC XML   *** BEST-GUESS / VERIFY ***
 // ----------------------------------------------------------------------------
-// Element/attribute names below are a PLAUSIBLE Xactimate structure inferred
-// from public sources, NOT confirmed against a real file. Confirm against a
-// reference .esx (unzip -> pretty-print XACTDOC) and correct:
-//   - root element + version attributes (xactNetVersion / schema version)
+// Element/attribute names below are a PLAUSIBLE Xactimate structure inferred from
+// public sources, NOT confirmed against a real file. The MODEL above is correct;
+// only the names + coordinate units here change once we diff a reference .esx.
+// Confirm and correct:
+//   - root element + version attributes (schema version)
 //   - admin/claim block element names
 //   - level/room/polygon element + coordinate UNITS (feet vs internal grid)
-//   - opening + line-item element names and code format
+//   - opening element names + how offset/kind are encoded
+//   - line-item element: exact CAT + SEL attribute names, modifier/activity codes
 // Keeping it isolated means only this function changes.
 // ============================================================================
 function serializeXactdoc(model) {
@@ -159,7 +209,7 @@ function serializeXactdoc(model) {
       room.vertices.forEach((v) => L.push(`            <POINT x="${v[0]}" y="${v[1]}"/>`)); // UNITS = feet (verify)
       L.push('          </POLYGON>');
       room.openings.forEach((op, oi) => {
-        L.push(`          <OPENING id="O${oi + 1}" type="${xmlEsc(op.type)}" edge="${op.edge}" offset="${op.offsetFt}" width="${op.widthFt}" height="${op.heightFt}"/>`);
+        L.push(`          <OPENING id="O${oi + 1}" kind="${xmlEsc(op.kind)}" edge="${op.edge}" offset="${op.offsetFt}" width="${op.widthFt}" height="${op.heightFt}"/>`);
       });
       L.push('        </ROOM>');
     });
@@ -167,11 +217,12 @@ function serializeXactdoc(model) {
   });
   L.push('    </SKETCHINFO>');
 
-  // ----- line items (optional) -----
+  // ----- line items -----
   if (model.lineItems.length) {
     L.push('    <LINEITEMS>');
     model.lineItems.forEach((it) => {
-      L.push(`      <LINEITEM code="${xmlEsc(it.code)}" desc="${xmlEsc(it.desc)}" quantity="${it.quantity}" unit="${xmlEsc(it.unit)}" unitPrice="${it.unitPrice}" room="${xmlEsc(it.room)}"/>`);
+      if (it.confidence === 'verify') L.push(`      <!-- VERIFY selector: ${xmlEsc(it.desc || '')} -->`);
+      L.push(`      <LINEITEM cat="${xmlEsc(it.cat)}" sel="${xmlEsc(it.sel)}" desc="${xmlEsc(it.desc || '')}" quantity="${it.quantity}" unit="${xmlEsc(it.unit || '')}" unitPrice="${it.unitPrice || 0}" room="${xmlEsc(it.room || '')}"/>`);
     });
     L.push('    </LINEITEMS>');
   }
@@ -209,4 +260,4 @@ async function buildEsx(claimId, downloadImage) {
   return { esx, claim: graph.claim, xml, model };
 }
 
-module.exports = { buildEsx, mapClaimToProject, serializeXactdoc, packEsx };
+module.exports = { buildEsx, mapClaimToProject, serializeXactdoc, packEsx, buildRoomLineItems };
