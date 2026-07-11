@@ -123,7 +123,7 @@ function roomScope(roomSketches) {
   const poly = largestRoomPolygon(roomSketches);
 
   const wetMap = {};    // "surface|material" -> sqft
-  const wetFloor = {};  // material -> sqft (drives extraction)
+  const wetFloor = {};  // "material||disposition" -> sqft (drives extraction vs tear-out)
   let affectedFloorSqFt = 0;
   for (const sc of scenes) {
     for (const wa of (sc.wetAreas || [])) {
@@ -131,7 +131,13 @@ function roomScope(roomSketches) {
       const material = wa.material || '';
       const sqft = wetSqFt(wa); if (!sqft) continue;
       wetMap[surface + '|' + material] = (wetMap[surface + '|' + material] || 0) + sqft;
-      if (surface === 'floor') { affectedFloorSqFt += sqft; wetFloor[material] = (wetFloor[material] || 0) + sqft; }
+      if (surface === 'floor') {
+        affectedFloorSqFt += sqft;
+        // disposition: 'remove' -> flooring tear-out; anything else (incl. absent) -> dry in place (extraction)
+        const disposition = wa.disposition === 'remove' ? 'remove' : 'dry';
+        const key = material + '||' + disposition;
+        wetFloor[key] = (wetFloor[key] || 0) + sqft;
+      }
     }
   }
 
@@ -150,7 +156,10 @@ function roomScope(roomSketches) {
       const [surface, material] = k.split('|');
       return { surface, material, sqft: r2(wetMap[k]) };
     }),
-    wetFloorByMaterial: Object.keys(wetFloor).map((m) => ({ material: m, sqft: r2(wetFloor[m]) })),
+    wetFloorByMaterial: Object.keys(wetFloor).map((k) => {
+      const [material, disposition] = k.split('||');
+      return { material, disposition, sqft: r2(wetFloor[k]) };
+    }),
     affectedFloorSqFt: r2(affectedFloorSqFt),
     floodCuts: floodCuts.map((c) => ({ lf: r2(c.lf), heightFt: c.heightFt, sqft: r2(c.sqft) })),
     containment: { sqft: r2(contSqft), count: contCount }

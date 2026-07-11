@@ -91,6 +91,35 @@ async function generateReportPdf(graph, downloadImage) {
   const h2 = (t) => { ensure(22); doc.moveDown(0.3).fillColor(DARK).fontSize(12).font('Helvetica-Bold').text(t); doc.font('Helvetica'); };
   const kv = (k, v) => { doc.fontSize(9).fillColor(GRAY).text(k + ': ', { continued: true }).fillColor(DARK).text(String(v ?? '-')); };
 
+  // ---- Xactimate line items for this claim (shared builder with the ESX export) ----
+  // The report and the ESX call the SAME mapClaimToProject, so the billable lines
+  // and their F9 justification notes are identical in both. Lazy require avoids the
+  // resto-esx <-> resto-report circular require at module load. Never let scope
+  // mapping break the rest of the report.
+  let esxByRoom = {}, esxClaimLevel = [];
+  try {
+    const { mapClaimToProject } = require('./resto-esx');
+    const esxModel = mapClaimToProject(graph);
+    for (const it of (esxModel.lineItems || [])) {
+      if (it.room) { (esxByRoom[it.room] = esxByRoom[it.room] || []).push(it); }
+      else esxClaimLevel.push(it);
+    }
+  } catch (_e) { esxByRoom = {}; esxClaimLevel = []; }
+
+  // Render a list of Xactimate line items: code + description + quantity in bold,
+  // then the adjuster-facing F9 justification (verbatim from the ESX) beneath it.
+  const renderScopeLines = (list) => {
+    (list || []).forEach((it) => {
+      ensure(26);
+      const q = `${it.quantity} ${it.unit || ''}`.trim();
+      doc.fontSize(9).fillColor(DARK).font('Helvetica-Bold').text(`${it.cat} ${it.sel}  \u00b7  ${it.desc || ''}  \u00b7  ${q}`, 50, doc.y, { width: W });
+      doc.font('Helvetica');
+      if (it.confidence === 'verify') doc.fontSize(7).fillColor('#B45309').text('Selector pending verification against a reference Xactimate file.', 50, doc.y, { width: W });
+      if (it.note) { doc.fontSize(7.5).fillColor(GRAY).font('Helvetica-Oblique').text(it.note, 60, doc.y, { width: W - 10 }); doc.font('Helvetica'); }
+      doc.moveDown(0.2);
+    });
+  };
+
   // ---- Cover / header (org branding) ----
   const rawSettings = graph.settings || {};
   const brandCfg = rawSettings.report_branding || rawSettings;   // branding stored in report_branding jsonb
@@ -281,7 +310,7 @@ async function generateReportPdf(graph, downloadImage) {
           doc.fillColor(GRAY).text(lbl, lx + 9, ly, { lineBreak: false });
           lx += wItem + 8;
         });
-        doc.y = ly + 16; doc.fillColor(DARK).font('Helvetica');
+        doc.x = 50; doc.y = ly + 16; doc.fillColor(DARK).font('Helvetica');
       }
 
       // drying trend: per-visit moisture readings for this room
@@ -363,6 +392,15 @@ async function generateReportPdf(graph, downloadImage) {
         if (contCount > 0) {
           doc.fontSize(9).fillColor(DARK).text(`Containment (PLASTIC 4 mil): ${contCount} barrier${contCount === 1 ? '' : 's'} = ${Math.round(contSqft)} sq ft`);
         }
+      }
+
+      // estimate scope: the billable Xactimate line items for THIS room, each with
+      // its F9 justification note. Same builder the ESX uses, so the report and the
+      // ESX say the identical thing.
+      const roomLineItems = esxByRoom[room.name] || [];
+      if (roomLineItems.length) {
+        doc.x = 50; ensure(24); h2('Estimate Scope (Xactimate line items)');
+        renderScopeLines(roomLineItems);
       }
     }
 
@@ -484,6 +522,15 @@ async function generateReportPdf(graph, downloadImage) {
     section('Equipment Usage Summary');
     doc.fontSize(8.5).fillColor(GRAY).text('Total equipment-days across all drying chambers, for estimate line-item justification.').moveDown(0.3).fillColor(DARK);
     Object.keys(eqTotals).forEach((t) => kv(EQUIP_FULL[t] || t, `${eqTotals[t]} unit-days`));
+
+    // billable equipment line items (same WTR DRY/DHM/AFD lines the ESX emits),
+    // each with its F9 note pointing the adjuster at the daily drying log
+    const equipScope = esxClaimLevel.filter((it) => it.cat === 'WTR');
+    if (equipScope.length) {
+      doc.x = 50; doc.moveDown(0.5).fontSize(9.5).fillColor(NAVY).font('Helvetica-Bold').text('Billable equipment line items', 50, doc.y, { width: W }).font('Helvetica');
+      doc.moveDown(0.2);
+      renderScopeLines(equipScope);
+    }
   }
 
   section('Schedule of Loss Summary');
