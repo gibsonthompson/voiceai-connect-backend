@@ -1,8 +1,8 @@
 // ============================================================================
 // RESTORATION PLATFORM ROUTES  (mounted at /api/resto)
 // Lives in voiceai-connect-backend/src/routes/. Reuses the existing Supabase
-// service client and CORS. /report, /drying-log, /mold-scan, /ocr, /scope are
-// implemented; esx remains a stub.
+// service client and CORS. /report, /drying-log, /mold-scan, /ocr, /doc-scan,
+// /scope, /esx are implemented.
 // ============================================================================
 
 const express = require('express');
@@ -246,6 +246,30 @@ router.post('/ocr', async (req, res) => {
     const msg = e.message || 'ocr failed';
     const code = msg === 'ocr not configured' ? 503 : msg === 'image required' ? 400 : 500;
     if (code === 500) console.error('resto ocr error:', msg);
+    res.status(code).json({ error: msg });
+  }
+});
+
+// POST /api/resto/doc-scan  { claimId, fileBase64, mediaType } -> reads a carrier
+// document (assignment sheet, loss notice, declarations page) and returns the claim
+// fields found on it. READ ONLY: this never touches resto_claims. The app shows every
+// extracted value beside the current one and the tech confirms each field before it is
+// saved, because a misread date of loss corrupts the coverage determination and a
+// misread policy number goes out on a carrier package.
+router.post('/doc-scan', async (req, res) => {
+  try {
+    const ctx = await authClaim(req, res);
+    if (!ctx) return;
+    const { fileBase64, mediaType } = req.body || {};
+    if (!fileBase64) return res.status(400).json({ error: 'file required' });
+    const { scanDocument } = require('../lib/resto-doc-scan');
+    const extracted = await scanDocument({ fileBase64, mediaType });
+    res.json({ ok: true, extracted });
+  } catch (e) {
+    const msg = e.message || 'doc scan failed';
+    const code = msg === 'doc scan not configured' ? 503
+      : msg === 'file required' || msg === 'unsupported file type' ? 400 : 500;
+    if (code === 500) console.error('resto doc-scan error:', msg);
     res.status(code).json({ error: msg });
   }
 });
