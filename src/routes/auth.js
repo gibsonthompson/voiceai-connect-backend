@@ -4,6 +4,11 @@
 // UPDATED: client_staff role accepted in client login
 // UPDATED: Clear visible_password on self-password-change
 // UPDATED: 2026-05-18 — Phase 1: dashboard_access check on client login
+// UPDATED: 2026-07-11: requireAgencyAccess middleware. Requires a valid token,
+//          confirms the caller owns the :agencyId in the URL (super_admin and
+//          admin-impersonation tokens pass), and enforces a Page Access key
+//          for agency_staff. Used to protect the Connect financials endpoints,
+//          which expose the agency's live Stripe balance.
 // Destination: src/routes/auth.js (FULL REPLACEMENT)
 // ============================================================================
 const bcrypt = require('bcryptjs');
@@ -394,4 +399,87 @@ function requirePermissionIfAuthed(permissionKey) {
   };
 }
 
-module.exports = { agencyLogin, clientLogin, verifyToken, setPassword, changePassword, requestPasswordReset, authMiddleware, requirePermission, requirePermissionIfAuthed, generateToken };
+// ============================================================================
+// AGENCY OWNERSHIP MIDDLEWARE (hard)
+// ----------------------------------------------------------------------------
+// For agency routes carrying an :agencyId param whose payload is sensitive
+// enough that a valid token AND ownership of that specific agency must both be
+// proven (e.g. the Connect financials endpoints, which return the agency's
+// live Stripe balance). Unlike requirePermissionIfAuthed, this does NOT let
+// anonymous callers through: a missing or invalid token is a hard 401.
+//
+// Pass conditions:
+//   - super_admin token                         → any agency
+//   - admin-impersonation token (type='agency') → must match :agencyId (id)
+//   - agency_owner token                        → must match :agencyId (agencyId)
+//   - agency_staff token                        → must match :agencyId AND the
+//       Page Access `permissionKey` is not explicitly false, and not disabled
+//
+// Deny conditions:
+//   - no/invalid token                          → 401
+//   - caller's agency id != :agencyId           → 403
+//   - client / client_staff / unknown roles     → 403 (not agency users)
+//
+// Token shapes handled: normal agency tokens carry { role, agencyId } from
+// generateToken; admin impersonation tokens (routes/admin.js) carry
+// { id, type:'agency' } and no role, so ownership is read from id.
+// ============================================================================
+function requireAgencyAccess(permissionKey) {
+  return async (req, res, next) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const token = authHeader.split(' ')[1];
+      let decoded;
+      try { decoded = jwt.verify(token, JWT_SECRET); }
+      catch { return res.status(401).json({ error: 'Invalid or expired token' }); }
+      req.user = decoded;
+
+      const routeAgencyId = req.params.agencyId;
+      if (!routeAgencyId) return res.status(400).json({ error: 'agencyId required' });
+
+      // super_admin can access any agency.
+      if (decoded.role === 'super_admin') return next();
+
+      // Resolve the caller's own agency id. Normal agency tokens carry
+      // agencyId; admin-impersonation tokens carry id + type='agency'.
+      const callerAgencyId = decoded.agencyId || (decoded.type === 'agency' ? decoded.id : null);
+      if (!callerAgencyId || callerAgencyId !== routeAgencyId) {
+        return res.status(403).json({ error: 'Not authorized for this agency' });
+      }
+
+      // Owners and impersonation tokens pass without a Page Access check.
+      if (decoded.role === 'agency_owner' || decoded.type === 'agency') return next();
+
+      // Agency staff: enforce the Page Access permission key (fail closed).
+      if (decoded.role === 'agency_staff') {
+        const { data: member } = await supabase
+          .from('team_members')
+          .select('permissions, status')
+          .eq('member_user_id', decoded.userId)
+          .eq('entity_type', 'agency')
+          .eq('entity_id', callerAgencyId)
+          .single();
+
+        if (!member || member.status === 'disabled') {
+          return res.status(403).json({ error: 'Access disabled' });
+        }
+        if (member.permissions && member.permissions[permissionKey] === false) {
+          return res.status(403).json({ error: `You do not have permission to access ${permissionKey}.` });
+        }
+        return next();
+      }
+
+      // Any other role (client, client_staff, unknown) is not an agency user.
+      return res.status(403).json({ error: 'Not authorized for this agency' });
+    } catch (error) {
+      console.error('❌ requireAgencyAccess error:', error);
+      return res.status(500).json({ error: 'Authorization check failed' });
+    }
+  };
+}
+
+module.exports = { agencyLogin, clientLogin, verifyToken, setPassword, changePassword, requestPasswordReset, authMiddleware, requirePermission, requirePermissionIfAuthed, requireAgencyAccess, generateToken };

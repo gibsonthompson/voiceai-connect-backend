@@ -28,6 +28,11 @@
 //              touches DB-only trials.
 //          (d) disconnectConnectAccount auto-sets require_card_for_trial=false
 //              since the toggle is meaningless without Stripe Connect.
+// UPDATED: 2026-07-11: getConnectFinancials (balance, payouts, and recent
+//          charges for the agency Payments page) and createConnectAccountSession
+//          (embedded Connect components, phase 2). Both are read-only against
+//          the connected Express account via the stripeAccount header, so they
+//          add no new money movement and change nothing in the existing flow.
 // ============================================================================
 const Stripe = require('stripe');
 const fetch = require('node-fetch');
@@ -170,6 +175,133 @@ async function getConnectStatus(req, res) {
   } catch (error) {
     console.error('Connect status error:', error);
     res.status(500).json({ error: 'Failed to get Connect status' });
+  }
+}
+
+// ============================================================================
+// GET CONNECT FINANCIALS
+// ----------------------------------------------------------------------------
+// Powers the agency Payments page. Under direct charges the money (balance,
+// payouts, customers, charges) all live on the connected Express account, so
+// everything here is read with the stripeAccount header. Nothing is written.
+//
+// Returns:
+//   available / pending / instant_available : per-currency balance arrays
+//     (usually a single currency). Amounts are in the smallest unit.
+//   payout_schedule : { interval, delay_days, weekly_anchor, monthly_anchor }
+//   next_payout     : earliest not-yet-settled payout (pending | in_transit)
+//   recent_payouts  : last 8 payouts (paid | pending | in_transit | ...)
+//   recent_charges  : last 10 charges with light customer info for a
+//                     "recent client payments" list
+// ============================================================================
+async function getConnectFinancials(req, res) {
+  try {
+    const { agencyId } = req.params;
+
+    const { data: agency, error } = await supabase
+      .from('agencies')
+      .select('stripe_account_id, currency, display_currency')
+      .eq('id', agencyId)
+      .single();
+
+    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
+    if (!agency.stripe_account_id) return res.json({ connected: false });
+
+    const acct = agency.stripe_account_id;
+
+    const [balance, payoutList, chargeList, account] = await Promise.all([
+      stripe.balance.retrieve({ stripeAccount: acct }),
+      stripe.payouts.list({ limit: 8 }, { stripeAccount: acct }),
+      stripe.charges.list({ limit: 10 }, { stripeAccount: acct }),
+      stripe.accounts.retrieve(acct),
+    ]);
+
+    const mapAmounts = (arr) => (arr || []).map((b) => ({ amount: b.amount, currency: b.currency }));
+
+    const payouts = (payoutList.data || []).map((p) => ({
+      id: p.id,
+      amount: p.amount,
+      currency: p.currency,
+      status: p.status, // paid | pending | in_transit | canceled | failed
+      arrival_date: p.arrival_date ? p.arrival_date * 1000 : null,
+      created: p.created ? p.created * 1000 : null,
+    }));
+
+    // Next payout = earliest payout not yet settled.
+    const upcoming = payouts
+      .filter((p) => p.status === 'pending' || p.status === 'in_transit')
+      .sort((a, b) => (a.arrival_date || 0) - (b.arrival_date || 0));
+
+    const charges = (chargeList.data || []).map((c) => ({
+      id: c.id,
+      amount: c.amount,
+      currency: c.currency,
+      status: c.status, // succeeded | pending | failed
+      paid: c.paid,
+      refunded: c.refunded,
+      created: c.created ? c.created * 1000 : null,
+      customer_name: c.billing_details?.name || null,
+      customer_email: c.billing_details?.email || c.receipt_email || null,
+      description: c.description || null,
+    }));
+
+    res.json({
+      connected: true,
+      charges_enabled: account.charges_enabled,
+      payouts_enabled: account.payouts_enabled,
+      display_currency: agency.display_currency || agency.currency || 'usd',
+      available: mapAmounts(balance.available),
+      pending: mapAmounts(balance.pending),
+      instant_available: mapAmounts(balance.instant_available),
+      payout_schedule: account.settings?.payouts?.schedule || null,
+      next_payout: upcoming[0] || null,
+      recent_payouts: payouts,
+      recent_charges: charges,
+    });
+  } catch (error) {
+    console.error('Connect financials error:', error);
+    res.status(500).json({ error: 'Failed to load financials' });
+  }
+}
+
+// ============================================================================
+// CREATE CONNECT ACCOUNT SESSION (embedded components, phase 2)
+// ----------------------------------------------------------------------------
+// Mints an AccountSession client_secret for Stripe's embedded Connect
+// components (Balances, Payouts, Payments) rendered inside the agency
+// dashboard, replacing the hosted Express Dashboard experience. Not used by
+// the cards-only Payments page; wired ahead of time so phase 2 is a frontend
+// only change. Some components may need enabling under Connect settings in the
+// Stripe Dashboard before they render.
+// ============================================================================
+async function createConnectAccountSession(req, res) {
+  try {
+    const { agencyId } = req.params;
+
+    const { data: agency, error } = await supabase
+      .from('agencies')
+      .select('stripe_account_id')
+      .eq('id', agencyId)
+      .single();
+
+    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
+    if (!agency.stripe_account_id) return res.status(400).json({ error: 'Stripe not connected' });
+
+    const session = await stripe.accountSessions.create({
+      account: agency.stripe_account_id,
+      components: {
+        payments: { enabled: true, features: { refund_management: true, dispute_management: true, capture_payments: true } },
+        payouts: { enabled: true, features: { instant_payouts: true, standard_payouts: true, edit_payout_schedule: true } },
+        balances: { enabled: true, features: { instant_payouts: true, standard_payouts: true, edit_payout_schedule: true } },
+        account_management: { enabled: true },
+        notification_banner: { enabled: true },
+      },
+    });
+
+    res.json({ client_secret: session.client_secret });
+  } catch (error) {
+    console.error('Account session error:', error);
+    res.status(500).json({ error: 'Failed to create account session' });
   }
 }
 
@@ -843,6 +975,8 @@ async function handleClientPaymentFailed(invoice, stripeAccountId) {
 module.exports = {
   createConnectAccountLink,
   getConnectStatus,
+  getConnectFinancials,          // NEW: agency Payments page (balance, payouts, charges)
+  createConnectAccountSession,   // NEW: embedded Connect components (phase 2)
   disconnectConnectAccount,
   createClientCheckout,
   createTrialCheckoutForSignup, // NEW: called from routes/client-signup.js

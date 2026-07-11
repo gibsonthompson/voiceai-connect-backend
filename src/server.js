@@ -10,6 +10,10 @@
 //                       writes to subscription_cancellations, SMS's platform owner.
 // UPDATED: 2026-06-30 — Telnyx whisper warm transfer: /webhook/telnyx-voice
 //                       (raw body) + /api/voice/request-transfer mounted.
+// UPDATED: 2026-07-11: Connect financials + account-session endpoints wired
+//                      for the agency Payments page, hardened with
+//                      requireAgencyAccess (valid token + caller-owns-:agencyId
+//                      + 'billing' Page Access for staff).
 // Destination: src/server.js (or src/index.js) — FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -188,6 +192,8 @@ const {
 const {
   createConnectAccountLink,
   getConnectStatus,
+  getConnectFinancials,
+  createConnectAccountSession,
   disconnectConnectAccount,
   createClientCheckout,
   createClientPortal,
@@ -204,6 +210,7 @@ const {
   authMiddleware,
   requirePermission,
   requirePermissionIfAuthed,
+  requireAgencyAccess,
   generateToken
 } = require('./routes/auth');
 
@@ -479,6 +486,15 @@ app.post('/api/agency/cancel', requirePermissionIfAuthed('billing'), async (req,
 app.post('/api/agency/connect/onboard', requirePermissionIfAuthed('settings'), createConnectAccountLink);
 app.get('/api/agency/connect/status/:agencyId', getConnectStatus);
 app.post('/api/agency/:agencyId/connect/disconnect', requirePermissionIfAuthed('settings'), disconnectConnectAccount);
+
+// Payments page data. Read-only against the connected Express account (balance,
+// payouts, recent charges). account-session mints an embedded-components secret
+// (phase 2). requireAgencyAccess REQUIRES a valid token, confirms the caller
+// owns :agencyId (super_admin and admin-impersonation tokens pass), and for an
+// agency_staff member enforces the 'billing' Page Access permission. Balance is
+// sensitive, so unlike the other connect routes these reject anonymous callers.
+app.get('/api/agency/connect/financials/:agencyId', requireAgencyAccess('billing'), getConnectFinancials);
+app.post('/api/agency/connect/account-session/:agencyId', requireAgencyAccess('billing'), createConnectAccountSession);
 
 // ============================================================================
 // AGENCY DASHBOARD & CLIENTS ROUTES
