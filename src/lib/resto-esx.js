@@ -123,6 +123,12 @@ function mapClaimToProject(graph) {
       adjuster: claim.adjuster || '',
       dateOfLoss: claim.date_of_loss || '',
       typeOfLoss: claim.type_of_loss || '',
+      causeOfLoss: claim.cause_of_loss || '',
+      dateDiscovered: claim.date_discovered || '',
+      lossOnset: claim.loss_onset || '',
+      policyType: claim.policy_type || '',
+      deductible: claim.deductible != null ? claim.deductible : '',
+      estimator: claim.estimator || '',
       category: claim.category_of_water || '',
       className: claim.class_of_water || ''
     },
@@ -236,10 +242,14 @@ function serializeXactdoc(model) {
   // ----- administrative / claim -----
   L.push('  <ADM>');
   L.push('    <ADMINFO>');
-  L.push(`      <PROJECTINFO typeOfLoss="${xmlEsc(m.typeOfLoss)}" dateOfLoss="${xmlEsc(m.dateOfLoss)}" catWater="${xmlEsc(m.category)}" classWater="${xmlEsc(m.className)}"/>`);
+  // causeOfLoss + dateDiscovered carry the sudden-vs-gradual determination, which is
+  // the most common ground for denying a water claim outright. Element/attribute
+  // names here remain BEST-GUESS like the rest of the wrapper (see header).
+  L.push(`      <PROJECTINFO typeOfLoss="${xmlEsc(m.typeOfLoss)}" causeOfLoss="${xmlEsc(m.causeOfLoss)}" dateOfLoss="${xmlEsc(m.dateOfLoss)}" dateDiscovered="${xmlEsc(m.dateDiscovered)}" lossOnset="${xmlEsc(m.lossOnset)}" catWater="${xmlEsc(m.category)}" classWater="${xmlEsc(m.className)}"/>`);
+  L.push(`      <POLICYINFO policyType="${xmlEsc(m.policyType)}" deductible="${xmlEsc(m.deductible)}"/>`);
   L.push(`      <INSUREDINFO name="${xmlEsc(m.insured)}"/>`);
   L.push(`      <LOSSINFO address="${xmlEsc(m.address)}" cityStateZip="${xmlEsc(m.cityStateZip)}"/>`);
-  L.push(`      <CLAIMINFO claimNumber="${xmlEsc(m.claimNumber)}" policyNumber="${xmlEsc(m.policyNumber)}" carrier="${xmlEsc(m.carrier)}" adjuster="${xmlEsc(m.adjuster)}"/>`);
+  L.push(`      <CLAIMINFO claimNumber="${xmlEsc(m.claimNumber)}" policyNumber="${xmlEsc(m.policyNumber)}" carrier="${xmlEsc(m.carrier)}" adjuster="${xmlEsc(m.adjuster)}" estimator="${xmlEsc(m.estimator)}"/>`);
   L.push('    </ADMINFO>');
   L.push('  </ADM>');
 
