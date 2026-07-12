@@ -274,6 +274,77 @@ router.post('/doc-scan', async (req, res) => {
   }
 });
 
+// POST /api/resto/form-pdf  { claimId, signatureId } -> one signed form as its own
+// downloadable PDF. Renders the signature's doc_snapshot (the terms as they stood
+// when it was signed), never a live template.
+router.post('/form-pdf', async (req, res) => {
+  try {
+    const ctx = await authClaim(req, res);
+    if (!ctx) return;
+    const { user, claim } = ctx;
+
+    const { signatureId } = req.body || {};
+    if (!signatureId) return res.status(400).json({ error: 'signatureId required' });
+
+    const { buildFormPdf } = require('../lib/resto-form-pdf');
+    const { pdf, title } = await buildFormPdf(claim.id, signatureId);
+
+    const path = `${claim.org_id}/${claim.id}/forms/${crypto.randomUUID()}.pdf`;
+    const { error: upErr } = await supabase.storage.from('resto-media')
+      .upload(path, pdf, { contentType: 'application/pdf', upsert: false });
+    if (upErr) { console.error('resto form-pdf upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
+
+    const { data: doc } = await supabase.from('resto_documents').insert({
+      org_id: claim.org_id, claim_id: claim.id, type: 'form',
+      storage_path: path, title: `${title} - ${claim.policyholder_name || 'Claim'}`, status: 'final',
+      generated_at: new Date().toISOString(), created_by: user.id
+    }).select('*').single();
+
+    res.json({ ok: true, document: doc });
+  } catch (e) {
+    const msg = e.message || 'form pdf failed';
+    const code = msg === 'signature not found' || msg === 'claim not found' ? 404 : msg === 'forbidden' ? 403 : 500;
+    if (code === 500) console.error('resto form-pdf error:', msg);
+    res.status(code).json({ error: msg });
+  }
+});
+
+// POST /api/resto/client-pack  { claimId } -> photos + notes only, for the homeowner.
+// Contains no line items, quantities, codes, or pricing by design (see resto-client-pack).
+router.post('/client-pack', async (req, res) => {
+  try {
+    const ctx = await authClaim(req, res);
+    if (!ctx) return;
+    const { user, claim } = ctx;
+
+    const { buildClientPack } = require('../lib/resto-client-pack');
+    const { pdf } = await buildClientPack(claim.id);
+
+    const path = `${claim.org_id}/${claim.id}/reports/${crypto.randomUUID()}.pdf`;
+    const { error: upErr } = await supabase.storage.from('resto-media')
+      .upload(path, pdf, { contentType: 'application/pdf', upsert: false });
+    if (upErr) { console.error('resto client-pack upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
+
+    const { data: doc } = await supabase.from('resto_documents').insert({
+      org_id: claim.org_id, claim_id: claim.id, type: 'client_pack',
+      storage_path: path, title: `Photos & Notes - ${claim.policyholder_name || 'Claim'}`, status: 'final',
+      generated_at: new Date().toISOString(), created_by: user.id
+    }).select('*').single();
+
+    await supabase.from('resto_job_events').insert({
+      org_id: claim.org_id, claim_id: claim.id, kind: 'report',
+      message: 'Client photo & note pack generated', meta: {}
+    }).then(() => {}, () => {});
+
+    res.json({ ok: true, document: doc });
+  } catch (e) {
+    const msg = e.message || 'client pack failed';
+    const code = msg === 'claim not found' ? 404 : 500;
+    if (code === 500) console.error('resto client-pack error:', msg);
+    res.status(code).json({ error: msg });
+  }
+});
+
 // POST /api/resto/esx  { claimId } -> Xactimate ESX export (SCAFFOLD: geometry +
 // metadata are correct; XML element names are best-guess pending a reference .esx,
 // so the file is not import-ready yet). Stored as a resto_documents 'esx' row.
