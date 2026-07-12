@@ -121,7 +121,13 @@ function mapClaimToProject(graph) {
       policyNumber: claim.policy_number || '',
       carrier: claim.insurance_company || '',
       adjuster: claim.adjuster || '',
+      insuredPhone: claim.policyholder_phone || '',
+      insuredEmail: claim.policyholder_email || '',
       dateOfLoss: claim.date_of_loss || '',
+      dateReceived: claim.date_received || '',
+      dateContacted: claim.date_contacted || '',
+      dateInspected: claim.date_inspected || '',
+      catCode: claim.cat_code || '',
       typeOfLoss: claim.type_of_loss || '',
       causeOfLoss: claim.cause_of_loss || '',
       dateDiscovered: claim.date_discovered || '',
@@ -219,80 +225,299 @@ function mapClaimToProject(graph) {
 }
 
 // ============================================================================
-// 2) SERIALIZER: project model -> XACTDOC XML   *** BEST-GUESS / VERIFY ***
+// 2) SERIALIZER: project model -> XACTDOC XML
 // ----------------------------------------------------------------------------
-// Element/attribute names below are a PLAUSIBLE Xactimate structure inferred from
-// public sources, NOT confirmed against a real file. The MODEL above is correct;
-// only the names + coordinate units here change once we diff a reference .esx.
-// Confirm and correct:
-//   - root element + version attributes (schema version)
-//   - admin/claim block element names
-//   - level/room/polygon element + coordinate UNITS (feet vs internal grid)
-//   - opening element names + how offset/kind are encoded
-//   - line-item element: exact CAT + SEL attribute names, modifier/activity codes
-// Keeping it isolated means only this function changes.
+// REWRITTEN against a REAL XACTDOC pulled from an actual Xactimate estimate
+// (see xactdoc-reference-findings.md). The previous version was invented and
+// wrong in almost every element name. What we now know from the reference:
+//
+//   * The document is ATTRIBUTE-CENTRIC. Almost nothing is element text.
+//   * There is NO <LINEITEM> element. A line item is split in two:
+//       - the DEFINITION lives in EMBEDDED_PL/SUMITEMS/SUMITEM
+//         (id, cat, sel, act, desc, unit)
+//       - the USAGE lives in a room GROUP as ITEMS/ITEM/SUMMARY_REF
+//         (sumRef -> the SUMITEM id, plus qty)
+//   * A NOTE is its own ITEM with type="N" attached="1", holding
+//     ITEM_NOTE/NOTE CDATA. It is a SIBLING of the line item, not a child.
+//     (Our F9 justification strings are the right content, wrong place before.)
+//   * act is the activity: '+' install/replace, '-' remove, '&' R&R.
+//     Our WTR mitigation selectors are services performed, so act='+'.
+//     (Flooring tear-out under WTR/FCC is already a removal SELECTOR, which is
+//     a different model from the FCC/AV act='-' pairing the reference uses for
+//     reconstruction. We stay in the WTR mitigation model.)
+//   * Sketch coordinates are integers at 1524 units per foot, held in one flat
+//     COORDINATE3 list; walls and vertices INDEX into it.
+//   * Cross-references use the NUMERIC part of an id (wallIDs="741 759" refers
+//     to SKETCHWALL id="SKT741").
+//
+// Still unverified: whether XACTDOC.ZIPXML is stored compressed inside the .esx
+// (see packEsx). That is a packaging question, not a serialization one.
 // ============================================================================
+
+const XU = 1524;                                  // Xactimate sketch units per foot
+const ftToU = (ft) => Math.round(ft * XU);        // feet -> Xactimate integer units
+const numOf = (id) => String(id).replace(/^\D+/, '');   // 'SKT741' -> '741'
+const cdata = (s) => `<![CDATA[${String(s == null ? '' : s).replace(/]]>/g, ']]&gt;')}]]>`;
+
+// TOL code, from the loss type. The reference uses <TOL code="FLOOD" desc="Flood"/>.
+const TOL_CODE = { water: 'WATER', fire: 'FIRE', mold: 'MOLD', other: 'OTHER' };
+
 function serializeXactdoc(model) {
   const m = model.metadata;
   const L = [];
-  L.push('<?xml version="1.0" encoding="UTF-8"?>');
-  L.push('<!-- SCAFFOLD: structure inferred, verify element names against a real .esx -->');
-  L.push('<XACTDOC schemaVersion="TODO-verify" generator="RestorationDocs">');
+  const p = (s) => L.push(s);
 
-  // ----- administrative / claim -----
-  L.push('  <ADM>');
-  L.push('    <ADMINFO>');
-  // causeOfLoss + dateDiscovered carry the sudden-vs-gradual determination, which is
-  // the most common ground for denying a water claim outright. Element/attribute
-  // names here remain BEST-GUESS like the rest of the wrapper (see header).
-  L.push(`      <PROJECTINFO typeOfLoss="${xmlEsc(m.typeOfLoss)}" causeOfLoss="${xmlEsc(m.causeOfLoss)}" dateOfLoss="${xmlEsc(m.dateOfLoss)}" dateDiscovered="${xmlEsc(m.dateDiscovered)}" lossOnset="${xmlEsc(m.lossOnset)}" catWater="${xmlEsc(m.category)}" classWater="${xmlEsc(m.className)}"/>`);
-  L.push(`      <POLICYINFO policyType="${xmlEsc(m.policyType)}" deductible="${xmlEsc(m.deductible)}"/>`);
-  L.push(`      <INSUREDINFO name="${xmlEsc(m.insured)}"/>`);
-  L.push(`      <LOSSINFO address="${xmlEsc(m.address)}" cityStateZip="${xmlEsc(m.cityStateZip)}"/>`);
-  L.push(`      <CLAIMINFO claimNumber="${xmlEsc(m.claimNumber)}" policyNumber="${xmlEsc(m.policyNumber)}" carrier="${xmlEsc(m.carrier)}" adjuster="${xmlEsc(m.adjuster)}" estimator="${xmlEsc(m.estimator)}"/>`);
-  L.push('    </ADMINFO>');
-  L.push('  </ADM>');
+  // ---- id allocation -------------------------------------------------------
+  let nSum = 0, nItm = 0, nGrp = 0, nSkt = 0, nCnt = 0, nExt = 0;
 
-  // ----- sketch geometry -----
-  L.push('  <PROJECT>');
-  L.push('    <SKETCHINFO>');
-  model.levels.forEach((lvl, li) => {
-    L.push(`      <LEVEL id="L${li + 1}" name="${xmlEsc(lvl.name)}">`);
-    lvl.rooms.forEach((room, ri) => {
-      L.push(`        <ROOM id="L${li + 1}R${ri + 1}" name="${xmlEsc(room.name)}" type="${xmlEsc(room.type)}" wallHeight="${room.wallHeight}" floorArea="${room.area}" perimeter="${room.perimeter}">`);
-      L.push('          <POLYGON>');
-      room.vertices.forEach((v) => L.push(`            <POINT x="${v[0]}" y="${v[1]}"/>`)); // UNITS = feet (verify)
-      L.push('          </POLYGON>');
-      room.openings.forEach((op, oi) => {
-        L.push(`          <OPENING id="O${oi + 1}" kind="${xmlEsc(op.kind)}" edge="${op.edge}" offset="${op.offsetFt}" width="${op.widthFt}" height="${op.heightFt}"/>`);
-      });
-      L.push('        </ROOM>');
-    });
-    L.push('      </LEVEL>');
-  });
-  L.push('    </SKETCHINFO>');
+  // SUMITEM definitions, deduped: many rooms can share one definition, and the
+  // reference does exactly that (one SUMITEM, referenced from several rooms).
+  const sums = [];
+  const sumByKey = new Map();
+  const sumFor = (it) => {
+    const act = '+';
+    const key = [it.cat, it.sel, act, it.unit, it.desc].join('\u0000');
+    if (!sumByKey.has(key)) {
+      const s = { id: 'SUM' + (++nSum), cat: it.cat, sel: it.sel, act, unit: it.unit || '', desc: it.desc || '' };
+      sumByKey.set(key, s); sums.push(s);
+    }
+    return sumByKey.get(key);
+  };
+  for (const it of model.lineItems) sumFor(it);
 
-  // ----- line items -----
-  if (model.lineItems.length) {
-    L.push('    <LINEITEMS>');
-    model.lineItems.forEach((it) => {
-      if (it.confidence === 'verify') L.push(`      <!-- VERIFY selector: ${xmlEsc(it.desc || '')} -->`);
-      const attrs = `cat="${xmlEsc(it.cat)}" sel="${xmlEsc(it.sel)}" desc="${xmlEsc(it.desc || '')}" quantity="${it.quantity}" unit="${xmlEsc(it.unit || '')}" unitPrice="${it.unitPrice || 0}" room="${xmlEsc(it.room || '')}"`;
-      if (it.note) {
-        // F9 line-item note. Element name <NOTE> is BEST-GUESS like the rest of the
-        // wrapper; the note CONTENT is correct and reused verbatim in the PDF report.
-        L.push(`      <LINEITEM ${attrs}>`);
-        L.push(`        <NOTE>${xmlEsc(it.note)}</NOTE>`);
-        L.push('      </LINEITEM>');
-      } else {
-        L.push(`      <LINEITEM ${attrs}/>`);
-      }
-    });
-    L.push('    </LINEITEMS>');
+  const byRoom = new Map();     // room name -> line items
+  const claimLevel = [];
+  for (const it of model.lineItems) {
+    if (it.room) { if (!byRoom.has(it.room)) byRoom.set(it.room, []); byRoom.get(it.room).push(it); }
+    else claimLevel.push(it);
   }
 
-  L.push('  </PROJECT>');
-  L.push('</XACTDOC>');
+  // ---- header --------------------------------------------------------------
+  p('<?xml version="1.0" encoding="UTF-8"?>');
+  p('<XACTDOC>');
+  p('  <XACTNET_INFO estimateType="CONTR"/>');
+  p('  <ATTACHMENTS/>');
+  p(`  <PROJECT_INFO type="Standard" dataType="Residential" name="${xmlEsc(m.insured || 'Claim')}" status="Completed" created="${new Date().toISOString().slice(0, 19)}">`);
+  p('    <NOTES/><XPERT_VARS/><IMAGE/>');
+  p('  </PROJECT_INFO>');
+
+  // ---- ADM: dates, type/cause of loss, coverage ----------------------------
+  const admAttrs = [
+    m.dateReceived ? `dateReceived="${xmlEsc(m.dateReceived)}"` : null,
+    m.dateOfLoss ? `dateOfLoss="${xmlEsc(m.dateOfLoss)}"` : null,
+    m.dateContacted ? `dateContacted="${xmlEsc(m.dateContacted)}"` : null,
+    m.dateInspected ? `dateInspected="${xmlEsc(m.dateInspected)}"` : null
+  ].filter(Boolean).join(' ');
+  p(`  <ADM ${admAttrs}>`);
+  p('    <SUBROGATION_NOTES/>');
+  p('    <TYPESOFLOSS>');
+  p(`      <TYPEOFLOSS deductible="${m.deductible === '' ? 0 : m.deductible}" catastrophe="${xmlEsc(m.catCode || '')}" claimNumber="${xmlEsc(m.claimNumber)}" policyNumber="${xmlEsc(m.policyNumber)}">`);
+  const tolCode = TOL_CODE[String(m.typeOfLoss || '').toLowerCase()] || 'OTHER';
+  p(`        <TOL code="${tolCode}" desc="${xmlEsc(m.typeOfLoss || '')}">`);
+  // COL = cause of loss. This is the sudden-vs-gradual evidence, and the single
+  // most common ground a water claim is denied on. It belongs in the file.
+  if (m.causeOfLoss) p(`          <COL desc="${xmlEsc(m.causeOfLoss)}"/>`);
+  p('        </TOL>');
+  p('      </TYPEOFLOSS>');
+  p('    </TYPESOFLOSS>');
+  p(`    <COVERAGE_INFO policyType="${xmlEsc(m.policyType || 'homeowner')}">`);
+  p('      <HOMEOWNER_COVERAGE_INFO><FORMS/><ADD_SUBLIMITS/></HOMEOWNER_COVERAGE_INFO>');
+  p('    </COVERAGE_INFO>');
+  p('  </ADM>');
+
+  // Xactimate re-prices from its own price list, so we deliberately set no
+  // prices. overhead/profit are left at Xactimate's defaults.
+  p('  <PARAMS><PCA/><BURDENTAXES/><WORKERSCOMPS/><FRINGEBENEFITS/><GENERAL_LIABILITIES/><SALESTAXES/></PARAMS>');
+
+  // ---- CONTACTS ------------------------------------------------------------
+  p('  <CONTACTS>');
+  const [street = '', rest = ''] = String(m.address || '').split(/,(.+)/);
+  const csz = (m.cityStateZip || rest || '').trim();
+  const mCsz = csz.match(/^(.*?)[,\s]+([A-Za-z]{2})\s+(\d{5})/);
+  const city = mCsz ? mCsz[1].trim() : csz;
+  const state = mCsz ? mCsz[2] : '';
+  const postal = mCsz ? mCsz[3] : '';
+  p(`    <CONTACT type="Client" id="CNT${++nCnt}" name="${xmlEsc(m.insured || '')}">`);
+  p('      <ADDRESSES>');
+  p(`        <ADDRESS type="Property" street="${xmlEsc(street.trim())}" city="${xmlEsc(city)}" state="${xmlEsc(state)}" postal="${xmlEsc(postal)}" country="US" primary="1"/>`);
+  p('      </ADDRESSES>');
+  p('      <CONTACTMETHODS>');
+  if (m.insuredPhone) p(`        <PHONE type="Home" number="${xmlEsc(m.insuredPhone)}" primary="1"/>`);
+  if (m.insuredEmail) p(`        <EMAIL address="${xmlEsc(m.insuredEmail)}"/>`);
+  p('      </CONTACTMETHODS>');
+  p('    </CONTACT>');
+  if (m.adjuster) p(`    <CONTACT type="ClaimRep" id="CNT${++nCnt}" name="${xmlEsc(m.adjuster)}"><ADDRESSES/><CONTACTMETHODS/></CONTACT>`);
+  if (m.estimator) p(`    <CONTACT type="Estimator" id="CNT${++nCnt}" name="${xmlEsc(m.estimator)}"><ADDRESSES/><CONTACTMETHODS/></CONTACT>`);
+  if (m.carrier) p(`    <COMPANY type="Reference" id="CNT${++nCnt}"><ADDRESSES/><CONTACTMETHODS/></COMPANY>`);
+  p('  </CONTACTS>');
+  p('  <CLAIM_INFO><ADMIN_INFO><AGENCY/><INSURANCE_CLIENT/></ADMIN_INFO><SERVICE_HISTORY><RESERVE/></SERVICE_HISTORY><LOSS_INFO/></CLAIM_INFO>');
+
+  // ---- EMBEDDED_PL: the line-item DEFINITIONS ------------------------------
+  p('  <EMBEDDED_PL>');
+  p('    <SUMITEMS>');
+  for (const s of sums) {
+    p(`      <SUMITEM id="${s.id}" cat="${xmlEsc(s.cat)}" sel="${xmlEsc(s.sel)}" act="${xmlEsc(s.act)}" desc="${xmlEsc(s.desc)}" unit="${xmlEsc(s.unit)}">`);
+    p('        <XPERT_VARS/><SUM_ACTIVITIES/>');   // no prices: Xactimate applies its own price list
+    p('      </SUMITEM>');
+  }
+  p('    </SUMITEMS>');
+  p('    <COMPONENTS/><CATEGORIES/><SUPP_EVENTS/>');
+  p('  </EMBEDDED_PL>');
+
+  // ---- GROUP: the estimate, room by room -----------------------------------
+  // Emits the ITEMS for one group: each line item as an ITEM/SUMMARY_REF, and
+  // its F9 justification immediately after as a sibling ITEM type="N".
+  const roomItemIds = [];
+  const emitItems = (items, indent, collectIds) => {
+    p(`${indent}<ITEMS>`);
+    for (const it of items) {
+      const s = sumFor(it);
+      const itmId = 'ITM' + (++nItm);
+      if (collectIds) collectIds.push(numOf(itmId));
+      p(`${indent}  <ITEM id="${itmId}" type="S">`);
+      p(`${indent}    <SUMMARY_REF sumRef="${s.id}" qty="${it.quantity}" depType="P" recoverable="1"><XPERT_VARS/><RESTORED_MATERIALS/></SUMMARY_REF>`);
+      p(`${indent}  </ITEM>`);
+      if (it.note) {
+        p(`${indent}  <ITEM id="ITM${++nItm}" type="N" attached="1">`);
+        p(`${indent}    <ITEM_NOTE addedByWaste="0"><NOTE>${cdata(it.note)}</NOTE></ITEM_NOTE>`);
+        p(`${indent}  </ITEM>`);
+      }
+    }
+    p(`${indent}</ITEMS>`);
+  };
+
+  const rootGrp = 'GRP' + (++nGrp);
+  p(`  <GROUP id="${rootGrp}" source="List">`);
+  p('    <ITEMS/>');
+
+  const levelGroups = [];   // { grpId, rooms: [{ grpId, room, itemIds }] }
+  model.levels.forEach((lvl) => {
+    const lvlGrp = 'GRP' + (++nGrp);
+    const lvlRec = { grpId: lvlGrp, name: lvl.name, rooms: [] };
+    levelGroups.push(lvlRec);
+    p(`    <GROUP id="${lvlGrp}" code="${xmlEsc(lvl.name)}" type="Non_Room" source="Sketch">`);
+    p('      <DIM><DIM_VARS_SUM/></DIM>');
+    for (const room of lvl.rooms) {
+      const rGrp = 'GRP' + (++nGrp);
+      const ids = [];
+      lvlRec.rooms.push({ grpId: rGrp, room, itemIds: ids });
+      p(`      <GROUP id="${rGrp}" code="${xmlEsc(room.name)}" type="Room" desc="${xmlEsc(room.name)}" source="Sketch">`);
+      emitItems(byRoom.get(room.name) || [], '        ', ids);
+      // Dimension variables the calc formulas reference (F = floor SF, PF = floor perimeter).
+      p(`        <DIM><DIM_VARS_SUM F="${room.area}" PF="${room.perimeter}"/></DIM>`);
+      p('      </GROUP>');
+    }
+    // Claim-level lines (equipment unit-days, contents) hang off the level, not a room.
+    emitItems(lvl === model.levels[0] ? claimLevel : [], '      ');
+    p('    </GROUP>');
+  });
+  if (!model.levels.length && claimLevel.length) {
+    const lvlGrp = 'GRP' + (++nGrp);
+    p(`    <GROUP id="${lvlGrp}" code="General" type="Non_Room" source="List">`);
+    emitItems(claimLevel, '      ');
+    p('    </GROUP>');
+  }
+  p('  </GROUP>');
+
+  p('  <AUDIT_DOC><ESTIMATE/></AUDIT_DOC><CHKLIST/><AUDIT_ENTRIES/><IMAGES/>');
+  p('  <PAYMENT_TRACKER><PT_WORKSHEET/></PAYMENT_TRACKER>');
+  p('  <UI_LAYOUT/>');
+  p('  <PROJECT_SETTING><SKTOPTS/><LINDETAILOPTS/></PROJECT_SETTING>');
+  p('  <SESSION_STATS/><CUSTOM_ITEMS/><XPERTS/>');
+
+  // ---- SKETCHDOCUMENT ------------------------------------------------------
+  // One flat COORDINATE3 list of "x y z" integers at 1524 units/ft. For an
+  // n-corner room we emit n bottom coords then n top coords, so wall i is the
+  // quad [bot_i, bot_i+1, top_i+1, top_i], matching the reference's ordering.
+  const coords = [];
+  const pushCoord = (xU, yU, zU) => { coords.push(`${xU} ${yU} ${zU}`); return coords.length - 1; };
+
+  const sketchDocId = 'SKT' + (++nSkt);
+  p(`  <SKETCHDOCUMENT id="${sketchDocId}" majorVersion="1" minorVersion="19" compassRotation="0.0">`);
+  const structId = 'SKT' + (++nSkt);
+  p(`    <SKETCHSTRUCTURE structureType="0" id="${structId}" name="Proposed">`);
+
+  let cursorX = 0;   // rooms are laid out in a row. True relative placement needs
+                     // the structure floor plan (resto_structure_floorplans), which
+                     // this model does not carry yet. Geometry per room is exact;
+                     // only the placement between rooms is arbitrary.
+  levelGroups.forEach((lvlRec, li) => {
+    const lvlId = 'SKT' + (++nSkt);
+    p(`      <SKETCHLEVEL id="${lvlId}" name="${xmlEsc(lvlRec.name)}" levelNumber="${li + 1}" floorElevation="${ftToU(100)}">`);
+
+    const wallRecs = [];
+    const vertRecs = [];
+    const roomRecs = [];
+
+    for (const { room, itemIds } of lvlRec.rooms) {
+      const verts = room.vertices || [];
+      if (verts.length < 3) continue;
+      const n = verts.length;
+      const hU = ftToU(room.wallHeight || 8);
+      const z0 = ftToU(100), z1 = z0 + hU;
+
+      const base = coords.length;
+      for (const v of verts) pushCoord(ftToU(v[0] + cursorX), ftToU(v[1]), z0);   // bottoms
+      for (const v of verts) pushCoord(ftToU(v[0] + cursorX), ftToU(v[1]), z1);   // tops
+
+      const wallIds = [];
+      for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        const wid = 'SKT' + (++nSkt);
+        wallIds.push(numOf(wid));
+        wallRecs.push({
+          id: wid,
+          name: String.fromCharCode(65 + (i % 26)),
+          coordIndex: [base + i, base + j, base + n + j, base + n + i].join(' '),
+          height: hU
+        });
+      }
+      const roomId = 'SKT' + (++nSkt);
+      // a vertex record per corner, naming the two walls that meet there
+      for (let i = 0; i < n; i++) {
+        const vid = 'SKT' + (++nSkt);
+        const prev = wallIds[(i - 1 + n) % n], cur = wallIds[i];
+        vertRecs.push({ id: vid, vertex: base + i, wallIDs: `${cur} ${prev}` });
+      }
+      roomRecs.push({
+        id: roomId, room, wallIDs: wallIds.join(' '),
+        itemIds: itemIds.join(' '),
+        lastDims: `C=${room.area};F=${room.area};PC=${room.perimeter};PF=${room.perimeter};`
+      });
+      // fix wall roomIDs now that the room has an id
+      for (let i = wallRecs.length - n; i < wallRecs.length; i++) wallRecs[i].roomIDs = `${numOf(roomId)} 0`;
+
+      cursorX += (Math.max(...verts.map((v) => v[0])) + 6);   // 6 ft gutter between rooms
+    }
+
+    for (const w of wallRecs) {
+      p(`        <SKETCHWALL id="${w.id}" name="${w.name}" roomIDs="${w.roomIDs}" coordIndex="${w.coordIndex}" thickness="${ftToU(1 / 3)}" wallHeight="${w.height}">`);
+      p('          <SKETCHWALLSURFACE side="0"/><SKETCHWALLSURFACE side="1"/>');
+      p('        </SKETCHWALL>');
+    }
+    for (const v of vertRecs) p(`        <SKETCHLEVELVERTEX id="${v.id}" vertex="${v.vertex}" wallIDs="${v.wallIDs}"/>`);
+    for (const r of roomRecs) {
+      p(`        <SKETCHROOM id="${r.id}" lineItems="${r.itemIds}" wallIDs="${r.wallIDs}" ceilingHeight="${r.room.wallHeight || 8}" lastDims="${xmlEsc(r.lastDims)}">`);
+      p(`          <SKETCHLABEL><SKETCHCDATACHILD>${cdata(r.room.name)}</SKETCHCDATACHILD></SKETCHLABEL>`);
+      p('        </SKETCHROOM>');
+    }
+    p('      </SKETCHLEVEL>');
+  });
+
+  p('    </SKETCHSTRUCTURE>');
+  p('    <SKETCHDOCUMENTPREFS displayGridSize="1524" gridSize="127" wallThickness="508"/>');
+  p('    <SKETCHVIEW name="Default Print View" type="0" zoom="1.0" scale="96.0"/>');
+  p(`    <COORDINATE3>${coords.join(' ')}</COORDINATE3>`);
+  p('  </SKETCHDOCUMENT>');
+
+  // ---- photos --------------------------------------------------------------
+  p('  <EXT_FILES>');
+  (model._photoPaths || []).slice(0, 130).forEach((_path, i) => {
+    p(`    <EXT_FILE id="EXT${++nExt}" fileName="${i + 1}.JPG" fileType="image/jpeg"/>`);
+  });
+  p('  </EXT_FILES>');
+
+  p('</XACTDOC>');
   return L.join('\n');
 }
 
