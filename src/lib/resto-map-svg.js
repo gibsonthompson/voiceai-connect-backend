@@ -1,5 +1,5 @@
 // ============================================================================
-// resto-map-svg.js — SINGLE SOURCE OF TRUTH for rendering a moisture map to SVG.
+// resto-map-svg.js: SINGLE SOURCE OF TRUTH for rendering a moisture map to SVG.
 // The report embeds this exact SVG (via svg-to-pdfkit); the frontend mirrors it
 // (buildMapSvg.ts) so the printed map is identical to the app. Encodes standard
 // floor-plan conventions: line-weight hierarchy, overall dimension lines with
@@ -108,7 +108,7 @@ function buildMapSvg(scene, opts) {
     }
   });
 
-  // 3) walls — double-line mitered band (classic floor-plan wall): a thick dark
+  // 3) walls: double-line mitered band (classic floor-plan wall): a thick dark
   //    stroke with a slightly thinner white stroke knocking out the core.
   const WT = 9, LW = 1.6;
   walls.forEach((p) => {
@@ -119,7 +119,12 @@ function buildMapSvg(scene, opts) {
     if (p.material) { const c = centroid(p.points); P.push(`<text x="${N(fx(c[0]))}" y="${N(fy(c[1]) + 4)}" text-anchor="middle" font-size="12" font-weight="700" fill="#64748b">${esc(p.material)}</text>`); }
   });
 
-  // 3.5) openings (doors / windows / cased openings) — knock a gap in the wall band
+  // 3.5) openings (doors / windows / cased openings / MISSING WALLS): knock a gap
+  //      in the wall band. A MISSING WALL is Xactimate's concept for an open archway
+  //      between two rooms: there is no wall there at all, so it gets NO jamb lines
+  //      (jambs would imply a cased opening, which is a different thing and a
+  //      different quantity) and is marked with a dashed line showing the absence.
+  //      It deducts full ceiling height from wall area and leaves no baseboard.
   const wallMap = {}; walls.forEach((w) => { wallMap[w.id] = w; });
   (scene.openings || []).forEach((op) => {
     const w = wallMap[op.wallId]; if (!w || !w.points || w.points.length < 2) return;
@@ -136,18 +141,24 @@ function buildMapSvg(scene, opts) {
     const nx = nrm[0], ny = nrm[1], h = WT / 2 + 1.2, jh = WT / 2, gapLen = Math.hypot(Bx - Ax, By - Ay);
     P.push(`<polygon points="${N(Ax)},${N(Ay)} ${N(Bx)},${N(By)} ${N(Bx + nx * h)},${N(By + ny * h)} ${N(Ax + nx * h)},${N(Ay + ny * h)}" fill="#f4f7fb"/>`);
     P.push(`<polygon points="${N(Ax)},${N(Ay)} ${N(Bx)},${N(By)} ${N(Bx - nx * h)},${N(By - ny * h)} ${N(Ax - nx * h)},${N(Ay - ny * h)}" fill="#ffffff"/>`);
-    P.push(`<line x1="${N(Ax - nx * jh)}" y1="${N(Ay - ny * jh)}" x2="${N(Ax + nx * jh)}" y2="${N(Ay + ny * jh)}" stroke="#0E2A4D" stroke-width="${LW}" stroke-linecap="round"/>`);
-    P.push(`<line x1="${N(Bx - nx * jh)}" y1="${N(By - ny * jh)}" x2="${N(Bx + nx * jh)}" y2="${N(By + ny * jh)}" stroke="#0E2A4D" stroke-width="${LW}" stroke-linecap="round"/>`);
+    if (op.kind !== 'missing_wall') {
+      P.push(`<line x1="${N(Ax - nx * jh)}" y1="${N(Ay - ny * jh)}" x2="${N(Ax + nx * jh)}" y2="${N(Ay + ny * jh)}" stroke="#0E2A4D" stroke-width="${LW}" stroke-linecap="round"/>`);
+      P.push(`<line x1="${N(Bx - nx * jh)}" y1="${N(By - ny * jh)}" x2="${N(Bx + nx * jh)}" y2="${N(By + ny * jh)}" stroke="#0E2A4D" stroke-width="${LW}" stroke-linecap="round"/>`);
+    }
     if (op.kind === 'door') {
       const oeX = Ax + nx * gapLen, oeY = Ay + ny * gapLen, sweep = (dir[0] * ny - dir[1] * nx) > 0 ? 1 : 0;
       P.push(`<path d="M ${N(Bx)} ${N(By)} A ${N(gapLen)} ${N(gapLen)} 0 0 ${sweep} ${N(oeX)} ${N(oeY)}" fill="none" stroke="#94a3b8" stroke-width="1.6"/>`);
       P.push(`<line x1="${N(Ax)}" y1="${N(Ay)}" x2="${N(oeX)}" y2="${N(oeY)}" stroke="#0E2A4D" stroke-width="2"/>`);
     } else if (op.kind === 'window') {
       P.push(`<line x1="${N(Ax)}" y1="${N(Ay)}" x2="${N(Bx)}" y2="${N(By)}" stroke="#0E2A4D" stroke-width="1.6"/>`);
+    } else if (op.kind === 'missing_wall') {
+      P.push(`<line x1="${N(Ax)}" y1="${N(Ay)}" x2="${N(Bx)}" y2="${N(By)}" stroke="#94a3b8" stroke-width="1.4" stroke-dasharray="4 4"/>`);
+      const mx = (Ax + Bx) / 2 + nx * 12, my = (Ay + By) / 2 + ny * 12;
+      P.push(`<text x="${N(mx)}" y="${N(my + 3)}" text-anchor="middle" font-size="8.5" font-weight="700" fill="#94a3b8">missing wall</text>`);
     }
   });
 
-  // 3.6) flood cuts — dashed band inside the affected wall + cut height (DRYW)
+  // 3.6) flood cuts: dashed band inside the affected wall + cut height (DRYW)
   (scene.floodCuts || []).forEach((fc) => {
     const w = wallMap[fc.wallId]; if (!w || !w.points || w.points.length < 2) return;
     const n = w.points.length;
@@ -164,10 +175,10 @@ function buildMapSvg(scene, opts) {
     P.push(`<line x1="${N(fx(A[0]))}" y1="${N(fy(A[1]))}" x2="${N(fx(B[0]))}" y2="${N(fy(B[1]))}" stroke="#F59E0B" stroke-width="6" stroke-linecap="round" stroke-dasharray="2 6" opacity="0.95"/>`);
     const lf = Math.round(lenU / UPF), ht = fc.heightFt < 1 ? '4"' : fc.heightFt + "'";
     const lx = fx((A[0] + B[0]) / 2 + nrm[0] * 13), ly = fy((A[1] + B[1]) / 2 + nrm[1] * 13);
-    P.push(`<text x="${N(lx)}" y="${N(ly + 4)}" text-anchor="middle" font-size="11" font-weight="800" fill="#B45309">${lf} linear ft · ${ht} cut</text>`);
+    P.push(`<text x="${N(lx)}" y="${N(ly + 4)}" text-anchor="middle" font-size="11" font-weight="800" fill="#B45309">${lf} linear ft \u00b7 ${ht} cut</text>`);
   });
 
-  // 3.7) containment barriers — poly line + sq ft (PLASTIC)
+  // 3.7) containment barriers: poly line + sq ft (PLASTIC)
   (scene.containments || []).forEach((ct) => {
     if (ct.x != null && ct.y != null) {
       const sqft = Math.round((ct.widthFt || 0) * (ct.heightFt || 0));
@@ -264,6 +275,7 @@ function buildMapSvg(scene, opts) {
   if (cnt('air_mover')) legend.push(['#29ABE6', `Air mover (${cnt('air_mover')})`]);
   if ((scene.floodCuts || []).length) legend.push(['#F59E0B', 'Flood cut']);
   if ((scene.containments || []).length) legend.push(['#8B5CF6', 'Containment']);
+  if ((scene.openings || []).some((o) => o.kind === 'missing_wall')) legend.push(['#94a3b8', 'Missing wall']);
   if (cnt('dehumidifier')) legend.push(['#11B5C6', `Dehu (${cnt('dehumidifier')})`]);
   if (cnt('air_scrubber')) legend.push(['#64748B', `Air scrubber (${cnt('air_scrubber')})`]);
   if (pins.length) legend.push(['#F26B3A', 'Reading']);

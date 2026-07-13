@@ -21,9 +21,17 @@
 // ============================================================================
 const { fetchClaimGraph } = require('./resto-report');
 const {
-  UPF, areaFt, perimeterFt, edgeLenFt, largestRoomPolygon, equipmentUnitDays, roomScope
+  UPF, areaFt, perimeterFt, edgeLenFt, largestRoomPolygon, equipmentUnitDays, roomScope,
+  roomDimensions, dimVarsString
 } = require('./resto-scope-quantities');
+
+// Standard opening sizes. Used ONLY when nothing was measured, and every such use is
+// recorded as an assumption (see the openings block below). A missing wall is null
+// because it is full ceiling height by definition.
+const OPENING_DEFAULT_WIDTH_FT = { door: 3, opening: 4, window: 3, missing_wall: 6 };
+const OPENING_DEFAULT_HEIGHT_FT = { door: 6 + 8 / 12, window: 4, opening: 6 + 8 / 12, missing_wall: null };
 const { EQUIP_CODE, selectorFor, flooringCodeKey } = require('./resto-xactimate-codes');
+const { footprintOf, placePoint, blocksOf, latestSketch } = require('./resto-floorplan');
 
 const r2 = (n) => Math.round(n * 100) / 100;
 const r3 = (n) => Math.round(n * 1000) / 1000;
@@ -143,48 +151,125 @@ function mapClaimToProject(graph) {
     photos: []
   };
 
-  // structures -> levels, rooms -> rooms (geometry from the moisture-map sketch)
+  // structures -> levels, rooms -> rooms.
+  // A room's SHAPE comes from its moisture-map sketch. Its PLACE comes from the
+  // structure floor plan (resto_structure_floorplans). Both are Xactimate fields,
+  // and until now we only had the first: rooms were emitted in an arbitrary row, so
+  // Xactimate received correct rooms in a building that did not exist. With a saved
+  // layout the whole level shares one coordinate space, and rooms the tech snapped
+  // flush are flush in the export.
+  const floorplans = graph.floorplans || [];
+  let assumedOpenings = 0;
+  let assumedCeilings = 0;
+
   for (const st of structures) {
     const level = { name: st.name || 'Main Level', rooms: [] };
     const stRooms = rooms.filter((r) => r.structure_id === st.id);
+    const blocks = blocksOf(floorplans, st.id);
+    // Ceiling height: the ROOM overrides the STRUCTURE default. Most houses have one
+    // height with exceptions (a vaulted living room, a low basement), so typing it once
+    // per structure is the difference between a tech using this and skipping it.
+    const structureCeiling = Number(st.default_ceiling_height_ft) > 0 ? Number(st.default_ceiling_height_ft) : null;
+    // Rooms fall back to a laid-out row ONLY when the structure has no floor plan.
+    let fallbackX = 0;
+
     for (const room of stRooms) {
       const rSketches = sketches.filter((s) => s.room_id === room.id);
       const roomName = room.name || 'Room';
       const poly = largestRoomPolygon(rSketches);
 
-      const r = { name: roomName, type: roomName, vertices: [], area: 0, perimeter: 0, wallHeight: 8, openings: [] };
+      const roomCeiling = Number(room.height_ft) > 0 ? Number(room.height_ft) : structureCeiling;
+      const ceilingFt = roomCeiling || 8;                 // last-resort default
+      if (!roomCeiling) assumedCeilings++;                // and we say so, rather than bill a guess in silence
+
+      const r = {
+        name: roomName, type: roomName, vertices: [], area: 0, perimeter: 0,
+        wallHeight: ceilingFt, openings: [], affected: room.affected !== false,
+        assumedCeiling: !roomCeiling
+      };
       if (poly) {
-        // normalize so the room's min corner is the origin (Xactimate rooms are local)
-        const ptsFt = poly.points.map((p) => [p[0] / UPF, p[1] / UPF]);
-        const xs = ptsFt.map((p) => p[0]), ys = ptsFt.map((p) => p[1]);
-        const ox = Math.min(...xs), oy = Math.min(...ys);
-        r.vertices = ptsFt.map((p) => [r3(p[0] - ox), r3(p[1] - oy)]);
+        // The tech positioned the block against the room's LATEST sketch, so the
+        // footprint (and therefore the rotation pivot) must come from that same
+        // sketch, or the room lands somewhere they never put it. Line-item
+        // quantities still aggregate across every sketch; that is a different question.
+        const latest = latestSketch(rSketches);
+        const fp = footprintOf(room, latest ? latest.canvas_json : null);
+        const block = blocks[room.id];
+
+        const ptsFt = block
+          ? poly.points.map((p) => { const w = placePoint(p, fp, block); return [w[0] / UPF, w[1] / UPF]; })
+          : poly.points.map((p) => [p[0] / UPF + fallbackX, p[1] / UPF]);
+
+        r.vertices = ptsFt.map((p) => [r3(p[0]), r3(p[1])]);
         r.area = r2(areaFt(poly.points));
         r.perimeter = r2(perimeterFt(poly.points));
+        if (!block) {
+          const xs = ptsFt.map((p) => p[0]);
+          fallbackX = Math.max(...xs) + 6;   // 6 ft gutter, only when there is no plan
+        }
 
         // openings on this room's outline. FIX: scene stores { wallId, edge, t,
         // widthFt, kind }. Old code read op.type/op.offsetFt/op.heightFt (which do
         // not exist), so every opening became a 7 ft door at offset 0. Now we read
         // the real fields: kind, t (0..1 along the edge) -> offset in feet, and a
         // sensible default height per kind.
+        // Opening heights are MEASUREMENTS, not guesses.
+        //
+        // This block used to hardcode `heightFt = kind === 'window' ? 4 : 6.67`, which
+        // is fabricated measurement data on an insurance document. It was harmless only
+        // while nothing consumed it. Now that wall area deducts openings
+        //     W = (perimeter x ceiling height) - SUM(width x HEIGHT)
+        // an invented height is an invented dollar amount on every paint and drywall
+        // line. So we read the captured height, and when one is genuinely missing we
+        // fall back to a standard size AND record that it was assumed, so it surfaces
+        // instead of hiding.
         for (const s of rSketches) {
           for (const op of ((s.canvas_json || {}).openings || [])) {
             if (op.wallId !== poly.id) continue;
             const kind = op.kind || 'door';
             const edgeFt = edgeLenFt(poly.points, op.edge || 0);
-            const widthFt = op.widthFt || (kind === 'opening' ? 4 : 3);
-            const heightFt = kind === 'window' ? 4 : 6.67; // ~80 in door/opening, ~4 ft window
+            let widthFt = op.widthFt != null ? op.widthFt : OPENING_DEFAULT_WIDTH_FT[kind];
+            widthFt = Math.max(0, Math.min(widthFt, edgeFt || widthFt));   // never wider than its wall
+
+            let heightFt, assumed = false;
+            if (kind === 'missing_wall') {
+              heightFt = ceilingFt;                       // a missing wall IS the full height
+            } else if (op.heightFt != null && op.heightFt > 0) {
+              heightFt = Math.min(op.heightFt, ceilingFt);
+            } else {
+              heightFt = Math.min(OPENING_DEFAULT_HEIGHT_FT[kind] || ceilingFt, ceilingFt);
+              assumed = true;
+              assumedOpenings++;
+            }
+
             const offsetFt = r2((op.t != null ? op.t : 0.5) * edgeFt);
-            r.openings.push({ kind, edge: op.edge || 0, offsetFt, widthFt, heightFt });
+            r.openings.push({ kind, edge: op.edge || 0, offsetFt, widthFt: r2(widthFt), heightFt: r2(heightFt), assumedHeight: assumed });
           }
         }
       }
+      // Xactimate's own room variables. Its line items bill against these as FORMULAS
+      // (the reference file's drywall line is calc="WC"), so Xactimate recomputes each
+      // quantity from the sketch. Emit them right and build-back lines come almost free.
+      //   F floor SF, C ceiling SF, SY floor sq yards, PF/PC perimeter,
+      //   W wall SF = (PF x ceiling height) - openings, WC = W + C
+      r.dims = roomDimensions(rSketches, ceilingFt);
+      r.lastDims = dimVarsString(r.dims);
       level.rooms.push(r);
 
       // room-scoped line items (extraction/tear-out, antimicrobial, drywall, containment)
       for (const it of buildRoomLineItems(rSketches, roomName, liContext)) model.lineItems.push(it);
     }
-    if (level.rooms.length) model.levels.push(level);
+    if (level.rooms.length) {
+      // Shift the whole level so its min corner sits at the origin. Relative
+      // positions (which is what the floor plan captured) are preserved exactly.
+      let mnX = Infinity, mnY = Infinity;
+      for (const rm of level.rooms) for (const v of rm.vertices) { if (v[0] < mnX) mnX = v[0]; if (v[1] < mnY) mnY = v[1]; }
+      if (isFinite(mnX)) {
+        for (const rm of level.rooms) rm.vertices = rm.vertices.map((v) => [r3(v[0] - mnX), r3(v[1] - mnY)]);
+      }
+      level.hasFloorPlan = Object.keys(blocks).length > 0;
+      model.levels.push(level);
+    }
   }
 
   // claim-level equipment line items (Xactimate bills equipment by unit-days, not
@@ -215,8 +300,20 @@ function mapClaimToProject(graph) {
     const desc = c.description || s.desc;
     const dispTxt = c.disposition === 'disposed' ? 'disposed' : 'non-salvageable';
     const note = `${desc}: ${dispTxt} total loss (qty ${c.quantity || 1}). Documented for the Coverage C contents claim; see the Schedule of Loss inventory.`;
-    model.lineItems.push({ cat: s.cat, sel: s.sel, unit: s.unit, quantity: c.quantity || 1, unitPrice: Number(c.replacement_cost) || 0, desc, confidence: s.confidence, room: '', note });
+    // NO PRICE. Xactimate re-prices every line from the Verisk price list for the
+    // region and the date of loss. Sending a price is at best ignored and at worst a
+    // number an adjuster can argue with. We send WHAT and HOW MUCH (cat, sel, qty,
+    // unit); Xactimate decides what it is worth. This was the last place a dollar
+    // value leaked into the export.
+    model.lineItems.push({ cat: s.cat, sel: s.sel, unit: s.unit, quantity: c.quantity || 1, desc, confidence: s.confidence, room: '', note });
   }
+
+  // Assumptions carried out of the export, so nothing rests on a guess in silence.
+  // Wall area is a dollar figure; a tech has to know when one is a default.
+  model.assumptions = {
+    openingsWithoutMeasuredHeight: assumedOpenings,
+    roomsWithoutMeasuredCeiling: assumedCeilings
+  };
 
   // photos placeholder (buffers filled by the caller which has storage access)
   model._photoPaths = (media || []).filter((m) => m.type === 'photo').map((m) => m.storage_path);
@@ -401,10 +498,20 @@ function serializeXactdoc(model) {
       const rGrp = 'GRP' + (++nGrp);
       const ids = [];
       lvlRec.rooms.push({ grpId: rGrp, room, itemIds: ids });
-      p(`      <GROUP id="${rGrp}" code="${xmlEsc(room.name)}" type="Room" desc="${xmlEsc(room.name)}" source="Sketch">`);
+      // A context-only space (a hallway drawn for flow) is a real room in the
+      // building and a real SKETCHROOM, but it carries no line items. A real XACTDOC
+      // models exactly this: every room is a SKETCHROOM, some GROUPs hold an empty
+      // <ITEMS/>. type is left off rather than invented: the reference uses real room
+      // types (Living, etc) from a Verisk list we do not have.
+      p(`      <GROUP id="${rGrp}" code="${xmlEsc(room.name)}" desc="${xmlEsc(room.name)}" source="Sketch">`);
       emitItems(byRoom.get(room.name) || [], '        ', ids);
-      // Dimension variables the calc formulas reference (F = floor SF, PF = floor perimeter).
-      p(`        <DIM><DIM_VARS_SUM F="${room.area}" PF="${room.perimeter}"/></DIM>`);
+      // The dimension variables a line item's calc formula references. Xactimate
+      // RECOMPUTES quantities from these, so they are not decoration: a wrong ceiling
+      // height here corrupts every calc="W" line at once.
+      const d = room.dims;
+      p(d
+        ? `        <DIM><DIM_VARS_SUM C="${d.C}" F="${d.F}" SY="${d.SY}" PC="${d.PC}" PF="${d.PF}" W="${d.W}" WC="${d.WC}"/></DIM>`
+        : `        <DIM><DIM_VARS_SUM F="${room.area}" PF="${room.perimeter}"/></DIM>`);
       p('      </GROUP>');
     }
     // Claim-level lines (equipment unit-days, contents) hang off the level, not a room.
@@ -435,21 +542,23 @@ function serializeXactdoc(model) {
   const sketchDocId = 'SKT' + (++nSkt);
   p(`  <SKETCHDOCUMENT id="${sketchDocId}" majorVersion="1" minorVersion="19" compassRotation="0.0">`);
   const structId = 'SKT' + (++nSkt);
-  p(`    <SKETCHSTRUCTURE structureType="0" id="${structId}" name="Proposed">`);
+  p(`    <SKETCHSTRUCTURE structureType="0" id="${structId}" name="Proposed" key="${rootGrp}" grpType="1" parentKey="${rootGrp}" grpDesc="Proposed">`);
 
-  let cursorX = 0;   // rooms are laid out in a row. True relative placement needs
-                     // the structure floor plan (resto_structure_floorplans), which
-                     // this model does not carry yet. Geometry per room is exact;
-                     // only the placement between rooms is arbitrary.
+  // Room vertices are already in real structure coordinates (placed from the floor
+  // plan in mapClaimToProject), so there is no layout to invent here any more.
   levelGroups.forEach((lvlRec, li) => {
     const lvlId = 'SKT' + (++nSkt);
-    p(`      <SKETCHLEVEL id="${lvlId}" name="${xmlEsc(lvlRec.name)}" levelNumber="${li + 1}" floorElevation="${ftToU(100)}">`);
+    // key/parentKey/grpType are what BIND the geometry to the estimate: a SKETCHLEVEL
+    // whose key is a GROUP id, holding SKETCHROOMs whose keys are the room GROUP ids.
+    // Without them Xactimate has geometry and line items but no idea which belongs to
+    // which. This was the single worst omission in the previous serializer.
+    p(`      <SKETCHLEVEL id="${lvlId}" name="${xmlEsc(lvlRec.name)}" key="${lvlRec.grpId}" grpType="11" parentKey="${rootGrp}" grpDesc="" levelNumber="${li + 1}" floorElevation="${ftToU(100)}">`);
 
     const wallRecs = [];
     const vertRecs = [];
     const roomRecs = [];
 
-    for (const { room, itemIds } of lvlRec.rooms) {
+    for (const { room, itemIds, grpId } of lvlRec.rooms) {
       const verts = room.vertices || [];
       if (verts.length < 3) continue;
       const n = verts.length;
@@ -457,8 +566,8 @@ function serializeXactdoc(model) {
       const z0 = ftToU(100), z1 = z0 + hU;
 
       const base = coords.length;
-      for (const v of verts) pushCoord(ftToU(v[0] + cursorX), ftToU(v[1]), z0);   // bottoms
-      for (const v of verts) pushCoord(ftToU(v[0] + cursorX), ftToU(v[1]), z1);   // tops
+      for (const v of verts) pushCoord(ftToU(v[0]), ftToU(v[1]), z0);   // bottoms
+      for (const v of verts) pushCoord(ftToU(v[0]), ftToU(v[1]), z1);   // tops
 
       const wallIds = [];
       for (let i = 0; i < n; i++) {
@@ -480,14 +589,12 @@ function serializeXactdoc(model) {
         vertRecs.push({ id: vid, vertex: base + i, wallIDs: `${cur} ${prev}` });
       }
       roomRecs.push({
-        id: roomId, room, wallIDs: wallIds.join(' '),
+        id: roomId, room, grpId, wallIDs: wallIds.join(' '),
         itemIds: itemIds.join(' '),
         lastDims: `C=${room.area};F=${room.area};PC=${room.perimeter};PF=${room.perimeter};`
       });
       // fix wall roomIDs now that the room has an id
       for (let i = wallRecs.length - n; i < wallRecs.length; i++) wallRecs[i].roomIDs = `${numOf(roomId)} 0`;
-
-      cursorX += (Math.max(...verts.map((v) => v[0])) + 6);   // 6 ft gutter between rooms
     }
 
     for (const w of wallRecs) {
@@ -497,7 +604,9 @@ function serializeXactdoc(model) {
     }
     for (const v of vertRecs) p(`        <SKETCHLEVELVERTEX id="${v.id}" vertex="${v.vertex}" wallIDs="${v.wallIDs}"/>`);
     for (const r of roomRecs) {
-      p(`        <SKETCHROOM id="${r.id}" lineItems="${r.itemIds}" wallIDs="${r.wallIDs}" ceilingHeight="${r.room.wallHeight || 8}" lastDims="${xmlEsc(r.lastDims)}">`);
+      // ceilingHeight is the room's MEASURED height (room override, else structure
+      // default). lastDims carries the full variable set the reference file uses.
+      p(`        <SKETCHROOM id="${r.id}" lineItems="${r.itemIds}" key="${r.grpId}" grpType="1" parentKey="${lvlRec.grpId}" grpDesc="${xmlEsc(r.room.name)}" wallIDs="${r.wallIDs}" ceilingHeight="${r.room.wallHeight}" lastDims="${xmlEsc(r.room.lastDims || r.lastDims)}">`);
       p(`          <SKETCHLABEL><SKETCHCDATACHILD>${cdata(r.room.name)}</SKETCHCDATACHILD></SKETCHLABEL>`);
       p('        </SKETCHROOM>');
     }
@@ -538,6 +647,18 @@ async function packEsx(xml, photos) {
 async function buildEsx(claimId, downloadImage) {
   const graph = await fetchClaimGraph(claimId);
   if (!graph.claim) throw new Error('claim not found');
+
+  // The structure floor plan is where the rooms actually SIT. Fetched here rather
+  // than in fetchClaimGraph so the carrier report (which does not need it) is left
+  // untouched.
+  const structureIds = (graph.structures || []).map((s) => s.id);
+  if (structureIds.length) {
+    const { supabase } = require('./supabase');
+    const { data: floorplans } = await supabase
+      .from('resto_structure_floorplans').select('*').in('structure_id', structureIds);
+    graph.floorplans = floorplans || [];
+  }
+
   const model = mapClaimToProject(graph);
   const xml = serializeXactdoc(model);
   let photos = [];
