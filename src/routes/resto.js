@@ -2,7 +2,7 @@
 // RESTORATION PLATFORM ROUTES  (mounted at /api/resto)
 // Lives in voiceai-connect-backend/src/routes/. Reuses the existing Supabase
 // service client and CORS. /report, /drying-log, /mold-scan, /ocr, /doc-scan,
-// /scope, /esx are implemented.
+// /scope, /form-pdf, /client-pack, /measurements, /esx are implemented.
 // ============================================================================
 
 const express = require('express');
@@ -35,6 +35,29 @@ async function authClaim(req, res) {
   return { user, claim };
 }
 
+// Insert the resto_documents row and THROW if the database refuses it.
+//
+// Every generator route used to write this as:
+//   const { data: doc } = await supabase.from('resto_documents').insert(...)
+// with no look at `error`. A check-constraint violation on `type` therefore
+// produced data:null, error:<violation>, and the route still answered
+// { ok: true, document: null }. The PDF sat in storage, no row existed, and the
+// button reported success while the Documents list stayed empty. A generator
+// that cannot record its output has failed, so it now says so.
+async function insertDocument(row) {
+  const { data, error } = await supabase.from('resto_documents').insert(row).select('*').single();
+  if (error) throw new Error('could not record the document: ' + error.message);
+  if (!data) throw new Error('could not record the document');
+  return data;
+}
+
+// Best-effort activity log. Never allowed to fail a generation.
+function logEvent(claim, message) {
+  return supabase.from('resto_job_events').insert({
+    org_id: claim.org_id, claim_id: claim.id, kind: 'report', message, meta: {}
+  }).then(() => {}, () => {});
+}
+
 // POST /api/resto/report  { claimId } -> generates the full carrier-ready PDF,
 // stores it, records a resto_documents row, returns the document.
 router.post('/report', async (req, res) => {
@@ -51,22 +74,18 @@ router.post('/report', async (req, res) => {
       .upload(path, pdf, { contentType: 'application/pdf', upsert: false });
     if (upErr) { console.error('resto report upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
 
-    const title = `Full Report - ${claim.policyholder_name || 'Claim'}`;
-    const { data: doc } = await supabase.from('resto_documents').insert({
+    const doc = await insertDocument({
       org_id: claim.org_id, claim_id: claim.id, type: 'full_export',
-      storage_path: path, title, status: 'final',
+      storage_path: path, title: `Full Report - ${claim.policyholder_name || 'Claim'}`, status: 'final',
       generated_at: new Date().toISOString(), created_by: user.id
-    }).select('*').single();
+    });
 
-    await supabase.from('resto_job_events').insert({
-      org_id: claim.org_id, claim_id: claim.id, kind: 'report',
-      message: 'Full report generated', meta: {}
-    }).then(() => {}, () => {}); // best-effort activity log
+    await logEvent(claim, 'Full report generated');
 
     res.json({ ok: true, document: doc });
   } catch (e) {
     console.error('resto report error:', e.message);
-    res.status(500).json({ error: 'report generation failed' });
+    res.status(500).json({ error: e.message || 'report generation failed' });
   }
 });
 
@@ -87,22 +106,18 @@ router.post('/drying-log', async (req, res) => {
       .upload(path, pdf, { contentType: 'application/pdf', upsert: false });
     if (upErr) { console.error('resto drying-log upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
 
-    const title = `Daily Drying Log - ${claim.policyholder_name || 'Claim'}`;
-    const { data: doc } = await supabase.from('resto_documents').insert({
+    const doc = await insertDocument({
       org_id: claim.org_id, claim_id: claim.id, type: 'drying_report',
-      storage_path: path, title, status: 'final',
+      storage_path: path, title: `Daily Drying Log - ${claim.policyholder_name || 'Claim'}`, status: 'final',
       generated_at: new Date().toISOString(), created_by: user.id
-    }).select('*').single();
+    });
 
-    await supabase.from('resto_job_events').insert({
-      org_id: claim.org_id, claim_id: claim.id, kind: 'report',
-      message: 'Daily drying log generated', meta: {}
-    }).then(() => {}, () => {}); // best-effort activity log
+    await logEvent(claim, 'Daily drying log generated');
 
     res.json({ ok: true, document: doc });
   } catch (e) {
     console.error('resto drying-log error:', e.message);
-    res.status(500).json({ error: 'drying log generation failed' });
+    res.status(500).json({ error: e.message || 'drying log generation failed' });
   }
 });
 
@@ -277,6 +292,11 @@ router.post('/doc-scan', async (req, res) => {
 // POST /api/resto/form-pdf  { claimId, signatureId } -> one signed form as its own
 // downloadable PDF. Renders the signature's doc_snapshot (the terms as they stood
 // when it was signed), never a live template.
+//
+// The snapshot is frozen at signing time and re-signing INSERTS a new signature row,
+// so one signatureId can only ever produce one PDF. If we already built it, hand back
+// the same document instead of uploading a byte-identical file and creating a second
+// row that clutters the Documents list.
 router.post('/form-pdf', async (req, res) => {
   try {
     const ctx = await authClaim(req, res);
@@ -286,6 +306,12 @@ router.post('/form-pdf', async (req, res) => {
     const { signatureId } = req.body || {};
     if (!signatureId) return res.status(400).json({ error: 'signatureId required' });
 
+    const { data: existing } = await supabase.from('resto_documents')
+      .select('*').eq('signature_id', signatureId).eq('claim_id', claim.id).maybeSingle();
+    if (existing && existing.storage_path) {
+      return res.json({ ok: true, document: existing, cached: true });
+    }
+
     const { buildFormPdf } = require('../lib/resto-form-pdf');
     const { pdf, title } = await buildFormPdf(claim.id, signatureId);
 
@@ -294,11 +320,11 @@ router.post('/form-pdf', async (req, res) => {
       .upload(path, pdf, { contentType: 'application/pdf', upsert: false });
     if (upErr) { console.error('resto form-pdf upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
 
-    const { data: doc } = await supabase.from('resto_documents').insert({
-      org_id: claim.org_id, claim_id: claim.id, type: 'form',
-      storage_path: path, title: `${title} - ${claim.policyholder_name || 'Claim'}`, status: 'final',
+    const doc = await insertDocument({
+      org_id: claim.org_id, claim_id: claim.id, type: 'form', signature_id: signatureId,
+      storage_path: path, title: `${title} - ${claim.policyholder_name || 'Claim'}`, status: 'signed',
       generated_at: new Date().toISOString(), created_by: user.id
-    }).select('*').single();
+    });
 
     res.json({ ok: true, document: doc });
   } catch (e) {
@@ -325,22 +351,54 @@ router.post('/client-pack', async (req, res) => {
       .upload(path, pdf, { contentType: 'application/pdf', upsert: false });
     if (upErr) { console.error('resto client-pack upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
 
-    const { data: doc } = await supabase.from('resto_documents').insert({
+    const doc = await insertDocument({
       org_id: claim.org_id, claim_id: claim.id, type: 'client_pack',
       storage_path: path, title: `Photos & Notes - ${claim.policyholder_name || 'Claim'}`, status: 'final',
       generated_at: new Date().toISOString(), created_by: user.id
-    }).select('*').single();
+    });
 
-    await supabase.from('resto_job_events').insert({
-      org_id: claim.org_id, claim_id: claim.id, kind: 'report',
-      message: 'Client photo & note pack generated', meta: {}
-    }).then(() => {}, () => {});
+    await logEvent(claim, 'Client photo & note pack generated');
 
     res.json({ ok: true, document: doc });
   } catch (e) {
     const msg = e.message || 'client pack failed';
     const code = msg === 'claim not found' ? 404 : 500;
     if (code === 500) console.error('resto client-pack error:', msg);
+    res.status(code).json({ error: msg });
+  }
+});
+
+// POST /api/resto/measurements  { claimId } -> the room-by-room measurement sheet:
+// floor, ceiling, perimeter, wall area with every opening deducted, and baseboard.
+// Shows its arithmetic, because an adjuster will ask how the wall area was reached.
+// No prices: Xactimate prices this, we only measure it.
+router.post('/measurements', async (req, res) => {
+  try {
+    const ctx = await authClaim(req, res);
+    if (!ctx) return;
+    const { user, claim } = ctx;
+
+    const { buildMeasurementPdf } = require('../lib/resto-measurements-pdf');
+    const { pdf } = await buildMeasurementPdf(claim.id);
+
+    const path = `${claim.org_id}/${claim.id}/reports/${crypto.randomUUID()}.pdf`;
+    const { error: upErr } = await supabase.storage.from('resto-media')
+      .upload(path, pdf, { contentType: 'application/pdf', upsert: false });
+    if (upErr) { console.error('resto measurements upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
+
+    const doc = await insertDocument({
+      org_id: claim.org_id, claim_id: claim.id, type: 'measurements',
+      storage_path: path, title: `Measurements - ${claim.policyholder_name || 'Claim'}`, status: 'final',
+      generated_at: new Date().toISOString(), created_by: user.id
+    });
+
+    await logEvent(claim, 'Measurement sheet generated');
+
+    res.json({ ok: true, document: doc });
+  } catch (e) {
+    const msg = e.message || 'measurements failed';
+    const code = msg === 'claim not found' ? 404 : 500;
+    if (code === 500) console.error('resto measurements error:', msg);
     res.status(code).json({ error: msg });
   }
 });
@@ -366,12 +424,11 @@ router.post('/esx', async (req, res) => {
       .upload(path, esx, { contentType: 'application/octet-stream', upsert: false });
     if (upErr) { console.error('resto esx upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
 
-    const title = `Xactimate Export (.esx) - ${claim.policyholder_name || 'Claim'}`;
-    const { data: doc } = await supabase.from('resto_documents').insert({
+    const doc = await insertDocument({
       org_id: claim.org_id, claim_id: claim.id, type: 'esx',
-      storage_path: path, title, status: 'draft',
+      storage_path: path, title: `Xactimate Export (.esx) - ${claim.policyholder_name || 'Claim'}`, status: 'draft',
       generated_at: new Date().toISOString(), created_by: user.id
-    }).select('*').single();
+    });
 
     res.json({ ok: true, document: doc });
   } catch (e) {

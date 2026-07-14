@@ -222,9 +222,13 @@ function openingsOf(scene, ceilingHeightFt) {
 
     let heightFt = op.heightFt;
     let assumed = false;
-    if (heightFt == null) {
-      const def = OPENING_DEFAULT_HEIGHT_FT[kind];
-      heightFt = def == null ? ceilingHeightFt : def;
+    if (kind === 'missing_wall') {
+      // A missing wall IS the full ceiling height. That is its definition, not an
+      // assumption, so it must never be flagged as one. (The frontend already got
+      // this right; this keeps the two engines in agreement.)
+      heightFt = ceilingHeightFt;
+    } else if (heightFt == null) {
+      heightFt = OPENING_DEFAULT_HEIGHT_FT[kind] || ceilingHeightFt;
       assumed = true;
     }
     // A 7 ft door in a 6 ft 8 in ceiling is nonsense; clamp rather than bill it.
