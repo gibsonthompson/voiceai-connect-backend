@@ -183,21 +183,41 @@ async function generateReportPdf(graph, getImage) {
           // it is what a re-carpet or replace-flooring line bills against. Wall square
           // footage is the paintable / drywall area after openings. Both are stated in
           // square feet, and named, because each drives its own line items.
+          //
+          // Per-surface scope: a surface a tech marked out of scope (an unaffected tile
+          // floor under wet walls) is still shown, marked "not in scope", so nothing looks
+          // hidden, but it is left out of the plain floor/wall summary line.
+          const incFloor = room.include_floor !== false;
+          const incWalls = room.include_walls !== false;
+          const incCeiling = room.include_ceiling !== false;
+          const incBase = room.include_baseboard !== false;
+          const nis = ' (not in scope)';
           const floorMat = floorMaterialOf(rSketches);
           const floorLabel = floorMat ? `Floor (${floorMat.toLowerCase()})` : 'Floor';
           k.h3('Measurements');
           k.facts([
-            [floorLabel, d.F + ' sq ft'],
-            ['Ceiling', d.C + ' sq ft'],
+            [floorLabel, d.F + ' sq ft' + (incFloor ? '' : nis)],
+            ['Ceiling', d.C + ' sq ft' + (incCeiling ? '' : nis)],
             ['Perimeter', d.PF + ' ft'],
             ['Ceiling height', d.SH + ' ft'],
-            ['Wall area', d.W + ' sq ft'],
-            ['Baseboard', d.baseboardLF + ' ft']
+            ['Wall area', d.W + ' sq ft' + (incWalls ? '' : nis)],
+            ['Baseboard', d.baseboardLF + ' ft' + (incBase ? '' : nis)]
           ], 3);
-          k.para(
-            `Floor${floorMat ? ' (' + floorMat.toLowerCase() + ')' : ''}: ${d.F} sq ft of floor.   Walls: ${d.W} sq ft.`,
-            { weight: 'b', size: T.size.small, color: T.ink }
-          );
+          const sumParts = [];
+          if (incFloor) sumParts.push(`Floor${floorMat ? ' (' + floorMat.toLowerCase() + ')' : ''}: ${d.F} sq ft`);
+          if (incWalls) sumParts.push(`Walls: ${d.W} sq ft`);
+          if (sumParts.length) {
+            k.para(sumParts.join('.   ') + '.', { weight: 'b', size: T.size.small, color: T.ink });
+          }
+          const outOf = [];
+          if (!incFloor) outOf.push('floor');
+          if (!incWalls) outOf.push('walls');
+          if (!incCeiling) outOf.push('ceiling');
+          if (!incBase) outOf.push('baseboard');
+          if (outOf.length) {
+            k.callout('Not part of the loss in this room: ' + outOf.join(', ') +
+              '. Measured and shown for reference, not billed.', 'warn');
+          }
           k.para(
             `Wall area = (perimeter ${d.PF} ft x height ${d.SH} ft) = ${d.grossWallSF} sq ft gross, less ${d.openingDeductSF} sq ft of openings.`,
             { size: T.size.small, color: T.muted }

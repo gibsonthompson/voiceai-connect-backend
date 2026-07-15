@@ -53,12 +53,29 @@ const xmlEsc = (s) => String(s == null ? '' : s).replace(/[<>&'"]/g, (c) => ({ '
 // surfaced both as the ESX line-item NOTE and, verbatim, under the same line in
 // the PDF report. context = { category, className, dateOfLoss }; a bare category
 // number is still accepted for backward compatibility.
+//
+// PER-SURFACE SCOPE (scope arg, 4th param). A surface a tech turned off is not
+// billed, exactly as it is not totalled on the measurement sheet and the report.
+// This gates the LINE ITEMS only; the room geometry (dims, sketch) is left whole,
+// because a room's shape is not the same thing as what is in the loss. So an
+// out-of-scope floor is still drawn and measured, it just carries no floor line.
+//   include_floor    -> water extraction / flooring tear-out / floor antimicrobial
+//   include_walls    -> flood-cut drywall removal
+//   include_ceiling  -> (no ceiling-only mitigation line is emitted here yet)
+//   include_baseboard-> (baseboard is a measurement, not a mitigation line here)
+// Containment is not a surface: it isolates the room, so it is never gated.
+// scope omitted or a bare object defaults every surface to in-scope, so existing
+// callers behave exactly as before.
 // ============================================================================
-function buildRoomLineItems(roomSketches, roomName, context) {
+function buildRoomLineItems(roomSketches, roomName, context, scopeFlags) {
   const ctx = (context && typeof context === 'object') ? context : { category: context };
   const categoryOfWater = ctx.category;
   const className = ctx.className;
   const dateOfLoss = ctx.dateOfLoss;
+
+  const flags = (scopeFlags && typeof scopeFlags === 'object') ? scopeFlags : {};
+  const incFloor = flags.include_floor !== false;
+  const incWalls = flags.include_walls !== false;
 
   // shared note fragments so every line reads consistently
   const where = roomName ? ` (${roomName})` : '';
@@ -77,31 +94,39 @@ function buildRoomLineItems(roomSketches, roomName, context) {
 
   // wet floor: dry in place -> extraction; remove -> flooring tear-out.
   // Either/or, never both on the same SF (double-billing is a scrub trigger).
-  for (const wf of scope.wetFloorByMaterial) {
-    const mat = wf.material || 'flooring';
-    if (wf.disposition === 'remove') {
-      const key = flooringCodeKey(wf.material);
-      if (key) push(key, wf.sqft, `Flooring tear-out, ${r2(wf.sqft)} SF of ${mat}${where}. ${catLabel}${classLabel} loss.${dol} Non-salvageable; removed rather than dried in place. Affected area measured on the moisture map.`);
-      else push('extraction_hard', wf.sqft, `Water extraction from ${r2(wf.sqft)} SF of wet ${mat}${where} (no tear-out code for this material; billed as extraction). ${catLabel}${classLabel} loss.${dol} Affected area measured on the moisture map.`);
-    } else {
-      const key = /carpet/i.test(wf.material) ? 'extraction_carpet' : 'extraction_hard';
-      push(key, wf.sqft, `Water extraction from ${r2(wf.sqft)} SF of wet ${mat}${where}. ${catLabel}${classLabel} loss.${dol} Affected area measured on the moisture map.`);
+  // Skipped entirely when the floor is out of scope for this room.
+  if (incFloor) {
+    for (const wf of scope.wetFloorByMaterial) {
+      const mat = wf.material || 'flooring';
+      if (wf.disposition === 'remove') {
+        const key = flooringCodeKey(wf.material);
+        if (key) push(key, wf.sqft, `Flooring tear-out, ${r2(wf.sqft)} SF of ${mat}${where}. ${catLabel}${classLabel} loss.${dol} Non-salvageable; removed rather than dried in place. Affected area measured on the moisture map.`);
+        else push('extraction_hard', wf.sqft, `Water extraction from ${r2(wf.sqft)} SF of wet ${mat}${where} (no tear-out code for this material; billed as extraction). ${catLabel}${classLabel} loss.${dol} Affected area measured on the moisture map.`);
+      } else {
+        const key = /carpet/i.test(wf.material) ? 'extraction_carpet' : 'extraction_hard';
+        push(key, wf.sqft, `Water extraction from ${r2(wf.sqft)} SF of wet ${mat}${where}. ${catLabel}${classLabel} loss.${dol} Affected area measured on the moisture map.`);
+      }
+    }
+
+    // antimicrobial: only defensible on Category 2 or 3 (S500 is specific about Cat 1),
+    // and it is a floor application here, so it follows the floor in and out of scope.
+    if (Number(categoryOfWater) >= 2 && scope.affectedFloorSqFt > 0) {
+      push('antimicrobial', scope.affectedFloorSqFt, `Antimicrobial applied to ${r2(scope.affectedFloorSqFt)} SF of affected flooring${where}. Required for ${catLabel}${classLabel} loss per IICRC S500.${dol}`);
     }
   }
 
-  // antimicrobial: only defensible on Category 2 or 3 (S500 is specific about Cat 1)
-  if (Number(categoryOfWater) >= 2 && scope.affectedFloorSqFt > 0) {
-    push('antimicrobial', scope.affectedFloorSqFt, `Antimicrobial applied to ${r2(scope.affectedFloorSqFt)} SF of affected flooring${where}. Required for ${catLabel}${classLabel} loss per IICRC S500.${dol}`);
+  // flood cuts -> drywall removal, bucketed by cut height. A wall surface, so it is
+  // skipped when the walls are out of scope for this room.
+  if (incWalls) {
+    for (const c of scope.floodCuts) {
+      if (c.heightFt <= 0.34) push('drywall_lf_4in', c.lf, `Wet drywall removed, ${r2(c.lf)} LF flood cut at 4 in${where}. ${catLabel}${classLabel} loss.${dol} Cut line documented on the moisture map.`);
+      else if (c.heightFt <= 2) push('drywall_lf_2ft', c.lf, `Wet drywall removed, ${r2(c.lf)} LF flood cut at ${c.heightFt} ft${where}. ${catLabel}${classLabel} loss.${dol} Cut line documented on the moisture map.`);
+      else push('drywall_sf', c.sqft, `Wet drywall removed, ${r2(c.sqft)} SF flood cut at ${c.heightFt} ft${where}. ${catLabel}${classLabel} loss.${dol} Cut line documented on the moisture map.`);
+    }
   }
 
-  // flood cuts -> drywall removal, bucketed by cut height
-  for (const c of scope.floodCuts) {
-    if (c.heightFt <= 0.34) push('drywall_lf_4in', c.lf, `Wet drywall removed, ${r2(c.lf)} LF flood cut at 4 in${where}. ${catLabel}${classLabel} loss.${dol} Cut line documented on the moisture map.`);
-    else if (c.heightFt <= 2) push('drywall_lf_2ft', c.lf, `Wet drywall removed, ${r2(c.lf)} LF flood cut at ${c.heightFt} ft${where}. ${catLabel}${classLabel} loss.${dol} Cut line documented on the moisture map.`);
-    else push('drywall_sf', c.sqft, `Wet drywall removed, ${r2(c.sqft)} SF flood cut at ${c.heightFt} ft${where}. ${catLabel}${classLabel} loss.${dol} Cut line documented on the moisture map.`);
-  }
-
-  // containment barrier
+  // containment barrier. Not a surface: it isolates the affected area regardless of
+  // which surfaces are scoped, so it is never gated by the surface flags.
   if (scope.containment.sqft > 0) {
     push('containment', scope.containment.sqft, `Containment barrier, ${r2(scope.containment.sqft)} SF (${scope.containment.count} barrier${scope.containment.count === 1 ? '' : 's'})${where}. Installed to isolate the affected area during ${catLabel}${classLabel} mitigation.${dol}`);
   }
@@ -252,12 +277,26 @@ function mapClaimToProject(graph) {
       // quantity from the sketch. Emit them right and build-back lines come almost free.
       //   F floor SF, C ceiling SF, SY floor sq yards, PF/PC perimeter,
       //   W wall SF = (PF x ceiling height) - openings, WC = W + C
+      //
+      // These stay WHOLE even when a surface is out of scope. Per-surface scope removes
+      // billed LINE ITEMS (below), never the room's real geometry: zeroing W here would
+      // corrupt the room Xactimate draws, and would break any formula line the adjuster
+      // adds after import. Scope is what is billed; dims are what the room is.
       r.dims = roomDimensions(rSketches, ceilingFt);
       r.lastDims = dimVarsString(r.dims);
       level.rooms.push(r);
 
+      // Per-surface scope for this room. Default every surface in-scope, so a room with
+      // no flags set (or all true) exports exactly as before.
+      const roomScopeFlags = {
+        include_floor: room.include_floor !== false,
+        include_walls: room.include_walls !== false,
+        include_ceiling: room.include_ceiling !== false,
+        include_baseboard: room.include_baseboard !== false
+      };
+
       // room-scoped line items (extraction/tear-out, antimicrobial, drywall, containment)
-      for (const it of buildRoomLineItems(rSketches, roomName, liContext)) model.lineItems.push(it);
+      for (const it of buildRoomLineItems(rSketches, roomName, liContext, roomScopeFlags)) model.lineItems.push(it);
     }
     if (level.rooms.length) {
       // Shift the whole level so its min corner sits at the origin. Relative

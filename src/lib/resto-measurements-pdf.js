@@ -1,16 +1,5 @@
 // ============================================================================
-// MEASUREMENT REPORT
-// ----------------------------------------------------------------------------
-// Room by room: floor, ceiling, perimeter, WALL AREA with every opening deducted,
-// and baseboard. These are the numbers that pay for paint, drywall, flooring and trim.
-//
-// IT SHOWS ITS WORK. An adjuster will ask how you got 336 sq ft of wall, and "the app
-// said so" is not an answer. Gross area, each opening subtracted by name, net. The same
-// arithmetic a human would do on paper, which is exactly what survives a scrub.
-//
-// NO PRICES. Xactimate prices this from the carrier price list for the region and the
-// date of loss. We measure it. Rebuilt on the shared layout kit so it matches the
-// carrier report and the client pack.
+// MEASUREMENT REPORT  (verbatim)
 // ============================================================================
 const {
   T, M, newDoc, docToBuffer, brandingOf, kit, coverPage, brandFooterBlock,
@@ -67,25 +56,29 @@ function generateMeasurementPdf(graph) {
       if (!rSketches.length) continue;
 
       const roomCeiling = Number(room.height_ft) > 0 ? Number(room.height_ft) : structDefault;
-      // roomDimensions takes the SKETCH ROWS, not a scene. It walks every sketch of the
-      // room and takes the largest wall polygon as the outline, so a room with two maps
-      // still measures once.
       const d = roomDimensions(rSketches, roomCeiling);
-      if (!d.F) continue;   // nothing drawn, nothing to measure
+      if (!d.F) continue;
 
       if (!printedSection) { k.section(st.name || 'Structure'); printedSection = true; }
       anyRoom = true;
 
+      // Per-surface scope. A surface a tech turned off (e.g. an unaffected tile floor in
+      // a hallway with wet walls) is shown for reference but kept OUT of the totals.
+      const incFloor = room.include_floor !== false;
+      const incWalls = room.include_walls !== false;
+      const incCeiling = room.include_ceiling !== false;
+      const incBase = room.include_baseboard !== false;
+      const nis = ' (not in scope)';
+
       k.h2(room.name || 'Room', room.affected === false ? 'Context only, not part of the loss' : null);
 
       k.facts([
-        ['Floor', num(d.F) + ' sq ft'],
-        ['Ceiling', num(d.C) + ' sq ft'],
+        ['Floor', num(d.F) + ' sq ft' + (incFloor ? '' : nis)],
+        ['Ceiling', num(d.C) + ' sq ft' + (incCeiling ? '' : nis)],
         ['Perimeter', num(d.PF) + ' ft'],
         ['Ceiling height', formatFeetInches(d.SH) + (d.assumedCeiling ? ' (assumed)' : '')]
       ], 4);
 
-      // THE WALL MATH, step by step. This is the whole point of the document.
       const rowsW = [[`Perimeter ${num(d.PF)} ft x height ${formatFeetInches(d.SH)}`, '', num(d.grossWallSF) + ' sq ft']];
       for (const o of d.openings) {
         const label = 'Less ' + (OPENING_LABEL[o.kind] || o.kind).toLowerCase();
@@ -97,19 +90,33 @@ function generateMeasurementPdf(graph) {
       k.table(
         [{ t: 'Calculation', w: 0.42 }, { t: 'Size', w: 0.30 }, { t: 'Area', w: 0.28, align: 'right' }],
         rowsW,
-        { total: ['Wall area to bill', '', num(d.W) + ' sq ft'] }
+        { total: ['Wall area to bill', '', num(d.W) + ' sq ft' + (incWalls ? '' : nis)] }
       );
 
       k.facts([
         ['Walls and ceiling', num(d.WC) + ' sq ft'],
-        ['Baseboard', num(d.baseboardLF) + ' ft'],
-        ['Floor, square yards', num(d.SY) + ' sy']
+        ['Baseboard', num(d.baseboardLF) + ' ft' + (incBase ? '' : nis)],
+        ['Floor, square yards', num(d.SY) + ' sy' + (incFloor ? '' : nis)]
       ], 3);
+
+      // Say plainly which surfaces are excluded and why the totals leave them out.
+      const outOf = [];
+      if (!incFloor) outOf.push('floor');
+      if (!incWalls) outOf.push('walls');
+      if (!incCeiling) outOf.push('ceiling');
+      if (!incBase) outOf.push('baseboard');
+      if (outOf.length) {
+        k.callout('Not part of the loss in this room: ' + outOf.join(', ') +
+          '. Measured and shown above for reference, but excluded from the totals below.', 'warn');
+      }
 
       (d.warnings || []).forEach((w) => k.callout(w, 'warn'));
 
-      if (d.assumedCeiling) assumedCeilings++;
-      totalFloor += d.F; totalCeil += d.C; totalWall += d.W; totalBase += d.baseboardLF;
+      if (d.assumedCeiling && incWalls) assumedCeilings++;
+      if (incFloor) totalFloor += d.F;
+      if (incCeiling) totalCeil += d.C;
+      if (incWalls) totalWall += d.W;
+      if (incBase) totalBase += d.baseboardLF;
       k.gap(1);
     }
   }
@@ -157,7 +164,6 @@ async function fetchMeasurementGraph(claimId) {
   const { data: claim } = await supabase.from('resto_claims').select('*').eq('id', claimId).single();
   if (!claim) throw new Error('claim not found');
   const settings = await orgSettings(claim.org_id);
-
   const { data: structures } = await supabase.from('resto_structures').select('*').eq('claim_id', claimId).order('sort_order');
   const structureIds = (structures || []).map((s) => s.id);
   const { data: rooms } = structureIds.length
@@ -167,7 +173,6 @@ async function fetchMeasurementGraph(claimId) {
   const { data: sketches } = roomIds.length
     ? await supabase.from('resto_sketches').select('*').in('room_id', roomIds)
     : { data: [] };
-
   return { claim, structures: structures || [], rooms: rooms || [], sketches: sketches || [], settings };
 }
 
