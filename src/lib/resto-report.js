@@ -1,22 +1,5 @@
 // ============================================================================
-// RESTORATION CLAIM REPORT  (pdfkit, no headless browser)
-// ----------------------------------------------------------------------------
-// The carrier-ready full export. This document is ADVERSARIAL: an adjuster opens
-// it looking for a reason to cut a line, so every number on it has to be findable
-// and has to show its work.
-//
-// Rewritten onto the shared layout kit in resto-pdf-common. The old version drew
-// with ad hoc moveDown calls and left doc.x wherever the last photo grid or legend
-// happened to end, which is why text bled sideways and captions ran into the row
-// below. Nothing here draws without calling ensure() first, and ensure() always
-// resets the left margin.
-//
-// Structure of the document:
-//   1  Cover: who, where, and the facts an adjuster opens the file to find
-//   2  Contents
-//   3+ One section per structure: each room's photos, measurements, moisture map,
-//      drying trend, materials, scope; then that structure's drying chambers
-//   n  Contents inventory, equipment summary, schedule of loss, signatures
+// RESTORATION CLAIM REPORT  (verbatim)
 // ============================================================================
 const SVGtoPDF = require('svg-to-pdfkit');
 const { buildMapSvg } = require('./resto-map-svg');
@@ -25,12 +8,10 @@ const {
   dateOnly, db, downloadImage
 } = require('./resto-pdf-common');
 
-// The measurement engine, shared with the ESX export and the measurements PDF.
-// Required defensively so a rename there can never take the whole report down.
 let roomDimensions = null;
 try { roomDimensions = require('./resto-scope-quantities').roomDimensions; } catch (_e) { roomDimensions = null; }
 
-const UPF = 40;   // scene units per foot. Matches the editors. Do not change.
+const UPF = 40;
 
 const READING_LABEL = { psychrometric: 'Affected', exterior: 'Exterior', dehu_outlet: 'Dehu outlet', material_mc: 'Material MC' };
 const EQUIP_FULL = { air_mover: 'Air mover', dehumidifier: 'Dehumidifier', air_scrubber: 'Air scrubber', heater: 'Heater' };
@@ -59,6 +40,19 @@ function equipDays(e) {
   return Math.max(1, Math.round((end - start) / 86400000) + (e.removed_at ? 1 : 0));
 }
 
+// The flooring material for a room, read from the floor wet-area a tech marked.
+// Lets the report say "Floor (carpet)" when the floor IS carpet, without hard-coding
+// carpet for a tile or hardwood room, which on a carrier-facing document would be a
+// misstatement. Returns null when no floor material was recorded.
+function floorMaterialOf(rSketches) {
+  for (const s of (rSketches || [])) {
+    for (const wa of ((s.canvas_json || {}).wetAreas || [])) {
+      if ((wa.surface || 'floor') === 'floor' && wa.material) return String(wa.material);
+    }
+  }
+  return null;
+}
+
 async function generateReportPdf(graph, getImage) {
   const { claim, structures, rooms, media, notes, contents, sketches, chambers, readings, dryStandards, signatures, equipment, moldScans } = graph;
 
@@ -69,9 +63,6 @@ async function generateReportPdf(graph, getImage) {
   const doc = newDoc();
   const bufP = docToBuffer(doc);
 
-  // ---- Xactimate line items, from the SAME builder the ESX uses, so the report and
-  // the export can never disagree about what is being billed. Lazy require avoids the
-  // resto-esx <-> resto-report circular load.
   let esxByRoom = {}, esxClaimLevel = [];
   try {
     const { mapClaimToProject } = require('./resto-esx');
@@ -82,7 +73,6 @@ async function generateReportPdf(graph, getImage) {
     }
   } catch (_e) { esxByRoom = {}; esxClaimLevel = []; }
 
-  // ---- 1. Cover -------------------------------------------------------------
   const cat = claim.category_of_water, cls = claim.class_of_water;
   const k = coverPage(doc, brand, {
     title: 'Property Restoration Report',
@@ -105,9 +95,6 @@ async function generateReportPdf(graph, getImage) {
   });
   const { W } = k;
 
-  // Sudden versus gradual is the number one outright denial reason on a water claim.
-  // If the record says gradual, or the discovery gap is wide, the report says so on the
-  // cover rather than letting the adjuster be the first to notice.
   const gap = (() => {
     if (!claim.date_of_loss || !claim.date_discovered) return null;
     const a = new Date(claim.date_of_loss + 'T00:00:00').getTime();
@@ -123,10 +110,9 @@ async function generateReportPdf(graph, getImage) {
   }
   if (claim.cause_notes) { k.h3('Cause and origin'); k.para(claim.cause_notes); }
 
-  doc.addPage();   // page 2, reserved for Contents
-  doc.addPage();   // page 3, body
+  doc.addPage();
+  doc.addPage();
 
-  // ---- shared renderers -----------------------------------------------------
   const renderScope = (list) => {
     k.table(
       [{ t: 'Code', w: 0.16 }, { t: 'Description', w: 0.58 }, { t: 'Qty', w: 0.14, align: 'right' }, { t: 'Unit', w: 0.12 }],
@@ -170,7 +156,6 @@ async function generateReportPdf(graph, getImage) {
   const eqTotals = {};
   const allContents = [];
 
-  // ---- 2. Structures --------------------------------------------------------
   for (const st of structures) {
     const stRooms = rooms.filter((r) => r.structure_id === st.id);
     const shown = stRooms.filter(roomHasContent);
@@ -190,27 +175,29 @@ async function generateReportPdf(graph, getImage) {
       const ceil = ceilingFor(room, st);
       k.h2(room.name || 'Room', ceil ? ceil + ' ft ceiling' : 'Ceiling height not measured');
 
-      // --- measurements. THE PRODUCT. Every wall line in the estimate bills against
-      // these numbers, so they belong on the carrier's copy, showing their arithmetic.
-      //
-      // roomDimensions takes the SKETCH ROWS, not a scene. It walks every sketch of the
-      // room and picks the largest wall polygon as the outline, which is how a room with
-      // more than one map still measures once. Passing a single canvas_json throws inside
-      // it, the catch swallows it, and the measurements silently disappear from a document
-      // that still reports success. Do not "simplify" this back to a scene.
       if (roomDimensions && rSketches.length) {
         let d = null;
         try { d = roomDimensions(rSketches, ceil); } catch (e) { console.error('roomDimensions failed:', e.message); d = null; }
         if (d && d.F > 0) {
+          // Floor square footage IS the carpet / flooring area for the whole room:
+          // it is what a re-carpet or replace-flooring line bills against. Wall square
+          // footage is the paintable / drywall area after openings. Both are stated in
+          // square feet, and named, because each drives its own line items.
+          const floorMat = floorMaterialOf(rSketches);
+          const floorLabel = floorMat ? `Floor (${floorMat.toLowerCase()})` : 'Floor';
           k.h3('Measurements');
           k.facts([
-            ['Floor', d.F + ' sq ft'],
+            [floorLabel, d.F + ' sq ft'],
             ['Ceiling', d.C + ' sq ft'],
             ['Perimeter', d.PF + ' ft'],
             ['Ceiling height', d.SH + ' ft'],
             ['Wall area', d.W + ' sq ft'],
             ['Baseboard', d.baseboardLF + ' ft']
           ], 3);
+          k.para(
+            `Floor${floorMat ? ' (' + floorMat.toLowerCase() + ')' : ''}: ${d.F} sq ft of floor.   Walls: ${d.W} sq ft.`,
+            { weight: 'b', size: T.size.small, color: T.ink }
+          );
           k.para(
             `Wall area = (perimeter ${d.PF} ft x height ${d.SH} ft) = ${d.grossWallSF} sq ft gross, less ${d.openingDeductSF} sq ft of openings.`,
             { size: T.size.small, color: T.muted }
@@ -244,7 +231,6 @@ async function generateReportPdf(graph, getImage) {
             if (stampGps && p.lat != null && p.lng != null) bits.push(Number(p.lat).toFixed(4) + ', ' + Number(p.lng).toFixed(4));
             return bits.join('   ');
           },
-          // Link each thumbnail to the full-resolution original so an adjuster can zoom in.
           onCell: async (p, x, y, cell) => {
             try {
               const { data: su } = await db().storage.from('resto-media').createSignedUrl(p.storage_path, 60 * 60 * 24 * 365);
@@ -268,14 +254,11 @@ async function generateReportPdf(graph, getImage) {
         );
       }
 
-      // --- moisture maps
       for (const s of rSketches.filter(sketchHasContent)) {
         const svg = buildMapSvg(s.canvas_json || {}, { width: 760, draw: 520 });
         const mm = svg.match(/width="(\d+)" height="(\d+)"/);
         const aspect = mm ? Number(mm[2]) / Number(mm[1]) : 0.6;
         const renderH = W * aspect;
-        // Heading, map and legend are ONE block. A legend on the page after its map
-        // explains nothing, which is exactly what happened before this reservation.
         k.h3('Moisture map', renderH + 46);
         const y = k.ensure(renderH + 40);
         SVGtoPDF(doc, svg, M, y, { width: W });
@@ -299,7 +282,6 @@ async function generateReportPdf(graph, getImage) {
         k.gap(1);
       }
 
-      // --- drying trend
       const roomPoints = [];
       for (const s of rSketches) for (const mp of ((s.canvas_json && s.canvas_json.moisturePoints) || [])) roomPoints.push(mp);
       const dateSet = new Set();
@@ -315,15 +297,12 @@ async function generateReportPdf(graph, getImage) {
         k.table(cols, trendPts.map((mp, i) => {
           const loc = mp.label || '';
           const mat = mp.material || '';
-          // "Subfloor, Subfloor at sink" reads like a typo. If the tech already named the
-          // material in the location, do not say it twice.
           const dup = mat && loc && loc.toLowerCase().indexOf(mat.toLowerCase()) >= 0;
           const head = mat && loc && !dup ? `${mat}, ${loc}` : (loc || mat || 'Point ' + (i + 1));
           return [head].concat(dates.map((d) => valOn(mp, d) || '-'));
         }));
       }
 
-      // --- affected materials + S500 equipment adequacy
       const wallsAll = [];
       let placedAm = 0, placedDh = 0, clsRoom = 0;
       for (const s of rSketches) {
@@ -353,7 +332,6 @@ async function generateReportPdf(graph, getImage) {
         ], 4);
       }
 
-      // --- demolition + containment, measured
       let fcLf = 0, fcSqft = 0, contSqft = 0, contCount = 0; const fcByH = {};
       for (const s of rSketches) {
         const cj = s.canvas_json || {}; const wmap = {};
@@ -383,18 +361,14 @@ async function generateReportPdf(graph, getImage) {
         k.table([{ t: 'Item', w: 0.32 }, { t: 'Detail', w: 0.24 }, { t: 'Length', w: 0.18, align: 'right' }, { t: 'Area', w: 0.26, align: 'right' }], rowsD);
       }
 
-      // --- billable scope for this room
       const roomLines = esxByRoom[room.name] || [];
       if (roomLines.length) { k.h3('Estimate scope (Xactimate line items)'); renderScope(roomLines); }
 
-      // --- contents in this room, accumulated for the claim-level inventory.
-      // NO totals are computed. We do not value contents: Xactimate does.
       rContents.forEach((c) => { allContents.push({ room: room.name, item: c }); });
 
       k.gap(2);
     }
 
-    // ---- drying chambers for this structure
     if (stChambers.length) {
       k.h2('Structural drying (IICRC S500)');
       for (const ch of stChambers) {
@@ -452,8 +426,6 @@ async function generateReportPdf(graph, getImage) {
           }
         }
 
-        // Atmospheric readings only. Material moisture has its own table directly above,
-        // and repeating it here printed rows where temp, RH, GPP and dew were all dashes.
         const atmos = cReadings.filter((r) => r.reading_type !== 'material_mc');
         if (atmos.length) {
           k.h3('Drying log (atmospheric)');
@@ -492,14 +464,6 @@ async function generateReportPdf(graph, getImage) {
     }
   }
 
-  // ---- 3. Contents inventory ------------------------------------------------
-  // WHAT the item is and WHAT WE DID TO IT. Not what it is worth.
-  //
-  // We do not price contents. Xactimate prices every line from the carrier price list for
-  // the region and the date of loss, and personal property is inventoried and valued in
-  // XactContents. A replacement cost we invent is a number that gets overwritten, argued
-  // about, or both, and it hands the adjuster an argument for free. The inventory is the
-  // deliverable; the valuation is theirs.
   const DISPOSITION = {
     non_restorable: 'Non-salvageable', disposed: 'Disposed', restorable: 'Restorable',
     packed_out: 'Packed out', moved: 'Moved', cleaned: 'Cleaned', in_place: 'Left in place'
@@ -529,7 +493,6 @@ async function generateReportPdf(graph, getImage) {
     }
   }
 
-  // ---- 4. Equipment summary -------------------------------------------------
   if (Object.keys(eqTotals).length) {
     k.section('Equipment Usage Summary');
     k.para('Total equipment-days across every drying chamber on this claim. Equipment days are the most-scrubbed line on a mitigation invoice, so the daily placement record is in the drying log above.',
@@ -543,7 +506,6 @@ async function generateReportPdf(graph, getImage) {
     if (equipScope.length) { k.h3('Billable equipment line items'); renderScope(equipScope); }
   }
 
-  // ---- 5. Signatures --------------------------------------------------------
   if (signatures && signatures.length) {
     doc.addPage();
     k.section('Authorizations and Signatures');
@@ -561,7 +523,7 @@ async function generateReportPdf(graph, getImage) {
           const y = k.ensure(50);
           doc.image(buf, M, y, { fit: [160, 42] });
           doc.x = M; doc.y = y + 46;
-        } catch (_e) { /* a corrupt signature image must not kill the report */ }
+        } catch (_e) { }
       }
       k.font('b', T.size.small, T.ink).text(
         `Signed by ${sig.signer_name || '-'} on ${new Date(sig.signed_at).toLocaleDateString()}`,
@@ -570,7 +532,6 @@ async function generateReportPdf(graph, getImage) {
     }
   }
 
-  // ---- 6. Close out ---------------------------------------------------------
   brandFooterBlock(k, cfg);
   k.gap(1);
   k.para('Generated ' + new Date().toLocaleString() + '. Timestamps and readings reflect data captured in the field.',
@@ -588,7 +549,6 @@ async function generateReportPdf(graph, getImage) {
   return bufP;
 }
 
-// --- data ------------------------------------------------------------------
 function dedupeLatest(rows) {
   const seen = new Set(); const out = [];
   for (const r of rows) if (!seen.has(r.media_id)) { seen.add(r.media_id); out.push(r); }
