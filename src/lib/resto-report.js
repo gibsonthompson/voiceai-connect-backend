@@ -219,8 +219,8 @@ async function generateReportPdf(graph, getImage) {
             ['Ceiling', d.C + ' sq ft' + (incCeiling ? '' : nis)],
             ['Perimeter', d.PF + ' ft'],
             ['Ceiling height', d.SH + ' ft'],
-            ['Wall area', wallSF + ' sq ft' + (incWalls ? '' : nis) + (deductOpenings ? '' : ' (openings included)')],
-            ['Baseboard', d.baseboardLF + ' ft' + (incBase ? '' : nis)]
+            ['Baseboard', d.baseboardLF + ' ft' + (incBase ? '' : nis)],
+            ['Wall area', wallSF + ' sq ft' + (incWalls ? '' : nis) + (deductOpenings ? '' : ' (openings included)')]
           ], 3);
           const sumParts = [];
           if (incFloor) sumParts.push(`Floor${floorMat ? ' (' + floorMat.toLowerCase() + ')' : ''}: ${d.F} sq ft`);
