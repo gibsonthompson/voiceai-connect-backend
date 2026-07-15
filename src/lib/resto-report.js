@@ -193,23 +193,12 @@ async function generateReportPdf(graph, getImage) {
           const incBase = room.include_baseboard !== false;
           const nis = ' (not in scope)';
 
-          // WALL AREA: deduct openings, or bill the full wall.
-          //
-          // deduct_openings = true (default): wall area is the NET paintable surface,
-          //   gross minus every door and window. This is what almost every water claim
-          //   wants, and it is what every existing room does.
-          //
-          // deduct_openings = false: bill the GROSS wall, perimeter x height, with the
-          //   openings included and NOT subtracted. Some scopes bill the whole wall (a
-          //   full-surface clean, or paint that runs past the casing), and this is the
-          //   switch for those. The openings are still measured and listed below, so the
-          //   adjuster sees they were captured and the full wall was billed deliberately.
-          //
-          // roomDimensions already computes both numbers, so nothing about the geometry
-          // or the measurement changes: only which of the two the report bills.
-          const deductOpenings = room.deduct_openings !== false;
+          // WALL AREA is the ENTIRE wall: perimeter x ceiling height, doors and windows
+          // NOT deducted. This is the full square footage to paint or clean, as if the
+          // openings were painted straight over. The openings are still measured and listed
+          // for reference, but they are included in this total, never subtracted.
           const hasOpenings = !!(d.openings && d.openings.length);
-          const wallSF = deductOpenings ? d.W : d.grossWallSF;
+          const wallSF = d.grossWallSF;
 
           const floorMat = floorMaterialOf(rSketches);
           const floorLabel = floorMat ? `Floor (${floorMat.toLowerCase()})` : 'Floor';
@@ -220,11 +209,11 @@ async function generateReportPdf(graph, getImage) {
             ['Perimeter', d.PF + ' ft'],
             ['Ceiling height', d.SH + ' ft'],
             ['Baseboard', d.baseboardLF + ' ft' + (incBase ? '' : nis)],
-            ['Wall area', wallSF + ' sq ft' + (incWalls ? '' : nis) + (deductOpenings ? '' : ' (openings included)')]
+            ['Wall area', wallSF + ' sq ft' + (incWalls ? '' : nis)]
           ], 3);
           const sumParts = [];
           if (incFloor) sumParts.push(`Floor${floorMat ? ' (' + floorMat.toLowerCase() + ')' : ''}: ${d.F} sq ft`);
-          if (incWalls) sumParts.push(`Walls: ${wallSF} sq ft${deductOpenings ? '' : ' (full wall)'}`);
+          if (incWalls) sumParts.push(`Walls: ${wallSF} sq ft`);
           if (sumParts.length) {
             k.para(sumParts.join('.   ') + '.', { weight: 'b', size: T.size.small, color: T.ink });
           }
@@ -238,25 +227,19 @@ async function generateReportPdf(graph, getImage) {
               '. Measured and shown for reference, not billed.', 'warn');
           }
           k.para(
-            deductOpenings
-              ? `Wall area = (perimeter ${d.PF} ft x height ${d.SH} ft) = ${d.grossWallSF} sq ft gross, less ${d.openingDeductSF} sq ft of openings.`
-              : (hasOpenings
-                  ? `Wall area = perimeter ${d.PF} ft x height ${d.SH} ft = ${d.grossWallSF} sq ft, billed in full with openings included (not deducted).`
-                  : `Wall area = perimeter ${d.PF} ft x height ${d.SH} ft = ${d.grossWallSF} sq ft.`),
+            `Wall area = perimeter ${d.PF} ft x height ${d.SH} ft = ${d.grossWallSF} sq ft, the entire wall with doors and windows included (not deducted).`,
             { size: T.size.small, color: T.muted }
           );
           if (hasOpenings) {
             k.table(
-              [{ t: 'Opening', w: 0.34 }, { t: 'Width', w: 0.22, align: 'right' }, { t: 'Height', w: 0.22, align: 'right' }, { t: deductOpenings ? 'Deducts' : 'Area', w: 0.22, align: 'right' }],
+              [{ t: 'Opening', w: 0.34 }, { t: 'Width', w: 0.22, align: 'right' }, { t: 'Height', w: 0.22, align: 'right' }, { t: 'Area', w: 0.22, align: 'right' }],
               d.openings.map((o) => [
                 (o.kind || '').replace('_', ' ') + (o.assumedHeight ? ' (height assumed)' : ''),
                 o.widthFt + ' ft', o.heightFt + ' ft', o.sqft + ' sq ft'
               ])
             );
-            if (!deductOpenings) {
-              k.para('Openings are measured and shown, but this room bills the full wall area, so they are not deducted.',
-                { size: T.size.small, color: T.muted });
-            }
+            k.para('Openings are measured and shown for reference. They are part of the wall area above, not deducted from it.',
+              { size: T.size.small, color: T.muted });
           }
           (d.warnings || []).forEach((w) => k.callout(w, 'warn'));
         }
