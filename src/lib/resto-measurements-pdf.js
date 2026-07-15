@@ -32,7 +32,7 @@ function generateMeasurementPdf(graph) {
   });
   const { W } = k;
 
-  k.para('Wall area is the perimeter multiplied by the ceiling height, with every door, window, cased opening and missing wall subtracted. Each deduction is listed by name and by size, so the arithmetic can be followed line by line.',
+  k.para('Wall area is the perimeter multiplied by the ceiling height, measured as the entire wall. Doors, windows, cased openings and missing walls are listed by name and by size for reference, but they are not deducted, so the wall area covers the full surface as if every opening were being finished.',
     { size: 10 });
   k.gap(1);
   k.para('Measurements only. Xactimate prices these from the carrier price list for the region and the date of loss.',
@@ -79,21 +79,26 @@ function generateMeasurementPdf(graph) {
         ['Ceiling height', formatFeetInches(d.SH) + (d.assumedCeiling ? ' (assumed)' : '')]
       ], 4);
 
-      const rowsW = [[`Perimeter ${num(d.PF)} ft x height ${formatFeetInches(d.SH)}`, '', num(d.grossWallSF) + ' sq ft']];
+      const grossWall = d.grossWallSF;
+      const rowsW = [[`Perimeter ${num(d.PF)} ft x height ${formatFeetInches(d.SH)}`, '', num(grossWall) + ' sq ft']];
       for (const o of d.openings) {
-        const label = 'Less ' + (OPENING_LABEL[o.kind] || o.kind).toLowerCase();
+        const label = OPENING_LABEL[o.kind] || o.kind;
         const size = `${formatFeetInches(o.widthFt)} x ${formatFeetInches(o.heightFt)}` + (o.assumedHeight ? '  (size assumed)' : '');
-        rowsW.push([label, size, '-' + num(o.sqft) + ' sq ft']);
+        rowsW.push([label, size, '(' + num(o.sqft) + ' sq ft)']);
       }
       k.h3('Wall area', 40);
       k.table(
         [{ t: 'Calculation', w: 0.42 }, { t: 'Size', w: 0.30 }, { t: 'Area', w: 0.28, align: 'right' }],
         rowsW,
-        { total: ['Wall area to bill', '', num(d.W) + ' sq ft' + (incWalls ? '' : nis)] }
+        { total: ['Wall area to bill', '', num(grossWall) + ' sq ft' + (incWalls ? '' : nis)] }
       );
+      if (d.openings.length) {
+        k.para('Openings above are listed for reference only. They are included in the wall area and not deducted, so the entire wall is measured as if every opening were being finished.',
+          { size: T.size.small, color: T.muted });
+      }
 
       k.facts([
-        ['Walls and ceiling', num(d.WC) + ' sq ft'],
+        ['Walls and ceiling', num(grossWall + d.C) + ' sq ft'],
         ['Baseboard', num(d.baseboardLF) + ' ft' + (incBase ? '' : nis)],
         ['Floor, square yards', num(d.SY) + ' sy' + (incFloor ? '' : nis)]
       ], 3);
@@ -113,7 +118,7 @@ function generateMeasurementPdf(graph) {
 
       if (incFloor) totalFloor += d.F;
       if (incCeiling) totalCeil += d.C;
-      if (incWalls) totalWall += d.W;
+      if (incWalls) totalWall += grossWall;
       if (incBase) totalBase += d.baseboardLF;
       k.gap(1);
     }
