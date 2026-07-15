@@ -32,7 +32,7 @@ function generateMeasurementPdf(graph) {
   });
   const { W } = k;
 
-  k.para('Wall area is the perimeter multiplied by the ceiling height, measured as the entire wall. Doors, windows, cased openings and missing walls are listed by name and by size for reference, but they are not deducted, so the wall area covers the full surface as if every opening were being finished.',
+  k.para('Wall area is the perimeter multiplied by the ceiling height. Each room shows two figures. The deducted wall area subtracts every door, window, cased opening and missing wall, each listed by name and by size so the arithmetic can be followed line by line. The total wall area is the entire wall with nothing deducted, as if every opening were being finished.',
     { size: 10 });
   k.gap(1);
   k.para('Measurements only. Xactimate prices these from the carrier price list for the region and the date of loss.',
@@ -41,7 +41,7 @@ function generateMeasurementPdf(graph) {
   doc.addPage();
   doc.x = M; doc.y = 76;
 
-  let totalFloor = 0, totalWall = 0, totalBase = 0, totalCeil = 0;
+  let totalFloor = 0, totalWallNet = 0, totalWallGross = 0, totalBase = 0, totalCeil = 0;
   let anyRoom = false;
 
   for (const st of structures) {
@@ -80,25 +80,32 @@ function generateMeasurementPdf(graph) {
       ], 4);
 
       const grossWall = d.grossWallSF;
+      const netWall = d.W;
+
+      // Section 1: openings deducted. Perimeter x height, then each opening subtracted.
       const rowsW = [[`Perimeter ${num(d.PF)} ft x height ${formatFeetInches(d.SH)}`, '', num(grossWall) + ' sq ft']];
       for (const o of d.openings) {
-        const label = OPENING_LABEL[o.kind] || o.kind;
+        const label = 'Less ' + (OPENING_LABEL[o.kind] || o.kind).toLowerCase();
         const size = `${formatFeetInches(o.widthFt)} x ${formatFeetInches(o.heightFt)}` + (o.assumedHeight ? '  (size assumed)' : '');
-        rowsW.push([label, size, '(' + num(o.sqft) + ' sq ft)']);
+        rowsW.push([label, size, '-' + num(o.sqft) + ' sq ft']);
       }
-      k.h3('Wall area', 40);
+      k.h3('Wall area, openings deducted', 40);
       k.table(
         [{ t: 'Calculation', w: 0.42 }, { t: 'Size', w: 0.30 }, { t: 'Area', w: 0.28, align: 'right' }],
         rowsW,
-        { total: ['Wall area to bill', '', num(grossWall) + ' sq ft' + (incWalls ? '' : nis)] }
+        { total: ['Deducted wall area', '', num(netWall) + ' sq ft' + (incWalls ? '' : nis)] }
       );
-      if (d.openings.length) {
-        k.para('Openings above are listed for reference only. They are included in the wall area and not deducted, so the entire wall is measured as if every opening were being finished.',
-          { size: T.size.small, color: T.muted });
-      }
+
+      // Section 2: total wall area, entire wall, nothing deducted.
+      k.h3('Total wall area', 40);
+      k.table(
+        [{ t: 'Calculation', w: 0.72 }, { t: 'Area', w: 0.28, align: 'right' }],
+        [[`Perimeter ${num(d.PF)} ft x height ${formatFeetInches(d.SH)}, entire wall`, num(grossWall) + ' sq ft']],
+        { total: ['Total wall area', num(grossWall) + ' sq ft' + (incWalls ? '' : nis)] }
+      );
 
       k.facts([
-        ['Walls and ceiling', num(grossWall + d.C) + ' sq ft'],
+        ['Walls and ceiling', num(d.WC) + ' sq ft'],
         ['Baseboard', num(d.baseboardLF) + ' ft' + (incBase ? '' : nis)],
         ['Floor, square yards', num(d.SY) + ' sy' + (incFloor ? '' : nis)]
       ], 3);
@@ -118,7 +125,7 @@ function generateMeasurementPdf(graph) {
 
       if (incFloor) totalFloor += d.F;
       if (incCeiling) totalCeil += d.C;
-      if (incWalls) totalWall += grossWall;
+      if (incWalls) { totalWallNet += netWall; totalWallGross += grossWall; }
       if (incBase) totalBase += d.baseboardLF;
       k.gap(1);
     }
@@ -132,9 +139,12 @@ function generateMeasurementPdf(graph) {
     k.facts([
       ['Floor area', num(totalFloor) + ' sq ft'],
       ['Ceiling area', num(totalCeil) + ' sq ft'],
-      ['Wall area to bill', num(totalWall) + ' sq ft'],
       ['Baseboard', num(totalBase) + ' ft']
-    ], 4);
+    ], 3);
+    k.facts([
+      ['Deducted wall area', num(totalWallNet) + ' sq ft'],
+      ['Total wall area, entire wall', num(totalWallGross) + ' sq ft']
+    ], 2);
   }
 
   brandFooterBlock(k, cfg);
