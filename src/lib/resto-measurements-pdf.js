@@ -42,7 +42,7 @@ function generateMeasurementPdf(graph) {
   doc.x = M; doc.y = 76;
 
   let totalFloor = 0, totalWall = 0, totalBase = 0, totalCeil = 0;
-  let assumedCeilings = 0, assumedOpenings = 0, anyRoom = false;
+  let anyRoom = false;
 
   for (const st of structures) {
     const stRooms = rooms.filter((r) => r.structure_id === st.id);
@@ -84,7 +84,6 @@ function generateMeasurementPdf(graph) {
         const label = 'Less ' + (OPENING_LABEL[o.kind] || o.kind).toLowerCase();
         const size = `${formatFeetInches(o.widthFt)} x ${formatFeetInches(o.heightFt)}` + (o.assumedHeight ? '  (size assumed)' : '');
         rowsW.push([label, size, '-' + num(o.sqft) + ' sq ft']);
-        if (o.assumedHeight) assumedOpenings++;
       }
       k.h3('Wall area', 40);
       k.table(
@@ -112,7 +111,6 @@ function generateMeasurementPdf(graph) {
 
       (d.warnings || []).forEach((w) => k.callout(w, 'warn'));
 
-      if (d.assumedCeiling && incWalls) assumedCeilings++;
       if (incFloor) totalFloor += d.F;
       if (incCeiling) totalCeil += d.C;
       if (incWalls) totalWall += d.W;
@@ -132,15 +130,6 @@ function generateMeasurementPdf(graph) {
       ['Wall area to bill', num(totalWall) + ' sq ft'],
       ['Baseboard', num(totalBase) + ' ft']
     ], 4);
-
-    if (assumedCeilings || assumedOpenings) {
-      const bits = [];
-      if (assumedCeilings) bits.push(`${assumedCeilings} room${assumedCeilings === 1 ? '' : 's'} without a measured ceiling height`);
-      if (assumedOpenings) bits.push(`${assumedOpenings} opening${assumedOpenings === 1 ? '' : 's'} without a measured size`);
-      k.callout(bits.join(' and ') + '. Those figures rest on a standard size rather than a tape measure, and they should be measured before the wall area is billed.', 'warn');
-    } else {
-      k.callout('Every ceiling height and every opening on this claim was measured. Nothing here rests on a default.', 'ok');
-    }
   }
 
   brandFooterBlock(k, cfg);
