@@ -501,7 +501,7 @@ async function generateReportPdf(graph, getImage) {
   if (allContents.length) {
     doc.addPage();
     k.section('Contents Inventory');
-    k.para('What was in each room, and what the crew did with it. Valuation is established in Xactimate and XactContents from the carrier price list, and is deliberately not stated here.',
+    k.para('What was in each room, and what the crew did with it.',
       { size: T.size.small, color: T.muted });
     k.gap(1);
     k.table(
