@@ -158,6 +158,7 @@ const aiPlaygroundRoutes = require('./routes/ai-playground');
 const leadScraperRoutes = require('./routes/lead-scraper');
 const byotRoutes = require('./routes/byot');
 const abandonedCartRoutes = require('./routes/abandoned-cart');
+const abandonedCheckoutCleanupRoutes = require('./routes/abandoned-checkout-cleanup');
 const agencyOnboardingSmsRoutes = require('./routes/agency-onboarding-sms');
 const activationSmsRoutes = require('./routes/activation-sms');
 const feedbackRoutes = require('./routes/feedback');
@@ -1222,6 +1223,11 @@ app.use('/api/cron', agencyOnboardingSmsRoutes);
 app.use('/api/cron', activationSmsRoutes);
 
 app.use('/api/cron', cleanupOrphanedTestClients);
+
+// Abandoned card-required checkout sweep: releases the number and deletes the
+// VAPI assistant for pending_payment clients that never completed Stripe
+// checkout. POST /api/cron/cleanup-abandoned-checkouts
+app.use('/api/cron', abandonedCheckoutCleanupRoutes);
 
 // Usage reporting cron (reports voice minutes to Stripe metered billing)
 app.use('/api/cron', usageReporterRoutes);
