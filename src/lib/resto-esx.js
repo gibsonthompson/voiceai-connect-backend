@@ -20,10 +20,18 @@
 // Requires: jszip  (npm i jszip)
 // ============================================================================
 const { fetchClaimGraph } = require('./resto-report');
+const { fitImage } = require('./resto-pdf-common');
 const {
   UPF, areaFt, perimeterFt, edgeLenFt, largestRoomPolygon, equipmentUnitDays, roomScope,
   roomDimensions, dimVarsString
 } = require('./resto-scope-quantities');
+
+// Embedded-photo limits. Full-resolution phone photos are what make an .esx blow past
+// the Supabase object-size cap (the XML itself is tiny), and Xactimate has its own
+// import ceiling, so photos are downscaled and the total embedded weight is capped.
+const PHOTO_MAX_EDGE = 1600;         // px on the long edge
+const PHOTO_QUALITY = 72;            // JPEG quality
+const PHOTO_BUDGET_BYTES = 40 * 1024 * 1024;   // hard cap on total embedded photo bytes
 
 // Standard opening sizes. Used ONLY when nothing was measured, and every such use is
 // recorded as an assumption (see the openings block below). A missing wall is null
@@ -659,10 +667,13 @@ function serializeXactdoc(model) {
   p('  </SKETCHDOCUMENT>');
 
   // ---- photos --------------------------------------------------------------
+  // Only the photos that actually made it into the ZIP are listed, so EXT_FILES
+  // never references a 1.JPG that the budget dropped.
   p('  <EXT_FILES>');
-  (model._photoPaths || []).slice(0, 130).forEach((_path, i) => {
+  const photoCount = model._embeddedPhotoCount != null ? model._embeddedPhotoCount : (model._photoPaths || []).length;
+  for (let i = 0; i < photoCount; i++) {
     p(`    <EXT_FILE id="EXT${++nExt}" fileName="${i + 1}.JPG" fileType="image/jpeg"/>`);
-  });
+  }
   p('  </EXT_FILES>');
 
   p('</XACTDOC>');
@@ -678,6 +689,28 @@ async function packEsx(xml, photos) {
   zip.file('XACTDOC.ZIPXML', xml);
   (photos || []).forEach((buf, i) => { if (buf) zip.file(`${i + 1}.JPG`, buf); });
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+}
+
+// Downscale + JPEG-compress the claim photos through the shared sharp helper, and
+// stop adding once the total embedded weight reaches the budget. This is what keeps a
+// photo-heavy claim from producing an .esx that exceeds the storage object-size limit
+// (the XML is tiny; raw phone photos are the weight) and keeps the file import-friendly.
+async function preparePhotos(paths, downloadImage) {
+  const out = [];
+  if (!downloadImage || !Array.isArray(paths) || !paths.length) return out;
+  let total = 0;
+  for (const path of paths.slice(0, 130)) {
+    let raw = null;
+    try { raw = await downloadImage(path); } catch (_e) { raw = null; }
+    if (!raw) continue;
+    let buf = raw;
+    try { buf = await fitImage(raw, PHOTO_MAX_EDGE, PHOTO_QUALITY); } catch (_e) { buf = raw; }
+    if (!buf) continue;
+    if (total + buf.length > PHOTO_BUDGET_BYTES) break;   // budget reached; stop embedding
+    total += buf.length;
+    out.push(buf);
+  }
+  return out;
 }
 
 // ============================================================================
@@ -699,12 +732,13 @@ async function buildEsx(claimId, downloadImage) {
   }
 
   const model = mapClaimToProject(graph);
+
+  // Compress photos FIRST and count what actually fits, so the XML's EXT_FILES list
+  // matches the JPGs the ZIP really contains.
+  const photos = await preparePhotos(model._photoPaths, downloadImage);
+  model._embeddedPhotoCount = photos.length;
+
   const xml = serializeXactdoc(model);
-  let photos = [];
-  if (downloadImage && model._photoPaths && model._photoPaths.length) {
-    photos = await Promise.all(model._photoPaths.slice(0, 130).map((p) => downloadImage(p).catch(() => null)));
-    photos = photos.filter(Boolean);
-  }
   const esx = await packEsx(xml, photos);
   return { esx, claim: graph.claim, xml, model };
 }

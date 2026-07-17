@@ -197,6 +197,7 @@ const {
   disconnectConnectAccount,
   createClientCheckout,
   createClientPortal,
+  changeClientPlan,
   handleConnectStripeWebhook,
   expireTrials
 } = require('./routes/stripe-connect');
@@ -1014,6 +1015,12 @@ app.use('/api/agency', previewTokenRoutes);
 app.post('/api/client/signup', signupRateLimiter, handleClientSignup);
 app.post('/api/client/checkout', createClientCheckout);
 app.post('/api/client/portal', createClientPortal);
+// In-app plan switch for an active connected subscription. Swaps the sub item
+// with proration and writes plan_type + monthly_call_limit together. Like
+// checkout/portal it carries no route middleware because changeClientPlan does
+// its own bearer-token ownership check (super_admin, the client itself, or the
+// managing agency) inside the handler.
+app.post('/api/client/change-plan', changeClientPlan);
 app.use('/api/client', clientRoutes);
 app.use('/api/client', require('./routes/call-mode'));
 app.use('/api/client', clientContactsRoutes);

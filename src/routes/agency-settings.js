@@ -92,6 +92,14 @@ function publicAgencyShape(agency) {
     stripe_account_id: agency.stripe_account_id,
     stripe_charges_enabled: agency.stripe_charges_enabled,
 
+    // Client trial card requirement. The signup/plan step ANDs this with
+    // stripe_charges_enabled (mirroring the cardRequired check in
+    // handleClientSignup) to decide whether to show the card-required
+    // auto-renew consent language. Safe to expose: it is already a
+    // public-facing toggle written via updateAgencySettings, and reveals
+    // nothing sensitive.
+    require_card_for_trial: agency.require_card_for_trial === true,
+
     // Analytics & Tracking (for marketing site script injection)
     gtm_id: agency.gtm_id || null,
     fb_pixel_id: agency.fb_pixel_id || null,
@@ -314,6 +322,11 @@ async function getAgencySettings(req, res) {
         // Calendar plan gating (which client plans can use Google Calendar)
         calendar_enabled_plans: agency.calendar_enabled_plans || ['pro', 'growth'],
         
+        // Client trial card requirement (require_card_for_trial). Returned so
+        // the Settings pricing tab can render and toggle it. The signup flow
+        // ANDs it with stripe_charges_enabled to decide the card-required path.
+        require_card_for_trial: agency.require_card_for_trial === true,
+        
         // Demo phone (auto-provisioned per agency via VAPI)
         demo_phone_number: agency.demo_phone_number || null,
         demo_assistant_id: agency.demo_assistant_id || null,
@@ -521,6 +534,14 @@ async function updateAgencySettings(req, res) {
       if (!['agency_name', 'business_name'].includes(sanitizedUpdates.client_header_mode)) {
         return res.status(400).json({ error: 'Invalid client_header_mode. Must be agency_name or business_name' });
       }
+    }
+
+    // Validate require_card_for_trial if provided (coerce to strict boolean).
+    // The card-required signup flow only actually engages when Stripe charges
+    // are enabled; that AND is enforced at signup time in handleClientSignup,
+    // so no cross-field check is needed here.
+    if (sanitizedUpdates.require_card_for_trial !== undefined) {
+      sanitizedUpdates.require_card_for_trial = sanitizedUpdates.require_card_for_trial === true;
     }
     
     // Validate display_currency if provided

@@ -33,6 +33,13 @@
 //          (embedded Connect components, phase 2). Both are read-only against
 //          the connected Express account via the stripeAccount header, so they
 //          add no new money movement and change nothing in the existing flow.
+// UPDATED: 2026-07-17: changeClientPlan (in-app upgrade/downgrade for an active
+//          connected subscription). Swaps the subscription item to a fresh
+//          target-plan price with proration and writes plan_type AND
+//          monthly_call_limit in the same handler, so the two plan-defining
+//          fields can no longer desync from Stripe. Fixes the dead end where
+//          createClientCheckout 409s active clients to a portal that has no
+//          plan-switch configured.
 // ============================================================================
 const Stripe = require('stripe');
 const fetch = require('node-fetch');
@@ -57,6 +64,22 @@ const { updateClientBillingQuantity } = require('../lib/usage-tracker');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
+
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+
+// Decode the caller's JWT (or null). Used by changeClientPlan to enforce that
+// only the client themselves, the managing agency, or a super_admin can change
+// a client's plan. Unlike checkout/portal, that endpoint mutates a live
+// subscription and can charge a prorated difference, so it is not left open to
+// an anonymous body-only caller.
+function decodeToken(req) {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) return null;
+    return jwt.verify(token, JWT_SECRET);
+  } catch { return null; }
+}
 
 // ============================================================================
 // COUNTRY → CURRENCY MAPPING
@@ -589,6 +612,171 @@ async function createClientPortal(req, res) {
 }
 
 // ============================================================================
+// CHANGE CLIENT PLAN (in-app upgrade/downgrade for an ACTIVE subscription)
+// ----------------------------------------------------------------------------
+// Fixes the plan-change dead end. createClientCheckout 409s any client that
+// already has an active|trialing|past_due connected subscription and tells them
+// to use the billing portal, but the portal has no plan-switch configured (and
+// prices are created ad hoc per checkout, so there is no catalog for it to
+// switch between). handleClientSubscriptionUpdated also never writes plan_type
+// or monthly_call_limit. Net effect before this: an active client cannot change
+// plans at all.
+//
+// This endpoint changes the plan directly on the connected subscription:
+//   1. Verifies the caller owns the client (client themselves, managing agency,
+//      or super_admin). This moves money, so it is not left open.
+//   2. Confirms the client has a changeable connected subscription.
+//   3. Creates a fresh product + price for the target plan on the connected
+//      account (same ad-hoc pattern as createClientCheckout; no stable catalog).
+//   4. Swaps the subscription's single item to the new price with
+//      proration_behavior 'create_prorations' (the prorated difference settles
+//      on the next invoice; during a trial there is no immediate charge and the
+//      new price applies at trial end).
+//   5. Writes plan_type AND monthly_call_limit in the SAME handler, so the two
+//      fields that define the plan can never desync from Stripe again.
+//
+// The resulting customer.subscription.updated webhook fires
+// handleClientSubscriptionUpdated, which only touches status fields and so does
+// not clobber the plan_type/limit written here. Usage (calls_this_month) is left
+// as-is: a mid-cycle plan change should not wipe the month's count.
+// ============================================================================
+async function changeClientPlan(req, res) {
+  try {
+    const { client_id, plan } = req.body;
+
+    if (!client_id || !plan) {
+      return res.status(400).json({ error: 'Missing required fields', required: ['client_id', 'plan'] });
+    }
+
+    const VALID_PLANS = ['starter', 'pro', 'growth'];
+    if (!VALID_PLANS.includes(plan)) {
+      return res.status(400).json({ error: 'Invalid plan', valid_plans: VALID_PLANS });
+    }
+
+    // Auth: this endpoint mutates a live subscription and can charge a prorated
+    // difference, so require a valid token whose owner is allowed to act on this
+    // client. Allowed: super_admin, the client itself (clientId match), or the
+    // managing agency (agencyId match).
+    const decoded = decodeToken(req);
+    if (!decoded) return res.status(401).json({ error: 'Authentication required' });
+
+    const { data: client, error: clientError } = await supabase
+      .from('clients').select('*, agencies!clients_agency_id_fkey(*)').eq('id', client_id).single();
+
+    if (clientError || !client) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+
+    const isSuperAdmin = decoded.role === 'super_admin';
+    const isOwnClient = decoded.clientId && decoded.clientId === client.id;
+    const isManagingAgency = decoded.agencyId && decoded.agencyId === client.agency_id;
+    if (!isSuperAdmin && !isOwnClient && !isManagingAgency) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const agency = client.agencies;
+    if (!agency) return res.status(404).json({ error: 'Agency not found' });
+    if (!agency.stripe_account_id || !agency.stripe_charges_enabled) {
+      return res.status(400).json({ error: 'Agency has not completed Stripe Connect setup' });
+    }
+
+    // No connected subscription => nothing to change. These clients (no-card
+    // trial, expired, canceled) start a fresh subscription via checkout instead.
+    if (!client.stripe_connected_subscription_id) {
+      return res.status(400).json({
+        error: 'no_active_subscription',
+        message: 'This account does not have an active subscription to change. Please choose a plan to subscribe.',
+      });
+    }
+
+    // Already on this plan => no-op.
+    if (client.plan_type === plan) {
+      return res.status(200).json({ success: true, unchanged: true, plan, message: 'You are already on this plan.' });
+    }
+
+    // Retrieve the live subscription and confirm it is in a changeable state.
+    let subscription;
+    try {
+      subscription = await stripe.subscriptions.retrieve(
+        client.stripe_connected_subscription_id,
+        { stripeAccount: agency.stripe_account_id }
+      );
+    } catch (subErr) {
+      if (subErr.code === 'resource_missing') {
+        return res.status(400).json({
+          error: 'no_active_subscription',
+          message: 'Your subscription could not be found. Please choose a plan to subscribe.',
+        });
+      }
+      throw subErr;
+    }
+
+    if (!['active', 'trialing', 'past_due'].includes(subscription.status)) {
+      return res.status(400).json({
+        error: 'subscription_not_changeable',
+        message: 'Your subscription is not in a state that can be changed. Please contact support.',
+        status: subscription.status,
+      });
+    }
+
+    const currentItem = subscription.items?.data?.[0];
+    if (!currentItem) {
+      return res.status(400).json({ error: 'Subscription has no billable item to change' });
+    }
+
+    // Target price + call limit (same defaults as createClientCheckout).
+    const priceAmounts = { starter: agency.price_starter || 9900, pro: agency.price_pro || 14900, growth: agency.price_growth || 29900 };
+    const callLimits = { starter: agency.limit_starter || 50, pro: agency.limit_pro || 150, growth: agency.limit_growth || 500 };
+    const priceAmount = priceAmounts[plan];
+    const callLimit = callLimits[plan];
+    const currency = getCurrencyForCountry(agency.country || 'US');
+
+    // Fresh product + price for the target plan on the connected account.
+    const product = await stripe.products.create({
+      name: `AI Receptionist - ${plan.charAt(0).toUpperCase() + plan.slice(1)}`,
+      metadata: { client_id, plan },
+    }, { stripeAccount: agency.stripe_account_id });
+
+    const price = await stripe.prices.create({
+      product: product.id, unit_amount: priceAmount, currency,
+      recurring: { interval: 'month' },
+    }, { stripeAccount: agency.stripe_account_id });
+
+    // Swap the single subscription item to the new price. create_prorations
+    // credits/debits the difference on the next invoice; during a trial this
+    // produces no immediate charge and the new price applies at trial end.
+    await stripe.subscriptions.update(
+      client.stripe_connected_subscription_id,
+      {
+        items: [{ id: currentItem.id, price: price.id }],
+        proration_behavior: 'create_prorations',
+        metadata: { client_id, agency_id: agency.id, plan },
+      },
+      { stripeAccount: agency.stripe_account_id }
+    );
+
+    // Write BOTH plan-defining fields in the same handler. This is the actual
+    // fix: plan_type and monthly_call_limit can no longer drift from Stripe.
+    const { error: updateError } = await supabase
+      .from('clients')
+      .update({ plan_type: plan, monthly_call_limit: callLimit })
+      .eq('id', client.id);
+
+    if (updateError) {
+      console.error('❌ Plan change: Stripe updated but DB write failed:', updateError.message);
+      return res.status(500).json({ error: 'Plan changed in billing but failed to update your account. Please contact support.' });
+    }
+
+    console.log(`✅ Client ${client.id} plan changed ${client.plan_type} -> ${plan} (limit ${callLimit})`);
+    res.json({ success: true, plan, monthly_call_limit: callLimit });
+
+  } catch (error) {
+    console.error('❌ Change plan error:', error);
+    res.status(500).json({ error: 'Failed to change plan' });
+  }
+}
+
+// ============================================================================
 // EXPIRE TRIALS (DB-only trials)
 // ----------------------------------------------------------------------------
 // UPDATED 2026-05-16: DELETES VAPI phone + assistant, frees slots
@@ -981,6 +1169,7 @@ module.exports = {
   createClientCheckout,
   createTrialCheckoutForSignup, // NEW: called from routes/client-signup.js
   createClientPortal,
+  changeClientPlan,             // NEW: in-app plan change for active subscriptions
   handleConnectStripeWebhook,
   expireTrials
 };

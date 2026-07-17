@@ -46,6 +46,16 @@
 //          client row is stamped voice_routing='telnyx_cc'. vapi_direct is the
 //          default and is unchanged. Resolved from req.body.voiceRouting (or
 //          an optional agency.default_voice_routing), via resolveVoiceRouting.
+// UPDATED: 2026-07-17 - Signup consent capture. handleClientSignup now records
+//          an affirmative consent audit row (client_consents) for every signup,
+//          and HARD-BLOCKS a card-required signup (require_card_for_trial AND
+//          stripe_charges_enabled) that arrives without consent_agreed=true,
+//          before any billable resource is provisioned. A card-required trial
+//          auto-converts to a recurring charge on a stored card (a negative
+//          option), so affirmative consent must exist and be recorded before
+//          the card is taken. See recordSignupConsent and the gate in
+//          handleClientSignup. handleAgencyAddClient is unchanged (agency-
+//          initiated, no end-user present to consent, never card-required).
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -171,6 +181,65 @@ function signupRateLimiter(req, res, next) {
     message: 'Too many signup attempts from this network. Please try again later.',
     retryAfterSec,
   });
+}
+
+// ============================================================================
+// RECORD SIGNUP CONSENT
+// ----------------------------------------------------------------------------
+// Writes an audit row to client_consents capturing the affirmative consent the
+// client gave at signup: the verbatim text they agreed to, whether the
+// card-required auto-renew disclosure was part of it, the legal template
+// versions in force, and request context (IP, user agent). Fully non-blocking:
+// a failure here (for example the migration not yet run) logs loudly but never
+// breaks signup. For card-required signups the hard gate in handleClientSignup
+// has already rejected the request unless consent_agreed === true, so reaching
+// this helper on a card-required signup means consent was given.
+// ============================================================================
+async function recordSignupConsent({ client, agency, cardRequired, req }) {
+  try {
+    // Best-effort lookup of the current legal template versions so the exact
+    // agreement can be reconstructed later. Never blocks signup.
+    let termsVersion = null;
+    let privacyVersion = null;
+    try {
+      const { data: templates } = await supabase
+        .from('legal_templates')
+        .select('template_type, version')
+        .in('template_type', ['terms', 'privacy']);
+      for (const t of templates || []) {
+        if (t.template_type === 'terms') termsVersion = t.version;
+        if (t.template_type === 'privacy') privacyVersion = t.version;
+      }
+    } catch (vErr) {
+      console.warn('⚠️ Consent: legal template version lookup failed (non-fatal):', vErr.message);
+    }
+
+    const consentText = typeof req.body?.consent_text === 'string'
+      ? req.body.consent_text.slice(0, 5000)
+      : null;
+    const userAgent = (req.headers['user-agent'] || '').slice(0, 1000) || null;
+
+    const { error } = await supabase.from('client_consents').insert({
+      client_id: client.id,
+      agency_id: agency.id,
+      consent_type: 'signup',
+      card_required: cardRequired === true,
+      terms_version: termsVersion,
+      privacy_version: privacyVersion,
+      consent_text: consentText,
+      ip_address: getClientIp(req),
+      user_agent: userAgent,
+      agreed: req.body?.consent_agreed === true,
+    });
+
+    if (error) {
+      console.error('❌ Consent: failed to record client_consents row (run the client_consents migration?):', error.message);
+    } else {
+      console.log(`📝 Consent recorded for client ${client.id} (card_required=${cardRequired === true})`);
+    }
+  } catch (err) {
+    console.error('❌ Consent: unexpected error recording consent (non-fatal):', err.message);
+  }
 }
 
 // ============================================================================
@@ -635,6 +704,29 @@ async function handleClientSignup(req, res) {
     // Whisper vs native transfer for this client (defaults to vapi_direct).
     const voiceRouting = resolveVoiceRouting(req.body, agency);
 
+    // ────────────────────────────────────────────────────────────────────
+    // CARD-REQUIRED CONSENT GATE (2026-07-17)
+    // If this signup will require a card (agency toggle on AND Stripe charges
+    // enabled), the client is about to authorize an auto-renewing charge after
+    // the 7-day trial. That is a negative option: we must have their
+    // affirmative consent BEFORE taking a card or provisioning any billable
+    // resource. Reject here, before STEP 1, so a missing-consent card-required
+    // signup never creates a VAPI assistant or rents a Telnyx number.
+    //
+    // willRequireCard mirrors the cardRequired computation in STEP 6b exactly,
+    // so the gate and the checkout decision can never disagree. No-card signups
+    // are not gated here (consent is still recorded below for TCPA), so a
+    // missing consent flag never breaks a no-card trial.
+    // ────────────────────────────────────────────────────────────────────
+    const willRequireCard = agency.require_card_for_trial === true && agency.stripe_charges_enabled === true;
+    if (willRequireCard && req.body.consent_agreed !== true) {
+      console.warn(`🚫 Card-required signup for agency ${agency.name} missing affirmative consent — rejecting before provisioning`);
+      return res.status(400).json({
+        error: 'consent_required',
+        message: 'Please agree to the terms, including the automatic charge after your free trial, to continue.',
+      });
+    }
+
     const limitCheck = await canAgencyAddClient(agencyId);
     if (!limitCheck.allowed) {
       const isBilling = limitCheck.reason === 'billing_required';
@@ -837,6 +929,13 @@ async function handleClientSignup(req, res) {
     } catch (billingErr) {
       console.warn('⚠️ Per-client billing update failed (non-fatal):', billingErr.message);
     }
+
+    // ── Record the signup consent audit row (non-blocking) ──────────
+    // willRequireCard reflects whether the auto-renew disclosure was part of
+    // the agreed text. For card-required signups the consent gate above has
+    // already guaranteed consent_agreed === true; for no-card signups we still
+    // record the TCPA/terms consent the client gave.
+    await recordSignupConsent({ client: newClient, agency, cardRequired: willRequireCard, req });
 
     // ============================================
     // STEP 5: CREATE USER RECORD
