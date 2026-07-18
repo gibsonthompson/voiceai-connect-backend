@@ -2,7 +2,8 @@
 // RESTORATION PLATFORM ROUTES  (mounted at /api/resto)
 // Lives in voiceai-connect-backend/src/routes/. Reuses the existing Supabase
 // service client and CORS. /report, /drying-log, /mold-scan, /ocr, /doc-scan,
-// /scope, /form-pdf, /client-pack, /measurements, /esx are implemented.
+// /scope, /form-pdf, /client-pack, /measurements, /esx, /underlay, /entry-sheet
+// are implemented.
 // ============================================================================
 
 const express = require('express');
@@ -170,11 +171,16 @@ router.get('/public/:token/:name?', async (req, res) => {
   }
 });
 
-// GET /api/resto/document/:id/:name? — streams a stored report PDF from OUR domain
+// GET /api/resto/document/:id/:name? streams a stored document from OUR domain
 // (via the Vercel /api proxy) with a clean filename, so the Supabase storage host
 // and its random object name are never exposed when viewing/sharing. Authed with
-// the session token in ?t= because the in-app PDF viewer and download anchors
-// can't send an Authorization header.
+// the session token in ?t= because the in-app viewer and download anchors can't
+// send an Authorization header.
+//
+// The content type and filename extension are taken from the stored object's own
+// extension, not hardcoded to PDF. Reports and the entry sheet are PDFs, the
+// Xactimate underlay is a PNG. Serving a PNG as application/pdf made the in-app
+// viewer choke, so the type now follows the file.
 router.get('/document/:id/:name?', async (req, res) => {
   try {
     const token = req.query.t;
@@ -194,10 +200,15 @@ router.get('/document/:id/:name?', async (req, res) => {
     if (error || !file) return res.status(404).send('file not found');
     const buf = Buffer.from(await file.arrayBuffer());
 
+    const ext = (doc.storage_path.split('.').pop() || 'pdf').toLowerCase();
+    const CT = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif' };
+    const contentType = CT[ext] || 'application/octet-stream';
+    const outExt = ext === 'jpeg' ? 'jpg' : ext;
+
     const clean = (doc.title || 'Report').replace(/[^\w]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
     const asDownload = req.query.download === '1' || req.query.download === 'true';
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `${asDownload ? 'attachment' : 'inline'}; filename="${clean}.pdf"`);
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `${asDownload ? 'attachment' : 'inline'}; filename="${clean}.${outExt}"`);
     res.setHeader('Cache-Control', 'private, no-store');
     res.send(buf);
   } catch (e) {
@@ -434,6 +445,79 @@ router.post('/esx', async (req, res) => {
   } catch (e) {
     console.error('resto esx error:', e.message);
     res.status(500).json({ error: e.message || 'esx generation failed' });
+  }
+});
+
+// POST /api/resto/underlay  { claimId, structureId? } -> renders a structure level
+// to a to-scale PNG the estimator imports into Xactimate as a Sketch underlay and
+// traces over. Uses the same placement math the esx uses, so the plan matches. When
+// structureId is omitted, the claim's first structure is used. Stored as a PNG under
+// a resto_documents 'upload' row (allowed by the type check, no schema change).
+router.post('/underlay', async (req, res) => {
+  try {
+    const ctx = await authClaim(req, res);
+    if (!ctx) return;
+    const { user, claim } = ctx;
+    const { structureId } = req.body || {};
+
+    const { buildClaimUnderlay } = require('../lib/resto-underlay');
+    const { png, structure } = await buildClaimUnderlay(claim.id, structureId);
+
+    const path = `${claim.org_id}/${claim.id}/reports/${crypto.randomUUID()}.png`;
+    const { error: upErr } = await supabase.storage.from('resto-media')
+      .upload(path, png, { contentType: 'image/png', upsert: false });
+    if (upErr) { console.error('resto underlay upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
+
+    const suffix = structure && structure.name ? ` (${structure.name})` : '';
+    const doc = await insertDocument({
+      org_id: claim.org_id, claim_id: claim.id, type: 'upload',
+      storage_path: path, title: `Xactimate Underlay${suffix} - ${claim.policyholder_name || 'Claim'}`, status: 'final',
+      generated_at: new Date().toISOString(), created_by: user.id
+    });
+
+    await logEvent(claim, 'Xactimate underlay generated');
+
+    res.json({ ok: true, document: doc });
+  } catch (e) {
+    const msg = e.message || 'underlay generation failed';
+    const code = msg === 'claim not found' ? 404
+      : msg === 'no drawn rooms for this structure' ? 400 : 500;
+    if (code === 500) console.error('resto underlay error:', e.message);
+    res.status(code).json({ error: msg });
+  }
+});
+
+// POST /api/resto/entry-sheet  { claimId } -> a per-room list of Xactimate line items
+// (CAT, SEL, quantity, unit) with the F9 justification note under each line, for a tech
+// to key straight into Xactimate. Same line-item model as the esx, rendered for humans.
+// No prices: Xactimate reprices from its own list. Stored as a resto_documents 'upload'
+// PDF row (allowed by the type check, no schema change).
+router.post('/entry-sheet', async (req, res) => {
+  try {
+    const ctx = await authClaim(req, res);
+    if (!ctx) return;
+    const { user, claim } = ctx;
+
+    const { buildEntrySheet } = require('../lib/resto-entry-sheet');
+    const { pdf } = await buildEntrySheet(claim.id);
+
+    const path = `${claim.org_id}/${claim.id}/reports/${crypto.randomUUID()}.pdf`;
+    const { error: upErr } = await supabase.storage.from('resto-media')
+      .upload(path, pdf, { contentType: 'application/pdf', upsert: false });
+    if (upErr) { console.error('resto entry-sheet upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
+
+    const doc = await insertDocument({
+      org_id: claim.org_id, claim_id: claim.id, type: 'upload',
+      storage_path: path, title: `Xactimate Entry Sheet - ${claim.policyholder_name || 'Claim'}`, status: 'final',
+      generated_at: new Date().toISOString(), created_by: user.id
+    });
+
+    await logEvent(claim, 'Xactimate entry sheet generated');
+
+    res.json({ ok: true, document: doc });
+  } catch (e) {
+    console.error('resto entry-sheet error:', e.message);
+    res.status(500).json({ error: e.message || 'entry sheet generation failed' });
   }
 });
 
