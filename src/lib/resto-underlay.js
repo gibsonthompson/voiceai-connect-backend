@@ -8,7 +8,15 @@
 //
 // Placement reuses resto-floorplan.js, the SAME math the ESX export uses, so the
 // underlay matches what a native import would draw. Geometry is read live from
-// each room's sketch; nothing is duplicated. No prices, no scope, just the plan.
+// each room's LATEST sketch; nothing is duplicated. No prices, no scope, just the plan.
+//
+// GEOMETRY FIX: the outline and the rotation pivot must come from the SAME sketch.
+// This used to take the largest wall polygon across ALL of a room's historical
+// sketches, then rotate it about a pivot computed from only the latest sketch.
+// Because the app writes a new resto_sketches row on every edit, rooms accumulate
+// several sketches in different coordinate frames, so that pairing placed points
+// from one frame around a center from another and threw rooms far off. Both now
+// come from the latest sketch, which is what the floor plan editor and the ESX use.
 //
 // Scale: rendered at a fixed pixels-per-foot with a labelled 10 ft scale bar and
 // the overall level size, so the tech scales the underlay in Xactimate until the
@@ -27,6 +35,13 @@ const dist = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
 const lerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
 const xmlEsc = (s) => String(s == null ? '' : s).replace(/[<>&'"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]));
 
+// canvas_json is jsonb (already an object from Supabase), but tolerate a string too.
+function asScene(v) {
+  if (v == null) return {};
+  if (typeof v === 'string') { try { return JSON.parse(v) || {}; } catch (e) { return {}; } }
+  return v;
+}
+
 function polyAreaU(points) {
   let a = 0;
   for (let i = 0; i < points.length; i++) { const p1 = points[i], p2 = points[(i + 1) % points.length]; a += p1[0] * p2[1] - p2[0] * p1[1]; }
@@ -44,25 +59,23 @@ function ftIn(ft) {
   return i ? `${f}'${i}"` : `${f}'`;
 }
 
-// The room outline: the largest closed polygon across all of the room's sketches.
-// Equivalent to largestRoomPolygon, reimplemented here so the underlay depends only
-// on resto-floorplan for placement and needs no scope-quantities import.
-function largestOutline(rSketches) {
-  let best = null, bestA = 0;
-  for (const s of (rSketches || [])) {
-    for (const w of ((s.canvas_json || {}).walls || [])) {
-      if (!w || !Array.isArray(w.points) || w.points.length < 3) continue;
-      const a = polyAreaU(w.points);
-      if (a > bestA) { bestA = a; best = { id: w.id, points: w.points }; }
-    }
+// The largest closed wall polygon WITHIN one set of walls (one sketch). This is the
+// room outline. It operates on the footprint's own walls, so the polygon and the
+// pivot always come from the same sketch.
+function largestPoly(walls) {
+  let best = null, bestA = -1;
+  for (const w of (walls || [])) {
+    if (!w || !Array.isArray(w.points) || w.points.length < 3) continue;
+    const a = polyAreaU(w.points);
+    if (a > bestA) { bestA = a; best = { id: w.id, points: w.points }; }
   }
   return best;
 }
 
 // Place every room in the structure into one shared coordinate space, in feet.
-// Mirrors mapClaimToProject: outline from the largest polygon, pivot from the
-// latest sketch, position from the floor-plan block, and a laid-out row fallback
-// when the structure has no saved plan.
+// Mirrors mapClaimToProject: outline and pivot from the room's latest sketch,
+// position from the floor-plan block, and a laid-out row fallback when the room has
+// no block in the saved plan.
 function placeLevel(graph, structureId) {
   const { structures = [], rooms = [], sketches = [] } = graph;
   const st = structures.find((s) => s.id === structureId) || structures[0];
@@ -75,11 +88,18 @@ function placeLevel(graph, structureId) {
 
   for (const room of stRooms) {
     const rSketches = sketches.filter((s) => s.room_id === room.id);
-    const poly = largestOutline(rSketches);
+    const latest = latestSketch(rSketches);
+    if (!latest) continue;                                 // no sketch, nothing to draw
+
+    const fp = footprintOf(room, latest.canvas_json);
+    if (!fp.hasSketch) continue;                           // latest sketch has no closed wall
+
+    // Outline from the SAME sketch as the pivot (fp.center is the bbox center of
+    // fp.walls, so the polygon has to be fp.walls' largest too).
+    const poly = largestPoly(fp.walls);
     if (!poly) continue;
 
-    const latest = latestSketch(rSketches);
-    const fp = footprintOf(room, latest ? latest.canvas_json : null);
+    const scene = asScene(latest.canvas_json);
     const block = blocks[room.id];
 
     const vertsFt = block
@@ -87,11 +107,9 @@ function placeLevel(graph, structureId) {
       : poly.points.map((p) => [p[0] / UPF + fallbackX, p[1] / UPF]);
 
     const openings = [];
-    for (const s of rSketches) {
-      for (const op of ((s.canvas_json || {}).openings || [])) {
-        if (op.wallId !== poly.id) continue;
-        openings.push({ kind: op.kind || 'door', edge: op.edge || 0, t: (op.t != null ? op.t : 0.5), widthFt: op.widthFt != null ? op.widthFt : 3 });
-      }
+    for (const op of (scene.openings || [])) {
+      if (op.wallId !== poly.id) continue;
+      openings.push({ kind: op.kind || 'door', edge: op.edge || 0, t: (op.t != null ? op.t : 0.5), widthFt: op.widthFt != null ? op.widthFt : 3 });
     }
 
     placed.push({
@@ -213,11 +231,11 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, hasFloorPlan }) {
   return parts.join('\n');
 }
 
-async function buildClaimUnderlay(claimId, structureId) {
-  const sharp = require('sharp');
+// Load the claim graph and attach the structures' floor plan rows once, so a single
+// fetch serves either one level or all of them.
+async function loadGraphWithFloorplans(claimId) {
   const graph = await fetchClaimGraph(claimId);
-  if (!graph.claim) throw new Error('claim not found');
-
+  if (!graph || !graph.claim) throw new Error('claim not found');
   const structureIds = (graph.structures || []).map((s) => s.id);
   if (structureIds.length) {
     const { supabase } = require('./supabase');
@@ -225,10 +243,14 @@ async function buildClaimUnderlay(claimId, structureId) {
       .from('resto_structure_floorplans').select('*').in('structure_id', structureIds);
     graph.floorplans = floorplans || [];
   }
+  return graph;
+}
 
-  const level = placeLevel(graph, structureId || structureIds[0]);
-  if (!level.structure || !level.rooms.length) throw new Error('no drawn rooms for this structure');
-
+// Render one structure to a PNG, or null when that structure has no drawn rooms.
+async function renderStructurePng(graph, structureId) {
+  const sharp = require('sharp');
+  const level = placeLevel(graph, structureId);
+  if (!level.structure || !level.rooms.length) return null;
   const svg = buildLevelUnderlaySvg({
     title: graph.claim.policyholder_name || graph.claim.address || 'Claim',
     structureName: level.structure.name || 'Structure',
@@ -236,7 +258,30 @@ async function buildClaimUnderlay(claimId, structureId) {
     hasFloorPlan: level.hasFloorPlan
   });
   const png = await sharp(Buffer.from(svg)).png().toBuffer();
-  return { png, svg, structure: level.structure, claim: graph.claim };
+  return { png, svg, structure: level.structure };
 }
 
-module.exports = { buildClaimUnderlay, placeLevel, buildLevelUnderlaySvg };
+// One level. structureId defaults to the claim's first structure.
+async function buildClaimUnderlay(claimId, structureId) {
+  const graph = await loadGraphWithFloorplans(claimId);
+  const ids = (graph.structures || []).map((s) => s.id);
+  const out = await renderStructurePng(graph, structureId || ids[0]);
+  if (!out) throw new Error('no drawn rooms for this structure');
+  return { png: out.png, svg: out.svg, structure: out.structure, claim: graph.claim };
+}
+
+// Every level that has drawn rooms, one PNG each. Xactimate imports an underlay per
+// level, so this is what the button uses: it yields one underlay per floor instead of
+// only the first structure.
+async function buildAllUnderlays(claimId) {
+  const graph = await loadGraphWithFloorplans(claimId);
+  const underlays = [];
+  for (const st of (graph.structures || [])) {
+    const out = await renderStructurePng(graph, st.id);
+    if (out) underlays.push(out);
+  }
+  if (!underlays.length) throw new Error('no drawn rooms for this claim');
+  return { claim: graph.claim, underlays };
+}
+
+module.exports = { buildClaimUnderlay, buildAllUnderlays, placeLevel, buildLevelUnderlaySvg };

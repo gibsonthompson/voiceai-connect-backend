@@ -458,30 +458,36 @@ router.post('/underlay', async (req, res) => {
     const ctx = await authClaim(req, res);
     if (!ctx) return;
     const { user, claim } = ctx;
-    const { structureId } = req.body || {};
 
-    const { buildClaimUnderlay } = require('../lib/resto-underlay');
-    const { png, structure } = await buildClaimUnderlay(claim.id, structureId);
+    // One underlay per level (structure) that has drawn rooms, because Xactimate
+    // imports an underlay onto one level at a time. Returns the first document for
+    // the toast; the client reloads the list and shows all of them.
+    const { buildAllUnderlays } = require('../lib/resto-underlay');
+    const { underlays } = await buildAllUnderlays(claim.id);
 
-    const path = `${claim.org_id}/${claim.id}/reports/${crypto.randomUUID()}.png`;
-    const { error: upErr } = await supabase.storage.from('resto-media')
-      .upload(path, png, { contentType: 'image/png', upsert: false });
-    if (upErr) { console.error('resto underlay upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
+    const docs = [];
+    for (const u of underlays) {
+      const path = `${claim.org_id}/${claim.id}/reports/${crypto.randomUUID()}.png`;
+      const { error: upErr } = await supabase.storage.from('resto-media')
+        .upload(path, u.png, { contentType: 'image/png', upsert: false });
+      if (upErr) { console.error('resto underlay upload failed:', upErr.message); return res.status(500).json({ error: 'upload failed' }); }
 
-    const suffix = structure && structure.name ? ` (${structure.name})` : '';
-    const doc = await insertDocument({
-      org_id: claim.org_id, claim_id: claim.id, type: 'upload',
-      storage_path: path, title: `Xactimate Underlay${suffix} - ${claim.policyholder_name || 'Claim'}`, status: 'final',
-      generated_at: new Date().toISOString(), created_by: user.id
-    });
+      const suffix = u.structure && u.structure.name ? ` (${u.structure.name})` : '';
+      const doc = await insertDocument({
+        org_id: claim.org_id, claim_id: claim.id, type: 'upload',
+        storage_path: path, title: `Xactimate Underlay${suffix} - ${claim.policyholder_name || 'Claim'}`, status: 'final',
+        generated_at: new Date().toISOString(), created_by: user.id
+      });
+      docs.push(doc);
+    }
 
-    await logEvent(claim, 'Xactimate underlay generated');
+    await logEvent(claim, `Xactimate underlay generated (${docs.length} level${docs.length === 1 ? '' : 's'})`);
 
-    res.json({ ok: true, document: doc });
+    res.json({ ok: true, document: docs[0], documents: docs });
   } catch (e) {
     const msg = e.message || 'underlay generation failed';
     const code = msg === 'claim not found' ? 404
-      : msg === 'no drawn rooms for this structure' ? 400 : 500;
+      : msg === 'no drawn rooms for this claim' ? 400 : 500;
     if (code === 500) console.error('resto underlay error:', e.message);
     res.status(code).json({ error: msg });
   }
