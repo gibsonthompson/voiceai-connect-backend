@@ -138,7 +138,7 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, hasFloorPlan }) {
   const wFt = Math.max(maxX, 1), hFt = Math.max(maxY, 1);
 
   const PX = clamp(2200 / Math.max(wFt, hFt), 14, 40); // pixels per foot
-  const padX = 80, padTop = 96, padBottom = 110;
+  const padX = 80, padTop = 96, padBottom = 160;
   const W = Math.round(wFt * PX) + padX * 2;
   const H = Math.round(hFt * PX) + padTop + padBottom;
   const X = (x) => padX + x * PX;
@@ -204,18 +204,24 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, hasFloorPlan }) {
     parts.push(`<text x="${cx.toFixed(1)}" y="${(cy + 18).toFixed(1)}" font-size="13" text-anchor="middle" fill="#555">${r.areaFt} sf</text>`);
   }
 
-  // bottom band: scale bar, level size, opening legend, plan note
-  const by = padTop + Math.round(hFt * PX) + 40;
-  const barPx = 10 * PX;
-  parts.push(`<line x1="${padX}" y1="${by}" x2="${padX + barPx}" y2="${by}" stroke="#111" stroke-width="3"/>`);
-  parts.push(`<line x1="${padX}" y1="${by - 6}" x2="${padX}" y2="${by + 6}" stroke="#111" stroke-width="3"/>`);
-  parts.push(`<line x1="${padX + barPx}" y1="${by - 6}" x2="${padX + barPx}" y2="${by + 6}" stroke="#111" stroke-width="3"/>`);
-  parts.push(`<text x="${padX + barPx + 12}" y="${by + 5}" font-size="15" font-weight="700">10 ft scale bar</text>`);
-  parts.push(`<text x="${padX}" y="${by + 30}" font-size="14" fill="#333">Level size ${ftIn(wFt)} x ${ftIn(hFt)}. In Xactimate, scale the underlay so this bar reads 10 ft on the grid.</text>`);
+  // bottom band: a long, exact CALIBRATION LINE the tech traces to scale the import.
+  // A long line at a round length scales far more accurately than a short 10 ft bar, and
+  // the red crosshair ends give an exact click target. Its pixel length is calLen feet at
+  // the image scale, so tracing it end to end and entering calLen ft scales the whole plan.
+  const calLen = Math.max(10, Math.floor((wFt * 0.85) / 5) * 5);
+  const by = padTop + Math.round(hFt * PX) + 46;
+  const cx0 = padX, cx1 = padX + calLen * PX;
+  const cross = (x) => `<line x1="${x}" y1="${by - 9}" x2="${x}" y2="${by + 9}" stroke="#B91C1C" stroke-width="2.5"/>`;
+  parts.push(`<line x1="${cx0}" y1="${by}" x2="${cx1.toFixed(1)}" y2="${by}" stroke="#B91C1C" stroke-width="3"/>`);
+  parts.push(cross(cx0));
+  parts.push(cross(cx1.toFixed(1)));
+  parts.push(`<text x="${((cx0 + cx1) / 2).toFixed(1)}" y="${by - 14}" font-size="16" font-weight="700" text-anchor="middle" fill="#B91C1C">SCALE LINE = ${ftIn(calLen)}</text>`);
+  parts.push(`<text x="${padX}" y="${by + 30}" font-size="14" fill="#333">To scale: after Import Underlay Image, choose Set Scale, draw from one red cross to the other, and enter ${calLen} ft 0 in.</text>`);
+  parts.push(`<text x="${padX}" y="${by + 50}" font-size="13" fill="#555">Level size ${ftIn(wFt)} x ${ftIn(hFt)}.</text>`);
 
   const legend = ['door', 'window', 'opening', 'missing_wall'];
   let lx = padX;
-  const ly = by + 56;
+  const ly = by + 74;
   for (const k of legend) {
     parts.push(`<line x1="${lx}" y1="${ly - 4}" x2="${lx + 22}" y2="${ly - 4}" stroke="${OPENING_COLOR[k]}" stroke-width="6" stroke-linecap="round"/>`);
     const label = k.replace('_', ' ');
@@ -224,7 +230,7 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, hasFloorPlan }) {
   }
 
   if (!hasFloorPlan) {
-    parts.push(`<text x="${padX}" y="${by + 82}" font-size="14" font-weight="700" fill="#B45309">No saved floor plan: rooms are shown separately, not in their true relative positions.</text>`);
+    parts.push(`<text x="${padX}" y="${by + 98}" font-size="14" font-weight="700" fill="#B45309">No saved floor plan: rooms are shown separately, not in their true relative positions.</text>`);
   }
 
   parts.push(`</svg>`);
