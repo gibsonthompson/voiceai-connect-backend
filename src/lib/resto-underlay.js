@@ -72,6 +72,45 @@ function largestPoly(walls) {
   return best;
 }
 
+function bboxOf(verts) {
+  let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+  for (const v of verts) { if (v[0] < minx) minx = v[0]; if (v[1] < miny) miny = v[1]; if (v[0] > maxx) maxx = v[0]; if (v[1] > maxy) maxy = v[1]; }
+  return { minx, miny, maxx, maxy, w: maxx - minx, h: maxy - miny };
+}
+
+// True if any two rooms' bounding boxes overlap (with a small tolerance so rooms that
+// merely touch are not counted). Overlap means the floor plan was not really laid out.
+function anyOverlap(rooms) {
+  const b = rooms.map((r) => bboxOf(r.vertsFt));
+  const pad = 0.5;
+  for (let i = 0; i < b.length; i++) for (let j = i + 1; j < b.length; j++) {
+    const A = b[i], B = b[j];
+    if (A.minx < B.maxx - pad && A.maxx > B.minx + pad && A.miny < B.maxy - pad && A.maxy > B.miny + pad) return true;
+  }
+  return false;
+}
+
+// Re-lay every room into a tidy, non-overlapping grid, each at its true scale and shape,
+// wrapping rows toward a roughly square overall footprint. Used when the level was not
+// laid out, so the underlay is a clean set of rooms to trace instead of a pile.
+function gridLayout(rooms) {
+  const G = 4; // ft gap between rooms
+  const cells = rooms.map((r) => {
+    const bb = bboxOf(r.vertsFt);
+    return { r, w: bb.w, h: bb.h, local: r.vertsFt.map((v) => [v[0] - bb.minx, v[1] - bb.miny]) };
+  });
+  const areaSum = cells.reduce((s, c) => s + Math.max(c.w, 1) * Math.max(c.h, 1), 0);
+  const maxW = Math.max(1, ...cells.map((c) => c.w));
+  const rowTarget = Math.max(maxW, Math.sqrt(areaSum) * 1.6);
+  let x = 0, y = 0, rowH = 0;
+  for (const c of cells) {
+    if (x > 0 && x + c.w > rowTarget) { x = 0; y += rowH + G; rowH = 0; }
+    c.r.vertsFt = c.local.map((p) => [p[0] + x, p[1] + y]);
+    x += c.w + G;
+    if (c.h > rowH) rowH = c.h;
+  }
+}
+
 // Place every room in the structure into one shared coordinate space, in feet.
 // Mirrors mapClaimToProject: outline and pivot from the room's latest sketch,
 // position from the floor-plan block, and a laid-out row fallback when the room has
@@ -123,24 +162,43 @@ function placeLevel(graph, structureId) {
     if (!block) { const xs = vertsFt.map((p) => p[0]); fallbackX = Math.max(...xs) + 6; }
   }
 
+  // A true-position underlay is only honest when every room was actually placed on the
+  // floor plan and the rooms do not overlap. When rooms are still in the tray (no block)
+  // or were dropped on top of each other, the positions are meaningless, so lay every
+  // room out in a clean, non-overlapping grid at correct scale instead. Each room keeps
+  // its own shape and size; the tech traces each and arranges them in Xactimate.
+  const arranged = placed.length > 0 && placed.every((r) => r.hasBlock) && !anyOverlap(placed);
+  if (!arranged) gridLayout(placed);
+
   // shift the level so its min corner sits at origin (relative positions preserved)
   let mnX = Infinity, mnY = Infinity;
   for (const r of placed) for (const v of r.vertsFt) { if (v[0] < mnX) mnX = v[0]; if (v[1] < mnY) mnY = v[1]; }
   if (isFinite(mnX)) for (const r of placed) r.vertsFt = r.vertsFt.map((v) => [v[0] - mnX, v[1] - mnY]);
 
-  return { structure: st, rooms: placed, hasFloorPlan: placed.some((r) => r.hasBlock) };
+  return { structure: st, rooms: placed, arranged };
 }
 
 // Pure renderer: placed level -> SVG string. Testable without a database.
-function buildLevelUnderlaySvg({ title, structureName, rooms, hasFloorPlan }) {
+function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   let maxX = 0, maxY = 0;
   for (const r of rooms) for (const v of r.vertsFt) { if (v[0] > maxX) maxX = v[0]; if (v[1] > maxY) maxY = v[1]; }
   const wFt = Math.max(maxX, 1), hFt = Math.max(maxY, 1);
 
   const PX = clamp(2200 / Math.max(wFt, hFt), 14, 40); // pixels per foot
-  const padX = 80, padTop = 96, padBottom = 160;
-  const W = Math.round(wFt * PX) + padX * 2;
-  const H = Math.round(hFt * PX) + padTop + padBottom;
+  const drawW = Math.round(wFt * PX), drawH = Math.round(hFt * PX);
+
+  // Type and line weights scale WITH the image. A large level makes a large PNG, and a
+  // fixed 16 px label or 3 px line becomes a hairline once that image is scaled to fit a
+  // screen or the Xactimate import preview. f never drops below 1, so a small plan keeps
+  // the base sizes. FS scales fonts, SW scales stroke widths, P scales spacing/offsets.
+  const f = Math.max(1, Math.max(drawW, drawH) / 800);
+  const FS = (n) => Math.round(n * f);
+  const SW = (n) => +(n * f).toFixed(1);
+  const P = (n) => Math.round(n * f);
+
+  const padX = P(70), padTop = P(96), padBottom = P(180);
+  const W = drawW + padX * 2;
+  const H = drawH + padTop + padBottom;
   const X = (x) => padX + x * PX;
   const Y = (y) => padTop + y * PX;
 
@@ -150,14 +208,14 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, hasFloorPlan }) {
   parts.push(`<style>text{font-family:Arial,Helvetica,sans-serif;fill:#111}</style>`);
 
   // title band
-  parts.push(`<text x="${padX}" y="40" font-size="26" font-weight="700">${xmlEsc(title)} \u00b7 ${xmlEsc(structureName)}</text>`);
-  parts.push(`<text x="${padX}" y="66" font-size="16" fill="#555">Xactimate Sketch underlay \u00b7 trace over this plan</text>`);
+  parts.push(`<text x="${padX}" y="${P(42)}" font-size="${FS(26)}" font-weight="700">${xmlEsc(title)} \u00b7 ${xmlEsc(structureName)}</text>`);
+  parts.push(`<text x="${padX}" y="${P(68)}" font-size="${FS(15)}" fill="#555">Xactimate Sketch underlay \u00b7 trace over this plan</text>`);
 
   // rooms
   for (const r of rooms) {
     const pts = r.vertsFt.map((v) => `${X(v[0]).toFixed(1)},${Y(v[1]).toFixed(1)}`).join(' ');
     const fill = r.affected ? '#eef4fb' : '#f3f4f6';
-    parts.push(`<polygon points="${pts}" fill="${fill}" stroke="#111" stroke-width="2.5" stroke-linejoin="round"/>`);
+    parts.push(`<polygon points="${pts}" fill="${fill}" stroke="#111" stroke-width="${SW(2.5)}" stroke-linejoin="round"/>`);
   }
 
   // edge length labels
@@ -171,11 +229,11 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, hasFloorPlan }) {
       // outward normal (rooms wound CW or CCW; a small offset either way is fine for a label)
       let nx = -(b[1] - a[1]), ny = (b[0] - a[0]);
       const nl = Math.hypot(nx, ny) || 1; nx /= nl; ny /= nl;
-      const lx = X(mid[0]) + nx * 14, ly = Y(mid[1]) + ny * 14;
+      const lx = X(mid[0]) + nx * P(16), ly = Y(mid[1]) + ny * P(16);
       const label = ftIn(lenFt);
-      const w = label.length * 8 + 8;
-      parts.push(`<rect x="${(lx - w / 2).toFixed(1)}" y="${(ly - 10).toFixed(1)}" width="${w}" height="16" rx="3" fill="#ffffff" fill-opacity="0.85"/>`);
-      parts.push(`<text x="${lx.toFixed(1)}" y="${(ly + 3).toFixed(1)}" font-size="12" text-anchor="middle" fill="#333">${label}</text>`);
+      const w = label.length * FS(8) + P(8);
+      parts.push(`<rect x="${(lx - w / 2).toFixed(1)}" y="${(ly - P(11)).toFixed(1)}" width="${w.toFixed(1)}" height="${P(18)}" rx="${P(3)}" fill="#ffffff" fill-opacity="0.85"/>`);
+      parts.push(`<text x="${lx.toFixed(1)}" y="${(ly + P(4)).toFixed(1)}" font-size="${FS(12)}" text-anchor="middle" fill="#333">${label}</text>`);
     }
   }
 
@@ -189,10 +247,10 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, hasFloorPlan }) {
       const p0 = lerp(a, b, clamp(op.t - half, 0, 1));
       const p1 = lerp(a, b, clamp(op.t + half, 0, 1));
       const color = OPENING_COLOR[op.kind] || OPENING_COLOR.door;
-      const dash = op.kind === 'missing_wall' ? ' stroke-dasharray="6 5"' : '';
-      parts.push(`<line x1="${X(p0[0]).toFixed(1)}" y1="${Y(p0[1]).toFixed(1)}" x2="${X(p1[0]).toFixed(1)}" y2="${Y(p1[1]).toFixed(1)}" stroke="${color}" stroke-width="6"${dash} stroke-linecap="round"/>`);
+      const dash = op.kind === 'missing_wall' ? ` stroke-dasharray="${P(6)} ${P(5)}"` : '';
+      parts.push(`<line x1="${X(p0[0]).toFixed(1)}" y1="${Y(p0[1]).toFixed(1)}" x2="${X(p1[0]).toFixed(1)}" y2="${Y(p1[1]).toFixed(1)}" stroke="${color}" stroke-width="${SW(6)}"${dash} stroke-linecap="round"/>`);
       const m = lerp(p0, p1, 0.5);
-      parts.push(`<text x="${X(m[0]).toFixed(1)}" y="${(Y(m[1]) - 8).toFixed(1)}" font-size="12" font-weight="700" text-anchor="middle" fill="${color}">${OPENING_LETTER[op.kind] || ''}</text>`);
+      parts.push(`<text x="${X(m[0]).toFixed(1)}" y="${(Y(m[1]) - P(8)).toFixed(1)}" font-size="${FS(12)}" font-weight="700" text-anchor="middle" fill="${color}">${OPENING_LETTER[op.kind] || ''}</text>`);
     }
   }
 
@@ -200,37 +258,38 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, hasFloorPlan }) {
   for (const r of rooms) {
     const c = centroid(r.vertsFt);
     const cx = X(c[0]), cy = Y(c[1]);
-    parts.push(`<text x="${cx.toFixed(1)}" y="${cy.toFixed(1)}" font-size="16" font-weight="700" text-anchor="middle">${xmlEsc(r.name)}</text>`);
-    parts.push(`<text x="${cx.toFixed(1)}" y="${(cy + 18).toFixed(1)}" font-size="13" text-anchor="middle" fill="#555">${r.areaFt} sf</text>`);
+    parts.push(`<text x="${cx.toFixed(1)}" y="${cy.toFixed(1)}" font-size="${FS(16)}" font-weight="700" text-anchor="middle">${xmlEsc(r.name)}</text>`);
+    parts.push(`<text x="${cx.toFixed(1)}" y="${(cy + P(19)).toFixed(1)}" font-size="${FS(13)}" text-anchor="middle" fill="#555">${r.areaFt} sf</text>`);
   }
 
-  // bottom band: a long, exact CALIBRATION LINE the tech traces to scale the import.
-  // A long line at a round length scales far more accurately than a short 10 ft bar, and
-  // the red crosshair ends give an exact click target. Its pixel length is calLen feet at
-  // the image scale, so tracing it end to end and entering calLen ft scales the whole plan.
+  // bottom band: a long, exact CALIBRATION LINE the tech traces to scale the import. A long
+  // line at a round length scales far more accurately than a short bar, and the red crosshair
+  // ends give an exact click target. Its pixel length is calLen feet at the image scale, so
+  // tracing it end to end and entering calLen ft scales the whole plan. Everything here is
+  // sized up with the image so it never renders as a faint hairline on a large plan.
   const calLen = Math.max(10, Math.floor((wFt * 0.85) / 5) * 5);
-  const by = padTop + Math.round(hFt * PX) + 46;
+  const by = padTop + drawH + P(58);
   const cx0 = padX, cx1 = padX + calLen * PX;
-  const cross = (x) => `<line x1="${x}" y1="${by - 9}" x2="${x}" y2="${by + 9}" stroke="#B91C1C" stroke-width="2.5"/>`;
-  parts.push(`<line x1="${cx0}" y1="${by}" x2="${cx1.toFixed(1)}" y2="${by}" stroke="#B91C1C" stroke-width="3"/>`);
+  const cross = (x) => `<line x1="${x}" y1="${by - P(13)}" x2="${x}" y2="${by + P(13)}" stroke="#B91C1C" stroke-width="${SW(3.5)}"/>`;
+  parts.push(`<line x1="${cx0}" y1="${by}" x2="${cx1.toFixed(1)}" y2="${by}" stroke="#B91C1C" stroke-width="${SW(4.5)}"/>`);
   parts.push(cross(cx0));
   parts.push(cross(cx1.toFixed(1)));
-  parts.push(`<text x="${((cx0 + cx1) / 2).toFixed(1)}" y="${by - 14}" font-size="16" font-weight="700" text-anchor="middle" fill="#B91C1C">SCALE LINE = ${ftIn(calLen)}</text>`);
-  parts.push(`<text x="${padX}" y="${by + 30}" font-size="14" fill="#333">To scale: after Import Underlay Image, choose Set Scale, draw from one red cross to the other, and enter ${calLen} ft 0 in.</text>`);
-  parts.push(`<text x="${padX}" y="${by + 50}" font-size="13" fill="#555">Level size ${ftIn(wFt)} x ${ftIn(hFt)}.</text>`);
+  parts.push(`<text x="${((cx0 + cx1) / 2).toFixed(1)}" y="${by - P(20)}" font-size="${FS(24)}" font-weight="700" text-anchor="middle" fill="#B91C1C">SCALE LINE = ${ftIn(calLen)}</text>`);
+  parts.push(`<text x="${padX}" y="${by + P(38)}" font-size="${FS(17)}" fill="#333">To scale: after Import Underlay Image, choose Set Scale, draw from one red cross to the other, and enter ${calLen} ft 0 in.</text>`);
+  parts.push(`<text x="${padX}" y="${by + P(62)}" font-size="${FS(14)}" fill="#555">Level size ${ftIn(wFt)} x ${ftIn(hFt)}.</text>`);
 
   const legend = ['door', 'window', 'opening', 'missing_wall'];
   let lx = padX;
-  const ly = by + 74;
+  const ly = by + P(90);
   for (const k of legend) {
-    parts.push(`<line x1="${lx}" y1="${ly - 4}" x2="${lx + 22}" y2="${ly - 4}" stroke="${OPENING_COLOR[k]}" stroke-width="6" stroke-linecap="round"/>`);
+    parts.push(`<line x1="${lx}" y1="${ly - P(4)}" x2="${lx + P(24)}" y2="${ly - P(4)}" stroke="${OPENING_COLOR[k]}" stroke-width="${SW(6)}" stroke-linecap="round"/>`);
     const label = k.replace('_', ' ');
-    parts.push(`<text x="${lx + 30}" y="${ly}" font-size="13" fill="#333">${label}</text>`);
-    lx += 30 + label.length * 7 + 30;
+    parts.push(`<text x="${lx + P(32)}" y="${ly}" font-size="${FS(13)}" fill="#333">${label}</text>`);
+    lx += P(32) + label.length * FS(7) + P(30);
   }
 
-  if (!hasFloorPlan) {
-    parts.push(`<text x="${padX}" y="${by + 98}" font-size="14" font-weight="700" fill="#B45309">No saved floor plan: rooms are shown separately, not in their true relative positions.</text>`);
+  if (!arranged) {
+    parts.push(`<text x="${padX}" y="${by + P(118)}" font-size="${FS(15)}" font-weight="700" fill="#B45309">Rooms auto-arranged to scale (this level was not laid out on the floor plan). Trace each room and position it in Xactimate.</text>`);
   }
 
   parts.push(`</svg>`);
@@ -261,7 +320,7 @@ async function renderStructurePng(graph, structureId) {
     title: graph.claim.policyholder_name || graph.claim.address || 'Claim',
     structureName: level.structure.name || 'Structure',
     rooms: level.rooms,
-    hasFloorPlan: level.hasFloorPlan
+    arranged: level.arranged
   });
   const png = await sharp(Buffer.from(svg)).png().toBuffer();
   return { png, svg, structure: level.structure };
