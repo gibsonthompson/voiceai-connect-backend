@@ -185,11 +185,10 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   const wFt = Math.max(maxX, 1), hFt = Math.max(maxY, 1);
 
   const longFt = Math.max(wFt, hFt);
-  // Crisp but BOUNDED. The drawing's long side aims for ~2800 px and never exceeds ~3200 px,
-  // so even a 9-room auto-arranged level stays a manageable PNG (~10 megapixels) instead of
-  // the 30+ megapixels that made Xactimate's underlay import fail to render. Still well above
-  // the old low-res render that looked grainy.
-  const PX = Math.min(3200 / longFt, clamp(2800 / longFt, 22, 64)); // pixels per foot
+  // WHOLE pixels per foot. An integer scale means one foot is always exactly PX pixels, so
+  // the scale line (a whole number of feet) is a whole number of pixels and every room edge
+  // lands on an exact pixel boundary. Bounded so a big level stays a manageable PNG.
+  const PX = Math.max(12, Math.min(64, Math.floor(2800 / longFt)));
   const drawW = Math.round(wFt * PX), drawH = Math.round(hFt * PX);
 
   // Type and line weights scale WITH the image. A large level makes a large PNG, and a
@@ -204,11 +203,20 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   // Extra margin on the LEFT and BOTTOM: dimensions sit OUTSIDE each room (width below,
   // height to the left), so a tech reading a wall's length never has the number sitting on
   // the wall they are tracing. That was the sloppy part before.
-  const padL = P(90), padR = P(90), padTop = P(150), padBottom = P(200);
+  const padL = P(90), padR = P(90), padTop = P(150), padBottom = P(210);
   const W = drawW + padL + padR;
   const H = drawH + padTop + padBottom;
-  const X = (x) => padL + x * PX;
-  const Y = (y) => padTop + y * PX;
+  // Snap to whole pixels. A wall drawn at a fractional pixel gets anti-aliased into a soft
+  // two-pixel smear, and a smear is exactly what makes "where is the wall" ambiguous.
+  const X = (x) => Math.round(padL + x * PX);
+  const Y = (y) => Math.round(padTop + y * PX);
+
+  // The wall line is drawn THIN and at a FIXED width, never scaled up with the image.
+  // This is the whole ballgame for accuracy. A stroke is centered on the true geometry, so a
+  // line W pixels thick means the tracer can be off by W/2 on each side. The old line was
+  // 9 px at 54 px/ft, which is 2 in of real-world thickness, so tracing outer edges instead
+  // of inner edges swung the room by 4 in. At 3 px the worst case is under a quarter inch.
+  const WALL_W = 3;
 
   // Text with a white halo so it reads over any line. rot rotates about its own anchor.
   const halo = (s, x, y, size, color, weight, anchor, rot) => {
@@ -225,11 +233,12 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   parts.push(`<text x="${padL}" y="${P(42)}" font-size="${FS(26)}" font-weight="700">${xmlEsc(title)} \u00b7 ${xmlEsc(structureName)}</text>`);
   parts.push(`<text x="${padL}" y="${P(68)}" font-size="${FS(15)}" fill="#555">Xactimate Sketch underlay \u00b7 trace over this plan</text>`);
 
-  // rooms
+  // rooms. Thin crisp outline over a light tint: the tint edge and the line are the same
+  // place, so there is one obvious thing to trace.
   for (const r of rooms) {
-    const pts = r.vertsFt.map((v) => `${X(v[0]).toFixed(1)},${Y(v[1]).toFixed(1)}`).join(' ');
-    const fill = r.affected ? '#eef4fb' : '#f3f4f6';
-    parts.push(`<polygon points="${pts}" fill="${fill}" stroke="#111" stroke-width="${SW(2.5)}" stroke-linejoin="round"/>`);
+    const pts = r.vertsFt.map((v) => `${X(v[0])},${Y(v[1])}`).join(' ');
+    const fill = r.affected ? '#e8f1fb' : '#f1f2f4';
+    parts.push(`<polygon points="${pts}" fill="${fill}" stroke="#111" stroke-width="${WALL_W}" stroke-linejoin="miter" shape-rendering="crispEdges"/>`);
   }
 
   // Everything a tech reads about a room sits ABOVE the box, never inside it. The box interior
@@ -264,11 +273,11 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
       if ((mid[0] - cen[0]) * nx + (mid[1] - cen[1]) * ny < 0) { nx = -nx; ny = -ny; } // point OUT of the room
 
       const dash = op.kind === 'missing_wall' ? ` stroke-dasharray="${P(7)} ${P(6)}"` : '';
-      parts.push(`<line x1="${X(p0[0]).toFixed(1)}" y1="${Y(p0[1]).toFixed(1)}" x2="${X(p1[0]).toFixed(1)}" y2="${Y(p1[1]).toFixed(1)}" stroke="${color}" stroke-width="${SW(9)}"${dash} stroke-linecap="butt"/>`);
+      parts.push(`<line x1="${X(p0[0])}" y1="${Y(p0[1])}" x2="${X(p1[0])}" y2="${Y(p1[1])}" stroke="${color}" stroke-width="${WALL_W * 2}"${dash} stroke-linecap="butt"/>`);
       // jamb ticks (perpendicular to the wall) at each end
-      const jt = P(10);
+      const jt = P(9);
       for (const pe of [p0, p1]) {
-        parts.push(`<line x1="${(X(pe[0]) - nx * jt).toFixed(1)}" y1="${(Y(pe[1]) - ny * jt).toFixed(1)}" x2="${(X(pe[0]) + nx * jt).toFixed(1)}" y2="${(Y(pe[1]) + ny * jt).toFixed(1)}" stroke="${color}" stroke-width="${SW(2.4)}"/>`);
+        parts.push(`<line x1="${(X(pe[0]) - nx * jt).toFixed(1)}" y1="${(Y(pe[1]) - ny * jt).toFixed(1)}" x2="${(X(pe[0]) + nx * jt).toFixed(1)}" y2="${(Y(pe[1]) + ny * jt).toFixed(1)}" stroke="${color}" stroke-width="${WALL_W}"/>`);
       }
       // width + type, set outside the wall (nothing is drawn inside the box)
       parts.push(halo(`${ftIn(op.widthFt)} ${OPENING_WORD[op.kind] || ''}`, X(mid[0]) + nx * P(26), Y(mid[1]) + ny * P(26) + P(4), FS(13), color, 700, 'middle'));
@@ -287,29 +296,36 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   // fraction of a long line than a short one. So the line spans as much of the plan width as
   // fits, at a whole-foot length, with a red dot at each exact endpoint to click and a tip to
   // zoom in first. Its pixel length is calLen feet at the image scale.
+  // THE SCALE LINE. Accuracy here sets the accuracy of the whole sketch, so it is built to
+  // remove ambiguity rather than to look bold:
+  //   - it is a whole number of feet, and PX is a whole number of pixels, so its pixel length
+  //     is exact;
+  //   - its endpoints sit on exact pixel positions;
+  //   - the line itself is THIN, so there is no thick band to click somewhere inside of;
+  //   - the target rings do NOT extend past the endpoint. The old crosshair arms ran 106 px
+  //     (about 23 in) beyond the true point, so clicking an arm tip instead of the center
+  //     threw the scale off badly.
+  // Click the small center dot at each end and enter the printed length.
   const calLen = Math.max(10, Math.floor(wFt * 0.9));
-  const by = padTop + drawH + P(58);   // room space below is empty now, band sits just under it
-  const cx0 = padL, cx1 = padL + calLen * PX;
-  // A bullseye at each end: an outer ring, a crosshair, and a solid center. Big enough to
-  // find and aim at even while the whole image is zoomed out and soft, which is exactly when
-  // you set the scale. Zoom to each bullseye, click the center, and the scale is exact.
-  const target = (xv) => {
-    const x = Number(xv);
-    return `<circle cx="${x}" cy="${by}" r="${P(17)}" fill="#ffffff" fill-opacity="0.65" stroke="#B91C1C" stroke-width="${SW(4)}"/>`
-      + `<line x1="${x}" y1="${by - P(26)}" x2="${x}" y2="${by + P(26)}" stroke="#B91C1C" stroke-width="${SW(2.6)}"/>`
-      + `<line x1="${x - P(26)}" y1="${by}" x2="${x + P(26)}" y2="${by}" stroke="#B91C1C" stroke-width="${SW(2.6)}"/>`
-      + `<circle cx="${x}" cy="${by}" r="${P(5)}" fill="#B91C1C"/>`;
-  };
-  parts.push(`<line x1="${cx0}" y1="${by}" x2="${cx1.toFixed(1)}" y2="${by}" stroke="#B91C1C" stroke-width="${SW(4)}"/>`);
+  const by = padTop + drawH + P(64);
+  const cx0 = padL, cx1 = padL + calLen * PX;   // exact integers: PX and calLen are integers
+  const ring = P(16);
+  // The marker extends UP AND DOWN ONLY. Nothing red reaches further left or right than the
+  // click point itself, so the leftmost and rightmost red pixels in the image ARE the two
+  // points to click. A ring or a horizontal crosshair arm would stick out past the endpoint
+  // (the old ones ran about 22 in past it) and invite a click in the wrong place.
+  const target = (x) => `<line x1="${x}" y1="${by - ring}" x2="${x}" y2="${by + ring}" stroke="#B91C1C" stroke-width="${WALL_W}"/>`;
+  parts.push(`<line x1="${cx0}" y1="${by}" x2="${cx1}" y2="${by}" stroke="#B91C1C" stroke-width="${WALL_W}" stroke-linecap="butt"/>`);
   parts.push(target(cx0));
-  parts.push(target(cx1.toFixed(1)));
-  parts.push(`<text x="${((cx0 + cx1) / 2).toFixed(1)}" y="${by - P(28)}" font-size="${FS(24)}" font-weight="700" text-anchor="middle" fill="#B91C1C" stroke="#ffffff" stroke-width="${SW(3.2)}" paint-order="stroke">SCALE LINE = ${ftIn(calLen)}</text>`);
-  parts.push(`<text x="${padL}" y="${by + P(48)}" font-size="${FS(17)}" fill="#333">To scale: choose Set Scale, zoom in to each red target, click its center, and enter ${calLen} ft 0 in.</text>`);
-  parts.push(`<text x="${padL}" y="${by + P(72)}" font-size="${FS(14)}" fill="#555">Level size ${ftIn(wFt)} x ${ftIn(hFt)}. A longer line traced at high zoom is the most accurate.</text>`);
+  parts.push(target(cx1));
+  parts.push(`<text x="${Math.round((cx0 + cx1) / 2)}" y="${by - P(26)}" font-size="${FS(24)}" font-weight="700" text-anchor="middle" fill="#B91C1C" stroke="#ffffff" stroke-width="${SW(3.2)}" paint-order="stroke">SCALE LINE = ${ftIn(calLen)}</text>`);
+  parts.push(`<text x="${padL}" y="${by + P(46)}" font-size="${FS(17)}" fill="#333">Set Scale: zoom in and click the exact left end of the red line, then its exact right end, and enter ${calLen} ft 0 in.</text>`);
+  parts.push(`<text x="${padL}" y="${by + P(70)}" font-size="${FS(15)}" fill="#333">Then trace along the CENTER of each wall line. The line is thin so it cannot shift a room by an inch either way.</text>`);
+  parts.push(`<text x="${padL}" y="${by + P(92)}" font-size="${FS(14)}" fill="#555">Check your scale: a traced room should match the size printed above it. Level size ${ftIn(wFt)} x ${ftIn(hFt)}. 1 ft = ${PX} px.</text>`);
 
   const legend = ['door', 'window', 'opening', 'missing_wall'];
   let lx = padL;
-  const ly = by + P(100);
+  const ly = by + P(120);
   for (const k of legend) {
     parts.push(`<line x1="${lx}" y1="${ly - P(4)}" x2="${lx + P(24)}" y2="${ly - P(4)}" stroke="${OPENING_COLOR[k]}" stroke-width="${SW(6)}" stroke-linecap="round"/>`);
     const label = k.replace('_', ' ');
@@ -318,7 +334,7 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   }
 
   if (!arranged) {
-    parts.push(`<text x="${padL}" y="${by + P(124)}" font-size="${FS(15)}" font-weight="700" fill="#B45309">Rooms auto-arranged to scale (this level was not laid out on the floor plan). Trace each room and position it in Xactimate.</text>`);
+    parts.push(`<text x="${padL}" y="${by + P(146)}" font-size="${FS(15)}" font-weight="700" fill="#B45309">Rooms auto-arranged to scale (this level was not laid out on the floor plan). Trace each room and position it in Xactimate.</text>`);
   }
 
   parts.push(`</svg>`);
