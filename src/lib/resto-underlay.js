@@ -78,23 +78,14 @@ function bboxOf(verts) {
   return { minx, miny, maxx, maxy, w: maxx - minx, h: maxy - miny };
 }
 
-// True if any two rooms' bounding boxes overlap (with a small tolerance so rooms that
-// merely touch are not counted). Overlap means the floor plan was not really laid out.
-function anyOverlap(rooms) {
-  const b = rooms.map((r) => bboxOf(r.vertsFt));
-  const pad = 0.5;
-  for (let i = 0; i < b.length; i++) for (let j = i + 1; j < b.length; j++) {
-    const A = b[i], B = b[j];
-    if (A.minx < B.maxx - pad && A.maxx > B.minx + pad && A.miny < B.maxy - pad && A.maxy > B.miny + pad) return true;
-  }
-  return false;
-}
-
 // Re-lay every room into a tidy, non-overlapping grid, each at its true scale and shape,
 // wrapping rows toward a roughly square overall footprint. Used when the level was not
 // laid out, so the underlay is a clean set of rooms to trace instead of a pile.
 function gridLayout(rooms) {
-  const G = 3; // ft gap between rooms (tight, but leaves room for the outside dimension labels)
+  // The vertical gap must clear TWO label bands stacked in it: an opening label hanging below
+  // the room above, and the name plus dimensions sitting above the room below. Too tight and
+  // a missing-wall label lands on the next room's name.
+  const GX = 5, GY = 14;
   const cells = rooms.map((r) => {
     const bb = bboxOf(r.vertsFt);
     return { r, w: bb.w, h: bb.h, local: r.vertsFt.map((v) => [v[0] - bb.minx, v[1] - bb.miny]) };
@@ -104,9 +95,9 @@ function gridLayout(rooms) {
   const rowTarget = Math.max(maxW, Math.sqrt(areaSum) * 1.6);
   let x = 0, y = 0, rowH = 0;
   for (const c of cells) {
-    if (x > 0 && x + c.w > rowTarget) { x = 0; y += rowH + G; rowH = 0; }
+    if (x > 0 && x + c.w > rowTarget) { x = 0; y += rowH + GY; rowH = 0; }
     c.r.vertsFt = c.local.map((p) => [p[0] + x, p[1] + y]);
-    x += c.w + G;
+    x += c.w + GX;
     if (c.h > rowH) rowH = c.h;
   }
 }
@@ -162,24 +153,23 @@ function placeLevel(graph, structureId) {
     if (!block) { const xs = vertsFt.map((p) => p[0]); fallbackX = Math.max(...xs) + 6; }
   }
 
-  // A true-position underlay is only honest when every room was actually placed on the
-  // floor plan and the rooms do not overlap. When rooms are still in the tray (no block)
-  // or were dropped on top of each other, the positions are meaningless, so lay every
-  // room out in a clean, non-overlapping grid at correct scale instead. Each room keeps
-  // its own shape and size; the tech traces each and arranges them in Xactimate.
-  const arranged = placed.length > 0 && placed.every((r) => r.hasBlock) && !anyOverlap(placed);
-  if (!arranged) gridLayout(placed);
+  // ROOMS ARE ALWAYS DRAWN SEPARATED, on purpose, even when the level has a saved layout.
+  // The workflow is to trace one clean room at a time and then push the rooms together in
+  // Xactimate, where the walls snap flush. Drawing them already flush would mean tracing
+  // shared walls twice, and it would leave nowhere to put a room's name and size except
+  // inside the outline being traced. Separate rooms keep every label outside the box.
+  gridLayout(placed);
 
   // shift the level so its min corner sits at origin (relative positions preserved)
   let mnX = Infinity, mnY = Infinity;
   for (const r of placed) for (const v of r.vertsFt) { if (v[0] < mnX) mnX = v[0]; if (v[1] < mnY) mnY = v[1]; }
   if (isFinite(mnX)) for (const r of placed) r.vertsFt = r.vertsFt.map((v) => [v[0] - mnX, v[1] - mnY]);
 
-  return { structure: st, rooms: placed, arranged };
+  return { structure: st, rooms: placed };
 }
 
 // Pure renderer: placed level -> SVG string. Testable without a database.
-function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
+function buildLevelUnderlaySvg({ title, structureName, rooms }) {
   let maxX = 0, maxY = 0;
   for (const r of rooms) for (const v of r.vertsFt) { if (v[0] > maxX) maxX = v[0]; if (v[1] > maxY) maxY = v[1]; }
   const wFt = Math.max(maxX, 1), hFt = Math.max(maxY, 1);
@@ -203,7 +193,7 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   // Extra margin on the LEFT and BOTTOM: dimensions sit OUTSIDE each room (width below,
   // height to the left), so a tech reading a wall's length never has the number sitting on
   // the wall they are tracing. That was the sloppy part before.
-  const padL = P(90), padR = P(90), padTop = P(150), padBottom = P(210);
+  const padL = P(90), padR = P(90), padTop = P(210), padBottom = P(210);
   const W = drawW + padL + padR;
   const H = drawH + padTop + padBottom;
   // Snap to whole pixels. A wall drawn at a fractional pixel gets anti-aliased into a soft
@@ -241,15 +231,37 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
     parts.push(`<polygon points="${pts}" fill="${fill}" stroke="#111" stroke-width="${WALL_W}" stroke-linejoin="miter" shape-rendering="crispEdges"/>`);
   }
 
-  // Everything a tech reads about a room sits ABOVE the box, never inside it. The box interior
-  // is left completely empty so it is a clean outline to trace over. Each room gets a two-line
-  // label above it: the name, and the width x length with the area.
-  for (const r of rooms) {
-    const bb = bboxOf(r.vertsFt);
+  // LABEL BANDS above each room, so nothing collides. Reading upward from the box:
+  //   box top, then the opening labels (P(22) out), then the room dimensions (P(56)),
+  //   then the room name (P(82)). Each band is clear of the next.
+  const BAND_OPENING = P(22), BAND_DIMS = P(56), BAND_NAME = P(82);
+
+  // On a level that was really laid out, rooms sit FLUSH against each other, so the band
+  // above a room is the inside of the room above it. Writing the label there would print a
+  // room's name across its neighbour. So each room is checked: if the band above it is clear,
+  // the label goes outside (the preferred spot, nothing on the outline being traced). If the
+  // band is occupied, the label tucks just inside that room's own top edge instead, which is
+  // where a real floor plan puts it and is still clear of the middle of the room.
+  const bandFt = BAND_NAME / PX;
+  const boxes = rooms.map((r) => bboxOf(r.vertsFt));
+  for (let i = 0; i < rooms.length; i++) {
+    const r = rooms[i], bb = boxes[i];
     const cx = X((bb.minx + bb.maxx) / 2);
     const topY = Y(bb.miny);
-    parts.push(halo(`${ftIn(bb.w)} x ${ftIn(bb.h)}  \u00b7  ${r.areaFt} sf`, cx, topY - P(10), FS(14), '#334155', 600, 'middle'));
-    parts.push(halo(xmlEsc(r.name), cx, topY - P(32), FS(17), '#0E2A4D', 700, 'middle'));
+    let clear = true;
+    for (let j = 0; j < rooms.length && clear; j++) {
+      if (j === i) continue;
+      const o = boxes[j];
+      if (o.minx < bb.maxx - 0.25 && o.maxx > bb.minx + 0.25
+        && o.maxy > bb.miny - bandFt - 0.25 && o.miny < bb.miny - 0.25) clear = false;
+    }
+    if (clear) {
+      parts.push(halo(`${ftIn(bb.w)} x ${ftIn(bb.h)}  \u00b7  ${r.areaFt} sf`, cx, topY - BAND_DIMS, FS(14), '#334155', 600, 'middle'));
+      parts.push(halo(xmlEsc(r.name), cx, topY - BAND_NAME, FS(18), '#0E2A4D', 700, 'middle'));
+    } else {
+      parts.push(halo(xmlEsc(r.name), cx, topY + P(54), FS(15), '#0E2A4D', 700, 'middle'));
+      parts.push(halo(`${ftIn(bb.w)} x ${ftIn(bb.h)}  \u00b7  ${r.areaFt} sf`, cx, topY + P(76), FS(13), '#334155', 600, 'middle'));
+    }
   }
 
   // OPENINGS, drawn to read: a bold colored bar across the opening, a jamb tick at each end,
@@ -279,8 +291,18 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
       for (const pe of [p0, p1]) {
         parts.push(`<line x1="${(X(pe[0]) - nx * jt).toFixed(1)}" y1="${(Y(pe[1]) - ny * jt).toFixed(1)}" x2="${(X(pe[0]) + nx * jt).toFixed(1)}" y2="${(Y(pe[1]) + ny * jt).toFixed(1)}" stroke="${color}" stroke-width="${WALL_W}"/>`);
       }
-      // width + type, set outside the wall (nothing is drawn inside the box)
-      parts.push(halo(`${ftIn(op.widthFt)} ${OPENING_WORD[op.kind] || ''}`, X(mid[0]) + nx * P(26), Y(mid[1]) + ny * P(26) + P(4), FS(13), color, 700, 'middle'));
+      // width + type. Normally just outside the wall; but on a flush layout the outside of
+      // that wall is the neighbouring room, so flip the label to the inside of this room
+      // rather than print it across the room next door.
+      const outPt = [mid[0] + (nx * BAND_OPENING) / PX, mid[1] + (ny * BAND_OPENING) / PX];
+      let occupied = false;
+      for (let j = 0; j < rooms.length && !occupied; j++) {
+        if (rooms[j] === r) continue;
+        const o = boxes[j];
+        if (outPt[0] > o.minx - 0.25 && outPt[0] < o.maxx + 0.25 && outPt[1] > o.miny - 0.25 && outPt[1] < o.maxy + 0.25) occupied = true;
+      }
+      const s = occupied ? -1 : 1;
+      parts.push(halo(`${ftIn(op.widthFt)} ${OPENING_WORD[op.kind] || ''}`, X(mid[0]) + s * nx * BAND_OPENING, Y(mid[1]) + s * ny * BAND_OPENING + P(4), FS(13), color, 700, 'middle'));
     }
   }
 
@@ -309,17 +331,19 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   const calLen = Math.max(10, Math.floor(wFt * 0.9));
   const by = padTop + drawH + P(64);
   const cx0 = padL, cx1 = padL + calLen * PX;   // exact integers: PX and calLen are integers
-  const ring = P(16);
-  // The marker extends UP AND DOWN ONLY. Nothing red reaches further left or right than the
-  // click point itself, so the leftmost and rightmost red pixels in the image ARE the two
-  // points to click. A ring or a horizontal crosshair arm would stick out past the endpoint
-  // (the old ones ran about 22 in past it) and invite a click in the wrong place.
-  const target = (x) => `<line x1="${x}" y1="${by - ring}" x2="${x}" y2="${by + ring}" stroke="#B91C1C" stroke-width="${WALL_W}"/>`;
+  const ring = P(15);
+  // BULLSEYE at each end: a ring to find it, a crosshair to aim, and a solid center dot that
+  // marks the exact point. The dot is the click target and it sits precisely on the endpoint,
+  // so the ring around it is only an aid and never something to click.
+  const target = (x) => `<circle cx="${x}" cy="${by}" r="${ring}" fill="#ffffff" fill-opacity="0.9" stroke="#B91C1C" stroke-width="${WALL_W}"/>`
+    + `<line x1="${x - ring}" y1="${by}" x2="${x + ring}" y2="${by}" stroke="#B91C1C" stroke-width="${Math.max(1, WALL_W - 1)}"/>`
+    + `<line x1="${x}" y1="${by - ring}" x2="${x}" y2="${by + ring}" stroke="#B91C1C" stroke-width="${Math.max(1, WALL_W - 1)}"/>`
+    + `<circle cx="${x}" cy="${by}" r="${Math.round(WALL_W * 1.5)}" fill="#B91C1C"/>`;
   parts.push(`<line x1="${cx0}" y1="${by}" x2="${cx1}" y2="${by}" stroke="#B91C1C" stroke-width="${WALL_W}" stroke-linecap="butt"/>`);
   parts.push(target(cx0));
   parts.push(target(cx1));
-  parts.push(`<text x="${Math.round((cx0 + cx1) / 2)}" y="${by - P(26)}" font-size="${FS(24)}" font-weight="700" text-anchor="middle" fill="#B91C1C" stroke="#ffffff" stroke-width="${SW(3.2)}" paint-order="stroke">SCALE LINE = ${ftIn(calLen)}</text>`);
-  parts.push(`<text x="${padL}" y="${by + P(46)}" font-size="${FS(17)}" fill="#333">Set Scale: zoom in and click the exact left end of the red line, then its exact right end, and enter ${calLen} ft 0 in.</text>`);
+  parts.push(`<text x="${Math.round((cx0 + cx1) / 2)}" y="${by - P(30)}" font-size="${FS(24)}" font-weight="700" text-anchor="middle" fill="#B91C1C" stroke="#ffffff" stroke-width="${SW(3.2)}" paint-order="stroke">SCALE LINE = ${ftIn(calLen)}</text>`);
+  parts.push(`<text x="${padL}" y="${by + P(50)}" font-size="${FS(17)}" fill="#333">Set Scale: zoom in and click the small red dot at the center of each bullseye, then enter ${calLen} ft 0 in.</text>`);
   parts.push(`<text x="${padL}" y="${by + P(70)}" font-size="${FS(15)}" fill="#333">Then trace along the CENTER of each wall line. The line is thin so it cannot shift a room by an inch either way.</text>`);
   parts.push(`<text x="${padL}" y="${by + P(92)}" font-size="${FS(14)}" fill="#555">Check your scale: a traced room should match the size printed above it. Level size ${ftIn(wFt)} x ${ftIn(hFt)}. 1 ft = ${PX} px.</text>`);
 
@@ -333,9 +357,7 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
     lx += P(32) + label.length * FS(7) + P(30);
   }
 
-  if (!arranged) {
-    parts.push(`<text x="${padL}" y="${by + P(146)}" font-size="${FS(15)}" font-weight="700" fill="#B45309">Rooms auto-arranged to scale (this level was not laid out on the floor plan). Trace each room and position it in Xactimate.</text>`);
-  }
+  parts.push(`<text x="${padL}" y="${by + P(146)}" font-size="${FS(16)}" font-weight="700" fill="#0E2A4D">Rooms are drawn separately on purpose. Trace one room at a time, then drag the rooms together in Xactimate and the walls snap flush.</text>`);
 
   parts.push(`</svg>`);
   return parts.join('\n');
@@ -364,8 +386,7 @@ async function renderStructurePng(graph, structureId) {
   const svg = buildLevelUnderlaySvg({
     title: graph.claim.policyholder_name || graph.claim.address || 'Claim',
     structureName: level.structure.name || 'Structure',
-    rooms: level.rooms,
-    arranged: level.arranged
+    rooms: level.rooms
   });
   const png = await sharp(Buffer.from(svg)).png().toBuffer();
   return { png, svg, structure: level.structure };
