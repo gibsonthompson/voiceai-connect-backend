@@ -184,7 +184,12 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   for (const r of rooms) for (const v of r.vertsFt) { if (v[0] > maxX) maxX = v[0]; if (v[1] > maxY) maxY = v[1]; }
   const wFt = Math.max(maxX, 1), hFt = Math.max(maxY, 1);
 
-  const PX = clamp(4800 / Math.max(wFt, hFt), 28, 120); // pixels per foot, high so the import stays crisp when Xactimate scales it up
+  const longFt = Math.max(wFt, hFt);
+  // Crisp but BOUNDED. The drawing's long side aims for ~2800 px and never exceeds ~3200 px,
+  // so even a 9-room auto-arranged level stays a manageable PNG (~10 megapixels) instead of
+  // the 30+ megapixels that made Xactimate's underlay import fail to render. Still well above
+  // the old low-res render that looked grainy.
+  const PX = Math.min(3200 / longFt, clamp(2800 / longFt, 22, 64)); // pixels per foot
   const drawW = Math.round(wFt * PX), drawH = Math.round(hFt * PX);
 
   // Type and line weights scale WITH the image. A large level makes a large PNG, and a
