@@ -184,7 +184,7 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   for (const r of rooms) for (const v of r.vertsFt) { if (v[0] > maxX) maxX = v[0]; if (v[1] > maxY) maxY = v[1]; }
   const wFt = Math.max(maxX, 1), hFt = Math.max(maxY, 1);
 
-  const PX = clamp(2200 / Math.max(wFt, hFt), 14, 40); // pixels per foot
+  const PX = clamp(4800 / Math.max(wFt, hFt), 28, 120); // pixels per foot, high so the import stays crisp when Xactimate scales it up
   const drawW = Math.round(wFt * PX), drawH = Math.round(hFt * PX);
 
   // Type and line weights scale WITH the image. A large level makes a large PNG, and a
@@ -196,7 +196,7 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   const SW = (n) => +(n * f).toFixed(1);
   const P = (n) => Math.round(n * f);
 
-  const padX = P(70), padTop = P(96), padBottom = P(180);
+  const padX = P(70), padTop = P(96), padBottom = P(195);
   const W = drawW + padX * 2;
   const H = drawH + padTop + padBottom;
   const X = (x) => padX + x * PX;
@@ -267,20 +267,27 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   // ends give an exact click target. Its pixel length is calLen feet at the image scale, so
   // tracing it end to end and entering calLen ft scales the whole plan. Everything here is
   // sized up with the image so it never renders as a faint hairline on a large plan.
-  const calLen = Math.max(10, Math.floor((wFt * 0.85) / 5) * 5);
+  // A longer reference line is MORE accurate, not less: a fixed clicking error is a smaller
+  // fraction of a long line than a short one. So the line spans as much of the plan width as
+  // fits, at a whole-foot length, with a red dot at each exact endpoint to click and a tip to
+  // zoom in first. Its pixel length is calLen feet at the image scale.
+  const calLen = Math.max(10, Math.floor(wFt * 0.9));
   const by = padTop + drawH + P(58);
   const cx0 = padX, cx1 = padX + calLen * PX;
-  const cross = (x) => `<line x1="${x}" y1="${by - P(13)}" x2="${x}" y2="${by + P(13)}" stroke="#B91C1C" stroke-width="${SW(3.5)}"/>`;
-  parts.push(`<line x1="${cx0}" y1="${by}" x2="${cx1.toFixed(1)}" y2="${by}" stroke="#B91C1C" stroke-width="${SW(4.5)}"/>`);
+  const cross = (x) => `<line x1="${x}" y1="${by - P(20)}" x2="${x}" y2="${by + P(20)}" stroke="#B91C1C" stroke-width="${SW(5)}"/>`;
+  const dot = (x) => `<circle cx="${x}" cy="${by}" r="${P(6)}" fill="#B91C1C"/>`;
+  parts.push(`<line x1="${cx0}" y1="${by}" x2="${cx1.toFixed(1)}" y2="${by}" stroke="#B91C1C" stroke-width="${SW(5.5)}"/>`);
   parts.push(cross(cx0));
   parts.push(cross(cx1.toFixed(1)));
-  parts.push(`<text x="${((cx0 + cx1) / 2).toFixed(1)}" y="${by - P(20)}" font-size="${FS(24)}" font-weight="700" text-anchor="middle" fill="#B91C1C">SCALE LINE = ${ftIn(calLen)}</text>`);
-  parts.push(`<text x="${padX}" y="${by + P(38)}" font-size="${FS(17)}" fill="#333">To scale: after Import Underlay Image, choose Set Scale, draw from one red cross to the other, and enter ${calLen} ft 0 in.</text>`);
-  parts.push(`<text x="${padX}" y="${by + P(62)}" font-size="${FS(14)}" fill="#555">Level size ${ftIn(wFt)} x ${ftIn(hFt)}.</text>`);
+  parts.push(dot(cx0));
+  parts.push(dot(cx1.toFixed(1)));
+  parts.push(`<text x="${((cx0 + cx1) / 2).toFixed(1)}" y="${by - P(24)}" font-size="${FS(24)}" font-weight="700" text-anchor="middle" fill="#B91C1C">SCALE LINE = ${ftIn(calLen)}</text>`);
+  parts.push(`<text x="${padX}" y="${by + P(42)}" font-size="${FS(17)}" fill="#333">To scale: choose Set Scale, then click the center of each red dot (zoom in first for accuracy) and enter ${calLen} ft 0 in.</text>`);
+  parts.push(`<text x="${padX}" y="${by + P(66)}" font-size="${FS(14)}" fill="#555">Level size ${ftIn(wFt)} x ${ftIn(hFt)}.</text>`);
 
   const legend = ['door', 'window', 'opening', 'missing_wall'];
   let lx = padX;
-  const ly = by + P(90);
+  const ly = by + P(94);
   for (const k of legend) {
     parts.push(`<line x1="${lx}" y1="${ly - P(4)}" x2="${lx + P(24)}" y2="${ly - P(4)}" stroke="${OPENING_COLOR[k]}" stroke-width="${SW(6)}" stroke-linecap="round"/>`);
     const label = k.replace('_', ' ');
