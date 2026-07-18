@@ -94,7 +94,7 @@ function anyOverlap(rooms) {
 // wrapping rows toward a roughly square overall footprint. Used when the level was not
 // laid out, so the underlay is a clean set of rooms to trace instead of a pile.
 function gridLayout(rooms) {
-  const G = 4; // ft gap between rooms
+  const G = 3; // ft gap between rooms (tight, but leaves room for the outside dimension labels)
   const cells = rooms.map((r) => {
     const bb = bboxOf(r.vertsFt);
     return { r, w: bb.w, h: bb.h, local: r.vertsFt.map((v) => [v[0] - bb.minx, v[1] - bb.miny]) };
@@ -201,11 +201,20 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   const SW = (n) => +(n * f).toFixed(1);
   const P = (n) => Math.round(n * f);
 
-  const padX = P(70), padTop = P(96), padBottom = P(195);
-  const W = drawW + padX * 2;
+  // Extra margin on the LEFT and BOTTOM: dimensions sit OUTSIDE each room (width below,
+  // height to the left), so a tech reading a wall's length never has the number sitting on
+  // the wall they are tracing. That was the sloppy part before.
+  const padL = P(90), padR = P(90), padTop = P(150), padBottom = P(200);
+  const W = drawW + padL + padR;
   const H = drawH + padTop + padBottom;
-  const X = (x) => padX + x * PX;
+  const X = (x) => padL + x * PX;
   const Y = (y) => padTop + y * PX;
+
+  // Text with a white halo so it reads over any line. rot rotates about its own anchor.
+  const halo = (s, x, y, size, color, weight, anchor, rot) => {
+    const t = rot ? ` transform="rotate(${rot} ${x} ${y})"` : '';
+    return `<text x="${x}" y="${y}" font-size="${size}" font-weight="${weight || 400}" text-anchor="${anchor || 'middle'}" fill="${color}" stroke="#ffffff" stroke-width="${SW(3.2)}" paint-order="stroke"${t}>${s}</text>`;
+  };
 
   const parts = [];
   parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`);
@@ -213,8 +222,8 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   parts.push(`<style>text{font-family:Arial,Helvetica,sans-serif;fill:#111}</style>`);
 
   // title band
-  parts.push(`<text x="${padX}" y="${P(42)}" font-size="${FS(26)}" font-weight="700">${xmlEsc(title)} \u00b7 ${xmlEsc(structureName)}</text>`);
-  parts.push(`<text x="${padX}" y="${P(68)}" font-size="${FS(15)}" fill="#555">Xactimate Sketch underlay \u00b7 trace over this plan</text>`);
+  parts.push(`<text x="${padL}" y="${P(42)}" font-size="${FS(26)}" font-weight="700">${xmlEsc(title)} \u00b7 ${xmlEsc(structureName)}</text>`);
+  parts.push(`<text x="${padL}" y="${P(68)}" font-size="${FS(15)}" fill="#555">Xactimate Sketch underlay \u00b7 trace over this plan</text>`);
 
   // rooms
   for (const r of rooms) {
@@ -223,27 +232,23 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
     parts.push(`<polygon points="${pts}" fill="${fill}" stroke="#111" stroke-width="${SW(2.5)}" stroke-linejoin="round"/>`);
   }
 
-  // edge length labels
+  // Everything a tech reads about a room sits ABOVE the box, never inside it. The box interior
+  // is left completely empty so it is a clean outline to trace over. Each room gets a two-line
+  // label above it: the name, and the width x length with the area.
   for (const r of rooms) {
-    const n = r.vertsFt.length;
-    for (let i = 0; i < n; i++) {
-      const a = r.vertsFt[i], b = r.vertsFt[(i + 1) % n];
-      const lenFt = dist(a, b);
-      if (lenFt < 1.5) continue;
-      const mid = lerp(a, b, 0.5);
-      // outward normal (rooms wound CW or CCW; a small offset either way is fine for a label)
-      let nx = -(b[1] - a[1]), ny = (b[0] - a[0]);
-      const nl = Math.hypot(nx, ny) || 1; nx /= nl; ny /= nl;
-      const lx = X(mid[0]) + nx * P(16), ly = Y(mid[1]) + ny * P(16);
-      const label = ftIn(lenFt);
-      const w = label.length * FS(8) + P(8);
-      parts.push(`<rect x="${(lx - w / 2).toFixed(1)}" y="${(ly - P(11)).toFixed(1)}" width="${w.toFixed(1)}" height="${P(18)}" rx="${P(3)}" fill="#ffffff" fill-opacity="0.85"/>`);
-      parts.push(`<text x="${lx.toFixed(1)}" y="${(ly + P(4)).toFixed(1)}" font-size="${FS(12)}" text-anchor="middle" fill="#333">${label}</text>`);
-    }
+    const bb = bboxOf(r.vertsFt);
+    const cx = X((bb.minx + bb.maxx) / 2);
+    const topY = Y(bb.miny);
+    parts.push(halo(`${ftIn(bb.w)} x ${ftIn(bb.h)}  \u00b7  ${r.areaFt} sf`, cx, topY - P(10), FS(14), '#334155', 600, 'middle'));
+    parts.push(halo(xmlEsc(r.name), cx, topY - P(32), FS(17), '#0E2A4D', 700, 'middle'));
   }
 
-  // openings drawn over the wall
+  // OPENINGS, drawn to read: a bold colored bar across the opening, a jamb tick at each end,
+  // a swing arc for a door, and the width and type labeled OUTSIDE the wall. Before, these
+  // were a thin line and a single letter, too small to see and with no measurement.
+  const OPENING_WORD = { door: 'Door', window: 'Window', opening: 'Opening', missing_wall: 'Missing wall' };
   for (const r of rooms) {
+    const cen = centroid(r.vertsFt);
     const n = r.vertsFt.length;
     for (const op of r.openings) {
       const a = r.vertsFt[op.edge % n], b = r.vertsFt[(op.edge + 1) % n];
@@ -252,20 +257,26 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
       const p0 = lerp(a, b, clamp(op.t - half, 0, 1));
       const p1 = lerp(a, b, clamp(op.t + half, 0, 1));
       const color = OPENING_COLOR[op.kind] || OPENING_COLOR.door;
-      const dash = op.kind === 'missing_wall' ? ` stroke-dasharray="${P(6)} ${P(5)}"` : '';
-      parts.push(`<line x1="${X(p0[0]).toFixed(1)}" y1="${Y(p0[1]).toFixed(1)}" x2="${X(p1[0]).toFixed(1)}" y2="${Y(p1[1]).toFixed(1)}" stroke="${color}" stroke-width="${SW(6)}"${dash} stroke-linecap="round"/>`);
-      const m = lerp(p0, p1, 0.5);
-      parts.push(`<text x="${X(m[0]).toFixed(1)}" y="${(Y(m[1]) - P(8)).toFixed(1)}" font-size="${FS(12)}" font-weight="700" text-anchor="middle" fill="${color}">${OPENING_LETTER[op.kind] || ''}</text>`);
+
+      let ex = b[0] - a[0], ey = b[1] - a[1]; const el = Math.hypot(ex, ey) || 1; ex /= el; ey /= el;
+      let nx = -ey, ny = ex;                                   // wall normal
+      const mid = lerp(p0, p1, 0.5);
+      if ((mid[0] - cen[0]) * nx + (mid[1] - cen[1]) * ny < 0) { nx = -nx; ny = -ny; } // point OUT of the room
+
+      const dash = op.kind === 'missing_wall' ? ` stroke-dasharray="${P(7)} ${P(6)}"` : '';
+      parts.push(`<line x1="${X(p0[0]).toFixed(1)}" y1="${Y(p0[1]).toFixed(1)}" x2="${X(p1[0]).toFixed(1)}" y2="${Y(p1[1]).toFixed(1)}" stroke="${color}" stroke-width="${SW(9)}"${dash} stroke-linecap="butt"/>`);
+      // jamb ticks (perpendicular to the wall) at each end
+      const jt = P(10);
+      for (const pe of [p0, p1]) {
+        parts.push(`<line x1="${(X(pe[0]) - nx * jt).toFixed(1)}" y1="${(Y(pe[1]) - ny * jt).toFixed(1)}" x2="${(X(pe[0]) + nx * jt).toFixed(1)}" y2="${(Y(pe[1]) + ny * jt).toFixed(1)}" stroke="${color}" stroke-width="${SW(2.4)}"/>`);
+      }
+      // width + type, set outside the wall (nothing is drawn inside the box)
+      parts.push(halo(`${ftIn(op.widthFt)} ${OPENING_WORD[op.kind] || ''}`, X(mid[0]) + nx * P(26), Y(mid[1]) + ny * P(26) + P(4), FS(13), color, 700, 'middle'));
     }
   }
 
-  // room name + area labels
-  for (const r of rooms) {
-    const c = centroid(r.vertsFt);
-    const cx = X(c[0]), cy = Y(c[1]);
-    parts.push(`<text x="${cx.toFixed(1)}" y="${cy.toFixed(1)}" font-size="${FS(16)}" font-weight="700" text-anchor="middle">${xmlEsc(r.name)}</text>`);
-    parts.push(`<text x="${cx.toFixed(1)}" y="${(cy + P(19)).toFixed(1)}" font-size="${FS(13)}" text-anchor="middle" fill="#555">${r.areaFt} sf</text>`);
-  }
+  // (room labels are drawn ABOVE each box, above; nothing is drawn inside)
+
 
   // bottom band: a long, exact CALIBRATION LINE the tech traces to scale the import. A long
   // line at a round length scales far more accurately than a short bar, and the red crosshair
@@ -277,22 +288,28 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   // fits, at a whole-foot length, with a red dot at each exact endpoint to click and a tip to
   // zoom in first. Its pixel length is calLen feet at the image scale.
   const calLen = Math.max(10, Math.floor(wFt * 0.9));
-  const by = padTop + drawH + P(58);
-  const cx0 = padX, cx1 = padX + calLen * PX;
-  const cross = (x) => `<line x1="${x}" y1="${by - P(20)}" x2="${x}" y2="${by + P(20)}" stroke="#B91C1C" stroke-width="${SW(5)}"/>`;
-  const dot = (x) => `<circle cx="${x}" cy="${by}" r="${P(6)}" fill="#B91C1C"/>`;
-  parts.push(`<line x1="${cx0}" y1="${by}" x2="${cx1.toFixed(1)}" y2="${by}" stroke="#B91C1C" stroke-width="${SW(5.5)}"/>`);
-  parts.push(cross(cx0));
-  parts.push(cross(cx1.toFixed(1)));
-  parts.push(dot(cx0));
-  parts.push(dot(cx1.toFixed(1)));
-  parts.push(`<text x="${((cx0 + cx1) / 2).toFixed(1)}" y="${by - P(24)}" font-size="${FS(24)}" font-weight="700" text-anchor="middle" fill="#B91C1C">SCALE LINE = ${ftIn(calLen)}</text>`);
-  parts.push(`<text x="${padX}" y="${by + P(42)}" font-size="${FS(17)}" fill="#333">To scale: choose Set Scale, then click the center of each red dot (zoom in first for accuracy) and enter ${calLen} ft 0 in.</text>`);
-  parts.push(`<text x="${padX}" y="${by + P(66)}" font-size="${FS(14)}" fill="#555">Level size ${ftIn(wFt)} x ${ftIn(hFt)}.</text>`);
+  const by = padTop + drawH + P(58);   // room space below is empty now, band sits just under it
+  const cx0 = padL, cx1 = padL + calLen * PX;
+  // A bullseye at each end: an outer ring, a crosshair, and a solid center. Big enough to
+  // find and aim at even while the whole image is zoomed out and soft, which is exactly when
+  // you set the scale. Zoom to each bullseye, click the center, and the scale is exact.
+  const target = (xv) => {
+    const x = Number(xv);
+    return `<circle cx="${x}" cy="${by}" r="${P(17)}" fill="#ffffff" fill-opacity="0.65" stroke="#B91C1C" stroke-width="${SW(4)}"/>`
+      + `<line x1="${x}" y1="${by - P(26)}" x2="${x}" y2="${by + P(26)}" stroke="#B91C1C" stroke-width="${SW(2.6)}"/>`
+      + `<line x1="${x - P(26)}" y1="${by}" x2="${x + P(26)}" y2="${by}" stroke="#B91C1C" stroke-width="${SW(2.6)}"/>`
+      + `<circle cx="${x}" cy="${by}" r="${P(5)}" fill="#B91C1C"/>`;
+  };
+  parts.push(`<line x1="${cx0}" y1="${by}" x2="${cx1.toFixed(1)}" y2="${by}" stroke="#B91C1C" stroke-width="${SW(4)}"/>`);
+  parts.push(target(cx0));
+  parts.push(target(cx1.toFixed(1)));
+  parts.push(`<text x="${((cx0 + cx1) / 2).toFixed(1)}" y="${by - P(28)}" font-size="${FS(24)}" font-weight="700" text-anchor="middle" fill="#B91C1C" stroke="#ffffff" stroke-width="${SW(3.2)}" paint-order="stroke">SCALE LINE = ${ftIn(calLen)}</text>`);
+  parts.push(`<text x="${padL}" y="${by + P(48)}" font-size="${FS(17)}" fill="#333">To scale: choose Set Scale, zoom in to each red target, click its center, and enter ${calLen} ft 0 in.</text>`);
+  parts.push(`<text x="${padL}" y="${by + P(72)}" font-size="${FS(14)}" fill="#555">Level size ${ftIn(wFt)} x ${ftIn(hFt)}. A longer line traced at high zoom is the most accurate.</text>`);
 
   const legend = ['door', 'window', 'opening', 'missing_wall'];
-  let lx = padX;
-  const ly = by + P(94);
+  let lx = padL;
+  const ly = by + P(100);
   for (const k of legend) {
     parts.push(`<line x1="${lx}" y1="${ly - P(4)}" x2="${lx + P(24)}" y2="${ly - P(4)}" stroke="${OPENING_COLOR[k]}" stroke-width="${SW(6)}" stroke-linecap="round"/>`);
     const label = k.replace('_', ' ');
@@ -301,7 +318,7 @@ function buildLevelUnderlaySvg({ title, structureName, rooms, arranged }) {
   }
 
   if (!arranged) {
-    parts.push(`<text x="${padX}" y="${by + P(118)}" font-size="${FS(15)}" font-weight="700" fill="#B45309">Rooms auto-arranged to scale (this level was not laid out on the floor plan). Trace each room and position it in Xactimate.</text>`);
+    parts.push(`<text x="${padL}" y="${by + P(124)}" font-size="${FS(15)}" font-weight="700" fill="#B45309">Rooms auto-arranged to scale (this level was not laid out on the floor plan). Trace each room and position it in Xactimate.</text>`);
   }
 
   parts.push(`</svg>`);
