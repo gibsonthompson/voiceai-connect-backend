@@ -40,6 +40,15 @@
 //          fields can no longer desync from Stripe. Fixes the dead end where
 //          createClientCheckout 409s active clients to a portal that has no
 //          plan-switch configured.
+// UPDATED: 2026-07-19: syncConnectBranding pushes each agency's logo and brand
+//          colors onto their connected Express account. Client checkouts are
+//          already created with the stripeAccount header (direct charges), so
+//          Stripe renders the CONNECTED account's branding on the hosted
+//          checkout, receipts, invoices, and customer portal. Express accounts
+//          have no full Stripe Dashboard, so the platform is the only party
+//          that can set those brand settings, which is why they have been
+//          blank. Fires automatically when an account first becomes able to
+//          accept charges, and is exported so a branding save can trigger it.
 // ============================================================================
 const Stripe = require('stripe');
 const fetch = require('node-fetch');
@@ -198,6 +207,192 @@ async function getConnectStatus(req, res) {
   } catch (error) {
     console.error('Connect status error:', error);
     res.status(500).json({ error: 'Failed to get Connect status' });
+  }
+}
+
+// ============================================================================
+// SYNC AGENCY BRANDING TO THE CONNECTED ACCOUNT
+// ----------------------------------------------------------------------------
+// Client checkouts are created with { stripeAccount: agency.stripe_account_id }
+// (see createClientCheckout / createTrialCheckoutForSignup), which makes the
+// agency the merchant of record. Stripe therefore renders the CONNECTED
+// account's brand settings on the hosted checkout page, receipts, invoices, and
+// the customer portal, not the platform's. Connected accounts are created as
+// type 'express', and an Express account has no full Stripe Dashboard to set
+// those settings in, so the platform has to write them through the Accounts
+// API. Until this ran, every agency's brand settings were empty and their
+// clients saw an unbranded checkout.
+//
+// What lands where (per Stripe's brand settings):
+//   icon            -> checkout, emails, customer portal, invoices
+//   logo            -> checkout, invoice PDFs
+//   primary_color   -> receipts, invoices, customer portal (NOT checkout)
+//   secondary_color -> checkout background, emails, customer portal
+// Because Stripe's secondary_color is the accent, it is fed from the agency's
+// accent_color (falling back to secondary_color), not from the darker
+// secondary shade we use for hover states.
+//
+// Deliberately does NOT touch business_profile.name. The agency typed their
+// real business name during Stripe onboarding, card network rules expect the
+// displayed name to match the actual business, and silently overwriting it
+// with our display name risks chargeback disputes. Left as a separate decision.
+//
+// Never throws. Callers treat it as fire and forget so a branding hiccup can
+// never break onboarding or a settings save.
+// ============================================================================
+
+// Stripe brand assets: JPG or PNG, under 512kb, at least 128x128.
+const BRANDING_MAX_BYTES = 512 * 1024;
+const BRANDING_ALLOWED_MIME = ['image/png', 'image/jpeg'];
+
+function isHexColor(value) {
+  return typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value.trim());
+}
+
+// Resolve agency.logo_url into raw bytes. The settings page stores whatever the
+// upload produced, which is a base64 data URL for a freshly uploaded file and an
+// https URL for one already hosted, so both shapes have to work. Returns null
+// when there is no usable image; throws only on a genuine fetch failure.
+async function loadBrandingImage(logoUrl) {
+  if (!logoUrl || typeof logoUrl !== 'string') return null;
+  const src = logoUrl.trim();
+  if (!src) return null;
+
+  const dataUrl = /^data:(image\/[a-z+]+);base64,(.+)$/i.exec(src);
+  if (dataUrl) {
+    let mime = dataUrl[1].toLowerCase();
+    if (mime === 'image/jpg') mime = 'image/jpeg';
+    if (!BRANDING_ALLOWED_MIME.includes(mime)) {
+      throw new Error(`unsupported logo type ${mime} (Stripe accepts PNG or JPG)`);
+    }
+    return { buffer: Buffer.from(dataUrl[2], 'base64'), mime };
+  }
+
+  if (!/^https?:\/\//i.test(src)) return null;
+
+  const res = await fetch(src);
+  if (!res.ok) throw new Error(`logo fetch failed (HTTP ${res.status})`);
+  let mime = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (mime === 'image/jpg') mime = 'image/jpeg';
+  if (!BRANDING_ALLOWED_MIME.includes(mime)) {
+    throw new Error(`unsupported logo type ${mime || 'unknown'} (Stripe accepts PNG or JPG)`);
+  }
+  return { buffer: Buffer.from(await res.arrayBuffer()), mime };
+}
+
+// agencyOrId: an agency row (must carry the fields selected below) or an id.
+// Returns { synced, reason?, accountId?, fileId?, colors? }. Never throws.
+async function syncConnectBranding(agencyOrId) {
+  try {
+    let agency = agencyOrId;
+
+    if (!agency || typeof agency === 'string') {
+      const agencyId = typeof agencyOrId === 'string' ? agencyOrId : null;
+      if (!agencyId) return { synced: false, reason: 'no_agency' };
+      const { data, error } = await supabase
+        .from('agencies')
+        .select('id, name, logo_url, primary_color, secondary_color, accent_color, stripe_account_id')
+        .eq('id', agencyId)
+        .single();
+      if (error || !data) return { synced: false, reason: 'agency_not_found' };
+      agency = data;
+    }
+
+    if (!agency.stripe_account_id) return { synced: false, reason: 'not_connected' };
+
+    const brandingUpdate = {};
+
+    // Colors first. These are cheap and apply even when there is no logo.
+    const primary = isHexColor(agency.primary_color) ? agency.primary_color.trim() : null;
+    const accentSource = isHexColor(agency.accent_color)
+      ? agency.accent_color
+      : (isHexColor(agency.secondary_color) ? agency.secondary_color : null);
+    const secondary = accentSource ? accentSource.trim() : null;
+
+    if (primary) brandingUpdate.primary_color = primary;
+    if (secondary) brandingUpdate.secondary_color = secondary;
+
+    // Logo. Upload the bytes to Stripe Files ON the connected account, then
+    // reference the returned file id. settings.branding takes a Stripe file id,
+    // never a URL, which is the part that trips people up here.
+    let fileId = null;
+    try {
+      const image = await loadBrandingImage(agency.logo_url);
+      if (image) {
+        if (image.buffer.length > BRANDING_MAX_BYTES) {
+          console.warn(`Branding sync: logo for ${agency.name} is ${(image.buffer.length / 1024).toFixed(0)}kb, over Stripe's 512kb limit. Colors will still sync.`);
+        } else {
+          const ext = image.mime === 'image/png' ? 'png' : 'jpg';
+          const upload = await stripe.files.create(
+            {
+              // purpose must be the brand-asset purpose; a wrong value comes
+              // back as an explicit Stripe parameter error rather than failing
+              // silently, so a mismatch is loud.
+              purpose: 'business_logo',
+              file: {
+                data: image.buffer,
+                name: `agency-${agency.id}-logo.${ext}`,
+                type: image.mime,
+              },
+            },
+            { stripeAccount: agency.stripe_account_id }
+          );
+          fileId = upload.id;
+          // icon is the square mark used on checkout and emails; logo is the
+          // wider lockup used on checkout and invoice PDFs. We only hold one
+          // asset per agency, so it serves as both.
+          brandingUpdate.icon = fileId;
+          brandingUpdate.logo = fileId;
+        }
+      }
+    } catch (imgErr) {
+      // A bad or unreachable logo must not stop the colors from syncing.
+      console.warn(`Branding sync: logo skipped for ${agency.name}: ${imgErr.message}`);
+    }
+
+    if (Object.keys(brandingUpdate).length === 0) {
+      return { synced: false, reason: 'nothing_to_sync', accountId: agency.stripe_account_id };
+    }
+
+    await stripe.accounts.update(agency.stripe_account_id, {
+      settings: { branding: brandingUpdate },
+    });
+
+    console.log(`🎨 Branding synced to Connect account ${agency.stripe_account_id} for ${agency.name}: ${Object.keys(brandingUpdate).join(', ')}`);
+    return {
+      synced: true,
+      accountId: agency.stripe_account_id,
+      fileId,
+      colors: { primary_color: primary, secondary_color: secondary },
+    };
+  } catch (error) {
+    console.error('❌ Branding sync failed:', error.message);
+    return { synced: false, reason: 'error', error: error.message };
+  }
+}
+
+// Express handler for an explicit resync, useful for backfilling agencies that
+// connected before this existed. Mount it wherever the other connect routes are
+// mounted, behind the same access guard as the rest of the Payments tab.
+async function syncConnectBrandingHandler(req, res) {
+  try {
+    const { agencyId } = req.params;
+    if (!agencyId) return res.status(400).json({ error: 'agencyId required' });
+
+    const result = await syncConnectBranding(agencyId);
+
+    if (!result.synced) {
+      const status = result.reason === 'agency_not_found' ? 404
+        : result.reason === 'not_connected' ? 400
+        : result.reason === 'error' ? 500
+        : 200;
+      return res.status(status).json({ success: false, ...result });
+    }
+
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('Branding sync endpoint error:', error);
+    res.status(500).json({ error: 'Failed to sync branding' });
   }
 }
 
@@ -949,6 +1144,21 @@ async function handleAccountUpdated(account) {
   if (account.charges_enabled && !agency.stripe_charges_enabled) {
     console.log('Agency can now accept payments:', agency.name);
 
+    // First moment the account can actually charge, so push the agency's logo
+    // and brand colors onto it now. Their clients' checkout pages then carry
+    // the agency's branding instead of an unbranded default. Fire and forget:
+    // syncConnectBranding never throws, and a branding problem must not affect
+    // the onboarding status write above or the notification below.
+    syncConnectBranding({
+      id: agency.id,
+      name: agency.name,
+      logo_url: agency.logo_url,
+      primary_color: agency.primary_color,
+      secondary_color: agency.secondary_color,
+      accent_color: agency.accent_color,
+      stripe_account_id: account.id,
+    }).catch(err => console.error('Branding sync on account activation failed:', err.message));
+
     const stripeMsg = await getSmsTemplate('admin_agency_stripe_connected', {
       name: agency.name,
       email: agency.email || 'N/A',
@@ -1170,6 +1380,8 @@ module.exports = {
   createTrialCheckoutForSignup, // NEW: called from routes/client-signup.js
   createClientPortal,
   changeClientPlan,             // NEW: in-app plan change for active subscriptions
+  syncConnectBranding,          // NEW: push agency logo + colors to their Connect account
+  syncConnectBrandingHandler,   // NEW: express handler for an explicit resync
   handleConnectStripeWebhook,
   expireTrials
 };
