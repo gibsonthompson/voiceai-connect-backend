@@ -9,6 +9,11 @@
 //          admin-impersonation tokens pass), and enforces a Page Access key
 //          for agency_staff. Used to protect the Connect financials endpoints,
 //          which expose the agency's live Stripe balance.
+// UPDATED: 2026-07-19: JWT_EXPIRES_IN raised from 7d to 30d. Tokens live in
+//          localStorage, so the lifetime stays bounded rather than infinite,
+//          but 7 days silently logged every agency out weekly. Existing tokens
+//          keep the 7d expiry baked in at signing time; only tokens issued
+//          after this deploy get 30 days.
 // Destination: src/routes/auth.js (FULL REPLACEMENT)
 // ============================================================================
 const bcrypt = require('bcryptjs');
@@ -17,7 +22,7 @@ const { supabase, getUserByEmail, getUserById } = require('../lib/supabase');
 const { sendEmail } = require('../lib/notifications');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
-const JWT_EXPIRES_IN = '7d';
+const JWT_EXPIRES_IN = '30d';
 
 function generateToken(user) {
   return jwt.sign(

@@ -12,10 +12,56 @@
 // UPDATED: 2026-06-08 — Added plan_*_name and plan_*_description columns for
 //                       white-label plan customization (Phase 3). Returned in
 //                       both getAgencyByHost (public) and getAgencySettings.
+// UPDATED: 2026-07-19: getAgencySettings no longer returns the sensitive half
+//                      of the agency row to unauthenticated callers. The route
+//                      is mounted open in server.js because app/onboarding and
+//                      lib/branding-context both call it with no token, so it
+//                      cannot simply be guarded. Instead the handler now checks
+//                      the caller itself: an owner (or super_admin, or an admin
+//                      impersonation token) gets the full dashboard payload,
+//                      anyone else gets the same publicAgencyShape projection
+//                      that /api/agency/by-id already serves. Before this, any
+//                      party holding an agency UUID (which is public, it is the
+//                      data-agency value in every embed snippet) could read that
+//                      agency's MRR, client counts, contact email and phone,
+//                      twilio_account_sid, and Stripe customer/subscription ids.
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
+const jwt = require('jsonwebtoken');
 const { supabase, getAgencyBySlug, getAgencyByDomain, getAgencyById } = require('../lib/supabase');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+
+// ============================================================================
+// CALLER OWNS AGENCY
+// ----------------------------------------------------------------------------
+// True when the request carries a valid token that is entitled to this agency's
+// private data. Mirrors the pass conditions in requireAgencyAccess (routes/
+// auth.js) so the two cannot drift:
+//   - super_admin                          -> any agency
+//   - normal agency token  { agencyId }    -> must match
+//   - admin impersonation  { id, type }    -> must match
+// Returns false for a missing, malformed, or expired token instead of throwing,
+// because on this route an unauthenticated caller is legitimate: it just gets
+// the public projection rather than a 401. Deliberately does NOT consult the
+// Page Access toggles, since this is the dashboard bootstrap every agency user
+// needs regardless of which tabs they can open.
+// ============================================================================
+function callerOwnsAgency(req, agencyId) {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return false;
+
+    const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+    if (decoded.role === 'super_admin') return true;
+
+    const callerAgencyId = decoded.agencyId || (decoded.type === 'agency' ? decoded.id : null);
+    return !!callerAgencyId && callerAgencyId === agencyId;
+  } catch {
+    return false;
+  }
+}
 
 // ============================================================================
 // PUBLIC AGENCY SHAPE
@@ -25,7 +71,8 @@ const { supabase, getAgencyBySlug, getAgencyByDomain, getAgencyById } = require(
 // shouldn't be public (BYOT credentials, internal tokens, anything sensitive).
 // Used by both getAgencyByHost (subdomain/marketing-domain lookup) and
 // getAgencyByIdPublic (Path A embed flow — iframe knows agency UUID from the
-// embed snippet's data-agency attribute).
+// embed snippet's data-agency attribute), and by the unauthenticated branch of
+// getAgencySettings.
 // ============================================================================
 function publicAgencyShape(agency) {
   return {
@@ -219,7 +266,30 @@ async function getAgencyByIdPublic(req, res) {
 }
 
 // ============================================================================
-// GET AGENCY SETTINGS (Protected - for agency dashboard)
+// GET AGENCY SETTINGS (agency dashboard bootstrap)
+// ----------------------------------------------------------------------------
+// Mounted WITHOUT a route guard in server.js on purpose: app/onboarding/page.tsx
+// and lib/branding-context.tsx both call this with no Authorization header, so
+// a hard 401 would break agency onboarding and white-label branding for
+// logged-out visitors.
+//
+// The privacy boundary therefore lives here instead of in middleware:
+//
+//   authenticated owner  -> full payload + stats (what the dashboard reads)
+//   everyone else        -> publicAgencyShape + a few non-sensitive operational
+//                           fields, and NO stats
+//
+// Withheld from the public branch, all of which used to be world-readable to
+// anyone holding the agency UUID: email, phone, mrr_cents and the client-count
+// stats, twilio_account_sid, byot_*, stripe_customer_id,
+// stripe_subscription_id, stripe_onboarding_complete, stripe_payouts_enabled,
+// and the team-member seat limits. stripe_account_id and
+// stripe_charges_enabled stay, because checkout needs them and by-host already
+// publishes them.
+//
+// The public branch sets public:true so a caller can tell the two apart, and
+// keeps stats present-but-null rather than absent so `data.stats?.x` reads
+// stay safe.
 // ============================================================================
 async function getAgencySettings(req, res) {
   try {
@@ -229,6 +299,28 @@ async function getAgencySettings(req, res) {
     
     if (!agency) {
       return res.status(404).json({ error: 'Agency not found' });
+    }
+
+    // ── Unauthenticated / other-agency caller: public projection only ──
+    if (!callerOwnsAgency(req, agencyId)) {
+      return res.json({
+        success: true,
+        public: true,
+        agency: {
+          ...publicAgencyShape(agency),
+          // Non-sensitive operational fields the onboarding page and the
+          // branding context legitimately read. None of these reveal revenue,
+          // contact details, or provider credentials.
+          status: agency.status,
+          onboarding_completed: agency.onboarding_completed,
+          onboarding_step: agency.onboarding_step,
+          client_header_mode: agency.client_header_mode || 'agency_name',
+          allow_client_branding: agency.allow_client_branding || false,
+          calendar_enabled_plans: agency.calendar_enabled_plans || ['pro', 'growth'],
+          timezone: agency.timezone,
+        },
+        stats: null
+      });
     }
     
     // Get client count and stats

@@ -14,6 +14,16 @@
 //                      for the agency Payments page, hardened with
 //                      requireAgencyAccess (valid token + caller-owns-:agencyId
 //                      + 'billing' Page Access for staff).
+// UPDATED: 2026-07-19: POST /api/agency/:agencyId/connect/sync-branding pushes
+//                      the agency's logo + brand colors to their connected
+//                      Stripe account, so their clients' checkout carries the
+//                      agency's branding. Backfill for accounts that connected
+//                      before branding sync existed; new accounts get it
+//                      automatically on first charges-enabled.
+//                      GET /api/agency/:agencyId/settings was considered for a
+//                      token requirement and deliberately left open: it is also
+//                      called anonymously by the onboarding page and the
+//                      white-label branding context.
 // Destination: src/server.js (or src/index.js) — FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -199,6 +209,7 @@ const {
   createClientCheckout,
   createClientPortal,
   changeClientPlan,
+  syncConnectBrandingHandler,
   handleConnectStripeWebhook,
   expireTrials
 } = require('./routes/stripe-connect');
@@ -284,6 +295,13 @@ app.get('/api/agency/by-host', getAgencyByHost);
 // Embed-widget Path A: iframe loads myvoiceaiconnect.com/get-started?agency=UUID
 // and looks the agency up by ID since there's no host-based context to derive.
 app.get('/api/agency/by-id', getAgencyByIdPublic);
+// Dashboard bootstrap, but ALSO called with no token by app/onboarding/page.tsx
+// (agency onboarding, before a session exists) and lib/branding-context.tsx
+// (white-label branding for logged-out visitors on public pages). It therefore
+// stays open: adding a token requirement here breaks agency onboarding and
+// public branding. Session-expiry detection is handled in the frontend context
+// against /api/auth/verify instead. Note this route is publicly readable by
+// agency id, which is a separate item worth closing later.
 app.get('/api/agency/:agencyId/settings', getAgencySettings);
 // Page Access gating: a logged-in agency_staff member without the 'settings'
 // toggle can't write settings. Unauthenticated/owner calls pass through (the
@@ -497,6 +515,15 @@ app.post('/api/agency/:agencyId/connect/disconnect', requirePermissionIfAuthed('
 // sensitive, so unlike the other connect routes these reject anonymous callers.
 app.get('/api/agency/connect/financials/:agencyId', requireAgencyAccess('billing'), getConnectFinancials);
 app.post('/api/agency/connect/account-session/:agencyId', requireAgencyAccess('billing'), createConnectAccountSession);
+
+// Push the agency's logo + brand colors onto their connected Stripe account, so
+// their clients' hosted checkout, receipts, invoices, and customer portal carry
+// the agency's branding instead of an unbranded default. New accounts get this
+// automatically when charges are first enabled (handleAccountUpdated in
+// routes/stripe-connect.js); this route exists to backfill accounts that
+// connected earlier and to re-push after a branding change. 'settings' Page
+// Access because it mirrors the Payments/branding surface in the settings page.
+app.post('/api/agency/:agencyId/connect/sync-branding', requireAgencyAccess('settings'), syncConnectBrandingHandler);
 
 // ============================================================================
 // AGENCY DASHBOARD & CLIENTS ROUTES
