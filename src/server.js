@@ -24,6 +24,10 @@
 //                      token requirement and deliberately left open: it is also
 //                      called anonymously by the onboarding page and the
 //                      white-label branding context.
+//                      Also mounts POST /api/agency/:agencyId/connect/login-link
+//                      (one-time Express dashboard link for the Payments page)
+//                      and POST /api/cron/reconcile-subscriptions (self-heals
+//                      client rows against real Stripe status).
 // Destination: src/server.js (or src/index.js) — FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -205,13 +209,15 @@ const {
   getConnectStatus,
   getConnectFinancials,
   createConnectAccountSession,
+  createConnectLoginLink,
   disconnectConnectAccount,
   createClientCheckout,
   createClientPortal,
   changeClientPlan,
   syncConnectBrandingHandler,
   handleConnectStripeWebhook,
-  expireTrials
+  expireTrials,
+  reconcileClientSubscriptions
 } = require('./routes/stripe-connect');
 
 const { 
@@ -524,6 +530,11 @@ app.post('/api/agency/connect/account-session/:agencyId', requireAgencyAccess('b
 // connected earlier and to re-push after a branding change. 'settings' Page
 // Access because it mirrors the Payments/branding surface in the settings page.
 app.post('/api/agency/:agencyId/connect/sync-branding', requireAgencyAccess('settings'), syncConnectBrandingHandler);
+
+// One-time login link into the agency's Express Stripe dashboard (payouts, bank
+// account, transactions). requireAgencyAccess('billing') because it exposes the
+// agency's own financial dashboard; only a verified owner of :agencyId passes.
+app.post('/api/agency/:agencyId/connect/login-link', requireAgencyAccess('billing'), createConnectLoginLink);
 
 // ============================================================================
 // AGENCY DASHBOARD & CLIENTS ROUTES
@@ -1225,6 +1236,26 @@ app.post('/api/cron/expire-trials', async (req, res) => {
   } catch (error) {
     console.error('Cron error:', error);
     res.status(500).json({ error: 'Failed to run trial expiration' });
+  }
+});
+
+// Reconcile client subscription_status against real Stripe status on the
+// connected account. Self-heals rows a missed webhook left wrong: cancels +
+// releases clients whose Stripe sub is actually dead (the dashboard-cancel case
+// that left rows stuck 'active'), and corrects past_due rows that recovered.
+// Pass ?dryRun=true to preview. Run daily as a backstop.
+app.post('/api/cron/reconcile-subscriptions', async (req, res) => {
+  const cronSecret = req.headers['x-cron-secret'];
+  if (process.env.CRON_SECRET && cronSecret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const dryRun = req.query.dryRun === 'true' || req.body?.dryRun === true;
+    const result = await reconcileClientSubscriptions({ dryRun });
+    res.json(result);
+  } catch (error) {
+    console.error('Reconcile cron error:', error);
+    res.status(500).json({ error: 'Failed to run subscription reconciliation' });
   }
 });
 

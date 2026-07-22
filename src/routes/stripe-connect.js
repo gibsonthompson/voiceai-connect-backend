@@ -40,6 +40,16 @@
 //          fields can no longer desync from Stripe. Fixes the dead end where
 //          createClientCheckout 409s active clients to a portal that has no
 //          plan-switch configured.
+// UPDATED: 2026-07-19: cancel-path hardening. (a) Subscription webhooks now
+//          resolve the client by stripe_connected_subscription_id first (unique,
+//          always on the event), falling back to the customer lookup, fixing
+//          the silent miss that left dashboard-canceled clients stuck 'active'.
+//          (b) One shared teardown (releaseClientResources/cancelClientAndRelease)
+//          so deleted, updated-to-terminal, and reconciliation all RELEASE the
+//          Telnyx number + delete the assistant, not just disable, so a canceled
+//          client stops costing money. (c) reconcileClientSubscriptions sweeps
+//          active/past_due clients against real Stripe status to self-heal rows
+//          a missed webhook already broke.
 // UPDATED: 2026-07-19: syncConnectBranding pushes each agency's logo and brand
 //          colors onto their connected Express account. Client checkouts are
 //          already created with the stripeAccount header (direct charges), so
@@ -524,7 +534,49 @@ async function createConnectAccountSession(req, res) {
 }
 
 // ============================================================================
-// DISCONNECT CONNECT ACCOUNT
+// CREATE CONNECT LOGIN LINK (Express dashboard access)
+// ----------------------------------------------------------------------------
+// Express accounts have no standalone Stripe login, so a plain dashboard.stripe
+// .com link is useless to them. createLoginLink mints a single-use, short-lived
+// URL straight into the agency's Express dashboard, where they can see payouts,
+// update their bank account, and view transactions. This is the correct target
+// for the "Open Stripe dashboard" button on the Payments page.
+//
+// Guarded upstream by requireAgencyAccess('billing') in server.js, so by the
+// time we get here the caller is a verified owner of :agencyId. Fails cleanly
+// if the account cannot accept charges yet (onboarding incomplete), because
+// login links only work once the account is set up.
+// ============================================================================
+async function createConnectLoginLink(req, res) {
+  try {
+    const { agencyId } = req.params;
+
+    const { data: agency, error } = await supabase
+      .from('agencies')
+      .select('stripe_account_id, stripe_charges_enabled')
+      .eq('id', agencyId)
+      .single();
+
+    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
+    if (!agency.stripe_account_id) return res.status(400).json({ error: 'Stripe not connected' });
+
+    try {
+      const link = await stripe.accounts.createLoginLink(agency.stripe_account_id);
+      return res.json({ url: link.url });
+    } catch (stripeErr) {
+      // Most common cause: the account hasn't finished onboarding, so Stripe
+      // won't issue a login link yet. Surface a clear, actionable message.
+      console.error('Login link error:', stripeErr.message);
+      return res.status(400).json({
+        error: 'dashboard_unavailable',
+        message: 'Finish Stripe setup before opening the dashboard.',
+      });
+    }
+  } catch (error) {
+    console.error('Create login link error:', error);
+    res.status(500).json({ error: 'Failed to create dashboard link' });
+  }
+}
 // ----------------------------------------------------------------------------
 // Also disables require_card_for_trial since the toggle is meaningless without
 // Stripe Connect. Without this, an agency could disconnect Stripe and then
@@ -1094,6 +1146,238 @@ async function expireTrials() {
 }
 
 // ============================================================================
+// SUBSCRIPTION-EVENT CLIENT RESOLUTION
+// ----------------------------------------------------------------------------
+// The bug: handleClientSubscriptionDeleted / ...Updated looked the client up
+// ONLY by customer id + account (getClientByStripeConnectedCustomerId). When a
+// subscription was canceled from the Stripe dashboard, if the row's
+// stripe_connected_customer_id was stale or the lookup otherwise missed, the
+// handler hit `if (!client) return` and the row stayed 'active' forever, which
+// is exactly what left canceled clients counted as active in analytics.
+//
+// Fix: resolve by stripe_connected_subscription_id FIRST. That id is unique,
+// is present on every subscription.* event, and is what we store at checkout,
+// so it is the most reliable key. Fall back to the legacy customer lookup only
+// if the sub-id match misses (e.g. very old rows that predate storing it).
+//
+// Done inline against the already-imported supabase client (same join shape as
+// createClientCheckout / changeClientPlan) so this needs no new export from
+// lib/supabase.js.
+// ============================================================================
+async function getClientByConnectedSubscriptionId(subscriptionId) {
+  if (!subscriptionId) return null;
+  const { data, error } = await supabase
+    .from('clients')
+    .select('*, agencies!clients_agency_id_fkey(*)')
+    .eq('stripe_connected_subscription_id', subscriptionId)
+    .limit(1);
+  if (error) { console.error('Sub-id client lookup failed:', error.message); return null; }
+  return (data && data[0]) || null;
+}
+
+async function resolveClientForSubscriptionEvent(subscription, stripeAccountId) {
+  const bySub = await getClientByConnectedSubscriptionId(subscription.id);
+  if (bySub) return bySub;
+  // Legacy fallback: customer id (+ account) for rows that never stored the sub id.
+  const byCustomer = await getClientByStripeConnectedCustomerId(subscription.customer, stripeAccountId);
+  if (byCustomer) {
+    console.warn(`Sub ${subscription.id}: matched client ${byCustomer.id} by customer id fallback (sub id not on row)`);
+  } else {
+    console.error(`Sub ${subscription.id}: no client matched by sub id OR customer id ${subscription.customer}. Event dropped.`);
+  }
+  return byCustomer;
+}
+
+// ============================================================================
+// UNIFIED CLIENT TELEPHONY TEARDOWN
+// ----------------------------------------------------------------------------
+// One place that releases a client's paid resources, so every cancel path
+// converges on the same behavior instead of three different ones (deleted:
+// disable only; expireTrials: full release; payment_failed: nothing). A truly
+// canceled subscription should RELEASE the Telnyx number, not just disable it,
+// or the number keeps billing every month for a client who is gone.
+//
+// Mirrors the expireTrials teardown: release the number (VAPI object + Telnyx
+// rental), delete the assistant, delete the query tool, and null the resource
+// fields so the freed number cannot collide with a future signup (the
+// clients_phone_number_key unique constraint). Never throws; returns a summary.
+// ============================================================================
+async function releaseClientResources(client) {
+  const result = { telnyxReleased: false, vapiDeleted: false, assistantDeleted: false };
+
+  if (client.vapi_phone_id || client.vapi_phone_number) {
+    try {
+      const r = await fullyReleaseNumber(client.vapi_phone_id, client.vapi_phone_number);
+      result.telnyxReleased = r.telnyxReleased;
+      result.vapiDeleted = r.vapiDeleted;
+      if (!r.telnyxReleased) {
+        console.error(`⚠️ Telnyx NOT released for ${client.business_name} (${client.vapi_phone_number}), orphan sweep will catch it`);
+      }
+    } catch (relErr) {
+      console.error('❌ Number release failed:', relErr.message);
+      if (client.vapi_phone_id) { try { await disablePhoneNumber(client.vapi_phone_id); } catch {} }
+    }
+  }
+
+  if (client.vapi_assistant_id && VAPI_API_KEY) {
+    try {
+      const res = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
+        method: 'DELETE', headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` },
+      });
+      result.assistantDeleted = res.ok || res.status === 404;
+      if (!result.assistantDeleted) { try { await disableAssistant(client.vapi_assistant_id); } catch {} }
+    } catch (vapiErr) {
+      console.error('⚠️ Assistant delete failed:', vapiErr.message);
+      try { await disableAssistant(client.vapi_assistant_id); } catch {}
+    }
+  }
+
+  if (client.vapi_query_tool_id && VAPI_API_KEY) {
+    try {
+      await fetch(`https://api.vapi.ai/tool/${client.vapi_query_tool_id}`, {
+        method: 'DELETE', headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` },
+      });
+    } catch { /* non-fatal */ }
+  }
+
+  return result;
+}
+
+// Canonical "this client's subscription has ended for good" transition. Marks
+// the row canceled, releases resources, nulls the telephony fields, and updates
+// agency billing quantity. Idempotent: a second call finds the fields already
+// nulled and simply no-ops the release. reason is for logging only.
+async function cancelClientAndRelease(client, reason) {
+  const release = await releaseClientResources(client);
+
+  const { error } = await supabase.from('clients').update({
+    subscription_status: 'canceled',
+    status: 'cancelled',
+    vapi_phone_id: null,
+    vapi_phone_number: null,
+    vapi_assistant_id: null,
+    vapi_query_tool_id: null,
+    phone_number: null,
+    phone_area_code: null,
+    updated_at: new Date().toISOString(),
+  }).eq('id', client.id);
+
+  if (error) {
+    console.error(`❌ Failed to mark client ${client.id} canceled:`, error.message);
+    return { ok: false, release };
+  }
+
+  try { await updateClientBillingQuantity(client.agency_id); }
+  catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
+
+  console.log(`✅ Client canceled + resources released: ${client.business_name} (${reason})`);
+  return { ok: true, release };
+}
+
+// Stripe subscription statuses that mean the subscription is over for good.
+const TERMINAL_SUB_STATUSES = ['canceled', 'incomplete_expired'];
+
+// ============================================================================
+// RECONCILE CLIENT SUBSCRIPTIONS
+// ----------------------------------------------------------------------------
+// Self-healing sweep for the rows a missed webhook already left wrong (patching
+// the handler does NOT retroactively fix them). Walks every client the DB still
+// believes is active or past_due WITH a connected subscription id, retrieves
+// the real subscription from Stripe on the connected account, and:
+//   - Stripe terminal (canceled / incomplete_expired) OR the subscription no
+//     longer exists (resource_missing) -> cancelClientAndRelease. This is the
+//     fix for a dashboard-side cancel whose webhook missed.
+//   - Stripe 'active'/'trialing' but DB 'past_due' -> correct DB back to
+//     active/trial (a recovery whose invoice.payment_succeeded webhook missed).
+//   - Stripe 'past_due'/'unpaid' -> leave as-is; Stripe is still retrying and a
+//     live retry must not be torn down.
+//
+// dryRun reports what WOULD change and touches nothing. Guarded by CRON_SECRET
+// like the other cron functions; server.js wraps it in a route.
+// ============================================================================
+async function reconcileClientSubscriptions({ dryRun = false } = {}) {
+  console.log(`🔁 Reconciling client subscriptions (dryRun=${dryRun})`);
+
+  const { data: clients, error } = await supabase
+    .from('clients')
+    .select('*, agencies!clients_agency_id_fkey(*)')
+    .in('subscription_status', ['active', 'past_due'])
+    .not('stripe_connected_subscription_id', 'is', null);
+
+  if (error) {
+    console.error('Reconcile query failed:', error.message);
+    return { success: false, error: error.message };
+  }
+
+  const rows = clients || [];
+  console.log(`🔁 ${rows.length} active/past_due client(s) to verify against Stripe`);
+
+  const results = [];
+  let corrected = 0, released = 0, reactivated = 0, unchanged = 0, skipped = 0;
+
+  for (const client of rows) {
+    const agency = client.agencies;
+    const acct = agency?.stripe_account_id;
+    if (!acct) {
+      skipped++;
+      results.push({ client_id: client.id, business_name: client.business_name, action: 'skipped_no_account' });
+      continue;
+    }
+
+    let sub = null;
+    let missing = false;
+    try {
+      sub = await stripe.subscriptions.retrieve(client.stripe_connected_subscription_id, { stripeAccount: acct });
+    } catch (e) {
+      if (e.code === 'resource_missing') { missing = true; }
+      else {
+        console.error(`Reconcile: retrieve failed for ${client.business_name}:`, e.message);
+        skipped++;
+        results.push({ client_id: client.id, business_name: client.business_name, action: 'skipped_stripe_error', error: e.message });
+        continue;
+      }
+    }
+
+    const stripeStatus = missing ? 'missing' : sub.status;
+    const isTerminal = missing || TERMINAL_SUB_STATUSES.includes(stripeStatus);
+
+    // DB says alive, Stripe says dead -> cancel + release.
+    if (isTerminal) {
+      if (dryRun) {
+        results.push({ client_id: client.id, business_name: client.business_name, db_status: client.subscription_status, stripe_status: stripeStatus, action: 'would_cancel_and_release' });
+        corrected++; released++;
+        continue;
+      }
+      const r = await cancelClientAndRelease(client, `reconcile: stripe=${stripeStatus}`);
+      results.push({ client_id: client.id, business_name: client.business_name, stripe_status: stripeStatus, action: r.ok ? 'canceled_and_released' : 'cancel_failed', release: r.release });
+      if (r.ok) { corrected++; released++; }
+      continue;
+    }
+
+    // DB past_due but Stripe recovered to active/trialing -> correct forward.
+    if (client.subscription_status === 'past_due' && (stripeStatus === 'active' || stripeStatus === 'trialing')) {
+      const dbStatus = stripeStatus === 'trialing' ? 'trial' : 'active';
+      if (dryRun) {
+        results.push({ client_id: client.id, business_name: client.business_name, action: `would_correct_to_${dbStatus}` });
+        corrected++; reactivated++;
+        continue;
+      }
+      await supabase.from('clients').update({ subscription_status: dbStatus, status: 'active', updated_at: new Date().toISOString() }).eq('id', client.id);
+      if (client.vapi_phone_id) { try { await enablePhoneNumber(client.vapi_phone_id); } catch {} }
+      if (client.vapi_assistant_id) { try { await enableAssistant(client.vapi_assistant_id); } catch {} }
+      results.push({ client_id: client.id, business_name: client.business_name, action: `corrected_to_${dbStatus}` });
+      corrected++; reactivated++;
+      continue;
+    }
+
+    unchanged++;
+  }
+
+  console.log(`🔁 Reconcile done: ${corrected} corrected (${released} released, ${reactivated} reactivated), ${unchanged} already correct, ${skipped} skipped`);
+  return { success: true, dryRun, scanned: rows.length, corrected, released, reactivated, unchanged, skipped, results };
+}
+
+// ============================================================================
 // WEBHOOK HANDLER - Connected Account Events
 // ============================================================================
 async function handleConnectStripeWebhook(req, res) {
@@ -1282,26 +1566,42 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
 }
 
 async function handleClientSubscriptionUpdated(subscription, stripeAccountId) {
-  console.log('Client subscription updated:', subscription.id);
+  console.log('Client subscription updated:', subscription.id, '| status:', subscription.status);
 
-  const client = await getClientByStripeConnectedCustomerId(subscription.customer, stripeAccountId);
+  const client = await resolveClientForSubscriptionEvent(subscription, stripeAccountId);
   if (!client) return;
 
-  let status = subscription.status;
+  const status = subscription.status;
+
+  // Terminal statuses: subscription is over for good. Full release via the
+  // shared path so a dashboard-side cancel that arrives as `updated` (not
+  // `deleted`) tears down exactly like a deleted event. Idempotent if the
+  // deleted event also lands.
+  if (TERMINAL_SUB_STATUSES.includes(status)) {
+    await cancelClientAndRelease(client, `subscription.updated status=${status}`);
+    return;
+  }
+
   let clientStatus = client.status;
 
   if (status === 'active') {
     clientStatus = 'active';
     if (client.vapi_phone_id) { await enablePhoneNumber(client.vapi_phone_id).catch(err => console.error('Failed to enable phone:', err.message)); }
     if (client.vapi_assistant_id) { await enableAssistant(client.vapi_assistant_id); }
-  } else if (status === 'canceled' || status === 'unpaid') {
+  } else if (status === 'unpaid') {
+    // Retries exhausted but not canceled. Stop service, but DISABLE rather than
+    // release, so the client can recover the same number by paying. A true
+    // cancel (terminal above) is what releases the number.
     clientStatus = 'cancelled';
     if (client.vapi_phone_id) { await disablePhoneNumber(client.vapi_phone_id).catch(err => console.error('Failed to disable phone:', err.message)); }
     if (client.vapi_assistant_id) { await disableAssistant(client.vapi_assistant_id); }
   }
+  // Note: 'past_due' intentionally leaves service ON. Stripe is still retrying
+  // the card, and cutting off a client who is about to pay is worse than the
+  // brief risk. 'cancel_at_period_end' arrives here as status='active' and is
+  // handled by the active branch (stays live until it actually ends).
 
   // Map Stripe 'trialing' to our 'trial' for consistency with DB-only trials.
-  // Other statuses ('active', 'canceled', 'past_due', etc.) pass through.
   const dbSubStatus = status === 'trialing' ? 'trial' : status;
 
   await supabase.from('clients').update({
@@ -1315,27 +1615,23 @@ async function handleClientSubscriptionUpdated(subscription, stripeAccountId) {
 
 async function handleClientSubscriptionDeleted(subscription, stripeAccountId) {
   console.log('Client subscription deleted:', subscription.id);
-  const client = await getClientByStripeConnectedCustomerId(subscription.customer, stripeAccountId);
+
+  // Sub-id-first resolution. The old customer-id-only lookup silently returned
+  // when the row's customer id was stale, which is what left dashboard-canceled
+  // clients stuck 'active'. Full release so the canceled client's number stops
+  // billing instead of merely being disabled.
+  const client = await resolveClientForSubscriptionEvent(subscription, stripeAccountId);
   if (!client) return;
 
-  if (client.vapi_phone_id) {
-    try { await disablePhoneNumber(client.vapi_phone_id); console.log('✅ VAPI phone number disabled:', client.vapi_phone_id); }
-    catch (phoneError) { console.error('❌ Failed to disable VAPI phone number:', phoneError.message); }
-  }
-  if (client.vapi_assistant_id) {
-    try { await disableAssistant(client.vapi_assistant_id); console.log('✅ VAPI assistant disabled:', client.vapi_assistant_id); }
-    catch (vapiError) { console.error('Failed to disable VAPI assistant:', vapiError); }
-  }
-
-  await supabase.from('clients').update({ subscription_status: 'canceled', status: 'cancelled' }).eq('id', client.id);
-
-  // Update agency per-client billing (decrease quantity)
-  try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
+  await cancelClientAndRelease(client, 'subscription.deleted');
 }
 
 async function handleClientPaymentSucceeded(invoice, stripeAccountId) {
   console.log('Client payment succeeded:', invoice.id);
-  const client = await getClientByStripeConnectedCustomerId(invoice.customer, stripeAccountId);
+  // Prefer the subscription id on the invoice (unique, reliable), fall back to
+  // the customer lookup, matching the subscription handlers.
+  let client = invoice.subscription ? await getClientByConnectedSubscriptionId(invoice.subscription) : null;
+  if (!client) client = await getClientByStripeConnectedCustomerId(invoice.customer, stripeAccountId);
   if (!client) { console.error('Client not found for payment:', invoice.customer); return; }
 
   await supabase.from('clients').update({ subscription_status: 'active', status: 'active', calls_this_month: 0 }).eq('id', client.id);
@@ -1360,7 +1656,8 @@ async function handleClientPaymentSucceeded(invoice, stripeAccountId) {
 
 async function handleClientPaymentFailed(invoice, stripeAccountId) {
   console.log('Client payment failed:', invoice.id);
-  const client = await getClientByStripeConnectedCustomerId(invoice.customer, stripeAccountId);
+  let client = invoice.subscription ? await getClientByConnectedSubscriptionId(invoice.subscription) : null;
+  if (!client) client = await getClientByStripeConnectedCustomerId(invoice.customer, stripeAccountId);
   if (!client) return;
   await supabase.from('clients').update({ subscription_status: 'past_due' }).eq('id', client.id);
   const agency = client.agencies;
@@ -1375,6 +1672,7 @@ module.exports = {
   getConnectStatus,
   getConnectFinancials,          // NEW: agency Payments page (balance, payouts, charges)
   createConnectAccountSession,   // NEW: embedded Connect components (phase 2)
+  createConnectLoginLink,        // NEW: Express dashboard login link
   disconnectConnectAccount,
   createClientCheckout,
   createTrialCheckoutForSignup, // NEW: called from routes/client-signup.js
@@ -1383,5 +1681,6 @@ module.exports = {
   syncConnectBranding,          // NEW: push agency logo + colors to their Connect account
   syncConnectBrandingHandler,   // NEW: express handler for an explicit resync
   handleConnectStripeWebhook,
-  expireTrials
+  expireTrials,
+  reconcileClientSubscriptions  // NEW: self-heal DB rows vs real Stripe status
 };
