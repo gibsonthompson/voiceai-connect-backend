@@ -8,6 +8,15 @@
 // Updated: 2026-06-09 — PLAN_RATES.pro.platformFee corrected 179 → 99 (stale
 //   pre-restructure value was inflating getAgencyUsageSummary estimated totals
 //   by $80/mo for every Pro agency on their billing dashboard)
+// Updated: 2026-07-22. insertUsageRecord now also captures VAPI's actual
+//   reported per-call cost (vapi_cost) and the per-stage costBreakdown onto the
+//   usage_records row. VAPI sends message.cost on the end-of-call-report, which
+//   is the real dollar cost of the call (hosting + STT + LLM + TTS + transport).
+//   Storing it here makes platform margin computable from actual cost instead
+//   of an estimate. Requires the usage_records.vapi_cost + cost_breakdown
+//   columns (see migration). Fully backward compatible: both params default to
+//   null, so existing callers that do not pass a cost store null and behave
+//   exactly as before.
 // ============================================================================
 const Stripe = require('stripe');
 const { supabase } = require('./supabase');
@@ -43,8 +52,13 @@ function getClientPriceId(planType) {
 
 // ============================================================================
 // INSERT USAGE RECORD + SEND STRIPE METER EVENT
+// ----------------------------------------------------------------------------
+// vapiCost / costBreakdown (added 2026-07-22): the actual cost VAPI reported
+// for this call on the end-of-call-report. Optional; both default to null so
+// older callers are unaffected. vapiCost is coerced to a finite number or null
+// before storage, so a malformed value never breaks the insert.
 // ============================================================================
-async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds }) {
+async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds, vapiCost = null, costBreakdown = null }) {
   if (!agencyId || !clientId) {
     console.warn('⚠️ Usage record skipped — missing agencyId or clientId');
     return null;
@@ -54,6 +68,11 @@ async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds }
   if (seconds === 0) return null;
 
   const billedMinutes = Math.ceil(seconds / 60);
+
+  // Coerce the VAPI-reported cost to a finite number, else null. Never throws.
+  const cost = (vapiCost !== null && vapiCost !== undefined && Number.isFinite(Number(vapiCost)))
+    ? Number(vapiCost)
+    : null;
 
   const billingMonth = new Date();
   billingMonth.setDate(1);
@@ -67,6 +86,8 @@ async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds }
         client_id: clientId,
         call_id: callId || null,
         duration_seconds: seconds,
+        vapi_cost: cost,
+        cost_breakdown: costBreakdown || null,
         billing_month: billingMonth.toISOString().split('T')[0],
         reported_to_stripe: false,
       })
@@ -79,7 +100,7 @@ async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds }
       return null;
     }
 
-    console.log(`📊 Usage recorded: ${seconds}s (${billedMinutes} billed min) | agency=${agencyId.slice(0, 8)} client=${clientId.slice(0, 8)}`);
+    console.log(`📊 Usage recorded: ${seconds}s (${billedMinutes} billed min)${cost !== null ? ` | cost $${cost}` : ''} | agency=${agencyId.slice(0, 8)} client=${clientId.slice(0, 8)}`);
 
     await sendVoiceMinutesMeterEvent(agencyId, billedMinutes, data.id);
 

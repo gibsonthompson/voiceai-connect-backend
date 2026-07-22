@@ -872,6 +872,17 @@ async function handleVapiWebhook(req, res) {
     durationSeconds = (durationSeconds != null && !Number.isNaN(Number(durationSeconds)))
       ? Math.round(Number(durationSeconds))
       : null;
+
+    // VAPI reports the actual cost of the call on the end-of-call-report:
+    // message.cost is the total in USD (hosting + STT + LLM + TTS + transport)
+    // and message.costBreakdown is the per-stage detail. Capture both so the
+    // platform can compute true margin from real cost, not an estimate. These
+    // are passed to insertUsageRecord in STEP 3 and stored on usage_records.
+    const vapiCost = (typeof message.cost === 'number') ? message.cost
+      : (typeof call?.cost === 'number') ? call.cost
+      : null;
+    const costBreakdown = message.costBreakdown || call?.costBreakdown || null;
+
     const endedReason = call.endedReason || message.endedReason || null;
     const { transferStatus, wasTransferred } = detectTransferStatus(endedReason, transcript);
 
@@ -932,7 +943,7 @@ async function handleVapiWebhook(req, res) {
     try {
       const agencyId = agency?.id || client.agency_id;
       if (agencyId && durationSeconds && durationSeconds > 0) {
-        await insertUsageRecord({ agencyId, clientId: client.id, callId: savedCallId, durationSeconds });
+        await insertUsageRecord({ agencyId, clientId: client.id, callId: savedCallId, durationSeconds, vapiCost, costBreakdown });
       }
     } catch (usageErr) {
       console.warn('⚠️ Usage record failed (non-fatal):', usageErr.message);

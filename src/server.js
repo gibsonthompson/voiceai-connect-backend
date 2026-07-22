@@ -1220,7 +1220,7 @@ app.use('/api/admin', adminAgencyDetail);
 app.use('/api/admin', smsLogRoutes);
 app.use('/api/admin', errorReportRoutes);
 app.use('/api/admin', require('./routes/admin-expenses'));
-
+app.use('/api/admin', require('./routes/admin-margin'));
 // ============================================================================
 // CRON ROUTES (Trial Expiration)
 // ============================================================================

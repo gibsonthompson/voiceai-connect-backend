@@ -7,6 +7,12 @@
 //   (VAPI object + underlying Telnyx number) on expiry so the rental stops,
 //   and (b) catches legacy/null plan_types that previously slipped through
 //   both filters and got stuck in 'trialing' forever.
+// Updated: 2026-07-22. resetMonthlyCounters now ALSO zeroes
+//   clients.calls_this_month, not just agencies.minutes_this_month. That client
+//   call counter is what the vapi webhook checks against monthly_call_limit,
+//   and it was never being reset here, so it accumulated across months. This is
+//   the fix for the "call counter seems low / never resets" report: the monthly
+//   cron was only resetting the agency minute rollup on a different table.
 //
 // CRON ROUTES:
 //   POST /api/cron/expire-agency-trials  — Daily, expires stale agency trials
@@ -153,10 +159,28 @@ async function expireAgencyTrials() {
 
 // ============================================================================
 // RESET MONTHLY COUNTERS (run on 1st of each month)
+// ----------------------------------------------------------------------------
+// Two independent monthly counters get zeroed here:
+//   1. agencies.minutes_this_month, the agency-level voice-minute rollup shown
+//      on billing dashboards. This one was already being reset correctly.
+//   2. clients.calls_this_month, the per-client monthly call count the vapi
+//      webhook checks against monthly_call_limit before answering. This was
+//      NOT being reset anywhere, so it accumulated forever and the plan cap
+//      drifted (and the "calls this month" numbers read as lifetime totals).
+//      Zeroing it here on the 1st gives every client a fresh monthly allotment.
+//
+// Both updates are scoped with .neq(col, 0) so only rows that actually hold a
+// non-zero value are written, which keeps the write set small. Each stage
+// checks its own error; if the client stage fails, the agency result is still
+// reported so a partial run is visible rather than silent.
 // ============================================================================
 async function resetMonthlyCounters() {
   console.log('🔄 Resetting monthly usage counters...');
 
+  let agencyReset = 0;
+  let clientReset = 0;
+
+  // ── 1. Agency minute rollups ──────────────────────────────────────────
   try {
     const { data, error } = await supabase
       .from('agencies')
@@ -165,16 +189,46 @@ async function resetMonthlyCounters() {
       .select('id, name');
 
     if (error) {
-      console.error('❌ Monthly counter reset failed:', error.message);
-      return { success: false, error: error.message };
+      console.error('❌ Agency minute reset failed:', error.message);
+      return { success: false, stage: 'agencies', error: error.message };
     }
 
-    console.log(`✅ Reset ${(data || []).length} agency counters`);
-    return { success: true, reset_count: (data || []).length };
+    agencyReset = (data || []).length;
+    console.log(`✅ Reset ${agencyReset} agency minute counters`);
   } catch (err) {
-    console.error('❌ Monthly reset error:', err.message);
-    return { success: false, error: err.message };
+    console.error('❌ Agency minute reset error:', err.message);
+    return { success: false, stage: 'agencies', error: err.message };
   }
+
+  // ── 2. Client monthly CALL counters (the plan-limit gate reads this) ──
+  //    This is the reset that was missing. clients.calls_this_month is what
+  //    vapi-webhook.js compares to monthly_call_limit. Only touch non-zero
+  //    rows. On the 1st the new month has no calls yet, so zeroing is correct
+  //    and hands each client back their full monthly cap.
+  try {
+    const { data, error } = await supabase
+      .from('clients')
+      .update({ calls_this_month: 0 })
+      .neq('calls_this_month', 0)
+      .select('id, business_name');
+
+    if (error) {
+      console.error('❌ Client call-counter reset failed:', error.message);
+      return { success: false, stage: 'clients', error: error.message, agency_minute_counters_reset: agencyReset };
+    }
+
+    clientReset = (data || []).length;
+    console.log(`✅ Reset ${clientReset} client call counters`);
+  } catch (err) {
+    console.error('❌ Client call-counter reset error:', err.message);
+    return { success: false, stage: 'clients', error: err.message, agency_minute_counters_reset: agencyReset };
+  }
+
+  return {
+    success: true,
+    agency_minute_counters_reset: agencyReset,
+    client_call_counters_reset: clientReset,
+  };
 }
 
 // ============================================================================
