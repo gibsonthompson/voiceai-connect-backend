@@ -1,276 +1,269 @@
 // ============================================================================
-// ABANDONED CHECKOUT CLEANUP - Cron Handler
-// ----------------------------------------------------------------------------
-// Closes the card-required signup cost leak. handleClientSignup (client-signup.js
-// STEP 2/3) provisions a VAPI assistant and rents a Telnyx number BEFORE the
-// Stripe Checkout, then flips the client to subscription_status='pending_payment'
-// (STEP 6b). If the user completes checkout, handleClientCheckoutCompleted
-// transitions them to 'trial'. If they ABANDON checkout, the row stays
-// 'pending_payment' forever while the assistant and the Telnyx number keep
-// billing. This cron sweeps those abandoned rows and tears the resources down.
-//
-// Safety model (biased hard toward never touching a paying client):
-//   - Only subscription_status='pending_payment' rows older than
-//     ABANDON_AFTER_HOURS. A real checkout completes in minutes and the webhook
-//     flips the status within seconds, so a 24h-old pending row is abandoned.
-//   - Skip any row that carries a stripe_connected_subscription_id (a webhook
-//     may be mid-flight). No-card trials are 'trial', never 'pending_payment',
-//     so they are never in scope.
-//   - Re-read each row immediately before releasing and re-confirm it is still
-//     pending_payment, still old enough, still has no subscription id. This
-//     shrinks the race with the checkout webhook to effectively zero.
-//   - dryRun mode reports what WOULD be swept and releases nothing.
-//
-// Teardown order per row: release the number (fullyReleaseNumber handles both
-// vapi_direct and telnyx_cc), delete the VAPI assistant + query tool, then mark
-// the row dead and null its phone/vapi fields so the released number cannot
-// collide with a future signup (see insertClientWithStaleNumberRecovery).
-//
-// Endpoint: POST /api/cron/cleanup-abandoned-checkouts
-//   header x-cron-secret: CRON_SECRET
-//   body/query dryRun=true to preview without releasing
+// ABANDONED CART SMS - Cron Handler
+// Sends up to 5 nudge SMS to agencies who signed up but never subscribed.
+// UPDATED: 2026-05-09 — Uses sendAndLogSMS for full SMS logging,
+//          updated messages to remove old pricing references,
+//          "start free" instead of "14-day free trial"
+// UPDATED: 2026-05-14 — Fixed phone formatting for international agencies
+//          (was defaulting to +1 for all), increment step on permanent
+//          failure to prevent infinite retry loops
 // ============================================================================
 
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
-const { fullyReleaseNumber } = require('../lib/vapi');
-
-const VAPI_API_KEY = process.env.VAPI_API_KEY;
-
-// How long a client may sit in pending_payment before it is considered an
-// abandoned checkout. Generous on purpose: legitimate checkouts flip within
-// seconds, so 24h leaves no realistic chance of catching a live customer.
-const ABANDON_AFTER_HOURS = 24;
-
-// Cap rows per run so a backlog can't turn one invocation into a marathon.
-const MAX_PER_RUN = 200;
+const { formatPhoneE164 } = require('../lib/notifications');
+const { sendAndLogSMS } = require('../lib/sms-logger');
+const { createPasswordToken } = require('./agency-signup');
+const { getSmsTemplate } = require('../lib/sms-templates');
 
 // ============================================================================
-// DELETE VAPI ASSISTANT: mirrors cleanupVapiResources in client-signup.js.
-// Treats 404 as success (already gone). Never throws; returns a boolean.
+// TIMING THRESHOLDS (minutes after signup)
 // ============================================================================
-async function deleteVapiAssistant(assistantId) {
-  if (!assistantId || !VAPI_API_KEY) return false;
-  try {
-    const res = await fetch(`https://api.vapi.ai/assistant/${assistantId}`, {
-      method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` },
-    });
-    if (res.ok || res.status === 404) {
-      console.log(`🧹 Deleted assistant: ${assistantId}`);
-      return true;
-    }
-    const t = await res.text().catch(() => '');
-    console.warn(`⚠️ Assistant delete returned ${res.status} for ${assistantId}: ${t.slice(0, 160)}`);
-    return false;
-  } catch (err) {
-    console.warn(`⚠️ Assistant delete error for ${assistantId}: ${err.message}`);
-    return false;
-  }
-}
+const STEP_THRESHOLDS = { 1: 30, 2: 60, 3: 1440, 4: 4320, 5: 10080 };
+
+// Permanent Telnyx error codes — retrying will never succeed
+const PERMANENT_ERROR_CODES = new Set([
+  '40310', // Invalid 'to' address
+  '40300', // Blocked due to STOP message
+  '40306', // Alpha sender not configured (can't SMS this country)
+]);
 
 // ============================================================================
-// DELETE VAPI QUERY TOOL: the KB search tool created alongside the assistant.
-// Non-fatal. 404 is success.
+// VALIDATE E.164 PHONE — catch obviously bad numbers before hitting Telnyx
 // ============================================================================
-async function deleteVapiQueryTool(toolId) {
-  if (!toolId || !VAPI_API_KEY) return false;
-  try {
-    const res = await fetch(`https://api.vapi.ai/tool/${toolId}`, {
-      method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` },
-    });
-    if (res.ok || res.status === 404) {
-      console.log(`🧹 Deleted query tool: ${toolId}`);
-      return true;
-    }
-    console.warn(`⚠️ Query tool delete returned ${res.status} for ${toolId}`);
-    return false;
-  } catch (err) {
-    console.warn(`⚠️ Query tool delete error for ${toolId}: ${err.message}`);
-    return false;
-  }
-}
-
-// ============================================================================
-// Is this row still a valid teardown target right now? Re-checked against a
-// fresh read immediately before releasing anything, to avoid racing the
-// checkout webhook.
-// ============================================================================
-function isStillAbandoned(row, cutoffIso) {
-  if (!row) return false;
-  if (row.subscription_status !== 'pending_payment') return false;
-  if (row.stripe_connected_subscription_id) return false;
-  if (!row.created_at || row.created_at >= cutoffIso) return false;
+function isValidE164(phone) {
+  if (!phone || !phone.startsWith('+')) return false;
+  const digits = phone.replace(/\D/g, '');
+  // E.164: 7-15 digits, no leading 0 after country code
+  if (digits.length < 7 || digits.length > 15) return false;
+  // Catch the +10... pattern (US code + non-US number = always invalid)
+  // Valid US/CA numbers after +1 are exactly 10 digits (total 11 with country code)
+  if (digits.startsWith('1') && digits.length !== 11) return false;
   return true;
 }
 
 // ============================================================================
-// CRON ENDPOINT
+// GET RECOVERY LINK — set-password for passwordless, login for password-set
 // ============================================================================
-router.post('/cleanup-abandoned-checkouts', async (req, res) => {
+async function getRecoveryLink(agency) {
+  const platformUrl = 'https://myvoiceaiconnect.com';
+  const loginUrl = `${platformUrl}/agency/login`;
+
+  try {
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, email, password_hash')
+      .eq('agency_id', agency.id)
+      .eq('role', 'agency_owner')
+      .single();
+
+    if (error || !user) {
+      console.log(`⚠️ No owner user found for agency ${agency.name} — using login link`);
+      return loginUrl;
+    }
+
+    if (user.password_hash) return loginUrl;
+
+    const token = await createPasswordToken(user.id, user.email);
+    const returnTo = encodeURIComponent(`/onboarding?agency=${agency.id}`);
+    console.log(`🔑 Generated fresh set-password token for ${agency.name} (no password set)`);
+    return `${platformUrl}/auth/set-password?token=${token}&returnTo=${returnTo}`;
+  } catch (err) {
+    console.error(`⚠️ Error checking password for ${agency.name}:`, err.message);
+    return loginUrl;
+  }
+}
+
+// ============================================================================
+// HARDCODED FALLBACKS (used only if DB template is missing)
+// ============================================================================
+function getFallbackMessage(step, name, recoveryLink) {
+  switch (step) {
+    case 1:
+      return `Hey ${name}! 👋\n\nYou started setting up your AI receptionist agency on VoiceAI Connect — nice.\n\nPick up where you left off, it takes about 2 minutes to finish:\n${recoveryLink}`;
+    case 2:
+      return `${name}, quick question — what type of businesses are you planning to sell AI receptionists to?\n\nWe ask because agencies targeting home services, medical, and legal are seeing the fastest traction right now.\n\nFinish your setup and start free — no credit card needed:\n${recoveryLink}`;
+    case 3:
+      return `Hey ${name},\n\nThe average VoiceAI Connect agency charges their clients $149/mo per AI receptionist.\n\n10 clients = $1,490/mo in recurring revenue. And you keep 100% — we never take a cut.\n\nStart free, no credit card needed:\n${recoveryLink}`;
+    case 4:
+      return `${name}, quick question — was there something holding you back from finishing your VoiceAI Connect setup?\n\nIf you ran into any issues, reply to this text and we'll help you get set up personally.\n\nYour account is still waiting:\n${recoveryLink}`;
+    case 5:
+      return `Hi ${name},\n\nThis is our last reminder about your VoiceAI Connect account.\n\nIf now isn't the right time, no worries at all. Your account will be here whenever you're ready.\n\nWhen you're ready to launch your AI receptionist agency:\n${recoveryLink}\n\nWe're here if you have any questions. 🙏`;
+    default:
+      return null;
+  }
+}
+
+// ============================================================================
+// DETERMINE NEXT STEP
+// ============================================================================
+function getNextStep(agency) {
+  const currentStep = agency.abandoned_cart_step || 0;
+  const nextStep = currentStep + 1;
+  if (nextStep > 5) return null;
+  const signupTime = new Date(agency.created_at).getTime();
+  const minutesSinceSignup = (Date.now() - signupTime) / (1000 * 60);
+  if (minutesSinceSignup < STEP_THRESHOLDS[nextStep]) return null;
+  if (agency.abandoned_cart_last_sent_at) {
+    const minutesSinceLastSent = (Date.now() - new Date(agency.abandoned_cart_last_sent_at).getTime()) / (1000 * 60);
+    if (minutesSinceLastSent < 15) return null;
+  }
+  return nextStep;
+}
+
+// ============================================================================
+// CRON ENDPOINT — POST /api/cron/abandoned-cart
+// ============================================================================
+router.post('/abandoned-cart', async (req, res) => {
   const cronSecret = req.headers['x-cron-secret'];
   if (process.env.CRON_SECRET && cronSecret !== process.env.CRON_SECRET) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  const dryRun = req.query.dryRun === 'true' || req.body?.dryRun === true;
-  const cutoffIso = new Date(Date.now() - ABANDON_AFTER_HOURS * 60 * 60 * 1000).toISOString();
-
   try {
-    console.log(`🧽 Abandoned checkout cleanup starting (cutoff ${cutoffIso}, dryRun=${dryRun})`);
+    console.log('🛒 Running abandoned cart SMS check...');
 
-    // Candidate rows: pending_payment, older than the cutoff. select('*') so we
-    // read whatever columns exist without coupling to exact column names, and
-    // read the subscription id defensively in JS.
-    const { data: candidates, error: queryErr } = await supabase
-      .from('clients')
-      .select('*')
-      .eq('subscription_status', 'pending_payment')
-      .lt('created_at', cutoffIso)
-      .order('created_at', { ascending: true })
-      .limit(MAX_PER_RUN);
+    const { data: agencies, error } = await supabase
+      .from('agencies')
+      .select('id, name, email, phone, country, created_at, abandoned_cart_step, abandoned_cart_last_sent_at')
+      .eq('subscription_status', 'pending')
+      .lt('abandoned_cart_step', 5)
+      .not('phone', 'is', null)
+      .order('created_at', { ascending: true });
 
-    if (queryErr) {
-      console.error('❌ Abandoned checkout query failed:', queryErr.message);
-      return res.status(500).json({ error: 'Database query failed', message: queryErr.message });
-    }
+    if (error) { console.error('❌ Abandoned cart query error:', error); return res.status(500).json({ error: 'Database query failed' }); }
+    if (!agencies || agencies.length === 0) { console.log('✅ No abandoned carts to process'); return res.json({ success: true, processed: 0, sent: 0 }); }
 
-    const rows = candidates || [];
-    if (rows.length === 0) {
-      console.log('✅ No abandoned checkouts to clean up');
-      return res.json({ success: true, dryRun, found: 0, cleaned: 0, skipped: 0, results: [] });
-    }
-
-    console.log(`📋 Found ${rows.length} pending_payment candidate(s) older than ${ABANDON_AFTER_HOURS}h`);
-
-    let cleaned = 0, skipped = 0;
+    console.log(`📋 Found ${agencies.length} pending agencies to check`);
+    let sent = 0, skipped = 0;
     const results = [];
 
-    for (const candidate of rows) {
-      // Skip if a subscription id is already present (webhook likely mid-flight).
-      if (candidate.stripe_connected_subscription_id) {
+    for (const agency of agencies) {
+      const nextStep = getNextStep(agency);
+      if (!nextStep) { skipped++; continue; }
+
+      // Format phone using agency's country (not hardcoded US)
+      const formattedPhone = formatPhoneE164(agency.phone, agency.country || 'US');
+
+      // Validate before attempting to send — catch obviously bad numbers
+      if (!formattedPhone || !isValidE164(formattedPhone)) {
+        console.log(`⚠️ Invalid phone for ${agency.name}: ${agency.phone} → ${formattedPhone} (country: ${agency.country || 'US'}) — skipping permanently`);
+        // Increment step so we don't retry this agency every 15 minutes
+        await supabase.from('agencies').update({
+          abandoned_cart_step: 5, // Max step — stops all future retries
+          abandoned_cart_last_sent_at: new Date().toISOString(),
+        }).eq('id', agency.id);
+        results.push({ agency: agency.name, step: nextStep, status: 'invalid_phone', phone: formattedPhone });
         skipped++;
-        results.push({ client_id: candidate.id, business_name: candidate.business_name, status: 'skipped_has_subscription' });
         continue;
       }
 
-      if (dryRun) {
-        results.push({
-          client_id: candidate.id,
-          business_name: candidate.business_name,
-          agency_id: candidate.agency_id,
-          phone_number: candidate.phone_number || candidate.vapi_phone_number || null,
-          created_at: candidate.created_at,
-          status: 'would_clean',
-        });
-        cleaned++;
-        continue;
-      }
+      const recoveryLink = await getRecoveryLink(agency);
+      const name = agency.name || 'there';
 
-      // Fresh re-read right before releasing, to catch a checkout that completed
-      // between the candidate query and now.
-      const { data: fresh, error: freshErr } = await supabase
-        .from('clients')
-        .select('*')
-        .eq('id', candidate.id)
-        .single();
+      // Try DB template first, fall back to hardcoded
+      const templateMsg = await getSmsTemplate(`abandoned_cart_${nextStep}`, { name, recovery_link: recoveryLink });
+      const message = templateMsg || getFallbackMessage(nextStep, name, recoveryLink);
+      if (!message) { skipped++; continue; }
 
-      if (freshErr) {
-        console.warn(`⚠️ Re-read failed for ${candidate.id}, skipping: ${freshErr.message}`);
-        skipped++;
-        results.push({ client_id: candidate.id, business_name: candidate.business_name, status: 'skipped_reread_failed' });
-        continue;
-      }
+      console.log(`📱 Sending abandoned cart step ${nextStep} to ${agency.name} (${formattedPhone})`);
 
-      if (!isStillAbandoned(fresh, cutoffIso)) {
-        console.log(`↩️ ${fresh.business_name} (${fresh.id}) is no longer an abandoned pending_payment, skipping`);
-        skipped++;
-        results.push({ client_id: fresh.id, business_name: fresh.business_name, status: 'skipped_state_changed' });
-        continue;
-      }
-
-      const phoneForRelease = fresh.phone_number || fresh.vapi_phone_number || null;
-      console.log(`🧽 Cleaning abandoned checkout: ${fresh.business_name} (${fresh.id}), number ${phoneForRelease || 'none'}`);
-
-      // 1. Release the number (VAPI phone object if any + underlying Telnyx
-      //    rental). fullyReleaseNumber tolerates a null vapi id (telnyx_cc) and
-      //    a null number.
-      let releaseResult = { vapiDeleted: false, telnyxReleased: false };
-      try {
-        releaseResult = await fullyReleaseNumber(fresh.vapi_phone_id || null, phoneForRelease);
-      } catch (relErr) {
-        console.error(`❌ Number release error for ${fresh.id}: ${relErr.message}`);
-      }
-
-      // 2. Delete the VAPI assistant + query tool.
-      const assistantDeleted = await deleteVapiAssistant(fresh.vapi_assistant_id);
-      await deleteVapiQueryTool(fresh.vapi_query_tool_id);
-
-      // 3. Mark the row dead and null the phone/vapi fields so the released
-      //    number can be reused without a unique-constraint collision. Guarded
-      //    on subscription_status='pending_payment' so we never overwrite a row
-      //    that flipped to a live status in the meantime.
-      const { data: updatedRows, error: updateErr } = await supabase
-        .from('clients')
-        .update({
-          subscription_status: 'expired',
-          status: 'expired',
-          vapi_assistant_id: null,
-          vapi_query_tool_id: null,
-          vapi_phone_id: null,
-          vapi_phone_number: null,
-          phone_number: null,
-          phone_area_code: null,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', fresh.id)
-        .eq('subscription_status', 'pending_payment')
-        .select('id');
-
-      if (updateErr) {
-        console.error(`❌ Failed to mark ${fresh.id} as expired: ${updateErr.message}`);
-        results.push({
-          client_id: fresh.id,
-          business_name: fresh.business_name,
-          status: 'released_but_mark_failed',
-          telnyxReleased: releaseResult.telnyxReleased,
-          vapiDeleted: releaseResult.vapiDeleted,
-          assistantDeleted,
-          error: updateErr.message,
-        });
-        continue;
-      }
-
-      if (!updatedRows || updatedRows.length === 0) {
-        // The guard matched 0 rows: status changed under us. Resources were
-        // already released, so log loudly for follow-up rather than silently.
-        console.error(`⚠️ ${fresh.id} status changed during cleanup after resources were released. Manual review advised.`);
-        results.push({ client_id: fresh.id, business_name: fresh.business_name, status: 'released_but_row_state_changed' });
-        cleaned++;
-        continue;
-      }
-
-      cleaned++;
-      results.push({
-        client_id: fresh.id,
-        business_name: fresh.business_name,
-        agency_id: fresh.agency_id,
-        phone_number: phoneForRelease,
-        status: 'cleaned',
-        telnyxReleased: releaseResult.telnyxReleased,
-        vapiDeleted: releaseResult.vapiDeleted,
-        assistantDeleted,
+      const smsSent = await sendAndLogSMS({
+        phone: formattedPhone,
+        message,
+        agencyId: agency.id,
+        recipientType: 'agency_owner',
+        messageType: `abandoned_cart_${nextStep}`,
+        metadata: {
+          step: nextStep,
+          linkType: recoveryLink.includes('set-password') ? 'set-password' : 'login',
+          country: agency.country || 'US',
+        },
       });
-      console.log(`✅ Cleaned ${fresh.business_name} (${fresh.id})`);
+
+      if (smsSent) {
+        await supabase.from('agencies').update({
+          abandoned_cart_step: nextStep,
+          abandoned_cart_last_sent_at: new Date().toISOString(),
+        }).eq('id', agency.id);
+        sent++;
+        results.push({ agency: agency.name, step: nextStep, status: 'sent', linkType: recoveryLink.includes('set-password') ? 'set-password' : 'login' });
+        console.log(`✅ Step ${nextStep} sent to ${agency.name}`);
+      } else {
+        // Send failed — increment step to prevent infinite retry on permanent errors
+        // (Telnyx errors like STOP block, alpha sender, etc. will never succeed)
+        await supabase.from('agencies').update({
+          abandoned_cart_step: nextStep,
+          abandoned_cart_last_sent_at: new Date().toISOString(),
+        }).eq('id', agency.id);
+        results.push({ agency: agency.name, step: nextStep, status: 'failed_advanced' });
+        console.log(`❌ Failed to send step ${nextStep} to ${agency.name} — advancing step to prevent retry`);
+      }
     }
 
-    console.log(`🧽 Abandoned checkout cleanup complete: ${cleaned} cleaned, ${skipped} skipped, ${rows.length} scanned (dryRun=${dryRun})`);
-    res.json({ success: true, dryRun, found: rows.length, cleaned, skipped, results });
+    console.log(`🛒 Abandoned cart complete: ${sent} sent, ${skipped} skipped out of ${agencies.length}`);
+    res.json({ success: true, processed: agencies.length, sent, skipped, results });
   } catch (error) {
-    console.error('❌ Abandoned checkout cleanup error:', error);
+    console.error('❌ Abandoned cart cron error:', error);
     res.status(500).json({ error: 'Cron job failed', message: error.message });
+  }
+});
+
+// ============================================================================
+// TEST ENDPOINT — POST /api/cron/abandoned-cart/test/:agencyId
+// ============================================================================
+router.post('/abandoned-cart/test/:agencyId', async (req, res) => {
+  const cronSecret = req.headers['x-cron-secret'];
+  if (process.env.CRON_SECRET && cronSecret !== process.env.CRON_SECRET) return res.status(401).json({ error: 'Unauthorized' });
+
+  try {
+    const { agencyId } = req.params;
+    const { step } = req.body;
+    const { data: agency, error } = await supabase.from('agencies').select('*').eq('id', agencyId).single();
+    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
+
+    const targetStep = step || (agency.abandoned_cart_step || 0) + 1;
+    if (targetStep > 5) return res.json({ success: false, message: 'All 5 messages already sent' });
+
+    const formattedPhone = formatPhoneE164(agency.phone, agency.country || 'US');
+    if (!formattedPhone || !isValidE164(formattedPhone)) return res.json({ success: false, message: `Invalid phone: ${agency.phone} → ${formattedPhone}` });
+
+    const recoveryLink = await getRecoveryLink(agency);
+    const name = agency.name || 'there';
+    const templateMsg = await getSmsTemplate(`abandoned_cart_${targetStep}`, { name, recovery_link: recoveryLink });
+    const message = templateMsg || getFallbackMessage(targetStep, name, recoveryLink);
+
+    console.log(`🧪 Test sending step ${targetStep} to ${agency.name}`);
+
+    const smsSent = await sendAndLogSMS({
+      phone: formattedPhone,
+      message,
+      agencyId: agency.id,
+      recipientType: 'agency_owner',
+      messageType: `abandoned_cart_${targetStep}`,
+      metadata: { step: targetStep, test: true },
+    });
+
+    if (smsSent) {
+      await supabase.from('agencies').update({
+        abandoned_cart_step: targetStep,
+        abandoned_cart_last_sent_at: new Date().toISOString(),
+      }).eq('id', agencyId);
+    }
+
+    res.json({
+      success: smsSent,
+      agency: agency.name,
+      step: targetStep,
+      phone: formattedPhone,
+      country: agency.country || 'US',
+      linkType: recoveryLink.includes('set-password') ? 'set-password' : 'login',
+      message: smsSent ? `Step ${targetStep} sent` : 'SMS failed',
+    });
+  } catch (error) {
+    console.error('❌ Test abandoned cart error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 

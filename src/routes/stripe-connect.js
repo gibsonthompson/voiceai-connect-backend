@@ -120,8 +120,41 @@ function getCurrencyForCountry(countryCode) {
   return countryCurrencyMap[countryCode] || 'usd';
 }
 
+// True when the platform supports Stripe Connect in this country. Backed by the
+// same countryCurrencyMap that decides currency, so "supported for onboarding"
+// and "has a known currency" can never disagree. Case-insensitive.
+function isSupportedConnectCountry(countryCode) {
+  return typeof countryCode === 'string'
+    && Object.prototype.hasOwnProperty.call(countryCurrencyMap, countryCode.trim().toUpperCase());
+}
+
 // ============================================================================
-// CREATE CONNECT ACCOUNT LINK
+// CREATE CONNECT ACCOUNT LINK  (POST /api/agency/connect/onboard)
+// ----------------------------------------------------------------------------
+// Creates (or resumes onboarding for) the agency's Express Connect account and
+// returns a hosted onboarding link.
+//
+// COUNTRY HANDLING (the fix). A connected account's country is set at creation
+// and is IMMUTABLE afterward, so it has to be right the first time. Before this,
+// the account was always created with `agency.country || 'US'`, which silently
+// trapped every non-US agency that had no stored country as a US account (this
+// is what put a UK agency on US onboarding and left it unable to take GBP).
+//
+// Now:
+//   - The onboarding country comes from the request body (the settings-page
+//     picker sends it), falling back to the agency's stored country, then 'US'.
+//   - It is validated against countryCurrencyMap (the same map that drives
+//     currency), so an unsupported code is rejected with 400 instead of quietly
+//     defaulting to US.
+//   - The resolved country is PERSISTED on the agency row. createClientCheckout,
+//     createTrialCheckoutForSignup, and changeClientPlan all derive currency
+//     from agency.country, so persisting here also fixes client-charge currency.
+//   - If an account already exists in a DIFFERENT country than the one now
+//     requested, we return 409 instead of reusing it. Reusing it would keep the
+//     agency on the wrong-country (and wrong-currency) account forever. To move,
+//     the agency disconnects (which nulls stripe_account_id) and reconnects.
+//   - A stale stripe_account_id that Stripe no longer knows (resource_missing)
+//     is treated as no account, and a fresh one is created.
 // ============================================================================
 async function createConnectAccountLink(req, res) {
   try {
@@ -131,6 +164,21 @@ async function createConnectAccountLink(req, res) {
       return res.status(400).json({ error: 'agency_id required' });
     }
 
+    // Requested country (optional). Present when the settings picker sends it.
+    // Normalized to an uppercase 2-letter code; blank/whitespace counts as absent.
+    const rawCountry = typeof req.body.country === 'string' ? req.body.country.trim().toUpperCase() : '';
+    const requestedCountry = rawCountry || null;
+
+    // Reject an explicitly requested country we do not support, rather than
+    // letting it fall through to a US default the caller never asked for.
+    if (requestedCountry && !isSupportedConnectCountry(requestedCountry)) {
+      return res.status(400).json({
+        error: 'country_unsupported',
+        message: `Stripe Connect is not available in ${requestedCountry} on this platform yet.`,
+        requested_country: requestedCountry,
+      });
+    }
+
     const { data: agency, error } = await supabase
       .from('agencies').select('*').eq('id', agency_id).single();
 
@@ -138,14 +186,73 @@ async function createConnectAccountLink(req, res) {
       return res.status(404).json({ error: 'Agency not found' });
     }
 
-    console.log('Creating Stripe Connect account for:', agency.name, '| Country:', agency.country || 'US');
-
     let accountId = agency.stripe_account_id;
 
+    // ---- Existing account: resume onboarding, or block a country change ----
+    if (accountId) {
+      let existingAccount = null;
+      try {
+        existingAccount = await stripe.accounts.retrieve(accountId);
+      } catch (retrieveErr) {
+        if (retrieveErr.code === 'resource_missing') {
+          // Stored id no longer exists at Stripe (deleted, or a different Stripe
+          // environment). Drop it and fall through to create a fresh account.
+          console.warn(`Connect: stored account ${accountId} missing at Stripe for ${agency.name}, recreating`);
+          await supabase.from('agencies').update({
+            stripe_account_id: null,
+            stripe_onboarding_complete: false,
+            stripe_charges_enabled: false,
+            stripe_payouts_enabled: false,
+          }).eq('id', agency_id);
+          accountId = null;
+        } else {
+          throw retrieveErr;
+        }
+      }
+
+      if (existingAccount) {
+        const existingCountry = (existingAccount.country || '').toUpperCase();
+
+        // A country change was explicitly requested and it conflicts with the
+        // account that already exists. Country cannot be changed on a live
+        // account, so do not silently keep them on the old one.
+        if (requestedCountry && existingCountry && requestedCountry !== existingCountry) {
+          return res.status(409).json({
+            error: 'account_country_mismatch',
+            message: `Your Stripe account is set to ${existingCountry} and a country cannot be changed after it is created. Disconnect Stripe first, then reconnect and choose ${requestedCountry}.`,
+            existing_country: existingCountry,
+            requested_country: requestedCountry,
+          });
+        }
+
+        // Self-heal: if the agency row never stored a country (or it drifted),
+        // backfill it from the real account so currency lookups are correct.
+        if (existingCountry && (agency.country || '').toUpperCase() !== existingCountry) {
+          await supabase.from('agencies').update({ country: existingCountry }).eq('id', agency_id);
+        }
+
+        console.log('Resuming Connect onboarding for:', agency.name, '| Country:', existingCountry || 'unknown');
+      }
+    }
+
+    // ---- No account (or a stale one was just cleared): create a fresh one ----
     if (!accountId) {
+      // Resolve the onboarding country: explicit request, else stored, else US.
+      const storedCountry = typeof agency.country === 'string' ? agency.country.trim().toUpperCase() : '';
+      let resolvedCountry = requestedCountry || storedCountry || 'US';
+
+      // Guard the stored/default path too. A bad value sitting in agency.country
+      // must not create an account in it; fall back to US and log.
+      if (!isSupportedConnectCountry(resolvedCountry)) {
+        console.warn(`Connect: resolved country ${resolvedCountry} for ${agency.name} is unsupported, defaulting to US`);
+        resolvedCountry = 'US';
+      }
+
+      console.log('Creating Stripe Connect account for:', agency.name, '| Country:', resolvedCountry);
+
       const account = await stripe.accounts.create({
         type: 'express',
-        country: agency.country || 'US',
+        country: resolvedCountry,
         email: agency.email,
         metadata: { agency_id: agency_id },
         capabilities: {
@@ -156,8 +263,14 @@ async function createConnectAccountLink(req, res) {
 
       accountId = account.id;
 
-      await supabase.from('agencies').update({ stripe_account_id: accountId }).eq('id', agency_id);
-      console.log('Connect account created:', accountId, '| Country:', agency.country || 'US');
+      // Persist BOTH the account id and the resolved country. Persisting country
+      // is what makes client-charge currency (getCurrencyForCountry(agency.country))
+      // correct for non-US agencies.
+      await supabase.from('agencies')
+        .update({ stripe_account_id: accountId, country: resolvedCountry })
+        .eq('id', agency_id);
+
+      console.log('Connect account created:', accountId, '| Country:', resolvedCountry);
     }
 
     const accountLink = await stripe.accountLinks.create({
