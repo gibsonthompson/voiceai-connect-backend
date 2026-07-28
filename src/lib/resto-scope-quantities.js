@@ -31,9 +31,15 @@ function polygonPerimeterU(pts) {
 const areaFt = (pts) => polygonAreaU(pts) / (UPF * UPF);
 const perimeterFt = (pts) => polygonPerimeterU(pts) / UPF;
 
-// wet area square footage: painted brush stroke (length x width + endcaps) or
-// filled polygon. Ported verbatim from sketchModel.ts wetSqFt so app and backend agree.
+// wet area square footage. A typed affected sqft (wa.sqft) ALWAYS wins: it is the
+// number a tech confirmed on the material sheet, defensible on a carrier document.
+// Only when it is absent do we fall back to the drawn geometry: the painted brush
+// stroke (length x width + endcaps) or a filled polygon. The brush fallback is a
+// rough visual estimate of a finger drag, never a billed figure on its own, which is
+// why the material sheet asks the tech to confirm it. Ported to stay in lockstep with
+// sketchModel.ts wetSqFt so app and backend agree.
 function wetSqFt(w) {
+  if (Number.isFinite(w.sqft) && w.sqft > 0) return w.sqft;
   if (w.brush) {
     const strokes = w.strokes && w.strokes.length ? w.strokes : (w.points && w.points.length ? [w.points] : []);
     let area = 0;
@@ -117,14 +123,32 @@ function equipmentUnitDays(equipment) {
 
 const r2 = (n) => Math.round(n * 100) / 100;
 
-// aggregate one room's measured scope from its sketches
-function roomScope(roomSketches) {
+// aggregate one room's measured scope from its sketches.
+//
+// ceilingHeightFt lets us cap affected surface areas at the real surface size, so an
+// affected number can only ever REDUCE from the full measured surface, never inflate
+// past it. Floor caps at the drawn floor area; walls at gross wall SF; ceiling at the
+// (flat) ceiling area, which equals floor. Passing it is optional: without it we still
+// cap the floor (from the outline polygon) but leave walls/ceiling uncapped, since we
+// cannot know the wall area without a ceiling height.
+function roomScope(roomSketches, ceilingHeightFt) {
   const scenes = roomSketches.map((s) => s.canvas_json || {});
   const poly = largestRoomPolygon(roomSketches);
+
+  const floorAreaFt = poly ? areaFt(poly.points) : 0;
+  const perimFt = poly ? perimeterFt(poly.points) : 0;
+  const SHcap = Number(ceilingHeightFt) > 0 ? Number(ceilingHeightFt) : null;
+  // gross wall area for the cap only: perimeter x height, openings NOT deducted (an
+  // affected wall area is a subset of the physical wall, and openings are billed over
+  // anyway per the report's wall-area rule).
+  const grossWallCap = SHcap != null ? perimFt * SHcap : null;
+  const ceilingCap = floorAreaFt; // flat ceiling: C = F
 
   const wetMap = {};    // "surface|material" -> sqft
   const wetFloor = {};  // "material||disposition" -> sqft (drives extraction vs tear-out)
   let affectedFloorSqFt = 0;
+  let affectedWallsSqFt = 0;
+  let affectedCeilingSqFt = 0;
   for (const sc of scenes) {
     for (const wa of (sc.wetAreas || [])) {
       const surface = wa.surface || 'floor';
@@ -137,8 +161,30 @@ function roomScope(roomSketches) {
         const disposition = wa.disposition === 'remove' ? 'remove' : 'dry';
         const key = material + '||' + disposition;
         wetFloor[key] = (wetFloor[key] || 0) + sqft;
+      } else if (surface === 'wall') {
+        affectedWallsSqFt += sqft;
+      } else if (surface === 'ceiling') {
+        affectedCeilingSqFt += sqft;
       }
     }
+  }
+
+  // An affected area is a PORTION of a surface, so it can never exceed that surface.
+  // Cap each affected sum at its full surface: floor at the drawn floor area, ceiling
+  // at the same (flat ceiling), walls at gross wall SF when a ceiling height is known.
+  // This is what turns a fabricated brush ribbon (which used to read wildly over the
+  // room) back into at most the real surface, even before a tech types a real number.
+  if (poly && affectedFloorSqFt > floorAreaFt + 0.5) affectedFloorSqFt = floorAreaFt;
+  if (grossWallCap != null && affectedWallsSqFt > grossWallCap + 0.5) affectedWallsSqFt = grossWallCap;
+  if (affectedCeilingSqFt > ceilingCap + 0.5) affectedCeilingSqFt = ceilingCap;
+
+  // If the floor total was capped, scale the per-material/disposition floor lines down
+  // by the same factor, so the extraction and tear-out lines that feed Xactimate never
+  // sum above the floor either.
+  const floorLineTotal = Object.values(wetFloor).reduce((a, b) => a + b, 0);
+  if (floorLineTotal > affectedFloorSqFt + 0.01 && floorLineTotal > 0) {
+    const scale = affectedFloorSqFt / floorLineTotal;
+    for (const k of Object.keys(wetFloor)) wetFloor[k] = wetFloor[k] * scale;
   }
 
   let floodCuts = [];
@@ -150,8 +196,8 @@ function roomScope(roomSketches) {
   }
 
   return {
-    floorAreaFt: poly ? r2(areaFt(poly.points)) : 0,
-    perimeterFt: poly ? r2(perimeterFt(poly.points)) : 0,
+    floorAreaFt: r2(floorAreaFt),
+    perimeterFt: r2(perimFt),
     wetBySurfaceMaterial: Object.keys(wetMap).map((k) => {
       const [surface, material] = k.split('|');
       return { surface, material, sqft: r2(wetMap[k]) };
@@ -161,6 +207,8 @@ function roomScope(roomSketches) {
       return { material, disposition, sqft: r2(wetFloor[k]) };
     }),
     affectedFloorSqFt: r2(affectedFloorSqFt),
+    affectedWallsSqFt: r2(affectedWallsSqFt),
+    affectedCeilingSqFt: r2(affectedCeilingSqFt),
     floodCuts: floodCuts.map((c) => ({ lf: r2(c.lf), heightFt: c.heightFt, sqft: r2(c.sqft) })),
     containment: { sqft: r2(contSqft), count: contCount }
   };

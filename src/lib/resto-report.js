@@ -10,6 +10,8 @@ const {
 
 let roomDimensions = null;
 try { roomDimensions = require('./resto-scope-quantities').roomDimensions; } catch (_e) { roomDimensions = null; }
+let roomScope = null;
+try { roomScope = require('./resto-scope-quantities').roomScope; } catch (_e) { roomScope = null; }
 
 const UPF = 40;
 
@@ -211,6 +213,33 @@ async function generateReportPdf(graph, getImage) {
             ['Baseboard', d.baseboardLF + ' ft' + (incBase ? '' : nis)],
             ['Wall area', wallSF + ' sq ft' + (incWalls ? '' : nis)]
           ], 3);
+
+          // AFFECTED AREA, on its own line per surface. A tech often documents only the wet
+          // part of a surface (wet carpet reachable around bookshelves, one wet ceiling
+          // tile), so the affected area is genuinely smaller than the whole surface. We show
+          // both: the full surface above for context, the affected portion here for what is
+          // billed. Affected is capped at its surface in the scope engine, so it can only
+          // ever be a subset, never larger. We print it only when it is real and smaller
+          // than the surface; when affected == full surface, the line above already says it.
+          if (roomScope) {
+            let scope = null;
+            try { scope = roomScope(rSketches, ceil); } catch (e) { console.error('roomScope failed:', e.message); scope = null; }
+            if (scope) {
+              const affLines = [];
+              const af = Number(scope.affectedFloorSqFt) || 0;
+              const aw = Number(scope.affectedWallsSqFt) || 0;
+              const ac = Number(scope.affectedCeilingSqFt) || 0;
+              if (incFloor && af > 0 && af < d.F - 0.5) affLines.push(['Affected floor', af + ' sq ft']);
+              if (incWalls && aw > 0 && aw < wallSF - 0.5) affLines.push(['Affected walls', aw + ' sq ft']);
+              if (incCeiling && ac > 0 && ac < d.C - 0.5) affLines.push(['Affected ceiling', ac + ' sq ft']);
+              if (affLines.length) {
+                k.facts(affLines, 3);
+                k.para('Affected area is the wet portion actually documented on each surface, a subset of the full surface size above. It is what the mitigation line items bill against.',
+                  { size: T.size.small, color: T.muted });
+              }
+            }
+          }
+
           const sumParts = [];
           if (incFloor) sumParts.push(`Floor${floorMat ? ' (' + floorMat.toLowerCase() + ')' : ''}: ${d.F} sq ft`);
           if (incWalls) sumParts.push(`Walls: ${wallSF} sq ft`);
@@ -520,6 +549,47 @@ async function generateReportPdf(graph, getImage) {
     if (lossCount) {
       k.callout(lossCount + ' item' + (lossCount === 1 ? '' : 's') +
         ' documented as non-salvageable. Photographs of each are in the room sections above, taken before disposal.', 'warn');
+    }
+
+    // CONTENTS PHOTOGRAPHS. Each contents item's photos are linked by
+    // resto_media.contents_item_id. They were being captured but never reached the
+    // report, so a non-salvageable item had no picture backing its disposition. Group
+    // media by item, and print the photos under each item that has them.
+    if (getImage) {
+      const contentPhotosByItem = {};
+      for (const m of (media || [])) {
+        if (m.type === 'photo' && m.contents_item_id) {
+          (contentPhotosByItem[m.contents_item_id] = contentPhotosByItem[m.contents_item_id] || []).push(m);
+        }
+      }
+      const withPhotos = allContents.filter(({ item }) => (contentPhotosByItem[item.id] || []).length);
+      if (withPhotos.length) {
+        k.gap(1);
+        k.h3('Contents photographs');
+        for (const { room, item } of withPhotos) {
+          const itemPhotos = contentPhotosByItem[item.id];
+          const dispo = DISPOSITION[item.disposition];
+          const head = [item.description || 'Item', room ? '(' + room + ')' : '', dispo ? '\u00b7 ' + dispo : '']
+            .filter(Boolean).join(' ');
+          k.h3(head, 150);
+          await k.photoGrid(itemPhotos, getImage, {
+            perRow: 3,
+            stamp: (p) => {
+              const bits = [];
+              if (p.captured_at) { try { bits.push(new Date(p.captured_at).toLocaleString(undefined, { month: 'numeric', day: 'numeric', year: '2-digit', hour: 'numeric', minute: '2-digit' })); } catch (_e) {} }
+              if (stampGps && p.lat != null && p.lng != null) bits.push(Number(p.lat).toFixed(4) + ', ' + Number(p.lng).toFixed(4));
+              return bits.join('   ');
+            },
+            onCell: async (p, x, y, cell) => {
+              try {
+                const { data: su } = await db().storage.from('resto-media').createSignedUrl(p.storage_path, 60 * 60 * 24 * 365);
+                if (su && su.signedUrl) doc.link(x, y, cell, cell, su.signedUrl);
+              } catch (_e) {}
+            }
+          });
+          k.gap(1);
+        }
+      }
     }
   }
 
