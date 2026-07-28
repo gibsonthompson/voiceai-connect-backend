@@ -447,7 +447,7 @@ async function getAgencySettings(req, res) {
         twilio_account_sid: agency.twilio_account_sid || null,
 
         // Team member limits
-        max_team_members_agency: agency.max_team_members_agency || 0,
+        max_team_members_agency: agency.max_team_members_agency ?? null,
         max_team_members_client: agency.max_team_members_client || 0,
 
         // Analytics & Tracking
