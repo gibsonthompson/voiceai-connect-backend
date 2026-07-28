@@ -43,7 +43,7 @@ const cors = require('cors');
 const { supabase } = require('./lib/supabase');
 const { fullyReleaseNumber } = require('./lib/vapi');
 const { expressErrorHandler, setupProcessErrorHandlers } = require('./lib/error-monitor');
-const { sendPlatformNotificationSMS } = require('./lib/notifications');
+const { sendPlatformNotificationSMS, sendAgencySignupNotificationSMS } = require('./lib/notifications');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -297,6 +297,70 @@ app.use('/api/resto', restoRoutes);
 
 app.post('/api/agency/signup', handleAgencySignup);
 app.post('/api/agency/onboarding', handleAgencyOnboarding);
+
+// ============================================================================
+// AGENCY ACTIVATED NOTIFICATION (free path)
+// ----------------------------------------------------------------------------
+// The Free plan activates in the Next route app/api/agency/start-trial, which
+// runs on Vercel and cannot call the notifications lib here directly. On a
+// successful pending -> active transition it POSTs here so the platform owner
+// gets the "New Agency Activated" SMS with the chosen plan (Free). Paid
+// activations fire the same notification inline in handleAgencyCheckoutCompleted
+// (routes/stripe-platform.js). This is NOT the premature step-1 signup SMS,
+// which was removed from handleAgencyOnboarding.
+//
+// Registered here, before the app.use('/api/agency', ...) routers below, so the
+// exact-path match wins. Guards: only sends for a genuinely activated agency,
+// plus a short in-memory dedupe so an accidental double POST cannot text twice.
+// start-trial rejects non-pending agencies, so in practice this is called once.
+// ============================================================================
+const _activationNotified = new Map();
+
+app.post('/api/agency/:agencyId/notify-activated', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+
+    const { data: agency, error } = await supabase
+      .from('agencies')
+      .select('id, name, email, phone, referral_source, country, plan_type, status, subscription_status, onboarding_completed')
+      .eq('id', agencyId)
+      .single();
+
+    if (error || !agency) {
+      return res.status(404).json({ error: 'Agency not found' });
+    }
+
+    // Only notify for a genuinely activated agency (guards a stray/early call).
+    const activated =
+      agency.onboarding_completed === true ||
+      agency.status === 'active' ||
+      agency.subscription_status === 'active';
+    if (!activated) {
+      return res.json({ success: false, skipped: 'not_activated' });
+    }
+
+    // Short in-memory dedupe so an accidental double POST (retry, refresh)
+    // does not text the owner twice. The start-trial route already calls this
+    // once on a successful pending -> active transition.
+    const now = Date.now();
+    const last = _activationNotified.get(agencyId) || 0;
+    if (now - last < 10 * 60 * 1000) {
+      return res.json({ success: true, skipped: 'recently_notified' });
+    }
+    _activationNotified.set(agencyId, now);
+
+    try {
+      await sendAgencySignupNotificationSMS(agency);
+    } catch (smsErr) {
+      console.error('notify-activated SMS failed (non-blocking):', smsErr.message);
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('notify-activated error:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 app.get('/api/agency/by-host', getAgencyByHost);
 // Embed-widget Path A: iframe loads myvoiceaiconnect.com/get-started?agency=UUID
 // and looks the agency up by ID since there's no host-based context to derive.

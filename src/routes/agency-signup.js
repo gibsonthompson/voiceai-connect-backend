@@ -1,8 +1,10 @@
 // ============================================================================
 // AGENCY SIGNUP & ONBOARDING
-// UPDATED: Removed premature signup notification SMS (fires with temp name).
-//          The real notification now only fires in handleAgencyOnboarding step 1
-//          after the agency sets their actual name and phone.
+// UPDATED: Removed premature signup notification SMS (fired with temp name).
+// UPDATED: 2026-07-27. Moved the admin activation SMS OUT of onboarding step 1
+//          entirely. It now fires only at real activation, with the plan: free
+//          via the start-trial route (POST /api/agency/:id/notify-activated),
+//          paid via handleAgencyCheckoutCompleted in stripe-platform.js.
 // UPDATED: 2026-05-07 — Default plan_type changed to 'free', signup status
 //          changed to 'active' (free tier requires no payment to start).
 // UPDATED: 2026-05-09 — Set onboarding_completed_at timestamp when onboarding
@@ -20,7 +22,7 @@
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { supabase } = require('../lib/supabase');
-const { sendAgencyWelcomeEmail, sendAgencySignupNotificationSMS, sendAgencyWelcomeSMS } = require('../lib/notifications');
+const { sendAgencyWelcomeEmail, sendAgencyWelcomeSMS } = require('../lib/notifications');
 const { seedDefaultTemplatesIfNeeded } = require('../lib/default-templates');
 
 // ============================================================================
@@ -512,22 +514,13 @@ async function handleAgencyOnboarding(req, res) {
       .update(updateData)
       .eq('id', agency_id);
     
-    // If step 1 completed, send admin notification with real name + phone
-    if (step === 1 && data.name) {
-      try {
-        const { data: updatedAgency } = await supabase
-          .from('agencies')
-          .select('*')
-          .eq('id', agency_id)
-          .single();
-        
-        if (updatedAgency) {
-          await sendAgencySignupNotificationSMS(updatedAgency);
-        }
-      } catch (smsError) {
-        console.warn('⚠️ Updated agency SMS notification failed (non-blocking):', smsError.message);
-      }
-    }
+    // NOTE: The admin "agency activated" SMS is NOT sent here anymore. Saving a
+    // name + phone in onboarding step 1 is not activation, it is just an early
+    // step toward it (plan, password, and card still come after). Firing here
+    // produced a premature "signup" text before the agency committed. The
+    // notification now fires only at real activation, with the chosen plan:
+    //   Free -> app/api/agency/start-trial POSTs /api/agency/:id/notify-activated
+    //   Paid -> handleAgencyCheckoutCompleted in routes/stripe-platform.js
     
     res.json({
       success: true,

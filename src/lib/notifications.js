@@ -5,6 +5,7 @@
 // UPDATED: 2026-05-10 — Welcome email plan-aware (Free vs Pro/Scale)
 // ============================================================================
 const fetch = require('node-fetch');
+const { decrypt } = require('./encryption');
 
 const PLATFORM_OWNER_PHONE = process.env.PLATFORM_OWNER_PHONE || '+16783161454';
 
@@ -107,13 +108,23 @@ async function sendPlatformNotificationSMS(message) {
   return _logSMS({ phone: PLATFORM_OWNER_PHONE, message: `🔔 VoiceAI Connect\n${message}`, recipientType: 'admin', messageType: 'platform_notification' });
 }
 
+// Fires when an agency ACTUALLY ACTIVATES (Free plan started via the start-trial
+// route, or paid checkout completed) and is a real, committed agency. It used to
+// fire in onboarding step 1 the moment a name + phone were saved, which produced
+// a premature "signup" text before the agency picked a plan or set a password.
+// Function name, export, and messageType ('admin_agency_signup') are kept stable
+// so callers and sms_log analytics do not break. Plan line added so the owner can
+// see Free vs Pro vs Scale at a glance.
 async function sendAgencySignupNotificationSMS(agency) {
-  let message = `🎉 New Agency Signup!\nName: ${agency.name}\nEmail: ${agency.email}`;
+  const PLAN_LABELS = { free: 'Free', pro: 'Pro ($99/mo)', scale: 'Scale ($499/mo)' };
+  const planLabel = PLAN_LABELS[agency.plan_type] || agency.plan_type || 'Free';
+  let message = `🎉 New Agency Activated!\nName: ${agency.name}\nEmail: ${agency.email}`;
   if (agency.phone) message += `\nPhone: ${formatPhoneDisplay(agency.phone) || agency.phone}`;
+  message += `\nPlan: ${planLabel}`;
   const referralLabel = getReferralSourceLabel(agency.referral_source);
   if (referralLabel) message += `\nSource: ${referralLabel}`;
   if (agency.country && agency.country !== 'US') message += `\n🌍 Country: ${agency.country}`;
-  return _logSMS({ phone: PLATFORM_OWNER_PHONE, message: `🔔 VoiceAI Connect\n${message}`, agencyId: agency.id, recipientType: 'admin', messageType: 'admin_agency_signup', metadata: { agencyName: agency.name } });
+  return _logSMS({ phone: PLATFORM_OWNER_PHONE, message: `🔔 VoiceAI Connect\n${message}`, agencyId: agency.id, recipientType: 'admin', messageType: 'admin_agency_signup', metadata: { agencyName: agency.name, plan: agency.plan_type || null } });
 }
 
 async function sendAgencyWelcomeSMS(agency, passwordToken) {
@@ -312,8 +323,150 @@ async function sendAgencyWelcomeEmail(agency, passwordToken) {
   });
 }
 
+// ============================================================================
+// AGENCY-OWNED TWILIO SMS (BYOT senders for non-US agencies)
+// ----------------------------------------------------------------------------
+// Non-US agencies with BYOT connected must send agency-scoped SMS (demo
+// follow-ups, demo sample summaries, client call notifications, lifecycle
+// texts) from their OWN Twilio, not the platform Telnyx US number, which does
+// not deliver reliably internationally. sms-logger.js routes those sends here.
+//
+// From resolution, in priority order:
+//   1. agency.twilio_messaging_service_sid  -> MessagingServiceSid (most robust;
+//      a Twilio Messaging Service can hold an alphanumeric Sender ID and fall
+//      back to a long code automatically). Reading a missing column is a safe
+//      undefined, so no migration is required for this to be skipped.
+//   2. agency.demo_phone_number, if that number is SMS-capable on the agency's
+//      Twilio  -> From = the demo number. This is Gibson's "the demo number is
+//      the SMS sender" model, used wherever the carrier allows it (e.g. CA).
+//   3. else  -> From = an alphanumeric Sender ID derived from the agency name
+//      (one-way; UK geographic/Local numbers are voice-first and not valid SMS
+//      senders, so this is the UK path). Alphanumeric is not deliverable to US
+//      or Canada destinations, but a non-US agency's recipients are in-country.
+//
+// A failed agency-Twilio send is surfaced, NOT silently retried on the platform
+// Telnyx number (that would reintroduce the international deliverability
+// problem). See sms-logger.js.
+// ============================================================================
+
+function agencyHasByotCreds(agency) {
+  return !!(agency
+    && agency.byot_enabled
+    && agency.twilio_account_sid
+    && agency.twilio_api_key_encrypted
+    && agency.twilio_api_secret_encrypted);
+}
+
+// Twilio alphanumeric Sender ID rules: max 11 chars, letters/digits/space only,
+// at least one letter. Derive from the agency name, then slug, then a neutral
+// generic. Never leak the platform brand.
+function sanitizeAlphanumericSenderId(agency) {
+  const candidates = [agency && agency.name, agency && agency.slug, 'Notify'];
+  for (const c of candidates) {
+    if (!c) continue;
+    const s = String(c).replace(/[^A-Za-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 11).trim();
+    if (s && /[A-Za-z]/.test(s)) return s;
+  }
+  return 'Notify';
+}
+
+// Cache SMS-capability of a number so we do not query Twilio on every send.
+// Numbers do not change capability, so a long TTL is safe.
+const _smsCapableCache = new Map(); // key `${accountSid}:${e164}` -> { capable, at }
+const _SMS_CAP_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function isNumberSmsCapable(accountSid, authHeader, e164) {
+  if (!accountSid || !e164) return false;
+  const key = `${accountSid}:${e164}`;
+  const cached = _smsCapableCache.get(key);
+  if (cached && (Date.now() - cached.at) < _SMS_CAP_TTL_MS) return cached.capable;
+  try {
+    const res = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers.json?PhoneNumber=${encodeURIComponent(e164)}`,
+      { headers: { 'Authorization': `Basic ${authHeader}` } }
+    );
+    if (!res.ok) { _smsCapableCache.set(key, { capable: false, at: Date.now() }); return false; }
+    const record = ((await res.json()).incoming_phone_numbers || [])[0];
+    const capable = !!(record && record.capabilities && record.capabilities.sms);
+    _smsCapableCache.set(key, { capable, at: Date.now() });
+    return capable;
+  } catch (err) {
+    console.error('❌ isNumberSmsCapable lookup failed:', err.message);
+    _smsCapableCache.set(key, { capable: false, at: Date.now() });
+    return false;
+  }
+}
+
+// Returns the Twilio Messages API sender params: { MessagingServiceSid } or
+// { From }. Never throws.
+async function resolveAgencySmsSender(agency, accountSid, authHeader) {
+  if (agency && agency.twilio_messaging_service_sid) {
+    return { MessagingServiceSid: agency.twilio_messaging_service_sid };
+  }
+  if (agency && agency.demo_phone_number) {
+    const capable = await isNumberSmsCapable(accountSid, authHeader, agency.demo_phone_number);
+    if (capable) return { From: agency.demo_phone_number };
+  }
+  return { From: sanitizeAlphanumericSenderId(agency) };
+}
+
+// Send one SMS via the agency's own Twilio account.
+// Returns { sent, from, sid, error, code }. Never throws.
+async function sendViaAgencyTwilio(agency, toPhone, message) {
+  try {
+    if (!agencyHasByotCreds(agency)) {
+      return { sent: false, from: null, error: 'no_twilio_credentials' };
+    }
+    let apiKey, apiSecret;
+    try {
+      apiKey = decrypt(agency.twilio_api_key_encrypted);
+      apiSecret = decrypt(agency.twilio_api_secret_encrypted);
+    } catch (e) {
+      console.error('❌ Agency Twilio SMS: failed to decrypt credentials:', e.message);
+      return { sent: false, from: null, error: 'decrypt_failed' };
+    }
+    const accountSid = agency.twilio_account_sid;
+    const authHeader = Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
+
+    const sender = await resolveAgencySmsSender(agency, accountSid, authHeader);
+    const senderLabel = sender.MessagingServiceSid
+      ? `MessagingService ${sender.MessagingServiceSid}`
+      : `From ${sender.From}`;
+
+    console.log(`📤 Agency Twilio SMS to ${toPhone} via ${senderLabel} (${agency.name})`);
+
+    const res = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Basic ${authHeader}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: new URLSearchParams({ To: toPhone, Body: message, ...sender }).toString()
+      }
+    );
+
+    const fromLabel = sender.From || sender.MessagingServiceSid || null;
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      console.error(`❌ Agency Twilio SMS failed (HTTP ${res.status}) code=${err.code || 'n/a'}: ${err.message || 'unknown'}`);
+      return { sent: false, from: fromLabel, error: err.message || `http_${res.status}`, code: err.code || null };
+    }
+
+    const data = await res.json().catch(() => ({}));
+    console.log(`✅ Agency Twilio SMS sent (sid ${data.sid || 'n/a'})`);
+    return { sent: true, from: fromLabel, sid: data.sid || null, error: null };
+  } catch (e) {
+    console.error('❌ Agency Twilio SMS exception:', e.message);
+    return { sent: false, from: null, error: e.message };
+  }
+}
+
 module.exports = {
   formatPhoneE164, formatPhoneDisplay, COUNTRY_CALLING_CODES, isInternationalAgency,
+  agencyHasByotCreds, sendViaAgencyTwilio, resolveAgencySmsSender, sanitizeAlphanumericSenderId,
   sendTelnyxSMS, sendPlatformNotificationSMS, sendAgencySignupNotificationSMS,
   sendAgencyWelcomeSMS, sendClientSignupNotificationSMS,
   sendAgencyTrialEndingSMS, sendAgencyPaymentFailedSMS,

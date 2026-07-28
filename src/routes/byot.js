@@ -3,6 +3,11 @@
 // Pro + Scale plan feature — agencies use their own Twilio account
 // for international number provisioning
 // UPDATED: 2026-05-10 — Lowered requirement from Scale-only to Pro+Scale
+// UPDATED: 2026-07-27 - Added releaseBYOTNumber so a number bought on the
+//          agency's own Twilio (e.g. an international demo line) can be released
+//          from that Twilio account on teardown. Deleting the VAPI object and
+//          releasing the platform Telnyx number does NOT touch the agency's
+//          Twilio, so without this a BYOT number bills forever.
 // Destination: src/routes/byot.js
 // ============================================================================
 const express = require('express');
@@ -337,5 +342,87 @@ async function provisionBYOTNumber(agency, options) {
   };
 }
 
+// ============================================================================
+// RELEASE A BYOT (AGENCY TWILIO) NUMBER
+// ----------------------------------------------------------------------------
+// Deletes a phone number from the AGENCY'S OWN Twilio account so it stops
+// billing. This is the Twilio-side counterpart to releaseTelnyxNumber in
+// lib/vapi.js. Deleting the VAPI phone object (fullyReleaseNumber) does NOT
+// release the underlying carrier number, and for BYOT the carrier is the
+// agency's Twilio, not the platform Telnyx account, so it must be deleted here.
+// Used when tearing down an international demo line.
+//
+// No stored SID is required: the number is looked up on the agency's Twilio by
+// its E.164 value to find its IncomingPhoneNumber SID, then deleted. Fully
+// idempotent and non-throwing:
+//   - agency has no Twilio creds                 -> false (nothing we can do)
+//   - number not on the account (already gone)   -> true
+//   - lookup or decrypt failure                  -> false (logged)
+//   - Twilio DELETE returns 204 (or 404)         -> true
+// Twilio's delete on an IncomingPhoneNumber returns 204 No Content on success.
+// ============================================================================
+async function releaseBYOTNumber(agency, e164) {
+  if (!agency || !agency.twilio_account_sid || !agency.twilio_api_key_encrypted) {
+    console.warn('⚠️ releaseBYOTNumber: agency has no Twilio credentials, nothing to release');
+    return false;
+  }
+  if (!e164) {
+    console.warn('⚠️ releaseBYOTNumber: no number provided');
+    return false;
+  }
+
+  // Normalize to E.164 (Twilio stores +<country><subscriber>).
+  let number = String(e164).trim();
+  if (!number.startsWith('+')) number = `+${number.replace(/\D/g, '')}`;
+
+  let apiKey, apiSecret;
+  try {
+    apiKey = decrypt(agency.twilio_api_key_encrypted);
+    apiSecret = decrypt(agency.twilio_api_secret_encrypted);
+  } catch (err) {
+    console.error('❌ releaseBYOTNumber: failed to decrypt Twilio credentials:', err.message);
+    return false;
+  }
+
+  const accountSid = agency.twilio_account_sid;
+  const authHeader = Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
+
+  try {
+    // 1. Find the IncomingPhoneNumber SID for this E.164 on the agency's Twilio.
+    const lookupRes = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers.json?PhoneNumber=${encodeURIComponent(number)}`,
+      { headers: { 'Authorization': `Basic ${authHeader}` } }
+    );
+    if (!lookupRes.ok) {
+      const t = await lookupRes.text().catch(() => '');
+      console.error(`❌ releaseBYOTNumber lookup failed for ${number}: HTTP ${lookupRes.status} ${t.slice(0, 160)}`);
+      return false;
+    }
+    const record = ((await lookupRes.json()).incoming_phone_numbers || [])[0];
+    if (!record || !record.sid) {
+      // Not on this account. Already released or never owned here. Treat as done.
+      console.log(`ℹ️ releaseBYOTNumber: ${number} not found on agency Twilio (already released?)`);
+      return true;
+    }
+
+    // 2. Delete it. Twilio returns 204 No Content on success.
+    const delRes = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers/${record.sid}.json`,
+      { method: 'DELETE', headers: { 'Authorization': `Basic ${authHeader}` } }
+    );
+    if (delRes.ok || delRes.status === 204 || delRes.status === 404) {
+      console.log(`✅ BYOT Twilio number RELEASED: ${number} (${record.sid})`);
+      return true;
+    }
+    const t = await delRes.text().catch(() => '');
+    console.error(`❌ releaseBYOTNumber delete failed for ${number} (${record.sid}): HTTP ${delRes.status} ${t.slice(0, 160)}`);
+    return false;
+  } catch (err) {
+    console.error(`❌ releaseBYOTNumber error for ${number}:`, err.message);
+    return false;
+  }
+}
+
 module.exports = router;
 module.exports.provisionBYOTNumber = provisionBYOTNumber;
+module.exports.releaseBYOTNumber = releaseBYOTNumber;

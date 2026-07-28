@@ -568,14 +568,25 @@ async function handleDemoToolCall(req, res, message) {
     if (!agency)
       return res.status(200).json({ results: [{ toolCallId, result: 'I just sent you a text — check your phone!' }] });
 
-    const { formatPhoneDisplay, sendTelnyxSMS } = require('../lib/notifications');
+    const { formatPhoneDisplay } = require('../lib/notifications');
     const callerDisplay = formatPhoneDisplay ? formatPhoneDisplay(callerPhone) : callerPhone;
     const smsContent = buildDemoSmsContent({
       business_name: args.business_name || 'Your Business', business_type: args.business_type || 'business',
       service_requested: args.service_requested || 'General inquiry', customer_name: args.customer_name || 'Customer',
       caller_phone_display: callerDisplay,
     }, agency);
-    await sendTelnyxSMS(callerPhone, smsContent);
+    // Route through sendAndLogSMS so a non-US agency sends this mid-call sample
+    // from its own Twilio (see sms-logger.js), and so it is logged like every
+    // other SMS. agency.id is authoritative even when resolveAgencyForDemo
+    // returned a partial record, sms-logger re-fetches the full agency row.
+    await sendAndLogSMS({
+      phone: callerPhone,
+      message: smsContent,
+      agencyId: agency.id,
+      recipientType: 'prospect',
+      messageType: 'demo_sample_summary',
+      metadata: { businessName: args.business_name || null, businessType: args.business_type || null },
+    });
     console.log(`✅ Demo SMS sent to ${callerPhone} in ${Date.now() - startTime}ms`);
     return res.status(200).json({ results: [{ toolCallId, result: 'Done! The text has been sent to their phone with the full call summary.' }] });
   } catch (error) {

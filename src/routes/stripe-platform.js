@@ -20,7 +20,7 @@
 // ============================================================================
 const Stripe = require('stripe');
 const { supabase, getAgencyByStripeCustomerId } = require('../lib/supabase');
-const { sendEmail, sendPlatformNotificationSMS } = require('../lib/notifications');
+const { sendEmail, sendPlatformNotificationSMS, sendAgencySignupNotificationSMS } = require('../lib/notifications');
 const { fullyReleaseNumber, disableAssistant } = require('../lib/vapi');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -612,6 +612,22 @@ async function handleAgencyCheckoutCompleted(session) {
 
   const planConfig = PLATFORM_PLANS[plan];
 
+  // Load the agency BEFORE the activation update so we can tell whether this is
+  // its first activation. checkout.session.completed can be retried by Stripe,
+  // and customer.subscription.created fires alongside it; keying off status is
+  // robust because at signup status is 'pending_payment' and only this handler
+  // moves it to 'trial'. A retry then sees 'trial' and skips, so the owner is
+  // texted exactly once, with the plan they picked.
+  const { data: agencyBefore } = await supabase
+    .from('agencies')
+    .select('id, name, email, phone, referral_source, country, status')
+    .eq('id', agencyId)
+    .single();
+
+  const isFirstActivation =
+    !!agencyBefore &&
+    (agencyBefore.status === 'pending' || agencyBefore.status === 'pending_payment');
+
   // Compute trial_ends_at. The checkout.session event doesn't include the
   // subscription's trial_end, so we use Date.now + 14 days as an initial
   // value. handleAgencySubscriptionUpdated will overwrite this with
@@ -652,6 +668,18 @@ async function handleAgencyCheckoutCompleted(session) {
     stripe_event_id: session.id,
     metadata: { plan },
   });
+
+  // Notify the platform owner that a paid agency just activated, WITH the plan.
+  // Guarded on the pending -> trial transition above so a webhook retry or the
+  // parallel subscription.created event cannot double-text. Best-effort: a
+  // failed SMS must not fail the webhook.
+  if (isFirstActivation) {
+    try {
+      await sendAgencySignupNotificationSMS({ ...agencyBefore, plan_type: plan });
+    } catch (e) {
+      console.error('Failed to send agency activation SMS:', e.message);
+    }
+  }
 
   console.log('✅ Agency activated:', agencyId);
 }

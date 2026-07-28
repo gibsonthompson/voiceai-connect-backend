@@ -19,7 +19,13 @@
 // ============================================================================
 
 const { supabase } = require('./supabase');
-const { sendTelnyxSMS, formatPhoneE164 } = require('./notifications');
+const {
+  sendTelnyxSMS,
+  formatPhoneE164,
+  isInternationalAgency,
+  agencyHasByotCreds,
+  sendViaAgencyTwilio,
+} = require('./notifications');
 
 /**
  * Send an SMS via Telnyx and log it to the sms_log table.
@@ -44,7 +50,30 @@ async function sendAndLogSMS({ phone, message, agencyId, recipientType, messageT
     return false;
   }
 
-  const formattedPhone = formatPhoneE164(phone);
+  // ── Resolve the agency (if any) to decide the transport ─────────────
+  // A non-US agency with BYOT connected must send its agency-scoped SMS from
+  // its OWN Twilio, not the platform Telnyx US number (which does not deliver
+  // reliably internationally). Admin/platform texts (recipientType 'admin')
+  // always stay on platform Telnyx. On a lookup failure we fall back to the
+  // platform sender, which is the pre-existing behavior for every SMS.
+  let agency = null;
+  if (agencyId) {
+    try {
+      const { data } = await supabase.from('agencies').select('*').eq('id', agencyId).single();
+      agency = data || null;
+    } catch (err) {
+      console.warn(`⚠️ SMS Logger: agency lookup failed for ${agencyId}, using platform sender:`, err.message);
+    }
+  }
+
+  const useAgencyTwilio = !!(agency
+    && recipientType !== 'admin'
+    && isInternationalAgency(agency)
+    && agencyHasByotCreds(agency));
+
+  // Format for the agency's country when known (e.g. a GB 0-prefixed number),
+  // otherwise US as before.
+  const formattedPhone = formatPhoneE164(phone, (agency && agency.country) || 'US');
   if (!formattedPhone) {
     console.warn(`⚠️ SMS Logger: Invalid phone number: ${phone} (for ${messageType || 'unknown'})`);
     await logSMS({
@@ -62,13 +91,34 @@ async function sendAndLogSMS({ phone, message, agencyId, recipientType, messageT
 
   let sent = false;
   let telnyxMessageId = null;
+  let sendMeta = { ...(metadata || {}) };
 
-  try {
-    // sendTelnyxSMS returns true/false — we can't get the message ID from current implementation
-    // If you update sendTelnyxSMS to return the response, we can capture the ID
-    sent = await sendTelnyxSMS(formattedPhone, message);
-  } catch (err) {
-    console.error(`❌ SMS Logger: Telnyx send failed for ${messageType}:`, err.message);
+  if (useAgencyTwilio) {
+    try {
+      const result = await sendViaAgencyTwilio(agency, formattedPhone, message);
+      sent = result.sent;
+      sendMeta = { ...sendMeta, sms_provider: 'agency_twilio', sms_from: result.from || null, twilio_sid: result.sid || null };
+      if (!sent) {
+        // Do NOT fall back to the platform Telnyx number for a non-US agency.
+        // That would reintroduce the exact international deliverability problem
+        // this path exists to fix. Surface the failure instead.
+        sendMeta.sms_error = result.error || 'agency_twilio_failed';
+        if (result.code) sendMeta.sms_error_code = result.code;
+        console.error(`❌ SMS Logger: agency Twilio send failed for ${messageType} (${agency.name}); not falling back to platform. Reason: ${result.error}`);
+      }
+    } catch (err) {
+      console.error(`❌ SMS Logger: agency Twilio send threw for ${messageType}:`, err.message);
+      sendMeta = { ...sendMeta, sms_provider: 'agency_twilio', sms_error: err.message };
+    }
+  } else {
+    try {
+      // sendTelnyxSMS returns true/false — we can't get the message ID from current implementation
+      // If you update sendTelnyxSMS to return the response, we can capture the ID
+      sent = await sendTelnyxSMS(formattedPhone, message);
+    } catch (err) {
+      console.error(`❌ SMS Logger: Telnyx send failed for ${messageType}:`, err.message);
+    }
+    sendMeta = { ...sendMeta, sms_provider: 'platform_telnyx' };
   }
 
   // Log regardless of outcome
@@ -80,7 +130,7 @@ async function sendAndLogSMS({ phone, message, agencyId, recipientType, messageT
     message,
     telnyxMessageId,
     status: sent ? 'sent' : 'failed',
-    metadata,
+    metadata: sendMeta,
   });
 
   return sent;
