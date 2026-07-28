@@ -35,6 +35,7 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { fullyReleaseNumber } = require('../lib/vapi');
+const { releaseBYOTNumber } = require('./byot');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 
@@ -202,6 +203,26 @@ router.post('/cleanup-abandoned-checkouts', async (req, res) => {
         releaseResult = await fullyReleaseNumber(fresh.vapi_phone_id || null, phoneForRelease);
       } catch (relErr) {
         console.error(`❌ Number release error for ${fresh.id}: ${relErr.message}`);
+      }
+
+      // 1b. BYOT: a card-required signup under a non-US agency provisions its
+      //     number on the agency's OWN Twilio (provisioning_method='byot'), so
+      //     fullyReleaseNumber above cannot release it. For those rows, look up
+      //     the agency's Twilio creds and release the number there too so it
+      //     stops billing. Never throws; no-op when creds are absent.
+      if (fresh.provisioning_method === 'byot' && phoneForRelease) {
+        try {
+          const { data: relAgency } = await supabase
+            .from('agencies')
+            .select('id, name, twilio_account_sid, twilio_api_key_encrypted, twilio_api_secret_encrypted')
+            .eq('id', fresh.agency_id)
+            .single();
+          if (relAgency && relAgency.twilio_account_sid && relAgency.twilio_api_key_encrypted) {
+            await releaseBYOTNumber(relAgency, phoneForRelease);
+          }
+        } catch (byotErr) {
+          console.error(`❌ BYOT release error for ${fresh.id}: ${byotErr.message}`);
+        }
       }
 
       // 2. Delete the VAPI assistant + query tool.

@@ -78,7 +78,7 @@ const {
 const { canAgencyAddClient } = require('./stripe-platform');
 
 // Import BYOT provisioning
-const { provisionBYOTNumber } = require('./byot');
+const { provisionBYOTNumber, releaseBYOTNumber } = require('./byot');
 
 // Import per-client billing update
 const { updateClientBillingQuantity } = require('../lib/usage-tracker');
@@ -896,6 +896,12 @@ async function handleClientSignup(req, res) {
         // just bought so we don't leak it, then fail cleanly.
         console.error('❌ Live phone_number conflict, releasing the number we just purchased');
         try { await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release of conflicted number failed:', e.message); }
+        // BYOT: the number was bought on the agency's OWN Twilio, so the
+        // release above cannot free it. Release it from the agency's Twilio
+        // too. Only for byot-provisioned numbers; never throws.
+        if (phoneResult.provisioningMethod === 'byot') {
+          try { await releaseBYOTNumber(agency, phoneResult.number); } catch (e) { console.warn('⚠️ BYOT release of conflicted number failed:', e.message); }
+        }
         await cleanupVapiResources(createdAssistantId, createdQueryToolId, 'phone-collision');
         createdAssistantId = null;
         createdQueryToolId = null;
@@ -909,6 +915,11 @@ async function handleClientSignup(req, res) {
       // The number was already purchased; release it so a failed insert does
       // not leak a billable Telnyx number.
       try { await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release after insert failure failed:', e.message); }
+      // BYOT: also release from the agency's own Twilio (see note above);
+      // only for byot-provisioned numbers, never throws.
+      if (phoneResult.provisioningMethod === 'byot') {
+        try { await releaseBYOTNumber(agency, phoneResult.number); } catch (e) { console.warn('⚠️ BYOT release after insert failure failed:', e.message); }
+      }
       throw clientError;
     }
 
@@ -1299,6 +1310,12 @@ async function handleAgencyAddClient(req, res) {
         // just bought so we don't leak it, then fail cleanly.
         console.error('❌ Live phone_number conflict, releasing the number we just purchased');
         try { await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release of conflicted number failed:', e.message); }
+        // BYOT: the number was bought on the agency's OWN Twilio, so the
+        // release above cannot free it. Release it from the agency's Twilio
+        // too. Only for byot-provisioned numbers; never throws.
+        if (phoneResult.provisioningMethod === 'byot') {
+          try { await releaseBYOTNumber(agency, phoneResult.number); } catch (e) { console.warn('⚠️ BYOT release of conflicted number failed:', e.message); }
+        }
         await cleanupVapiResources(createdAssistantId, createdQueryToolId, 'phone-collision');
         createdAssistantId = null;
         createdQueryToolId = null;
@@ -1312,6 +1329,11 @@ async function handleAgencyAddClient(req, res) {
       // The number was already purchased; release it so a failed insert does
       // not leak a billable Telnyx number.
       try { await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release after insert failure failed:', e.message); }
+      // BYOT: also release from the agency's own Twilio (see note above);
+      // only for byot-provisioned numbers, never throws.
+      if (phoneResult.provisioningMethod === 'byot') {
+        try { await releaseBYOTNumber(agency, phoneResult.number); } catch (e) { console.warn('⚠️ BYOT release after insert failure failed:', e.message); }
+      }
       throw clientError;
     }
 

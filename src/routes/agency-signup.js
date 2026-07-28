@@ -465,6 +465,16 @@ async function handleAgencyOnboarding(req, res) {
           updateData.referral_source = data.referral_source || null;
           console.log(`📊 Referral source: ${getReferralSourceLabel(data.referral_source)}`);
         }
+        // Country now captured at onboarding (was previously only set as a
+        // Stripe Connect side effect, which left non-US agencies with no
+        // country until they connected Stripe, breaking SMS routing). Keep
+        // currency in sync so paid pricing renders in the right currency.
+        if (data.country) {
+          const resolvedCountry = String(data.country).toUpperCase();
+          updateData.country = resolvedCountry;
+          updateData.currency = getCurrencyForCountry(resolvedCountry);
+          console.log(`🌍 Country set: ${resolvedCountry} (currency: ${updateData.currency})`);
+        }
         break;
         
       case 2: // Pricing

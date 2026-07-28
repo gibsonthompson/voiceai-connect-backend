@@ -78,6 +78,7 @@ const {
   sendPlatformNotificationSMS
 } = require('../lib/notifications');
 const { enableAssistant, disableAssistant, disablePhoneNumber, enablePhoneNumber, fullyReleaseNumber } = require('../lib/vapi');
+const { releaseBYOTNumber } = require('./byot');
 const { getSmsTemplate } = require('../lib/sms-templates');
 const { updateClientBillingQuantity } = require('../lib/usage-tracker');
 
@@ -1179,6 +1180,18 @@ async function expireTrials() {
           console.error('❌ Number release failed:', relErr.message);
           if (client.vapi_phone_id) { try { await disablePhoneNumber(client.vapi_phone_id); } catch {} }
         }
+
+        // BYOT: the number may have been bought on the AGENCY'S own Twilio, not
+        // the platform Telnyx. fullyReleaseNumber deletes the VAPI object and
+        // releases Telnyx, but never touches the agency's Twilio, so without
+        // this a BYOT number keeps billing on the agency's account forever.
+        // releaseBYOTNumber is idempotent and never throws; gated on the agency
+        // actually having Twilio creds so non-BYOT teardowns stay silent.
+        const relAgency = client.agencies;
+        if (relAgency && relAgency.twilio_account_sid && relAgency.twilio_api_key_encrypted && client.vapi_phone_number) {
+          try { await releaseBYOTNumber(relAgency, client.vapi_phone_number); }
+          catch (byotErr) { console.error('❌ BYOT release failed:', byotErr.message); }
+        }
       }
 
       // ── DELETE VAPI assistant ──
@@ -1316,7 +1329,7 @@ async function resolveClientForSubscriptionEvent(subscription, stripeAccountId) 
 // clients_phone_number_key unique constraint). Never throws; returns a summary.
 // ============================================================================
 async function releaseClientResources(client) {
-  const result = { telnyxReleased: false, vapiDeleted: false, assistantDeleted: false };
+  const result = { telnyxReleased: false, vapiDeleted: false, assistantDeleted: false, byotReleased: false };
 
   if (client.vapi_phone_id || client.vapi_phone_number) {
     try {
@@ -1329,6 +1342,17 @@ async function releaseClientResources(client) {
     } catch (relErr) {
       console.error('❌ Number release failed:', relErr.message);
       if (client.vapi_phone_id) { try { await disablePhoneNumber(client.vapi_phone_id); } catch {} }
+    }
+
+    // BYOT: for a client provisioned on the AGENCY'S own Twilio, the number is
+    // not a platform Telnyx number, so fullyReleaseNumber above cannot release
+    // it and it keeps billing on the agency's Twilio. Release it there too.
+    // Idempotent and never throws; gated on the agency having Twilio creds so
+    // non-BYOT teardowns stay silent.
+    const relAgency = client.agencies;
+    if (relAgency && relAgency.twilio_account_sid && relAgency.twilio_api_key_encrypted && client.vapi_phone_number) {
+      try { result.byotReleased = await releaseBYOTNumber(relAgency, client.vapi_phone_number); }
+      catch (byotErr) { console.error('❌ BYOT release failed:', byotErr.message); }
     }
   }
 

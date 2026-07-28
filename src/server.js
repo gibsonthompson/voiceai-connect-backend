@@ -42,6 +42,7 @@ const express = require('express');
 const cors = require('cors');
 const { supabase } = require('./lib/supabase');
 const { fullyReleaseNumber } = require('./lib/vapi');
+const { releaseBYOTNumber } = require('./routes/byot');
 const { expressErrorHandler, setupProcessErrorHandlers } = require('./lib/error-monitor');
 const { sendPlatformNotificationSMS, sendAgencySignupNotificationSMS } = require('./lib/notifications');
 
@@ -418,7 +419,7 @@ app.post('/api/agency/cancel', requirePermissionIfAuthed('billing'), async (req,
   try {
     const { data: agency, error } = await supabase
       .from('agencies')
-      .select('id, name, email, plan_type, subscription_status, stripe_subscription_id, demo_vapi_phone_id, demo_phone_number, demo_assistant_id')
+      .select('id, name, email, plan_type, subscription_status, stripe_subscription_id, demo_vapi_phone_id, demo_phone_number, demo_assistant_id, twilio_account_sid, twilio_api_key_encrypted, twilio_api_secret_encrypted')
       .eq('id', agency_id)
       .single();
 
@@ -455,6 +456,14 @@ app.post('/api/agency/cancel', requirePermissionIfAuthed('billing'), async (req,
         console.log(`📞 Demo released for ${agency.name}: VAPI=${release.vapiDeleted} Telnyx=${release.telnyxReleased}`);
         if (!release.telnyxReleased) {
           console.error(`⚠️ Telnyx demo NOT released for ${agency.name} (${agency.demo_phone_number}), orphan sweep will catch it`);
+        }
+        // BYOT: a non-US agency's demo number was provisioned on the agency's
+        // OWN Twilio, so fullyReleaseNumber (VAPI + Telnyx) cannot release it.
+        // Release it from the agency's Twilio too. Never throws, and no-ops
+        // when the agency has no Twilio creds (US agencies).
+        if (agency.twilio_account_sid && agency.twilio_api_key_encrypted && agency.demo_phone_number) {
+          try { await releaseBYOTNumber(agency, agency.demo_phone_number); }
+          catch (byotErr) { console.error('BYOT demo release failed (continuing):', byotErr.message); }
         }
         if (agency.demo_assistant_id && process.env.VAPI_API_KEY) {
           try {

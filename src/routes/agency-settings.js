@@ -318,6 +318,7 @@ async function getAgencySettings(req, res) {
           allow_client_branding: agency.allow_client_branding || false,
           calendar_enabled_plans: agency.calendar_enabled_plans || ['pro', 'growth'],
           timezone: agency.timezone,
+          country: agency.country || 'US',
         },
         stats: null
       });
