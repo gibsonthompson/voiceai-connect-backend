@@ -2,6 +2,10 @@
 // PLATFORM ADMIN ROUTES
 // Only accessible by whitelisted platform owners
 // WITH LEADS MANAGEMENT + CSV IMPORT + PIPELINE QUEUE
+// UPDATED: 2026-07-29: /dashboard and /agencies now use Postgres rollup RPCs
+//          (admin_dashboard_rollup, admin_agencies_rollup) instead of pulling
+//          whole tables and counting in JS. Fixes the slow admin load. Response
+//          shapes are unchanged.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -91,88 +95,38 @@ router.get('/verify', requireAdmin, (req, res) => {
 
 // ============================================================================
 // DASHBOARD OVERVIEW STATS
+// ----------------------------------------------------------------------------
+// Backed by the Postgres function admin_dashboard_rollup, which computes the
+// agency/client/call counts, platform MRR, and 7-day recents in the database
+// instead of pulling whole tables into Node and counting them. Same response
+// shape as before: { stats: {...}, recentAgencyList: [...] }.
 // ============================================================================
 router.get('/dashboard', requireAdmin, async (req, res) => {
   try {
-    const { data: agencies, error: agencyError } = await supabase
-      .from('agencies')
-      .select('id, name, email, plan_type, subscription_status, status, created_at, trial_ends_at');
+    const { data, error } = await supabase.rpc('admin_dashboard_rollup');
+    if (error) throw error;
 
-    if (agencyError) throw agencyError;
-
-    const { data: clients, error: clientError } = await supabase
-      .from('clients')
-      .select('id, agency_id, subscription_status, plan_type, calls_this_month, created_at');
-
-    if (clientError) throw clientError;
-
-    const startOfMonth = new Date();
-    startOfMonth.setDate(1);
-    startOfMonth.setHours(0, 0, 0, 0);
-
-    const { count: callsThisMonth } = await supabase
-      .from('calls')
-      .select('id', { count: 'exact', head: true })
-      .gte('created_at', startOfMonth.toISOString());
-
-    const totalAgencies = agencies?.length || 0;
-    const activeAgencies = agencies?.filter(a => 
-      a.subscription_status === 'active' || a.subscription_status === 'trialing'
-    ).length || 0;
-    const trialAgencies = agencies?.filter(a => 
-      a.subscription_status === 'trialing' || a.status === 'trial'
-    ).length || 0;
-
-    const totalClients = clients?.length || 0;
-    const activeClients = clients?.filter(c => 
-      c.subscription_status === 'active' || c.subscription_status === 'trial'
-    ).length || 0;
-
-    const PLATFORM_PRICES = {
-      free: 0,
-      pro: 17900,
-      scale: 49900,
-      starter: 0,
-      professional: 17900,
-      enterprise: 49900
+    // Default every legacy stat key, then overlay whatever the rollup returned,
+    // and coerce to Number so a bigint-as-string from Postgres never leaks a
+    // string into the response (the old JS path always returned numbers).
+    const raw = { ...(data?.stats || {}) };
+    const stats = {
+      totalAgencies: Number(raw.totalAgencies) || 0,
+      activeAgencies: Number(raw.activeAgencies) || 0,
+      trialAgencies: Number(raw.trialAgencies) || 0,
+      totalClients: Number(raw.totalClients) || 0,
+      activeClients: Number(raw.activeClients) || 0,
+      platformMRR: Number(raw.platformMRR) || 0,
+      callsThisMonth: Number(raw.callsThisMonth) || 0,
+      recentAgencies: Number(raw.recentAgencies) || 0,
+      recentClients: Number(raw.recentClients) || 0,
     };
 
-    let platformMRR = 0;
-    agencies?.forEach(agency => {
-      if (agency.subscription_status === 'active') {
-        const plan = agency.plan_type || 'starter';
-        platformMRR += PLATFORM_PRICES[plan] || PLATFORM_PRICES.starter;
-      }
-    });
-
-    const weekAgo = new Date();
-    weekAgo.setDate(weekAgo.getDate() - 7);
-
-    const recentAgencies = agencies?.filter(a => 
-      new Date(a.created_at) > weekAgo
-    ).length || 0;
-
-    const recentClients = clients?.filter(c => 
-      new Date(c.created_at) > weekAgo
-    ).length || 0;
-
-    console.log(`📊 Admin dashboard: ${totalAgencies} agencies, ${totalClients} clients, $${platformMRR/100} MRR`);
+    console.log(`📊 Admin dashboard (rollup): ${stats.totalAgencies} agencies, ${stats.totalClients} clients, $${(stats.platformMRR || 0) / 100} MRR`);
 
     res.json({
-      stats: {
-        totalAgencies,
-        activeAgencies,
-        trialAgencies,
-        totalClients,
-        activeClients,
-        platformMRR,
-        callsThisMonth: callsThisMonth || 0,
-        recentAgencies,
-        recentClients,
-      },
-      recentAgencyList: agencies
-        ?.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-        .slice(0, 5) || [],
+      stats,
+      recentAgencyList: data?.recentAgencyList || [],
     });
 
   } catch (error) {
@@ -183,6 +137,12 @@ router.get('/dashboard', requireAdmin, async (req, res) => {
 
 // ============================================================================
 // LIST ALL AGENCIES — Enriched with aggregate counts from all tables
+// ----------------------------------------------------------------------------
+// The agency fetch (with its status/plan/search filters and pagination) is
+// unchanged. The per-agency counts now come from a single admin_agencies_rollup
+// RPC (one row per agency) instead of five sequential table pulls plus JS
+// counting. The slowest offender before was counting calls in JS by pulling
+// every call row for the page's clients. Merge + summary output is identical.
 // ============================================================================
 router.get('/agencies', requireAdmin, async (req, res) => {
   try {
@@ -208,86 +168,39 @@ router.get('/agencies', requireAdmin, async (req, res) => {
 
     if (error) throw error;
 
-    // Fetch aggregate counts for all agencies in parallel
-    const agencyIds = (agencies || []).map(a => a.id);
+    // One Postgres call returns all per-agency aggregate counts. Coerce every
+    // value to Number (bigint columns come back as strings over PostgREST).
+    const { data: rollupRows, error: rollupError } = await supabase.rpc('admin_agencies_rollup');
+    if (rollupError) throw rollupError;
 
-    // Client counts per agency + build client→agency map for call counting
-    const { data: clientRows } = await supabase
-      .from('clients')
-      .select('agency_id, id')
-      .in('agency_id', agencyIds);
-
-    const clientCounts = {};
-    const clientIdToAgency = {};
-    (clientRows || []).forEach(c => {
-      clientCounts[c.agency_id] = (clientCounts[c.agency_id] || 0) + 1;
-      clientIdToAgency[c.id] = c.agency_id;
+    const rollup = {};
+    (rollupRows || []).forEach(r => {
+      rollup[r.agency_id] = {
+        client_count: Number(r.client_count) || 0,
+        call_count: Number(r.call_count) || 0,
+        lead_count: Number(r.lead_count) || 0,
+        total_revenue: Number(r.total_revenue) || 0,
+        payment_count: Number(r.payment_count) || 0,
+        user_count: Number(r.user_count) || 0,
+      };
     });
 
-    // Call counts per agency (calls are linked to clients, not agencies directly)
-    let callCounts = {};
-    const allClientIds = Object.keys(clientIdToAgency);
-    if (allClientIds.length > 0) {
-      const { data: callRows } = await supabase
-        .from('calls')
-        .select('client_id')
-        .in('client_id', allClientIds);
-
-      (callRows || []).forEach(c => {
-        const agId = clientIdToAgency[c.client_id];
-        if (agId) callCounts[agId] = (callCounts[agId] || 0) + 1;
-      });
-    }
-
-    // Lead counts per agency
-    const { data: leadRows } = await supabase
-      .from('leads')
-      .select('agency_id')
-      .in('agency_id', agencyIds);
-
-    const leadCounts = {};
-    (leadRows || []).forEach(l => {
-      leadCounts[l.agency_id] = (leadCounts[l.agency_id] || 0) + 1;
+    // Merge the rollup counts onto each fetched agency row.
+    const enriched = (agencies || []).map(a => {
+      const r = rollup[a.id] || {};
+      return {
+        ...a,
+        client_count: r.client_count || 0,
+        call_count: r.call_count || 0,
+        lead_count: r.lead_count || 0,
+        total_revenue: r.total_revenue || 0,
+        payment_count: r.payment_count || 0,
+        user_count: r.user_count || 0,
+      };
     });
 
-    // Revenue per agency (succeeded payments only)
-    const { data: paymentRows } = await supabase
-      .from('payments')
-      .select('agency_id, amount, status')
-      .in('agency_id', agencyIds)
-      .eq('status', 'succeeded');
-
-    const revenueTotals = {};
-    const paymentCounts = {};
-    (paymentRows || []).forEach(p => {
-      revenueTotals[p.agency_id] = (revenueTotals[p.agency_id] || 0) + (p.amount || 0);
-      paymentCounts[p.agency_id] = (paymentCounts[p.agency_id] || 0) + 1;
-    });
-
-    // User counts per agency
-    const { data: userRows } = await supabase
-      .from('users')
-      .select('agency_id')
-      .in('agency_id', agencyIds);
-
-    const userCounts = {};
-    (userRows || []).forEach(u => {
-      if (u.agency_id) userCounts[u.agency_id] = (userCounts[u.agency_id] || 0) + 1;
-    });
-
-    // Enrich each agency
-    const enriched = (agencies || []).map(a => ({
-      ...a,
-      client_count: clientCounts[a.id] || 0,
-      call_count: callCounts[a.id] || 0,
-      lead_count: leadCounts[a.id] || 0,
-      total_revenue: revenueTotals[a.id] || 0,
-      payment_count: paymentCounts[a.id] || 0,
-      user_count: userCounts[a.id] || 0,
-    }));
-
-    // Platform-wide summary
-    const sumValues = (obj) => Object.values(obj).reduce((s, c) => s + c, 0);
+    // Platform-wide summary, computed over the fetched agencies (same scope as
+    // the pre-rollup route) so the tiles read identically.
     const summary = {
       total_agencies: enriched.length,
       active: enriched.filter(a => a.subscription_status === 'active').length,
@@ -295,14 +208,14 @@ router.get('/agencies', requireAdmin, async (req, res) => {
       past_due: enriched.filter(a => a.subscription_status === 'past_due').length,
       canceled: enriched.filter(a => ['canceled', 'suspended'].includes(a.subscription_status || a.status)).length,
       pending: enriched.filter(a => a.subscription_status === 'pending' || a.status === 'pending_payment').length,
-      total_clients: sumValues(clientCounts),
-      total_calls: sumValues(callCounts),
-      total_leads: sumValues(leadCounts),
-      total_revenue: sumValues(revenueTotals),
+      total_clients: enriched.reduce((s, a) => s + a.client_count, 0),
+      total_calls: enriched.reduce((s, a) => s + a.call_count, 0),
+      total_leads: enriched.reduce((s, a) => s + a.lead_count, 0),
+      total_revenue: enriched.reduce((s, a) => s + a.total_revenue, 0),
       stripe_connected: enriched.filter(a => a.stripe_charges_enabled).length,
     };
 
-    console.log(`📋 Admin fetched ${enriched.length} agencies (enriched)`);
+    console.log(`📋 Admin fetched ${enriched.length} agencies (rollup)`);
 
     res.json({ agencies: enriched, summary });
 

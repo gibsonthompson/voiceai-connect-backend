@@ -28,6 +28,8 @@
 //                      (one-time Express dashboard link for the Payments page)
 //                      and POST /api/cron/reconcile-subscriptions (self-heals
 //                      client rows against real Stripe status).
+// UPDATED: 2026-07-29: Mount admin-calls router (calls + demos feeds) that the
+//                      redesigned admin Overview and Calls pages read from.
 // Destination: src/server.js (or src/index.js) — FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -240,6 +242,7 @@ const calendarRoutes = require('./routes/calendar');
 const googleCalendarAuthRoutes = require('./routes/google-calendar-auth');
 const { updateAssistantCalendar } = require('./lib/calendar-tools');
 const adminRoutes = require('./routes/admin');
+const adminCallsRoutes = require('./routes/admin-calls');
 const adminAgencyDetail = require('./routes/admin-agency-detail');
 const smsLogRoutes = require('./routes/sms-log');
 const errorReportRoutes = require('./routes/error-report');
@@ -1289,6 +1292,7 @@ app.get('/api/auth/google/callback', googleCallback);
 // ============================================================================
 
 app.use('/api/admin', adminRoutes);
+app.use('/api/admin', adminCallsRoutes);
 app.use('/api/admin', adminAgencyDetail);
 app.use('/api/admin', smsLogRoutes);
 app.use('/api/admin', errorReportRoutes);
