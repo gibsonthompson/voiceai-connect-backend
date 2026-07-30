@@ -39,6 +39,14 @@
 // ============================================================================
 require('dotenv').config();
 
+// Resolve Stripe test/live mode from STRIPE_MODE and copy the selected key set
+// onto the plain STRIPE_* env vars the rest of the app reads. Must run BEFORE
+// any module that constructs a Stripe client at load time (stripe-connect,
+// stripe-platform). One env change flips the whole backend between modes. See
+// stripe-mode.js. Keys are NOT generated here; both sets already exist in your
+// Stripe dashboard and are pasted into env once as ..._TEST / ..._LIVE.
+require('./stripe-mode');
+
 // Force IPv4-first DNS resolution. In the DigitalOcean container, resolving a
 // Cloudflare-fronted host (e.g. api.elevenlabs.io) to an IPv6 address that the
 // container cannot route makes outbound fetches hang on connect until the
@@ -235,6 +243,7 @@ const {
   verifyToken,
   setPassword,
   changePassword,
+  recoverAccountSetup,
   authMiddleware,
   requirePermission,
   requirePermissionIfAuthed,
@@ -1285,6 +1294,10 @@ app.post('/api/auth/agency/login', agencyLogin);
 app.post('/api/auth/client/login', clientLogin);
 app.post('/api/auth/verify', verifyToken);
 app.post('/api/auth/set-password', setPassword);
+// Recovery for an account created but never given a password (lost/closed
+// set-password tab). The login page calls this on a "Password not set" error to
+// mint a fresh set-password token and redirect the user to /auth/set-password.
+app.post('/api/auth/recover-setup', recoverAccountSetup);
 app.post('/api/auth/change-password', changePassword);
 app.use('/api/auth', passwordResetRoutes);
 app.get('/api/auth/google', googleAuth);

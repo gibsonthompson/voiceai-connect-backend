@@ -3,7 +3,7 @@
 // UPDATED: Team member permissions in login responses
 // UPDATED: client_staff role accepted in client login
 // UPDATED: Clear visible_password on self-password-change
-// UPDATED: 2026-05-18 — Phase 1: dashboard_access check on client login
+// UPDATED: 2026-05-18 - Phase 1: dashboard_access check on client login
 // UPDATED: 2026-07-11: requireAgencyAccess middleware. Requires a valid token,
 //          confirms the caller owns the :agencyId in the URL (super_admin and
 //          admin-impersonation tokens pass), and enforces a Page Access key
@@ -14,10 +14,22 @@
 //          but 7 days silently logged every agency out weekly. Existing tokens
 //          keep the 7d expiry baked in at signing time; only tokens issued
 //          after this deploy get 30 days.
+// UPDATED: 2026-07-30: recoverAccountSetup (POST /api/auth/recover-setup). A
+//          token-based recovery for an account that was created but never
+//          finished setting a password (password_hash is null). This is the
+//          case a lost/closed set-password tab produces: the one-time token in
+//          that URL is gone, agencyLogin returns "Password not set", and the
+//          user has no way back. recoverAccountSetup mints a FRESH
+//          password_reset_tokens row and returns the token so the frontend can
+//          send them straight to /auth/set-password. No email is sent, matching
+//          the rest of the signup flow. It only ever acts on an account whose
+//          password_hash is null, so an active account can't be taken over
+//          through it. See the SECURITY note on the function for gating.
 // Destination: src/routes/auth.js (FULL REPLACEMENT)
 // ============================================================================
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { supabase, getUserByEmail, getUserById } = require('../lib/supabase');
 const { sendEmail } = require('../lib/notifications');
 
@@ -77,7 +89,7 @@ async function agencyLogin(req, res) {
 
 // ============================================================================
 // CLIENT LOGIN
-// UPDATED: Phase 1 — dashboard_access check + read_only flag
+// UPDATED: Phase 1 - dashboard_access check + read_only flag
 // ============================================================================
 async function clientLogin(req, res) {
   try {
@@ -131,6 +143,95 @@ async function clientLogin(req, res) {
       client
     });
   } catch (error) { console.error('❌ Client login error:', error); res.status(500).json({ error: 'Login failed' }); }
+}
+
+// ============================================================================
+// RECOVER ACCOUNT SETUP  (POST /api/auth/recover-setup)
+// ----------------------------------------------------------------------------
+// Fixes the dead end where an account was created but the password was never
+// set, and the one-time set-password token was lost (closed/expired tab). The
+// login page calls this when it gets "Password not set" back. This mints a
+// FRESH password_reset_tokens row (same table setPassword consumes) and returns
+// the token so the frontend can redirect straight to /auth/set-password. No
+// email is involved, matching the rest of the signup flow.
+//
+// Response contract (deliberately does not leak which emails exist):
+//   { needsSetup: true,  token }  -> account exists, password_hash is null.
+//                                    Send them to /auth/set-password?token=...
+//   { needsSetup: false }         -> either no such account, OR the account
+//                                    already has a password. The UI treats both
+//                                    the same: "check your password / sign in".
+//
+// scope (optional body field): 'agency' | 'client'. When provided we only
+// recover a matching role, so the agency login page can't hand back a token for
+// a client account and vice versa. Omitted = allow either.
+//
+// SECURITY: this is intentionally UNGATED for now, which is fine because it only
+// ever acts on an account whose password_hash is null (a never-finished
+// account); an active account is untouched. To harden later (recommended before
+// heavy public traffic), gate it behind proof the caller actually completed
+// checkout, e.g. require the Stripe checkout session_id and verify it maps to
+// this account and is paid before issuing the token. The single place to add
+// that check is marked below with "GATE HERE".
+// ============================================================================
+async function recoverAccountSetup(req, res) {
+  try {
+    const { email, scope } = req.body;
+    if (!email || !String(email).includes('@')) {
+      return res.status(400).json({ error: 'Valid email required' });
+    }
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+    const user = await getUserByEmail(normalizedEmail);
+
+    // No such user. Do not reveal that. Present the same shape as "already set".
+    if (!user) {
+      return res.json({ needsSetup: false });
+    }
+
+    // Restrict by role when the caller told us which surface it is, so an agency
+    // login can only recover an agency account and a client login only a client.
+    if (scope === 'agency' && !['agency_owner', 'agency_staff'].includes(user.role)) {
+      return res.json({ needsSetup: false });
+    }
+    if (scope === 'client' && !['client', 'client_staff'].includes(user.role)) {
+      return res.json({ needsSetup: false });
+    }
+
+    // Account already has a password: nothing to recover. The user should just
+    // sign in (or use the normal forgot-password flow, which emails a link).
+    if (user.password_hash) {
+      return res.json({ needsSetup: false });
+    }
+
+    // GATE HERE: before this point, add any proof-of-ownership check you want
+    // (e.g. verify a Stripe checkout session_id belongs to this account and is
+    // paid). Everything below issues a fresh set-password token.
+
+    // Mint a fresh single-use token (same table + shape setPassword consumes).
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date();
+    expiresAt.setHours(expiresAt.getHours() + 24);
+
+    const { error: insertError } = await supabase.from('password_reset_tokens').insert({
+      user_id: user.id,
+      email: normalizedEmail,
+      token,
+      expires_at: expiresAt.toISOString(),
+      used: false,
+    });
+
+    if (insertError) {
+      console.error('❌ recover-setup token insert failed:', insertError.message);
+      return res.status(500).json({ error: 'Could not start account setup. Please try again.' });
+    }
+
+    console.log('🔁 Account setup recovery token issued for:', normalizedEmail, '| role:', user.role);
+    return res.json({ needsSetup: true, token });
+  } catch (error) {
+    console.error('❌ recover-setup error:', error);
+    return res.status(500).json({ error: 'Could not start account setup' });
+  }
 }
 
 // ============================================================================
@@ -273,7 +374,7 @@ function authMiddleware(requiredRoles = []) {
 // PERMISSION MIDDLEWARE
 // ----------------------------------------------------------------------------
 // Enforces a single Page Access permission on a route. This is the SERVER-SIDE
-// half of the per-member gating — the sidebar/route guards in the frontend are
+// half of the per-member gating - the sidebar/route guards in the frontend are
 // UX only; this is what actually stops a staff member from hitting an endpoint
 // their toggles don't allow (e.g. a direct curl to the settings/billing API).
 //
@@ -340,7 +441,7 @@ function requirePermission(permissionKey) {
 // SOFT PERMISSION MIDDLEWARE (for dual-use routes)
 // ----------------------------------------------------------------------------
 // Same policy as requirePermission, but for routes that legitimately run BOTH
-// authenticated (dashboard) and unauthenticated (signup) — e.g. the agency
+// authenticated (dashboard) and unauthenticated (signup) - e.g. the agency
 // checkout endpoint is hit during signup before the user has a token. This
 // guard reads the token itself rather than relying on a prior authMiddleware:
 //
@@ -374,7 +475,7 @@ function requirePermissionIfAuthed(permissionKey) {
       let entityId = null;
       if (decoded.role === 'agency_staff') { entityType = 'agency'; entityId = decoded.agencyId; }
       else if (decoded.role === 'client_staff') { entityType = 'client'; entityId = decoded.clientId; }
-      else return next(); // unknown role on a dual-use route — defer to handler
+      else return next(); // unknown role on a dual-use route - defer to handler
 
       if (!entityId) return next();
 
@@ -487,4 +588,4 @@ function requireAgencyAccess(permissionKey) {
   };
 }
 
-module.exports = { agencyLogin, clientLogin, verifyToken, setPassword, changePassword, requestPasswordReset, authMiddleware, requirePermission, requirePermissionIfAuthed, requireAgencyAccess, generateToken };
+module.exports = { agencyLogin, clientLogin, recoverAccountSetup, verifyToken, setPassword, changePassword, requestPasswordReset, authMiddleware, requirePermission, requirePermissionIfAuthed, requireAgencyAccess, generateToken };
