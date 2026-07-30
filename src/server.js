@@ -1,14 +1,14 @@
 // ============================================================================
 // VOICEAI CONNECT - MULTI-TENANT BACKEND SERVER
 // UPDATED: Team member routes mounted, Content render service mounted
-// UPDATED: 2026-05-07 — Usage tracking cron + usage summary endpoint (Phase 1)
-// UPDATED: 2026-05-19 — Phase 3A: Staff members + client services routes
-// UPDATED: 2026-06-03 — /api/agency/cancel now releases the agency demo number
-// UPDATED: 2026-06-07 — Generic client field update endpoint (business_name, owner_phone, etc.)
-// UPDATED: 2026-06-07 — Exclude test clients from dashboard/analytics MRR and stats
-// UPDATED: 2026-06-10 — /api/agency/cancel now captures reason + feedback,
+// UPDATED: 2026-05-07, Usage tracking cron + usage summary endpoint (Phase 1)
+// UPDATED: 2026-05-19, Phase 3A: Staff members + client services routes
+// UPDATED: 2026-06-03, /api/agency/cancel now releases the agency demo number
+// UPDATED: 2026-06-07, Generic client field update endpoint (business_name, owner_phone, etc.)
+// UPDATED: 2026-06-07, Exclude test clients from dashboard/analytics MRR and stats
+// UPDATED: 2026-06-10, /api/agency/cancel now captures reason + feedback,
 //                       writes to subscription_cancellations, SMS's platform owner.
-// UPDATED: 2026-06-30 — Telnyx whisper warm transfer: /webhook/telnyx-voice
+// UPDATED: 2026-06-30, Telnyx whisper warm transfer: /webhook/telnyx-voice
 //                       (raw body) + /api/voice/request-transfer mounted.
 // UPDATED: 2026-07-11: Connect financials + account-session endpoints wired
 //                      for the agency Payments page, hardened with
@@ -30,7 +30,7 @@
 //                      client rows against real Stripe status).
 // UPDATED: 2026-07-29: Mount admin-calls router (calls + demos feeds) that the
 //                      redesigned admin Overview and Calls pages read from.
-// Destination: src/server.js (or src/index.js) — FULL REPLACEMENT
+// Destination: src/server.js (or src/index.js), FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
 
@@ -186,7 +186,7 @@ const teamRoutes = require('./routes/team');
 const contentRender = require('./content-render');  // Content render service
 const restoRoutes = require('./routes/resto');  // Restoration platform routes
 
-// Usage tracking (Phase 1 — metered billing)
+// Usage tracking (Phase 1, metered billing)
 const usageReporterRoutes = require('./cron/usage-reporter');
 const { getAgencyUsageSummary } = require('./lib/usage-tracker');
 const testClientRoutes = require('./routes/test-client');
@@ -220,7 +220,8 @@ const {
   syncConnectBrandingHandler,
   handleConnectStripeWebhook,
   expireTrials,
-  reconcileClientSubscriptions
+  reconcileClientSubscriptions,
+  setMinutePassThrough
 } = require('./routes/stripe-connect');
 
 const { 
@@ -383,7 +384,7 @@ app.get('/api/agency/:agencyId/settings', getAgencySettings);
 app.put('/api/agency/:agencyId/settings', requirePermissionIfAuthed('settings'), updateAgencySettings);
 app.post('/api/agency/:agencyId/domain/verify', verifyAgencyDomain);
 // 'billing' gates the agency's own subscription actions. checkout is also hit
-// during signup before a token exists, so the soft guard is required here —
+// during signup before a token exists, so the soft guard is required here -
 // it only blocks an authenticated staff member who lacks 'billing'.
 app.post('/api/agency/checkout', requirePermissionIfAuthed('billing'), createAgencyCheckout);
 app.post('/api/agency/portal', requirePermissionIfAuthed('billing'), createAgencyPortal);
@@ -611,6 +612,16 @@ app.post('/api/agency/:agencyId/connect/sync-branding', requireAgencyAccess('set
 // account, transactions). requireAgencyAccess('billing') because it exposes the
 // agency's own financial dashboard; only a verified owner of :agencyId passes.
 app.post('/api/agency/:agencyId/connect/login-link', requireAgencyAccess('billing'), createConnectLoginLink);
+
+// Toggle client-facing per-minute billing on or off for the agency. On enable
+// it validates a rate is set and Connect is chargeable (rejects otherwise),
+// ensures the connected-account meter, and sweeps existing clients to attach
+// the metered item. On disable it flips the flag; reporting stops immediately
+// and inert items are cleaned up at each client's next renewal. Body:
+// { enabled: true|false }. requireAgencyAccess('billing') because it changes
+// what the agency's clients are charged; only a verified owner of :agencyId
+// (or super_admin) passes.
+app.post('/api/agency/:agencyId/minute-pass-through', requireAgencyAccess('billing'), setMinutePassThrough);
 
 // ============================================================================
 // AGENCY DASHBOARD & CLIENTS ROUTES
@@ -1047,7 +1058,7 @@ app.get('/api/agency/:agencyId/analytics', async (req, res) => {
 });
 
 // ============================================================================
-// AGENCY USAGE SUMMARY (Phase 1 — metered billing)
+// AGENCY USAGE SUMMARY (Phase 1, metered billing)
 // ============================================================================
 
 app.get('/api/agency/:agencyId/usage', async (req, res) => {
@@ -1206,7 +1217,7 @@ app.get('/api/voices', (req, res) => {
 });
 
 // ============================================================================
-// VOICE PREVIEW — greeting spoken in the selected voice via ElevenLabs TTS.
+// VOICE PREVIEW, greeting spoken in the selected voice via ElevenLabs TTS.
 // Inline because GET /api/voices is inline here and routes/voices.js is NOT
 // mounted. POST /api/voices/preview  body { voice_id, text }  -> audio/mpeg
 // Uses node-fetch (the same egress path proven in lib/vapi.js) plus a hard
@@ -1266,7 +1277,7 @@ app.post('/api/voices/preview', async (req, res) => {
     return res.send(audio);
   } catch (err) {
     if (err.name === 'AbortError') {
-      console.error('Voice preview timed out reaching ElevenLabs (8s) — outbound connect likely blocked');
+      console.error('Voice preview timed out reaching ElevenLabs (8s), outbound connect likely blocked');
       return res.status(504).json({ success: false, error: 'Voice synthesis timed out' });
     }
     console.error('Voice preview error:', err.message);
@@ -1400,7 +1411,7 @@ app.post('/webhook/stripe-connect',
   handleConnectStripeWebhook
 );
 // ============================================================================
-// BOOKING SYSTEM (Custom scheduling — replaces Calendly)
+// BOOKING SYSTEM (Custom scheduling, replaces Calendly)
 // ============================================================================
 app.use('/api/booking', bookingRoutes);
 // ============================================================================

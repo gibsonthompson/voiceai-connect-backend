@@ -4,16 +4,16 @@
 // WITH INTERNATIONAL CLIENT SUPPORT
 // WITH OPTIONAL PASSWORD AT SIGNUP (Phase 2A)
 // WITH AGENCY TEMPLATE KB INHERITANCE
-// UPDATED: Phase 2 — Phone numbers use serverUrl only (no assistantId)
+// UPDATED: Phase 2, Phone numbers use serverUrl only (no assistantId)
 // UPDATED: Extract and store vapi_query_tool_id for dynamic config builder
 // UPDATED: New clients inherit nav_bg/nav_text from agency defaults (2026-04-17)
-// UPDATED: 2026-05-07 — Per-client billing triggers on client add (pricing restructure)
-// UPDATED: 2026-05-19 — Two-way SMS: auto-assign messaging profile + 10DLC campaign
-// UPDATED: 2026-05-20 — Rollback: clean up orphaned VAPI resources (assistant, KB,
+// UPDATED: 2026-05-07, Per-client billing triggers on client add (pricing restructure)
+// UPDATED: 2026-05-19, Two-way SMS: auto-assign messaging profile + 10DLC campaign
+// UPDATED: 2026-05-20, Rollback: clean up orphaned VAPI resources (assistant, KB,
 //          query tool) when phone provisioning fails. Guard SMS sends against
 //          undefined phone numbers. Better error messages for Telnyx 402.
-// UPDATED: 2026-05-29 — Fix: agency_id now set on user record in all signup paths
-// UPDATED: 2026-06-08 — Phase 1 double-billing fix: handleClientSignup now
+// UPDATED: 2026-05-29, Fix: agency_id now set on user record in all signup paths
+// UPDATED: 2026-06-08, Phase 1 double-billing fix: handleClientSignup now
 //          HONORS req.body.planType (starter|pro|growth) instead of hardcoding
 //          'starter'. Matches the pattern already in handleAgencyAddClient.
 //          /signup/plan was posting the user's selected plan; backend was
@@ -21,12 +21,12 @@
 //          Users then re-selected their intended plan on /upgrade-required,
 //          which is where the double-billing happened (now guarded backend-side
 //          in stripe-connect.js createClientCheckout).
-// UPDATED: 2026-06-08 — Phase 5 hardening: exported signupRateLimiter middleware
+// UPDATED: 2026-06-08, Phase 5 hardening: exported signupRateLimiter middleware
 //          to throttle /api/client/signup at 5 requests per IP per hour.
 //          In-memory token bucket (single-instance safe). Public embed widget
 //          makes this endpoint internet-exposed without auth, so a basic
 //          rate limit is the bare minimum before CAPTCHA / fraud detection.
-// UPDATED: 2026-06-10 — Card-required trial support in handleClientSignup.
+// UPDATED: 2026-06-10, Card-required trial support in handleClientSignup.
 //          When agency.require_card_for_trial=true AND stripe_charges_enabled,
 //          handleClientSignup creates a Stripe Connect Checkout with
 //          trial_period_days=7 via createTrialCheckoutForSignup (imported
@@ -84,7 +84,7 @@ const { provisionBYOTNumber, releaseBYOTNumber } = require('./byot');
 const { updateClientBillingQuantity } = require('../lib/usage-tracker');
 
 // ============================================================================
-// VALID CLIENT PLANS — single source of truth for plan-tier validation
+// VALID CLIENT PLANS, single source of truth for plan-tier validation
 // across handleClientSignup, handleAgencyAddClient, and provisionClient.
 // ============================================================================
 const VALID_CLIENT_PLANS = ['starter', 'pro', 'growth'];
@@ -108,7 +108,7 @@ function resolveVoiceRouting(source, agency) {
 }
 
 // ============================================================================
-// RATE LIMITER (Phase 5) — in-memory token bucket for /api/client/signup
+// RATE LIMITER (Phase 5), in-memory token bucket for /api/client/signup
 // ----------------------------------------------------------------------------
 // The public embed widget makes this endpoint reachable by anyone with the
 // snippet. Without throttling, a single script could spin up arbitrary
@@ -144,7 +144,7 @@ setInterval(() => {
 function getClientIp(req) {
   // x-forwarded-for is a chain set by DO's LB; first entry is the original
   // caller. Fall back to req.ip (which is the LB peer if trust proxy isn't
-  // set — still useful as a partial identifier locally).
+  // set, still useful as a partial identifier locally).
   const xff = req.headers['x-forwarded-for'];
   if (typeof xff === 'string' && xff.length > 0) {
     return xff.split(',')[0].trim();
@@ -161,7 +161,7 @@ function signupRateLimiter(req, res, next) {
   const bucket = signupAttempts.get(ip);
 
   if (!bucket || bucket.resetAt <= now) {
-    // First request from this IP, or previous window has expired — open a
+    // First request from this IP, or previous window has expired, open a
     // fresh window.
     signupAttempts.set(ip, { count: 1, resetAt: now + SIGNUP_RATE_LIMIT_WINDOW_MS });
     return next();
@@ -290,7 +290,7 @@ async function cleanupVapiResources(assistantId, queryToolId, context) {
 // ENABLE SMS FOR PHONE NUMBER
 // Assigns the number to a Telnyx messaging profile and 10DLC campaign
 // so it can send/receive SMS for two-way messaging.
-// Non-blocking — failure here doesn't stop client provisioning.
+// Non-blocking, failure here doesn't stop client provisioning.
 // ============================================================================
 async function enableSMSForNumber(phoneNumber) {
   const messagingProfileId = process.env.TELNYX_MESSAGING_PROFILE_ID;
@@ -298,7 +298,7 @@ async function enableSMSForNumber(phoneNumber) {
   const apiKey = process.env.TELNYX_API_KEY;
 
   if (!messagingProfileId || !campaignId || !apiKey) {
-    console.log('⚠️ SMS provisioning skipped — TELNYX_MESSAGING_PROFILE_ID or TELNYX_10DLC_CAMPAIGN_ID not configured');
+    console.log('⚠️ SMS provisioning skipped, TELNYX_MESSAGING_PROFILE_ID or TELNYX_10DLC_CAMPAIGN_ID not configured');
     return { success: false, reason: 'not_configured' };
   }
 
@@ -336,7 +336,7 @@ async function enableSMSForNumber(phoneNumber) {
     if (!campaignRes.ok) {
       const err = await campaignRes.text();
       console.warn(`⚠️ SMS 10DLC campaign assignment failed for ${normalized}:`, err);
-      // Profile was assigned — number can still receive inbound, just might get filtered on outbound
+      // Profile was assigned, number can still receive inbound, just might get filtered on outbound
       return { success: true, reason: 'campaign_failed', error: err };
     }
 
@@ -443,7 +443,7 @@ async function createPasswordToken(userId, email) {
 
 // ============================================================================
 // CONFIGURE PHONE WEBHOOK
-// UPDATED: Phase 2 — serverUrl ONLY, no assistantId on the phone number.
+// UPDATED: Phase 2, serverUrl ONLY, no assistantId on the phone number.
 // The static assistant remains on VAPI (stored in client.vapi_assistant_id)
 // but the phone number uses serverUrl so assistant-request fires.
 // ============================================================================
@@ -526,7 +526,7 @@ async function provisionPhoneForClient(agency, clientData, assistantId, voiceRou
       };
     }
 
-    // Configure webhook — serverUrl only, no assistantId
+    // Configure webhook, serverUrl only, no assistantId
     await configurePhoneWebhook(phoneData.id, assistantId);
 
     return {
@@ -644,7 +644,7 @@ async function insertClientWithStaleNumberRecovery(payload) {
 
 // ============================================================================
 // MAIN CLIENT SIGNUP HANDLER (from agency marketing site)
-// UPDATED 2026-06-08 — Phase 1: now honors req.body.planType so plan selection
+// UPDATED 2026-06-08, Phase 1: now honors req.body.planType so plan selection
 // in /signup/plan is no longer theater. Same validation pattern as
 // handleAgencyAddClient below.
 // ============================================================================
@@ -687,7 +687,7 @@ async function handleClientSignup(req, res) {
     // ────────────────────────────────────────────────────────────────────
     const planType = VALID_CLIENT_PLANS.includes(req.body.planType) ? req.body.planType : 'starter';
     if (req.body.planType && !VALID_CLIENT_PLANS.includes(req.body.planType)) {
-      console.warn(`⚠️ Invalid planType "${req.body.planType}" from signup request — defaulting to starter`);
+      console.warn(`⚠️ Invalid planType "${req.body.planType}" from signup request, defaulting to starter`);
     }
 
     const agency = await getAgencyById(agencyId);
@@ -720,7 +720,7 @@ async function handleClientSignup(req, res) {
     // ────────────────────────────────────────────────────────────────────
     const willRequireCard = agency.require_card_for_trial === true && agency.stripe_charges_enabled === true;
     if (willRequireCard && req.body.consent_agreed !== true) {
-      console.warn(`🚫 Card-required signup for agency ${agency.name} missing affirmative consent — rejecting before provisioning`);
+      console.warn(`🚫 Card-required signup for agency ${agency.name} missing affirmative consent, rejecting before provisioning`);
       return res.status(400).json({
         error: 'consent_required',
         message: 'Please agree to the terms, including the automatic charge after your free trial, to continue.',
@@ -768,7 +768,7 @@ async function handleClientSignup(req, res) {
     if (hasPassword) {
       const salt = await bcrypt.genSalt(10);
       passwordHash = await bcrypt.hash(password, salt);
-      console.log('🔑 Password provided at signup — will store hash directly');
+      console.log('🔑 Password provided at signup, will store hash directly');
     }
 
     // ============================================
@@ -828,7 +828,7 @@ async function handleClientSignup(req, res) {
         phone
       }, assistant.id, voiceRouting);
     } catch (phoneError) {
-      // Phone provisioning failed — clean up VAPI resources
+      // Phone provisioning failed, clean up VAPI resources
       await cleanupVapiResources(createdAssistantId, createdQueryToolId, businessName);
       createdAssistantId = null;
       createdQueryToolId = null;
@@ -923,7 +923,7 @@ async function handleClientSignup(req, res) {
       throw clientError;
     }
 
-    // Past this point, client record exists — no more rollback needed
+    // Past this point, client record exists, no more rollback needed
     createdAssistantId = null;
     createdQueryToolId = null;
 
@@ -970,7 +970,7 @@ async function handleClientSignup(req, res) {
       throw userError;
     }
 
-    console.log(`✅ User created: ${newUser.id}${hasPassword ? ' (with password)' : ' (no password — email flow)'}`);
+    console.log(`✅ User created: ${newUser.id}${hasPassword ? ' (with password)' : ' (no password, email flow)'}`);
 
     // ============================================
     // STEP 6: GENERATE PASSWORD TOKEN
@@ -990,6 +990,11 @@ async function handleClientSignup(req, res) {
     // VAPI + phone are already provisioned above. Abandoned checkouts leave
     // those active; a Phase 2 cleanup cron sweeps pending_payment >24h old.
     //
+    // passwordToken is threaded into the checkout so its success_url lands the
+    // paid client on the agency's own /auth/set-password page (they set a
+    // password once and land in the dashboard logged in), instead of a welcome
+    // page that would force an email round-trip to finish.
+    //
     // If toggle is on but Stripe Connect isn't ready, we log a warning and
     // fall back to the no-card flow so signup never breaks.
     // ============================================
@@ -997,13 +1002,13 @@ async function handleClientSignup(req, res) {
     const cardRequired = agency.require_card_for_trial === true && agency.stripe_charges_enabled === true;
 
     if (agency.require_card_for_trial === true && agency.stripe_charges_enabled !== true) {
-      console.warn(`⚠️ Agency ${agency.name} has require_card_for_trial=true but stripe_charges_enabled=false — falling back to no-card trial`);
+      console.warn(`⚠️ Agency ${agency.name} has require_card_for_trial=true but stripe_charges_enabled=false, falling back to no-card trial`);
     }
 
     if (cardRequired) {
       try {
         const { createTrialCheckoutForSignup } = require('./stripe-connect');
-        const checkout = await createTrialCheckoutForSignup({ client: newClient, agency, plan: planType });
+        const checkout = await createTrialCheckoutForSignup({ client: newClient, agency, plan: planType, passwordToken });
         cardRequiredCheckoutUrl = checkout.url;
 
         const { error: pendingErr } = await supabase
@@ -1043,7 +1048,7 @@ async function handleClientSignup(req, res) {
       console.log('📱 Sending welcome SMS...');
       await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneResult.number, agency);
     } else {
-      console.warn('⚠️ Skipping welcome SMS — no valid owner phone');
+      console.warn('⚠️ Skipping welcome SMS, no valid owner phone');
     }
 
     // ============================================
@@ -1057,8 +1062,8 @@ async function handleClientSignup(req, res) {
     // ────────────────────────────────────────────
     // For card-required signups, response includes checkout_url. The embed
     // widget redirects the top-level window to this URL so the user enters
-    // their card on Stripe. After completion, Stripe redirects to
-    // {agencyUrl}/client/welcome?trial=started and our webhook activates.
+    // their card on Stripe. After completion, Stripe redirects to the paid
+    // client's set-password page on the agency domain and our webhook activates.
     // ============================================
     console.log('🎉 Client onboarding complete:', businessName, cardRequiredCheckoutUrl ? '(card-required, awaiting payment)' : '(no-card trial active)');
 
@@ -1150,7 +1155,7 @@ async function handleAgencyAddClient(req, res) {
     // already comes from destructuring; this rejects any out-of-set string.
     const resolvedPlanType = VALID_CLIENT_PLANS.includes(planType) ? planType : 'starter';
     if (planType !== resolvedPlanType) {
-      console.warn(`⚠️ Invalid planType "${planType}" from agency add-client — defaulting to starter`);
+      console.warn(`⚠️ Invalid planType "${planType}" from agency add-client, defaulting to starter`);
     }
 
     const agency = await getAgencyById(agencyId);
@@ -1237,7 +1242,7 @@ async function handleAgencyAddClient(req, res) {
     }
 
     // === STEP 3: Provision Phone (unified) ===
-    // This can fail — if it does, roll back VAPI resources from steps 1-2
+    // This can fail, if it does, roll back VAPI resources from steps 1-2
     let phoneResult;
     try {
       phoneResult = await provisionPhoneForClient(agency, {
@@ -1247,7 +1252,7 @@ async function handleAgencyAddClient(req, res) {
         phone
       }, assistant.id, voiceRouting);
     } catch (phoneError) {
-      // Phone provisioning failed — clean up orphaned VAPI resources
+      // Phone provisioning failed, clean up orphaned VAPI resources
       await cleanupVapiResources(createdAssistantId, createdQueryToolId, businessName);
       createdAssistantId = null;
       createdQueryToolId = null;
@@ -1337,7 +1342,7 @@ async function handleAgencyAddClient(req, res) {
       throw clientError;
     }
 
-    // Past this point, client record exists — no more rollback needed
+    // Past this point, client record exists, no more rollback needed
     createdAssistantId = null;
     createdQueryToolId = null;
 
@@ -1380,7 +1385,7 @@ async function handleAgencyAddClient(req, res) {
       console.log('📱 Sending welcome SMS...');
       await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneResult.number, agency);
     } else {
-      console.warn('⚠️ Skipping welcome SMS — no valid owner phone');
+      console.warn('⚠️ Skipping welcome SMS, no valid owner phone');
     }
 
     // === STEP 7: Notify Agency Owner ===

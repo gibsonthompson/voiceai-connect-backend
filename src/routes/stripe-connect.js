@@ -4,18 +4,18 @@
 // UPDATED: reactivation re-enables VAPI phone number
 // UPDATED: Admin Stripe Connect notification wired to getSmsTemplate()
 // FIXED: expireTrials verifies status update persisted before sending SMS
-// UPDATED: 2026-05-08 — Per-client billing triggers on client status changes
-// UPDATED: 2026-05-16 — expireTrials DELETES (not disables) VAPI resources
+// UPDATED: 2026-05-08, Per-client billing triggers on client status changes
+// UPDATED: 2026-05-16, expireTrials DELETES (not disables) VAPI resources
 //          to free up phone number slots. Nulls out resource IDs in DB.
-// UPDATED: 2026-05-22 — Client checkout: logging, explicit FK hint, pricing
+// UPDATED: 2026-05-22, Client checkout: logging, explicit FK hint, pricing
 //          defaults updated to $99/$149/$299
-// UPDATED: 2026-06-03 — expireTrials now RELEASES the underlying Telnyx number
+// UPDATED: 2026-06-03, expireTrials now RELEASES the underlying Telnyx number
 //          (via fullyReleaseNumber) before nulling vapi_phone_number. Deleting
 //          only the VAPI object left the Telnyx rental billing monthly forever.
-// UPDATED: 2026-06-08 — Phase 1 double-billing fix: createClientCheckout
+// UPDATED: 2026-06-08, Phase 1 double-billing fix: createClientCheckout
 //          rejects with 409 if client.stripe_connected_subscription_id already
 //          points to an active|trialing|past_due Stripe subscription.
-// UPDATED: 2026-06-10 — require_card_for_trial support:
+// UPDATED: 2026-06-10, require_card_for_trial support:
 //          (a) createTrialCheckoutForSignup creates a Stripe Connect Checkout
 //              with trial_period_days=7 for card-required signups, called from
 //              handleClientSignup in routes/client-signup.js.
@@ -127,6 +127,257 @@ function getCurrencyForCountry(countryCode) {
 function isSupportedConnectCountry(countryCode) {
   return typeof countryCode === 'string'
     && Object.prototype.hasOwnProperty.call(countryCurrencyMap, countryCode.trim().toUpperCase());
+}
+
+// ============================================================================
+// CLIENT-FACING PER-MINUTE BILLING (agency charges its own client per minute)
+// ----------------------------------------------------------------------------
+// This is the AGENCY-TO-CLIENT layer, entirely on the agency's connected
+// account (direct charges, agency keeps 100 percent). It is separate from the
+// PLATFORM-TO-AGENCY minute meter run on the platform account by usage-tracker.
+//
+// The whole feature is a lifecycle, not a boolean. One resolver decides
+// everything, read fresh, never cached:
+//
+//   minutePassThroughActive(agency) === true  ->  the client pays per minute
+//   minutePassThroughActive(agency) === false ->  the agency absorbs minutes
+//
+// "Active" requires the connected account to actually be chargeable, the agency
+// to have flipped the toggle on, AND a real rate to be set. That last clause is
+// what makes an accidental "on but nothing configured" state harmless: no rate,
+// not active, no charge. Reporting a meter event (in usage-tracker.js) adds one
+// more gate on top: the client must not be in trial.
+//
+// OFF is authoritative because the toggle governs REPORTING, and reporting is
+// what bills. Flip off and events stop that instant regardless of what items
+// still exist on the subscription. Inert metered items are removed at each
+// client's next renewal (handleClientPaymentSucceeded), not mid-cycle, so
+// turning off never fires a surprise invoice.
+// ============================================================================
+
+// The single source of truth. Every gate (checkout attach, plan change,
+// rollover cleanup, the ON sweep, and the usage-tracker meter event) calls
+// this. If it returns false, no client minute charge can happen.
+function minutePassThroughActive(agency) {
+  return !!(agency
+    && agency.stripe_account_id
+    && agency.stripe_charges_enabled === true
+    && agency.minute_pass_through === true
+    && Number(agency.client_minute_rate_cents) > 0);
+}
+
+// True for a subscription item backed by a Stripe meter (the per-minute item).
+// The flat base-plan item has no recurring.meter, so this reliably tells the
+// two apart. Used everywhere we must touch the minute item WITHOUT disturbing
+// the base plan.
+function findMeteredItem(subscription) {
+  return (subscription?.items?.data || []).find((it) => it?.price?.recurring?.meter) || null;
+}
+
+// Create (or reuse) the voice_minutes meter on the agency's OWN connected
+// account, and store its id on the agency row. Idempotent: it lists existing
+// meters first and reuses a voice_minutes one, so a retry or a lost DB write
+// never spawns duplicate meters. Mutates the passed agency object so the caller
+// sees the id without a re-fetch. Same meter shape as the platform meter.
+async function ensureConnectMinuteMeter(agency) {
+  if (agency.connect_minute_meter_id) return agency.connect_minute_meter_id;
+  if (!agency.stripe_account_id) throw new Error('Agency has no connected account for a minute meter');
+  const acct = agency.stripe_account_id;
+
+  let meterId = null;
+  try {
+    const existing = await stripe.billing.meters.list({ status: 'active', limit: 100 }, { stripeAccount: acct });
+    const found = (existing.data || []).find((m) => m.event_name === 'voice_minutes');
+    if (found) meterId = found.id;
+  } catch (e) {
+    console.warn('Connect meter list failed, will attempt create:', e.message);
+  }
+
+  if (!meterId) {
+    const meter = await stripe.billing.meters.create({
+      display_name: 'Voice Minutes',
+      event_name: 'voice_minutes',
+      default_aggregation: { formula: 'sum' },
+      customer_mapping: { event_payload_key: 'stripe_customer_id', type: 'by_id' },
+      value_settings: { event_payload_key: 'value' },
+    }, { stripeAccount: acct });
+    meterId = meter.id;
+  }
+
+  await supabase.from('agencies').update({ connect_minute_meter_id: meterId }).eq('id', agency.id);
+  agency.connect_minute_meter_id = meterId;
+  return meterId;
+}
+
+// Included minutes for a plan (free allotment before overage). 0 = pure
+// per-minute, no free tier. Falls back to 0 for unknown plans.
+function includedMinutesForPlan(agency, plan) {
+  const map = {
+    starter: agency.included_minutes_starter || 0,
+    pro: agency.included_minutes_pro || 0,
+    growth: agency.included_minutes_growth || 0,
+  };
+  return map[plan] || 0;
+}
+
+// Build a metered price on the connected account for this plan's minutes.
+//   included > 0 -> graduated tiers: the allotment at $0, then the rate.
+//   included = 0 -> plain per-unit metered price at the rate.
+// client_minute_rate_cents is cents per minute and may be fractional, so it is
+// passed as unit_amount_decimal (a string of cents). All minutes are reported
+// to the meter and Stripe zero-rates the allotment, so there is no app-side
+// allotment math.
+async function createConnectMinutePrice(agency, plan) {
+  const acct = agency.stripe_account_id;
+  const meterId = await ensureConnectMinuteMeter(agency);
+  const currency = getCurrencyForCountry(agency.country || 'US');
+  const rateCents = Number(agency.client_minute_rate_cents);
+  if (!(rateCents > 0)) throw new Error('client_minute_rate_cents must be greater than 0 to bill minutes');
+  const included = includedMinutesForPlan(agency, plan);
+
+  const product = await stripe.products.create({
+    name: `Voice Minutes - ${plan.charAt(0).toUpperCase() + plan.slice(1)}`,
+    metadata: { plan, kind: 'voice_minutes' },
+  }, { stripeAccount: acct });
+
+  const recurring = { interval: 'month', usage_type: 'metered', meter: meterId };
+
+  if (included > 0) {
+    return stripe.prices.create({
+      product: product.id,
+      currency,
+      recurring,
+      billing_scheme: 'tiered',
+      tiers_mode: 'graduated',
+      tiers: [
+        { up_to: included, unit_amount: 0 },
+        { up_to: 'inf', unit_amount_decimal: String(rateCents) },
+      ],
+      metadata: { plan, kind: 'voice_minutes' },
+    }, { stripeAccount: acct });
+  }
+
+  return stripe.prices.create({
+    product: product.id,
+    currency,
+    recurring,
+    billing_scheme: 'per_unit',
+    unit_amount_decimal: String(rateCents),
+    metadata: { plan, kind: 'voice_minutes' },
+  }, { stripeAccount: acct });
+}
+
+// Attach the metered minute item to an EXISTING live subscription. Used by the
+// ON sweep and the backfill for clients who already had a flat-only sub before
+// pass-through was turned on. New signups get the item at checkout instead.
+// Idempotent: no-ops if a metered item is already present. Returns a summary,
+// never throws on the "nothing to do" paths.
+async function ensureClientMinuteItem(client, agency) {
+  if (!minutePassThroughActive(agency)) return { attached: false, reason: 'not_active' };
+  if (!client.stripe_connected_subscription_id) return { attached: false, reason: 'no_subscription' };
+  const acct = agency.stripe_account_id;
+
+  let sub;
+  try {
+    sub = await stripe.subscriptions.retrieve(client.stripe_connected_subscription_id, { stripeAccount: acct });
+  } catch (e) {
+    if (e.code === 'resource_missing') return { attached: false, reason: 'sub_missing' };
+    throw e;
+  }
+  if (!['active', 'trialing', 'past_due'].includes(sub.status)) {
+    return { attached: false, reason: `status_${sub.status}` };
+  }
+  if (findMeteredItem(sub)) return { attached: false, reason: 'already_attached' };
+
+  const price = await createConnectMinutePrice(agency, client.plan_type || 'starter');
+  await stripe.subscriptionItems.create(
+    { subscription: sub.id, price: price.id }, // metered items reject quantity
+    { stripeAccount: acct }
+  );
+  return { attached: true };
+}
+
+// ON sweep. When an agency flips pass-through on, attach the metered item to
+// every existing client that has a live subscription. New signups are handled
+// at checkout, so this only backfills the existing book. Partial failures are
+// fine: each client either ends up with the item or not, and a re-run finishes
+// the rest. Never lets one client's Stripe hiccup abort the whole sweep.
+async function attachMinuteItemsForAgency(agencyId) {
+  const { data: agency } = await supabase.from('agencies').select('*').eq('id', agencyId).single();
+  if (!agency) return { ok: false, reason: 'agency_not_found' };
+  if (!minutePassThroughActive(agency)) return { ok: false, reason: 'not_active' };
+
+  await ensureConnectMinuteMeter(agency);
+
+  const { data: clients } = await supabase
+    .from('clients')
+    .select('id, business_name, plan_type, stripe_connected_subscription_id')
+    .eq('agency_id', agencyId)
+    .not('stripe_connected_subscription_id', 'is', null);
+
+  let attached = 0, skipped = 0;
+  for (const c of clients || []) {
+    try {
+      const r = await ensureClientMinuteItem(c, agency);
+      if (r.attached) attached++; else skipped++;
+    } catch (e) {
+      skipped++;
+      console.warn(`Minute item attach failed for ${c.business_name}:`, e.message);
+    }
+  }
+  return { ok: true, attached, skipped };
+}
+
+// ============================================================================
+// SET MINUTE PASS-THROUGH  (POST /api/agency/:agencyId/minute-pass-through)
+// ----------------------------------------------------------------------------
+// The toggle endpoint. Validates BEFORE flipping on so the misconfigured
+// "on but no rate / not connected" state can never exist. Turning on ensures
+// the meter and sweeps existing clients. Turning off just flips the flag:
+// reporting stops immediately via the resolver, and inert items are cleaned up
+// at each client's next renewal, so there is no mid-cycle charge and nothing
+// else to do here. Mount behind the same billing guard as the other agency
+// billing routes in server.js.
+// ============================================================================
+async function setMinutePassThrough(req, res) {
+  try {
+    const { agencyId } = req.params;
+    if (!agencyId) return res.status(400).json({ error: 'agencyId required' });
+
+    const enabled = req.body?.enabled === true;
+
+    const { data: agency, error } = await supabase.from('agencies').select('*').eq('id', agencyId).single();
+    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
+
+    if (enabled) {
+      if (!agency.stripe_account_id || !agency.stripe_charges_enabled) {
+        return res.status(400).json({
+          error: 'stripe_not_ready',
+          message: 'Connect Stripe and finish onboarding before enabling per-minute billing.',
+        });
+      }
+      if (!(Number(agency.client_minute_rate_cents) > 0)) {
+        return res.status(400).json({
+          error: 'rate_required',
+          message: 'Set a per-minute rate above zero before enabling per-minute billing.',
+        });
+      }
+
+      await ensureConnectMinuteMeter(agency);
+      await supabase.from('agencies').update({ minute_pass_through: true }).eq('id', agencyId);
+      agency.minute_pass_through = true;
+
+      const sweep = await attachMinuteItemsForAgency(agencyId);
+      return res.json({ success: true, enabled: true, sweep });
+    }
+
+    // Turn off. Reporting stops now; inert items are removed at renewal.
+    await supabase.from('agencies').update({ minute_pass_through: false }).eq('id', agencyId);
+    return res.json({ success: true, enabled: false });
+  } catch (e) {
+    console.error('setMinutePassThrough error:', e.message);
+    return res.status(500).json({ error: 'Failed to update per-minute billing' });
+  }
 }
 
 // ============================================================================
@@ -723,6 +974,12 @@ async function disconnectConnectAccount(req, res) {
       stripe_charges_enabled: false,
       stripe_payouts_enabled: false,
       require_card_for_trial: false, // auto-disable, meaningless without Connect
+      // A disconnected agency has no connected account, so it has no meter and
+      // cannot charge clients per minute. Force pass-through off and drop the
+      // dead meter reference, otherwise minutePassThroughActive would still gate
+      // false (no stripe_account_id) but the row would misleadingly read "on".
+      minute_pass_through: false,
+      connect_minute_meter_id: null,
       updated_at: new Date().toISOString()
     }).eq('id', agencyId);
 
@@ -755,9 +1012,16 @@ async function disconnectConnectAccount(req, res) {
 // Mirrors createClientCheckout structure but adds trial_period_days and uses
 // different status_url paths since this is a fresh signup, not an upgrade.
 //
+// passwordToken (optional): the fresh set-password token generated at signup.
+// When present, success_url lands the paid client on the agency's own
+// /auth/set-password page instead of /client/welcome, so they set a password
+// once (which mints a session on the agency origin and drops them into the
+// dashboard logged in) with no email round-trip. Falls back to /client/welcome
+// when no token is supplied, so nothing breaks if it is ever missing.
+//
 // Returns: { url } on success, throws on error. Caller handles errors.
 // ============================================================================
-async function createTrialCheckoutForSignup({ client, agency, plan }) {
+async function createTrialCheckoutForSignup({ client, agency, plan, passwordToken }) {
   if (!agency.stripe_account_id || !agency.stripe_charges_enabled) {
     throw new Error('Agency Stripe Connect not configured');
   }
@@ -810,12 +1074,28 @@ async function createTrialCheckoutForSignup({ client, agency, plan }) {
     ? `https://${agency.marketing_domain}`
     : `https://${agency.slug}.myvoiceaiconnect.com`;
 
+  // When we have a password token, send the paid client straight to set their
+  // password on the agency domain (which then logs them into the dashboard on
+  // that origin). Otherwise fall back to the welcome page.
+  const successUrl = passwordToken
+    ? `${agencyUrl}/auth/set-password?token=${encodeURIComponent(passwordToken)}`
+    : `${agencyUrl}/client/welcome?trial=started`;
+
+  // Flat base item, plus the metered minute item when pass-through is active.
+  // The metered item accrues nothing during the 7-day trial because the meter
+  // event in usage-tracker is gated on the client not being in trial.
+  const lineItems = [{ price: price.id, quantity: 1 }];
+  if (minutePassThroughActive(agency)) {
+    const minutePrice = await createConnectMinutePrice(agency, plan);
+    lineItems.push({ price: minutePrice.id }); // metered, no quantity
+  }
+
   const session = await stripe.checkout.sessions.create({
     customer: connectedCustomerId,
     mode: 'subscription',
     payment_method_types: ['card'],
-    line_items: [{ price: price.id, quantity: 1 }],
-    success_url: `${agencyUrl}/client/welcome?trial=started`,
+    line_items: lineItems,
+    success_url: successUrl,
     cancel_url: `${agencyUrl}/client/signup?canceled=true`,
     metadata: {
       client_id: client.id,
@@ -836,7 +1116,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan }) {
 
 // ============================================================================
 // CREATE CLIENT CHECKOUT (upgrade flow, used by /api/client/checkout)
-// UPDATED 2026-06-08 — Phase 1 active-subscription guard.
+// UPDATED 2026-06-08, Phase 1 active-subscription guard.
 // ============================================================================
 async function createClientCheckout(req, res) {
   try {
@@ -883,7 +1163,7 @@ async function createClientCheckout(req, res) {
           console.error('Existing-sub lookup failed:', subErr);
           throw subErr;
         }
-        console.warn(`Stale stripe_connected_subscription_id ${client.stripe_connected_subscription_id} for client ${client_id} — proceeding with fresh checkout`);
+        console.warn(`Stale stripe_connected_subscription_id ${client.stripe_connected_subscription_id} for client ${client_id}, proceeding with fresh checkout`);
       }
     }
 
@@ -922,9 +1202,16 @@ async function createClientCheckout(req, res) {
       ? `https://${agency.marketing_domain}`
       : `https://${agency.slug}.myvoiceaiconnect.com`;
 
+    // Flat base item, plus the metered minute item when pass-through is active.
+    const upgradeLineItems = [{ price: price.id, quantity: 1 }];
+    if (minutePassThroughActive(agency)) {
+      const minutePrice = await createConnectMinutePrice(agency, plan);
+      upgradeLineItems.push({ price: minutePrice.id }); // metered, no quantity
+    }
+
     const session = await stripe.checkout.sessions.create({
       customer: connectedCustomerId, mode: 'subscription', payment_method_types: ['card'],
-      line_items: [{ price: price.id, quantity: 1 }],
+      line_items: upgradeLineItems,
       success_url: `${agencyUrl}/client/dashboard?upgrade=success`,
       cancel_url: `${agencyUrl}/client/upgrade-required?canceled=true`,
       metadata: { client_id, agency_id: agency.id, plan, call_limit: callLimits[plan].toString(), type: 'client_subscription' },
@@ -1080,8 +1367,14 @@ async function changeClientPlan(req, res) {
       });
     }
 
-    const currentItem = subscription.items?.data?.[0];
-    if (!currentItem) {
+    // Identify the flat base item by identity, NOT by index. Once a metered
+    // minute item is attached, items.data[0] may be either one, so swapping
+    // the wrong item would corrupt billing. The flat item is the one with no
+    // recurring.meter; the metered item (if any) is handled separately below.
+    const meterItem = findMeteredItem(subscription);
+    const flatItem = (subscription.items?.data || []).find((it) => !it?.price?.recurring?.meter)
+      || subscription.items?.data?.[0];
+    if (!flatItem) {
       return res.status(400).json({ error: 'Subscription has no billable item to change' });
     }
 
@@ -1103,13 +1396,30 @@ async function changeClientPlan(req, res) {
       recurring: { interval: 'month' },
     }, { stripeAccount: agency.stripe_account_id });
 
-    // Swap the single subscription item to the new price. create_prorations
-    // credits/debits the difference on the next invoice; during a trial this
-    // produces no immediate charge and the new price applies at trial end.
+    // Build the items update: always swap the flat base item to the new plan
+    // price. For the minute item, re-point it to a price built for the new
+    // plan's included-minutes tier when pass-through is active (adding it if it
+    // was missing). If pass-through is off, leave any inert item alone; it is
+    // cleaned up at renewal. Minutes carry no dollar amount on the meter event,
+    // so re-pointing changes the rate/allotment going forward without touching
+    // usage already reported.
+    const itemsUpdate = [{ id: flatItem.id, price: price.id }];
+    if (minutePassThroughActive(agency)) {
+      const minutePrice = await createConnectMinutePrice(agency, plan);
+      if (meterItem) {
+        itemsUpdate.push({ id: meterItem.id, price: minutePrice.id });
+      } else {
+        itemsUpdate.push({ price: minutePrice.id });
+      }
+    }
+
+    // create_prorations credits/debits the flat difference on the next invoice;
+    // during a trial this produces no immediate charge and the new price applies
+    // at trial end. Metered items carry no fixed amount, so they do not prorate.
     await stripe.subscriptions.update(
       client.stripe_connected_subscription_id,
       {
-        items: [{ id: currentItem.id, price: price.id }],
+        items: itemsUpdate,
         proration_behavior: 'create_prorations',
         metadata: { client_id, agency_id: agency.id, plan },
       },
@@ -1174,7 +1484,7 @@ async function expireTrials() {
           const release = await fullyReleaseNumber(client.vapi_phone_id, client.vapi_phone_number);
           console.log(`📞 Release ${client.business_name}: VAPI=${release.vapiDeleted} Telnyx=${release.telnyxReleased}`);
           if (!release.telnyxReleased) {
-            console.error(`⚠️ Telnyx NOT released for ${client.business_name} (${client.vapi_phone_number}) — orphan sweep will catch it`);
+            console.error(`⚠️ Telnyx NOT released for ${client.business_name} (${client.vapi_phone_number}), orphan sweep will catch it`);
           }
         } catch (relErr) {
           console.error('❌ Number release failed:', relErr.message);
@@ -1246,9 +1556,9 @@ async function expireTrials() {
 
       if (verifyClient?.subscription_status !== 'trial_expired') {
         console.error('❌ Status update did not persist for:', client.business_name,
-          '— still:', verifyClient?.subscription_status,
+          ', still:', verifyClient?.subscription_status,
           '(likely RLS policy blocking the update)');
-        results.push({ id: client.id, business_name: client.business_name, success: false, error: 'Update did not persist — check RLS policies on clients table' });
+        results.push({ id: client.id, business_name: client.business_name, success: false, error: 'Update did not persist, check RLS policies on clients table' });
         continue;
       }
 
@@ -1652,6 +1962,7 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
     trial_ends_at: isTrialing ? subTrialEnd : null,
     status: 'active',
     calls_this_month: 0,
+    minutes_this_period: 0,
   }).eq('id', clientId);
 
   if (updateError) { console.error('Failed to update client:', updateError); return; }
@@ -1771,13 +2082,36 @@ async function handleClientPaymentSucceeded(invoice, stripeAccountId) {
   if (!client) client = await getClientByStripeConnectedCustomerId(invoice.customer, stripeAccountId);
   if (!client) { console.error('Client not found for payment:', invoice.customer); return; }
 
-  await supabase.from('clients').update({ subscription_status: 'active', status: 'active', calls_this_month: 0 }).eq('id', client.id);
+  // New period begins: reset both per-period counters.
+  await supabase.from('clients').update({ subscription_status: 'active', status: 'active', calls_this_month: 0, minutes_this_period: 0 }).eq('id', client.id);
 
   if (client.vapi_phone_id) {
     try { await enablePhoneNumber(client.vapi_phone_id); } catch (phoneError) { console.error('Failed to enable VAPI phone number:', phoneError.message); }
   }
   if (client.vapi_assistant_id) {
     try { await enableAssistant(client.vapi_assistant_id); } catch (vapiError) { console.error('Failed to enable VAPI assistant:', vapiError); }
+  }
+
+  // Minute pass-through OFF cleanup, executed at renewal. If the agency has
+  // turned per-minute billing off, an inert metered item may still be attached
+  // from when it was on. Remove it now. This runs AFTER the invoice that just
+  // succeeded (which already billed the prior period's real minute usage), and
+  // the new period has zero accrued usage because reporting has been off, so
+  // deleting here bills nothing. This is the "no mid-cycle surprise" step: the
+  // item only disappears at a clean period boundary. If pass-through is still
+  // on, the item is left in place and simply keeps accruing.
+  try {
+    const agency = client.agencies || (client.agency_id ? await getAgencyById(client.agency_id) : null);
+    if (agency && agency.stripe_account_id && client.stripe_connected_subscription_id && !minutePassThroughActive(agency)) {
+      const sub = await stripe.subscriptions.retrieve(client.stripe_connected_subscription_id, { stripeAccount: agency.stripe_account_id });
+      const meterItem = findMeteredItem(sub);
+      if (meterItem) {
+        await stripe.subscriptionItems.del(meterItem.id, { stripeAccount: agency.stripe_account_id });
+        console.log(`🧹 Removed inert minute item ${meterItem.id} for ${client.business_name} (pass-through off at rollover)`);
+      }
+    }
+  } catch (cleanupErr) {
+    console.warn('Minute item rollover cleanup failed (non-fatal):', cleanupErr.message);
   }
 
   await supabase.from('payments').insert({
@@ -1819,5 +2153,12 @@ module.exports = {
   syncConnectBrandingHandler,   // NEW: express handler for an explicit resync
   handleConnectStripeWebhook,
   expireTrials,
-  reconcileClientSubscriptions  // NEW: self-heal DB rows vs real Stripe status
+  reconcileClientSubscriptions, // NEW: self-heal DB rows vs real Stripe status
+  // Client-facing per-minute billing (agency charges its client per minute)
+  minutePassThroughActive,      // resolver: is per-minute billing live for this agency
+  ensureConnectMinuteMeter,     // create/reuse the voice_minutes meter on the connected account
+  createConnectMinutePrice,     // build a metered minute price for a plan on the connected account
+  ensureClientMinuteItem,       // attach the metered item to one existing subscription
+  attachMinuteItemsForAgency,   // ON sweep: attach to every existing client (used by toggle + backfill)
+  setMinutePassThrough          // POST handler for the on/off toggle
 };
