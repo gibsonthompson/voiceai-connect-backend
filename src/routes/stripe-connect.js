@@ -59,6 +59,14 @@
 //          that can set those brand settings, which is why they have been
 //          blank. Fires automatically when an account first becomes able to
 //          accept charges, and is exported so a branding save can trigger it.
+// UPDATED: 2026-07-30: repriceMinuteItemsForAgency. Stripe prices are immutable,
+//          so a change to client_minute_rate_cents or included_minutes_* only
+//          reached new signups and plan changes. This sweep rebuilds a fresh
+//          minute price per existing client (at the current rate/included for
+//          that client's plan) and swaps the metered item onto it, so a rate
+//          change applies to the whole existing book. Called from
+//          updateAgencySettings after a rate/included change; no-ops when
+//          pass-through is off.
 // ============================================================================
 const Stripe = require('stripe');
 const fetch = require('node-fetch');
@@ -102,7 +110,7 @@ function decodeToken(req) {
 }
 
 // ============================================================================
-// COUNTRY → CURRENCY MAPPING
+// COUNTRY to CURRENCY MAPPING
 // ============================================================================
 const countryCurrencyMap = {
   US: 'usd', CA: 'cad', GB: 'gbp', MX: 'mxn', BR: 'brl',
@@ -326,6 +334,74 @@ async function attachMinuteItemsForAgency(agencyId) {
     }
   }
   return { ok: true, attached, skipped };
+}
+
+// ============================================================================
+// REPRICE MINUTE ITEMS FOR AGENCY  (rate / included-minutes change sweep)
+// ----------------------------------------------------------------------------
+// Stripe prices are immutable. When an agency changes client_minute_rate_cents
+// or a plan's included_minutes_*, clients who already have a metered item keep
+// the OLD price until something re-points them, so a settings rate change would
+// otherwise only affect new signups and plan changes. This sweep rebuilds a
+// fresh minute price per client (at the CURRENT rate/included for that client's
+// plan) and swaps the existing metered item onto it, applying the change to the
+// whole existing book.
+//
+// Only runs when pass-through is active. A client with a live sub but no metered
+// item yet (e.g. added after the ON sweep) gets one attached at the fresh price,
+// so it also bills at the new rate. proration_behavior 'none' on the swap: a
+// metered price carries no fixed amount, so there is nothing to prorate and this
+// keeps the change from generating an invoice line. Never lets one client's
+// Stripe hiccup abort the rest; returns a summary. Called from
+// updateAgencySettings after a rate/included change.
+// ============================================================================
+async function repriceMinuteItemsForAgency(agencyId) {
+  const { data: agency } = await supabase.from('agencies').select('*').eq('id', agencyId).single();
+  if (!agency) return { ok: false, reason: 'agency_not_found' };
+  if (!minutePassThroughActive(agency)) return { ok: false, reason: 'not_active' };
+
+  const acct = agency.stripe_account_id;
+
+  const { data: clients } = await supabase
+    .from('clients')
+    .select('id, business_name, plan_type, stripe_connected_subscription_id')
+    .eq('agency_id', agencyId)
+    .not('stripe_connected_subscription_id', 'is', null);
+
+  let repriced = 0, attached = 0, skipped = 0;
+  for (const c of clients || []) {
+    try {
+      let sub;
+      try {
+        sub = await stripe.subscriptions.retrieve(c.stripe_connected_subscription_id, { stripeAccount: acct });
+      } catch (e) {
+        if (e.code === 'resource_missing') { skipped++; continue; }
+        throw e;
+      }
+      if (!['active', 'trialing', 'past_due'].includes(sub.status)) { skipped++; continue; }
+
+      const price = await createConnectMinutePrice(agency, c.plan_type || 'starter');
+      const meterItem = findMeteredItem(sub);
+      if (meterItem) {
+        await stripe.subscriptionItems.update(
+          meterItem.id,
+          { price: price.id, proration_behavior: 'none' },
+          { stripeAccount: acct }
+        );
+        repriced++;
+      } else {
+        await stripe.subscriptionItems.create(
+          { subscription: sub.id, price: price.id }, // metered, no quantity
+          { stripeAccount: acct }
+        );
+        attached++;
+      }
+    } catch (e) {
+      skipped++;
+      console.warn(`Minute item reprice failed for ${c.business_name}:`, e.message);
+    }
+  }
+  return { ok: true, repriced, attached, skipped };
 }
 
 // ============================================================================
@@ -1478,7 +1554,7 @@ async function expireTrials() {
 
   for (const client of expiredClients || []) {
     try {
-      // ── RELEASE the phone number: delete VAPI + release Telnyx ──
+      // -- RELEASE the phone number: delete VAPI + release Telnyx --
       if (client.vapi_phone_id || client.vapi_phone_number) {
         try {
           const release = await fullyReleaseNumber(client.vapi_phone_id, client.vapi_phone_number);
@@ -1504,7 +1580,7 @@ async function expireTrials() {
         }
       }
 
-      // ── DELETE VAPI assistant ──
+      // -- DELETE VAPI assistant --
       if (client.vapi_assistant_id && VAPI_API_KEY) {
         try {
           const asstRes = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
@@ -1522,7 +1598,7 @@ async function expireTrials() {
         }
       }
 
-      // ── Update status + null out VAPI resource IDs ──
+      // -- Update status + null out VAPI resource IDs --
       //    Also null phone_number + phone_area_code. The number was just
       //    released back to Telnyx's pool, so this dead row must stop claiming
       //    it. The clients_phone_number_key unique constraint sits on
@@ -1547,7 +1623,7 @@ async function expireTrials() {
         continue;
       }
 
-      // ── Verify update persisted (RLS check) ──
+      // -- Verify update persisted (RLS check) --
       const { data: verifyClient } = await supabase
         .from('clients')
         .select('subscription_status')
@@ -1562,11 +1638,11 @@ async function expireTrials() {
         continue;
       }
 
-      // ── Send SMS after confirmed status change ──
+      // -- Send SMS after confirmed status change --
       const agency = client.agencies;
       await sendClientTrialExpiredSMS(client, agency);
 
-      // ── Update agency per-client billing (decrease quantity) ──
+      // -- Update agency per-client billing (decrease quantity) --
       try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
 
       console.log('✅ Trial expired + VAPI resources released for:', client.business_name);
@@ -2141,24 +2217,25 @@ async function handleClientPaymentFailed(invoice, stripeAccountId) {
 module.exports = {
   createConnectAccountLink,
   getConnectStatus,
-  getConnectFinancials,          // NEW: agency Payments page (balance, payouts, charges)
-  createConnectAccountSession,   // NEW: embedded Connect components (phase 2)
-  createConnectLoginLink,        // NEW: Express dashboard login link
+  getConnectFinancials,          // agency Payments page (balance, payouts, charges)
+  createConnectAccountSession,   // embedded Connect components (phase 2)
+  createConnectLoginLink,        // Express dashboard login link
   disconnectConnectAccount,
   createClientCheckout,
-  createTrialCheckoutForSignup, // NEW: called from routes/client-signup.js
+  createTrialCheckoutForSignup, // called from routes/client-signup.js
   createClientPortal,
-  changeClientPlan,             // NEW: in-app plan change for active subscriptions
-  syncConnectBranding,          // NEW: push agency logo + colors to their Connect account
-  syncConnectBrandingHandler,   // NEW: express handler for an explicit resync
+  changeClientPlan,             // in-app plan change for active subscriptions
+  syncConnectBranding,          // push agency logo + colors to their Connect account
+  syncConnectBrandingHandler,   // express handler for an explicit resync
   handleConnectStripeWebhook,
   expireTrials,
-  reconcileClientSubscriptions, // NEW: self-heal DB rows vs real Stripe status
+  reconcileClientSubscriptions, // self-heal DB rows vs real Stripe status
   // Client-facing per-minute billing (agency charges its client per minute)
   minutePassThroughActive,      // resolver: is per-minute billing live for this agency
   ensureConnectMinuteMeter,     // create/reuse the voice_minutes meter on the connected account
   createConnectMinutePrice,     // build a metered minute price for a plan on the connected account
   ensureClientMinuteItem,       // attach the metered item to one existing subscription
   attachMinuteItemsForAgency,   // ON sweep: attach to every existing client (used by toggle + backfill)
+  repriceMinuteItemsForAgency,  // rate/included change sweep: re-point existing metered items to a fresh price
   setMinutePassThrough          // POST handler for the on/off toggle
 };

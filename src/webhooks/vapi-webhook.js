@@ -1,24 +1,29 @@
 // ============================================================================
 // VAPI WEBHOOK HANDLER - Multi-Tenant Aware
-// UPDATED: 2026-05-05 — Comprehensive demo call summary with AI extraction,
+// UPDATED: 2026-05-05 - Comprehensive demo call summary with AI extraction,
 //   fixed duration extraction, personalized SMS
-// UPDATED: 2026-05-06 — Usage record tracking for metered billing (Phase 1)
-// UPDATED: 2026-05-09 — Demo SMS: area code location, actionable follow-up,
+// UPDATED: 2026-05-06 - Usage record tracking for metered billing (Phase 1)
+// UPDATED: 2026-05-09 - Demo SMS: area code location, actionable follow-up,
 //   sendAndLogSMS for full SMS logging
-// UPDATED: 2026-05-14 — Multilingual: English-enforced summaries, callLanguage
+// UPDATED: 2026-05-14 - Multilingual: English-enforced summaries, callLanguage
 //   extraction, call_language stored on every call record
-// UPDATED: 2026-05-19 — Fix: demo admin SMS summary truncation cuts at word
+// UPDATED: 2026-05-19 - Fix: demo admin SMS summary truncation cuts at word
 //   boundary (300 char limit) instead of mid-word at 200
-// UPDATED: 2026-05-20 — Save demo calls to demo_calls table for dashboard display.
-// UPDATED: 2026-05-22 — Fix: Claude model string claude-sonnet-4-6 (was 404ing
+// UPDATED: 2026-05-20 - Save demo calls to demo_calls table for dashboard display.
+// UPDATED: 2026-05-22 - Fix: Claude model string claude-sonnet-4-6 (was 404ing
 //   with invalid dated version). Fix: demo_calls insert now checks Supabase
 //   error return instead of silently succeeding.
-// UPDATED: 2026-06-17 — FIX: round duration_seconds before insert. VAPI sends
+// UPDATED: 2026-06-17 - FIX: round duration_seconds before insert. VAPI sends
 //   fractional seconds (e.g. 50.573) but duration_seconds is an INTEGER
 //   column, so every client-call insert failed with Postgres 22P02 and the
-//   code returned a silent 500 — no row saved, and therefore no SMS (SMS is
+//   code returned a silent 500 - no row saved, and therefore no SMS (SMS is
 //   the step after the save). Also added diagnostic logging so gate blocks
 //   and the real insert error print instead of dying silently.
+// UPDATED: 2026-07-30 - STEP 2 now increments clients.minutes_this_period by
+//   the per-call billed minutes (Math.ceil(durationSeconds / 60)), the same
+//   value reported to the client meter, so the client dashboard's Voice
+//   Minutes display reflects real usage. Billing itself still runs off the
+//   Stripe meter, not this counter.
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -76,7 +81,7 @@ async function generateAISummary(transcript, industry, callerPhone) {
     waterproofing: 'Focus on: type of water intrusion or foundation issue, property location, severity, urgency.',
     junk_removal: 'Focus on: items or volume to remove or dumpster size, location, access, timeline.'
   };
-  const prompt = `Analyze this phone call transcript for a ${industry} business.\n\nTranscript:\n${transcript}\n\nCaller Phone: ${callerPhone}\n\nExtract and return ONLY valid JSON:\n{"customerName":"string or Unknown","customerPhone":"formatted (XXX) XXX-XXXX","customerEmail":"string or null","urgency":"emergency|high|medium|routine","summary":"2-3 sentence summary IN ENGLISH focusing on: ${industryGuidance[industry] || 'what the customer needs'}","callLanguage":"two-letter language code of the language spoken during the call, e.g. en or es","isSpam":false,"spamReason":null}\n\nIMPORTANT: Always write the summary in English, even if the call was conducted in Spanish or another language. If the call was not in English, note the language in the callLanguage field and begin the summary with the language spoken (e.g. "Spanish-language call.").\n\nSPAM DETECTION: Set isSpam true ONLY if the caller is clearly a telemarketer, robocall, or solicitor. Indicators: plays a pre-recorded message or sales pitch, tries to sell a product or service TO the business (SEO, Google Ads, insurance leads, credit card processing, etc.), opens the call by asking for "the business owner" or "the person in charge of your Google listing" with no prior natural conversation, the line goes silent after connecting, or uses high-pressure sales tactics. Do NOT mark as spam if: the caller is a real customer asking a question, requesting service, or asking to speak with someone — even if the interaction is short. When in doubt, set isSpam to false.`;
+  const prompt = `Analyze this phone call transcript for a ${industry} business.\n\nTranscript:\n${transcript}\n\nCaller Phone: ${callerPhone}\n\nExtract and return ONLY valid JSON:\n{"customerName":"string or Unknown","customerPhone":"formatted (XXX) XXX-XXXX","customerEmail":"string or null","urgency":"emergency|high|medium|routine","summary":"2-3 sentence summary IN ENGLISH focusing on: ${industryGuidance[industry] || 'what the customer needs'}","callLanguage":"two-letter language code of the language spoken during the call, e.g. en or es","isSpam":false,"spamReason":null}\n\nIMPORTANT: Always write the summary in English, even if the call was conducted in Spanish or another language. If the call was not in English, note the language in the callLanguage field and begin the summary with the language spoken (e.g. "Spanish-language call.").\n\nSPAM DETECTION: Set isSpam true ONLY if the caller is clearly a telemarketer, robocall, or solicitor. Indicators: plays a pre-recorded message or sales pitch, tries to sell a product or service TO the business (SEO, Google Ads, insurance leads, credit card processing, etc.), opens the call by asking for "the business owner" or "the person in charge of your Google listing" with no prior natural conversation, the line goes silent after connecting, or uses high-pressure sales tactics. Do NOT mark as spam if: the caller is a real customer asking a question, requesting service, or asking to speak with someone - even if the interaction is short. When in doubt, set isSpam to false.`;
   try {
     const _ac1 = new AbortController();
     const _t1 = setTimeout(() => _ac1.abort(), 15000);
@@ -183,14 +188,14 @@ ${transcript}
 
 Caller Phone: ${callerPhone || 'Unknown'}${industryHint}
 
-Extract and return ONLY valid JSON — no backticks, no extra text:
+Extract and return ONLY valid JSON - no backticks, no extra text:
 {
   "businessName": "the caller's business name, or null if not mentioned",
-  "businessType": "type of business like dental, plumbing, restaurant, law firm — or null",
+  "businessType": "type of business like dental, plumbing, restaurant, law firm - or null",
   "callerName": "the caller's personal name if mentioned, or null",
   "interestLevel": "high if they asked about pricing, signup, features, or seemed excited; medium if engaged but noncommittal; low if disinterested or ended quickly",
-  "serviceDiscussed": "the specific scenario roleplayed in one short phrase, e.g. 'emergency dental appointment booking' or 'plumbing leak repair intake' — or null",
-  "askedQuestions": true or false — did the caller ask follow-up questions about the product after the roleplay,
+  "serviceDiscussed": "the specific scenario roleplayed in one short phrase, e.g. 'emergency dental appointment booking' or 'plumbing leak repair intake' - or null",
+  "askedQuestions": true or false - did the caller ask follow-up questions about the product after the roleplay,
   "summary": "2-3 sentence summary in English covering: what business they run, what the AI demonstrated for them, and their reaction/interest level"
 }`;
 
@@ -380,11 +385,11 @@ async function handleDemoCall(agency, message, industryKey = null) {
         if (businessName) {
           lines.push(`Thanks for trying ${agencyName}'s AI receptionist${nameNote}! 🎉`);
           lines.push('');
-          lines.push(`That demo showed exactly how AI would answer calls for ${businessName} — 24/7, with instant text summaries after every call.`);
+          lines.push(`That demo showed exactly how AI would answer calls for ${businessName} - 24/7, with instant text summaries after every call.`);
         } else {
           lines.push(`Thanks for trying ${agencyName}'s AI receptionist! 🎉`);
           lines.push('');
-          lines.push(`What you just experienced is exactly how AI would answer your business calls — 24/7, no missed calls, instant summaries.`);
+          lines.push(`What you just experienced is exactly how AI would answer your business calls - 24/7, no missed calls, instant summaries.`);
         }
 
         lines.push('');
@@ -412,7 +417,7 @@ async function handleDemoCall(agency, message, industryKey = null) {
   if (agency.phone) {
     try {
       const lines = [];
-      lines.push(`🎤 Demo Call — ${agency.name}`);
+      lines.push(`🎤 Demo Call - ${agency.name}`);
       lines.push(`━━━━━━━━━━━━━━━━━━`);
       lines.push(`📞 ${callerDisplay}`);
       if (businessLabel) lines.push(`🏢 ${businessLabel}`);
@@ -440,13 +445,13 @@ async function handleDemoCall(agency, message, industryKey = null) {
 
       lines.push(`━━━━━━━━━━━━━━━━━━`);
       if (interestLevel === 'high') {
-        lines.push(`💡 Hot lead — follow up within the hour.`);
+        lines.push(`💡 Hot lead - follow up within the hour.`);
       } else if (interestLevel === 'medium') {
-        lines.push(`💡 Warm lead — follow up within 24 hours.`);
+        lines.push(`💡 Warm lead - follow up within 24 hours.`);
       } else {
         lines.push(callerPhone && callerPhone !== 'Unknown'
           ? `✅ Follow-up SMS sent to caller`
-          : `⚠️ No caller phone — follow-up not sent`
+          : `⚠️ No caller phone - follow-up not sent`
         );
       }
 
@@ -556,7 +561,7 @@ async function handleDemoToolCall(req, res, message) {
 
     const callerPhone = message.call?.customer?.number || message.customer?.number || null;
     if (!callerPhone || callerPhone === 'Unknown')
-      return res.status(200).json({ results: [{ toolCallId, result: "I wasn't able to send the text — I don't have your phone number. But after every real call, your team would get an instant summary." }] });
+      return res.status(200).json({ results: [{ toolCallId, result: "I wasn't able to send the text - I don't have your phone number. But after every real call, your team would get an instant summary." }] });
 
     let vapiPhone = message.phoneNumber?.number || message.call?.phoneNumber?.number || null;
     if (!vapiPhone) {
@@ -566,7 +571,7 @@ async function handleDemoToolCall(req, res, message) {
     let agency = null;
     if (vapiPhone) { const resolved = await resolveAgencyForDemo(vapiPhone); agency = resolved.agency; }
     if (!agency)
-      return res.status(200).json({ results: [{ toolCallId, result: 'I just sent you a text — check your phone!' }] });
+      return res.status(200).json({ results: [{ toolCallId, result: 'I just sent you a text - check your phone!' }] });
 
     const { formatPhoneDisplay } = require('../lib/notifications');
     const callerDisplay = formatPhoneDisplay ? formatPhoneDisplay(callerPhone) : callerPhone;
@@ -591,7 +596,7 @@ async function handleDemoToolCall(req, res, message) {
     return res.status(200).json({ results: [{ toolCallId, result: 'Done! The text has been sent to their phone with the full call summary.' }] });
   } catch (error) {
     console.error(`❌ Demo tool-call failed:`, error.message);
-    return res.status(200).json({ results: [{ toolCallId: 'error', result: "I sent the text — check your phone!" }] });
+    return res.status(200).json({ results: [{ toolCallId: 'error', result: "I sent the text - check your phone!" }] });
   }
 }
 
@@ -669,7 +674,7 @@ async function handleAssistantRequest(req, res, message) {
       const { agency: demoAgency, industryKey } = await resolveAgencyForDemo(vapiPhoneNumber);
 
       if (demoAgency && industryKey) {
-        console.log(`🎯 Industry demo call (${industryKey}) — building config for: ${demoAgency.name}`);
+        console.log(`🎯 Industry demo call (${industryKey}) - building config for: ${demoAgency.name}`);
         try {
           const demoConfig = buildIndustryDemoConfig(industryKey, demoAgency);
           console.log(`✅ Industry demo config built in ${Date.now() - startTime}ms`);
@@ -680,7 +685,7 @@ async function handleAssistantRequest(req, res, message) {
       }
 
       if (demoAgency) {
-        console.log(`🎤 Generic demo call — building config for: ${demoAgency.name}`);
+        console.log(`🎤 Generic demo call - building config for: ${demoAgency.name}`);
         try {
           const demoConfig = buildDemoDynamicConfig(demoAgency);
           console.log(`✅ Generic demo config built in ${Date.now() - startTime}ms`);
@@ -780,7 +785,7 @@ async function handleVapiWebhook(req, res) {
         if (pid) { vapiPhone = await getPhoneNumberFromVapi(pid); if (vapiPhone) message.phoneNumber = { ...(message.phoneNumber || {}), number: vapiPhone }; }
       }
       if (vapiPhone) { const { agency } = await resolveAgencyForDemo(vapiPhone); if (agency) return handleDemoToolCall(req, res, message); }
-      console.log(`🔧 Tool-call received (non-demo) — acknowledging`);
+      console.log(`🔧 Tool-call received (non-demo) - acknowledging`);
       return res.status(200).json({ received: true });
     }
 
@@ -828,7 +833,7 @@ async function handleVapiWebhook(req, res) {
         const result = await handleDemoCall(demoAgency, message, industryKey);
         return res.status(200).json({ received: true, demo: true, industry: industryKey, ...result });
       }
-      console.log(`🚫 EXIT: not a client and not a demo number — nothing saved`);
+      console.log(`🚫 EXIT: not a client and not a demo number - nothing saved`);
       return res.status(200).json({ received: true });
     }
 
@@ -838,7 +843,7 @@ async function handleVapiWebhook(req, res) {
     // DIAGNOSTIC: print every value the gates below read, so a block is never
     // a mystery. If the call dies after this line with no "Call saved" log,
     // the next line printed tells you exactly which gate (or the insert).
-    console.log(`🔎 Gate values — client.subscription_status=${client.subscription_status}, client.trial_ends_at=${client.trial_ends_at}, agency.subscription_status=${agency?.subscription_status ?? 'NO-AGENCY'}, agency.trial_ends_at=${agency?.trial_ends_at ?? 'n/a'}, calls_this_month=${client.calls_this_month}, monthly_call_limit=${client.monthly_call_limit}, owner_phone=${client.owner_phone ? 'set' : 'MISSING'}, hipaa_mode=${client.hipaa_mode === true}`);
+    console.log(`🔎 Gate values - client.subscription_status=${client.subscription_status}, client.trial_ends_at=${client.trial_ends_at}, agency.subscription_status=${agency?.subscription_status ?? 'NO-AGENCY'}, agency.trial_ends_at=${agency?.trial_ends_at ?? 'n/a'}, calls_this_month=${client.calls_this_month}, monthly_call_limit=${client.monthly_call_limit}, owner_phone=${client.owner_phone ? 'set' : 'MISSING'}, hipaa_mode=${client.hipaa_mode === true}`);
 
     if (agency) {
       if (!['active', 'trial', 'trialing'].includes(agency.subscription_status)) {
@@ -870,7 +875,7 @@ async function handleVapiWebhook(req, res) {
       return res.status(200).json({ received: true, blocked: true, reason: 'Limit reached' });
     }
 
-    console.log(`✅ All gates passed — proceeding to save`);
+    console.log(`✅ All gates passed - proceeding to save`);
 
     // ── EXTRACT CALL DATA (before AI, so we can save immediately) ──────
     const transcript = message.transcript || '';
@@ -902,7 +907,7 @@ async function handleVapiWebhook(req, res) {
     const storedRecordingUrl = hipaaMode ? null : recordingUrl;
     const storedTranscript = hipaaMode ? null : transcript;
     if (hipaaMode) {
-      console.log('🏥 HIPAA mode — recording and transcript will not be stored');
+      console.log('🏥 HIPAA mode - recording and transcript will not be stored');
     }
 
     // ── STEP 1: SAVE CALL RECORD IMMEDIATELY ──────────────────────────
@@ -943,11 +948,20 @@ async function handleVapiWebhook(req, res) {
     }
     console.log('✅ Call saved (pre-AI):', savedCallId);
 
-    // ── STEP 2: UPDATE CALL COUNT ─────────────────────────────────────
+    // ── STEP 2: UPDATE CALL COUNT (+ per-period minutes) ──────────────
+    // Increment calls_this_month, and minutes_this_period by the per-call
+    // billed minutes (ceil of duration / 60). This is the SAME value reported
+    // to the client meter in usage-tracker, so the client dashboard's Voice
+    // Minutes display matches what is billed. Billing itself runs off the
+    // Stripe meter; this counter is for display and any client-level cap.
     const newCount = currentCallCount + 1;
     const isFirst = newCount === 1;
     const upd = { calls_this_month: newCount };
     if (isFirst) { upd.first_call_received = true; upd.first_call_received_at = new Date().toISOString(); }
+    const billedMinutes = (durationSeconds && durationSeconds > 0) ? Math.ceil(durationSeconds / 60) : 0;
+    if (billedMinutes > 0) {
+      upd.minutes_this_period = (client.minutes_this_period || 0) + billedMinutes;
+    }
     await supabase.from('clients').update(upd).eq('id', client.id);
 
     // ── STEP 3: RECORD VOICE USAGE ────────────────────────────────────
@@ -980,7 +994,7 @@ async function handleVapiWebhook(req, res) {
     let { isSpam, spamReason } = aiData;
 
     if (wasTransferred && isSpam) {
-      console.log(`⚠️ Spam flag overridden — call was successfully transferred (${endedReason})`);
+      console.log(`⚠️ Spam flag overridden - call was successfully transferred (${endedReason})`);
       isSpam = false;
       spamReason = null;
     }
@@ -1031,7 +1045,7 @@ async function handleVapiWebhook(req, res) {
       smsSent = await sendCallNotificationSMS(client, agency, aiData);
       console.log(`📲 Owner SMS to ${client.owner_phone}: ${smsSent ? 'sent' : 'FAILED'}`);
     } else {
-      console.log(`📲 No owner_phone on client — skipping owner SMS`);
+      console.log(`📲 No owner_phone on client - skipping owner SMS`);
     }
     await notifyTeamMembers(client.id, aiData, agency);
     if (isFeatureEnabled(client, agency, 'email_summaries') && client.email) {

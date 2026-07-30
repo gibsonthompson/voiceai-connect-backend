@@ -7,9 +7,9 @@
 // UPDATED: Added AI tool keys to plan_features validation
 // UPDATED: Added team member limits to settings response
 // UPDATED: Added marketing_template to responses + whitelist
-// UPDATED: 2026-05-22 — Added client_header_mode + allow_client_branding to whitelist + response
-// UPDATED: 2026-05-29 — Fixed plan_features validation: team_members is a number, not boolean
-// UPDATED: 2026-06-08 — Added plan_*_name and plan_*_description columns for
+// UPDATED: 2026-05-22 - Added client_header_mode + allow_client_branding to whitelist + response
+// UPDATED: 2026-05-29 - Fixed plan_features validation: team_members is a number, not boolean
+// UPDATED: 2026-06-08 - Added plan_*_name and plan_*_description columns for
 //                       white-label plan customization (Phase 3). Returned in
 //                       both getAgencyByHost (public) and getAgencySettings.
 // UPDATED: 2026-07-19: getAgencySettings no longer returns the sensitive half
@@ -25,11 +25,28 @@
 //                      data-agency value in every embed snippet) could read that
 //                      agency's MRR, client counts, contact email and phone,
 //                      twilio_account_sid, and Stripe customer/subscription ids.
+// UPDATED: 2026-07-30: Client per-minute billing. getAgencySettings (auth
+//                      branch) now returns minute_pass_through,
+//                      client_minute_rate_cents, and included_minutes_* so the
+//                      Payments tab can render the section. updateAgencySettings
+//                      allows client_minute_rate_cents and the three
+//                      included_minutes_* fields through, with range validation.
+//                      minute_pass_through is deliberately NOT writable here (it
+//                      goes through the dedicated toggle endpoint, which
+//                      validates, creates the connected-account meter, and
+//                      sweeps existing clients). connect_minute_meter_id is
+//                      system-managed and never user-writable.
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
 const jwt = require('jsonwebtoken');
 const { supabase, getAgencyBySlug, getAgencyByDomain, getAgencyById } = require('../lib/supabase');
+// Reprice sweep for client per-minute billing. Stripe prices are immutable, so
+// a rate/included-minutes change only reaches EXISTING clients if their metered
+// item is re-pointed to a fresh price. updateAgencySettings fires this in the
+// background after such a change. Requiring stripe-connect here is safe: it
+// does not require this module back (no circular dependency).
+const { repriceMinuteItemsForAgency } = require('./stripe-connect');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
@@ -70,7 +87,7 @@ function callerOwnsAgency(req, agencyId) {
 // marketing site, signup widget, embed iframe. NEVER include columns that
 // shouldn't be public (BYOT credentials, internal tokens, anything sensitive).
 // Used by both getAgencyByHost (subdomain/marketing-domain lookup) and
-// getAgencyByIdPublic (Path A embed flow — iframe knows agency UUID from the
+// getAgencyByIdPublic (Path A embed flow - iframe knows agency UUID from the
 // embed snippet's data-agency attribute), and by the unauthenticated branch of
 // getAgencySettings.
 // ============================================================================
@@ -213,7 +230,7 @@ async function getAgencyByHost(req, res) {
 // ----------------------------------------------------------------------------
 // The embed snippet bakes in the agency's UUID via data-agency. When the
 // iframe loads on the platform domain (myvoiceaiconnect.com), there's no
-// host-based agency context to derive — middleware sees a platform request
+// host-based agency context to derive - middleware sees a platform request
 // and skips Supabase. This endpoint lets the iframe look up the agency by
 // the UUID it already has, then render the client-side signup flow branded
 // by that agency.
@@ -224,7 +241,7 @@ async function getAgencyByHost(req, res) {
 //     are returned. Suspended/canceled → 403 so the embed shows an unavailable
 //     state instead of a working form for an off-status agency.
 //   - Returns the publicAgencyShape projection (same as by-host). NEVER add
-//     fields here that aren't already exposed via by-host — they'd leak via
+//     fields here that aren't already exposed via by-host - they'd leak via
 //     the embed widget too.
 // ============================================================================
 async function getAgencyByIdPublic(req, res) {
@@ -414,6 +431,18 @@ async function getAgencySettings(req, res) {
         
         // Calendar plan gating (which client plans can use Google Calendar)
         calendar_enabled_plans: agency.calendar_enabled_plans || ['pro', 'growth'],
+
+        // Client per-minute billing (agency charges its own clients per voice
+        // minute on its connected account). minute_pass_through is READ here so
+        // the Payments tab can render the toggle state, but it is only WRITTEN
+        // via POST /api/agency/:agencyId/minute-pass-through, never through the
+        // settings PUT. Rate is stored in cents (numeric(10,4), sub-cent
+        // allowed); included minutes are the per-plan free allotment.
+        minute_pass_through: agency.minute_pass_through === true,
+        client_minute_rate_cents: agency.client_minute_rate_cents ?? null,
+        included_minutes_starter: agency.included_minutes_starter ?? 0,
+        included_minutes_pro: agency.included_minutes_pro ?? 0,
+        included_minutes_growth: agency.included_minutes_growth ?? 0,
         
         // Client trial card requirement (require_card_for_trial). Returned so
         // the Settings pricing tab can render and toggle it. The signup flow
@@ -491,7 +520,17 @@ async function updateAgencySettings(req, res) {
       'marketing_domain', 'domain_verified',
       'price_starter', 'price_pro', 'price_growth',
       'limit_starter', 'limit_pro', 'limit_growth',
-      // Phase 3 — white-label plan customization
+      // Client per-minute billing: the agency-wide overage rate (cents/min)
+      // and the per-plan included-minute allotments. Written via the normal
+      // settings PUT. IMPORTANT: minute_pass_through is intentionally NOT in
+      // this list. Enabling/disabling pass-through has side effects (validate
+      // rate + Connect, create the connected-account meter, sweep existing
+      // clients, clean up inert items at renewal), so it must go through the
+      // dedicated POST /api/agency/:agencyId/minute-pass-through endpoint.
+      // connect_minute_meter_id is system-managed and never user-writable.
+      'client_minute_rate_cents',
+      'included_minutes_starter', 'included_minutes_pro', 'included_minutes_growth',
+      // Phase 3 - white-label plan customization
       'plan_starter_name', 'plan_pro_name', 'plan_growth_name',
       'plan_starter_description', 'plan_pro_description', 'plan_growth_description',
       'support_email', 'support_phone', 'timezone',
@@ -588,6 +627,46 @@ async function updateAgencySettings(req, res) {
       } else {
         sanitizedUpdates[field] = trimmed;
       }
+    }
+
+    // Validate client per-minute billing fields.
+    // client_minute_rate_cents is stored in CENTS as numeric(10,4), so sub-cent
+    // precision is allowed (do not force an integer). Range guard: >= 0 and a
+    // sane ceiling of 1000 cents/min (10.00 per minute) to catch a fat-fingered
+    // value. Empty/null clears the rate. The frontend collects dollars and
+    // multiplies by 100 before sending, so what arrives here is already cents.
+    if (sanitizedUpdates.client_minute_rate_cents !== undefined) {
+      const raw = sanitizedUpdates.client_minute_rate_cents;
+      if (raw === null || raw === '') {
+        sanitizedUpdates.client_minute_rate_cents = null;
+      } else {
+        const cents = Number(raw);
+        if (!Number.isFinite(cents) || cents < 0) {
+          return res.status(400).json({ error: 'client_minute_rate_cents must be a number >= 0' });
+        }
+        if (cents > 1000) {
+          return res.status(400).json({ error: 'client_minute_rate_cents cannot exceed 1000 (10.00 per minute)' });
+        }
+        // Clamp to numeric(10,4): at most 4 decimal places of cents.
+        sanitizedUpdates.client_minute_rate_cents = Math.round(cents * 10000) / 10000;
+      }
+    }
+
+    for (const field of ['included_minutes_starter', 'included_minutes_pro', 'included_minutes_growth']) {
+      if (sanitizedUpdates[field] === undefined) continue;
+      const raw = sanitizedUpdates[field];
+      if (raw === null || raw === '') {
+        sanitizedUpdates[field] = 0;
+        continue;
+      }
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 0) {
+        return res.status(400).json({ error: `${field} must be an integer >= 0` });
+      }
+      if (n > 100000) {
+        return res.status(400).json({ error: `${field} cannot exceed 100000` });
+      }
+      sanitizedUpdates[field] = n;
     }
 
     // Validate branding_overrides structure if provided
@@ -734,7 +813,7 @@ async function updateAgencySettings(req, res) {
       }
     }
 
-    // Sanitize custom scripts — basic length check (prevent abuse)
+    // Sanitize custom scripts - basic length check (prevent abuse)
     if (sanitizedUpdates.custom_head_scripts !== undefined && sanitizedUpdates.custom_head_scripts !== null) {
       if (sanitizedUpdates.custom_head_scripts.length > 10000) {
         return res.status(400).json({ error: 'Custom head scripts too long (max 10,000 characters)' });
@@ -774,7 +853,23 @@ async function updateAgencySettings(req, res) {
     }
     
     console.log('✅ Agency settings updated:', agency.name);
-    
+
+    // If the per-minute rate or any plan's included minutes changed, re-point
+    // existing clients' metered items to a fresh price at the new values.
+    // Stripe prices are immutable, so without this a rate change would only
+    // apply to new signups and plan changes. Fired in the background: it hits
+    // Stripe per client and must not block or fail the settings save. No-ops
+    // when pass-through is off (the sweep checks minutePassThroughActive).
+    const minuteFieldsTouched = ['client_minute_rate_cents', 'included_minutes_starter', 'included_minutes_pro', 'included_minutes_growth']
+      .some((f) => f in sanitizedUpdates);
+    if (minuteFieldsTouched) {
+      repriceMinuteItemsForAgency(agencyId)
+        .then((r) => {
+          if (r?.ok) console.log(`Minute reprice sweep for ${agencyId}: repriced ${r.repriced}, attached ${r.attached}, skipped ${r.skipped}`);
+        })
+        .catch((e) => console.error('Minute reprice sweep failed (non-fatal):', e.message));
+    }
+
     res.json({
       success: true,
       agency

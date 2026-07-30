@@ -30,6 +30,11 @@
 //                      client rows against real Stripe status).
 // UPDATED: 2026-07-29: Mount admin-calls router (calls + demos feeds) that the
 //                      redesigned admin Overview and Calls pages read from.
+// UPDATED: 2026-07-30: /api/client/:clientId/details agency select extended
+//                      with the client per-minute billing fields
+//                      (minute_pass_through, client_minute_rate_cents,
+//                      included_minutes_*) so the client dashboard can show
+//                      minutes used vs included and projected per-minute cost.
 // Destination: src/server.js (or src/index.js), FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -297,7 +302,7 @@ app.use('/api/content-render', contentRender);
 app.use('/api/resto', restoRoutes);
 
 // ============================================================================
-// AGENCY ROUTES (Platform → Agencies)
+// AGENCY ROUTES (Platform to Agencies)
 // ============================================================================
 
 app.post('/api/agency/signup', handleAgencySignup);
@@ -1058,24 +1063,6 @@ app.get('/api/agency/:agencyId/analytics', async (req, res) => {
 });
 
 // ============================================================================
-// AGENCY USAGE SUMMARY (Phase 1, metered billing)
-// ============================================================================
-
-app.get('/api/agency/:agencyId/usage', async (req, res) => {
-  try {
-    const { agencyId } = req.params;
-    const summary = await getAgencyUsageSummary(agencyId);
-    if (!summary) {
-      return res.status(404).json({ error: 'Agency not found or no usage data' });
-    }
-    res.json({ success: true, usage: summary });
-  } catch (error) {
-    console.error('Error fetching usage:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// ============================================================================
 // REFERRAL PROGRAM ROUTES
 // ============================================================================
 
@@ -1131,7 +1118,7 @@ app.use('/api/agency', teamRoutes);
 app.use('/api/agency', previewTokenRoutes);
 
 // ============================================================================
-// CLIENT ROUTES (Agencies → Clients)
+// CLIENT ROUTES (Agencies to Clients)
 // ============================================================================
 
 // Phase 5: signupRateLimiter caps /api/client/signup at 5 requests per IP
@@ -1172,7 +1159,10 @@ app.get('/api/client/:clientId/details', async (req, res) => {
     // plan_features JSONB (powers buildClientPlans), and the theme/currency
     // fields that /client/upgrade-required and the client dashboard expect.
     // Without these, the upgrade-required page would fall back to hardcoded
-    // names and USD even after agencies set custom plan_*_name values.
+    // names and USD even after agencies set custom plan_*_name values. The
+    // minute_pass_through + client_minute_rate_cents + included_minutes_*
+    // fields power the client dashboard's Voice Minutes display (minutes used
+    // vs included and projected per-minute cost).
     const { data: client, error } = await supabase
       .from('clients')
       .select(`
@@ -1186,7 +1176,9 @@ app.get('/api/client/:clientId/details', async (req, res) => {
           plan_starter_description, plan_pro_description, plan_growth_description,
           plan_features,
           website_theme, country, currency, display_currency,
-          stripe_account_id, stripe_charges_enabled
+          stripe_account_id, stripe_charges_enabled,
+          minute_pass_through, client_minute_rate_cents,
+          included_minutes_starter, included_minutes_pro, included_minutes_growth
         )
       `)
       .eq('id', clientId)
