@@ -6,6 +6,9 @@
 //          (admin_dashboard_rollup, admin_agencies_rollup) instead of pulling
 //          whole tables and counting in JS. Fixes the slow admin load. Response
 //          shapes are unchanged.
+// UPDATED: 2026-07-31: Added support-requests endpoints (GET list/filter + PATCH
+//          status/notes) backing the admin Support page. Inbound help-widget
+//          escalations are persisted to support_requests by routes/help.js.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -136,7 +139,7 @@ router.get('/dashboard', requireAdmin, async (req, res) => {
 });
 
 // ============================================================================
-// LIST ALL AGENCIES — Enriched with aggregate counts from all tables
+// LIST ALL AGENCIES - Enriched with aggregate counts from all tables
 // ----------------------------------------------------------------------------
 // The agency fetch (with its status/plan/search filters and pagination) is
 // unchanged. The per-agency counts now come from a single admin_agencies_rollup
@@ -450,7 +453,7 @@ router.post('/agencies/:agencyId/impersonate', requireAdmin, async (req, res) =>
 });
 
 // ============================================================================
-// ADMIN LEADS ROUTES — Platform-level sales pipeline
+// ADMIN LEADS ROUTES - Platform-level sales pipeline
 // These are YOUR leads (prospective agencies to sell to).
 // Stored with agency_id = NULL to keep them separate from agency CRM leads.
 // ============================================================================
@@ -510,7 +513,7 @@ router.get('/leads/pipeline', requireAdmin, async (req, res) => {
       .order('created_at', { ascending: false })
       .limit(20);
 
-    // Gone cold — contacted but no outreach in 7+ days, no follow-up set, not won/lost/new
+    // Gone cold - contacted but no outreach in 7+ days, no follow-up set, not won/lost/new
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
     const { data: cold } = await supabase
       .from('leads')
@@ -688,7 +691,7 @@ router.post('/leads', requireAdmin, async (req, res) => {
 
 // ============================================================================
 // POST /api/admin/leads/import - Bulk CSV import as platform leads
-// No agency needed — these are YOUR prospective agency leads
+// No agency needed - these are YOUR prospective agency leads
 // ============================================================================
 router.post('/leads/import', requireAdmin, async (req, res) => {
   try {
@@ -934,7 +937,7 @@ router.delete('/leads/:leadId', requireAdmin, async (req, res) => {
 });
 
 // ============================================================================
-// ADMIN OUTREACH ROUTES — Platform-level templates, compose, and logging
+// ADMIN OUTREACH ROUTES - Platform-level templates, compose, and logging
 // Templates and history stored with agency_id = NULL
 // ============================================================================
 
@@ -1348,6 +1351,206 @@ router.get('/leads/:leadId/outreach', requireAdmin, async (req, res) => {
   } catch (error) {
     console.error('Admin lead outreach error:', error);
     res.status(500).json({ error: 'Failed to load outreach stats' });
+  }
+});
+
+// ============================================================================
+// SUPPORT REQUESTS - inbound help-widget escalations
+// ----------------------------------------------------------------------------
+// The support widget's "Contact Us" escalation writes a row to support_requests
+// (see routes/help.js) in addition to texting the platform owner. These
+// endpoints back the admin Support page: list/filter the queue and update a
+// request's status + admin notes.
+// ============================================================================
+
+// GET /api/admin/support-requests
+// Query: status, user_type, search, limit, offset
+// Returns { requests, total, counts } where counts is the whole-table status
+// breakdown (for the tab badges), independent of the current page/filter.
+router.get('/support-requests', requireAdmin, async (req, res) => {
+  try {
+    const { status, user_type, search, limit = 30, offset = 0 } = req.query;
+
+    let query = supabase
+      .from('support_requests')
+      .select('*', { count: 'exact' })
+      .order('created_at', { ascending: false })
+      .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
+
+    if (status) query = query.eq('status', status);
+    if (user_type) query = query.eq('user_type', user_type);
+    if (search) {
+      query = query.or(
+        `message.ilike.%${search}%,user_email.ilike.%${search}%,display_name.ilike.%${search}%`
+      );
+    }
+
+    const { data: requests, error, count } = await query;
+    if (error) throw error;
+
+    // Whole-table status counts for the tab badges.
+    const { data: allRows } = await supabase.from('support_requests').select('status');
+    const counts = { open: 0, in_progress: 0, resolved: 0, total: 0 };
+    (allRows || []).forEach(r => {
+      counts.total += 1;
+      if (r.status && counts[r.status] !== undefined) counts[r.status] += 1;
+    });
+
+    res.json({ requests: requests || [], total: count || 0, counts });
+  } catch (error) {
+    console.error('Admin support-requests error:', error);
+    res.status(500).json({ error: 'Failed to load support requests' });
+  }
+});
+
+// PATCH /api/admin/support-requests/:id
+// Body: { status?, admin_notes? }
+// Moving to 'resolved' stamps resolved_at; moving off 'resolved' clears it.
+router.patch('/support-requests/:id', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, admin_notes } = req.body;
+
+    const updates = {};
+    if (status !== undefined) {
+      const allowed = ['open', 'in_progress', 'resolved'];
+      if (!allowed.includes(status)) {
+        return res.status(400).json({ error: 'Invalid status' });
+      }
+      updates.status = status;
+      updates.resolved_at = status === 'resolved' ? new Date().toISOString() : null;
+    }
+    if (admin_notes !== undefined) {
+      updates.admin_notes = admin_notes;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'Nothing to update' });
+    }
+
+    const { data, error } = await supabase
+      .from('support_requests')
+      .update(updates)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Support request not found' });
+
+    console.log(`🎫 Admin updated support request ${id}:`, updates);
+    res.json({ success: true, request: data });
+  } catch (error) {
+    console.error('Admin update support request error:', error);
+    res.status(500).json({ error: 'Failed to update support request' });
+  }
+});
+
+// ============================================================================
+// FEEDBACK - Settings > Feedback submissions (agency_feedback)
+// ----------------------------------------------------------------------------
+// routes/feedback.js writes agency_feedback rows (message + agency_id) and texts
+// the platform owner. These endpoints back the admin Support page's Feedback
+// tab: list/filter, and triage via status ('new' | 'reviewed' | 'archived') +
+// admin notes. Agency name/email are joined in manually (like sms-log) to avoid
+// PostgREST embedding ambiguity.
+// ============================================================================
+
+const FEEDBACK_STATUSES = ['new', 'reviewed', 'archived'];
+
+// GET /api/admin/feedback
+// Query: status, search (message), limit, offset
+// Returns { feedback, total, counts } where counts is the whole-table status
+// breakdown (for the tab badges).
+router.get('/feedback', requireAdmin, async (req, res) => {
+  try {
+    const { status, search, limit = 30, offset = 0 } = req.query;
+
+    let query = supabase
+      .from('agency_feedback')
+      .select('id, agency_id, message, status, admin_notes, created_at, reviewed_at', { count: 'exact' })
+      .order('created_at', { ascending: false })
+      .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
+
+    if (status) query = query.eq('status', status);
+    if (search) query = query.ilike('message', `%${search}%`);
+
+    const { data: rows, error, count } = await query;
+    if (error) throw error;
+
+    // Enrich with agency name + email.
+    const agencyIds = [...new Set((rows || []).map(r => r.agency_id).filter(Boolean))];
+    let agencyMap = {};
+    if (agencyIds.length > 0) {
+      const { data: agencies } = await supabase
+        .from('agencies')
+        .select('id, name, email')
+        .in('id', agencyIds);
+      (agencies || []).forEach(a => { agencyMap[a.id] = a; });
+    }
+
+    const feedback = (rows || []).map(r => ({
+      ...r,
+      agency_name: agencyMap[r.agency_id]?.name || null,
+      agency_email: agencyMap[r.agency_id]?.email || null,
+    }));
+
+    // Whole-table status counts for the tab badges. status may be null on rows
+    // created before the triage columns existed; treat those as 'new'.
+    const { data: allRows } = await supabase.from('agency_feedback').select('status');
+    const counts = { new: 0, reviewed: 0, archived: 0, total: 0 };
+    (allRows || []).forEach(r => {
+      counts.total += 1;
+      const s = r.status || 'new';
+      if (counts[s] !== undefined) counts[s] += 1;
+    });
+
+    res.json({ feedback, total: count || 0, counts });
+  } catch (error) {
+    console.error('Admin feedback error:', error);
+    res.status(500).json({ error: 'Failed to load feedback' });
+  }
+});
+
+// PATCH /api/admin/feedback/:id
+// Body: { status?, admin_notes? }
+// Moving to 'reviewed' stamps reviewed_at; moving off it clears it.
+router.patch('/feedback/:id', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, admin_notes } = req.body;
+
+    const updates = {};
+    if (status !== undefined) {
+      if (!FEEDBACK_STATUSES.includes(status)) {
+        return res.status(400).json({ error: 'Invalid status' });
+      }
+      updates.status = status;
+      updates.reviewed_at = status === 'reviewed' ? new Date().toISOString() : null;
+    }
+    if (admin_notes !== undefined) {
+      updates.admin_notes = admin_notes;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'Nothing to update' });
+    }
+
+    const { data, error } = await supabase
+      .from('agency_feedback')
+      .update(updates)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Feedback not found' });
+
+    console.log(`💬 Admin updated feedback ${id}:`, updates);
+    res.json({ success: true, feedback: data });
+  } catch (error) {
+    console.error('Admin update feedback error:', error);
+    res.status(500).json({ error: 'Failed to update feedback' });
   }
 });
 
