@@ -35,6 +35,16 @@
 //                      (minute_pass_through, client_minute_rate_cents,
 //                      included_minutes_*) so the client dashboard can show
 //                      minutes used vs included and projected per-minute cost.
+// UPDATED: 2026-07-31: Cancellation flow reworked. /api/agency/cancel no longer
+//                      needs a reason up front (the dropdown was removed) and
+//                      now logs its owner SMS as message type
+//                      'agency_cancellation' (via sendAndLogSMS) so it is
+//                      filterable in the admin SMS Log instead of lumped in with
+//                      generic platform notifications. New endpoint
+//                      /api/agency/cancel-category records the reason the user
+//                      grades on the post-cancel screen (reuses the existing
+//                      subscription_cancellations.reason column) and texts a
+//                      short follow-up logged as 'agency_cancellation_reason'.
 // Destination: src/server.js (or src/index.js), FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -406,11 +416,11 @@ app.post('/api/agency/portal', requirePermissionIfAuthed('billing'), createAgenc
 // ============================================================================
 // AGENCY CANCELLATION
 // ----------------------------------------------------------------------------
-// Reads { agency_id, reason, feedback } from the body. reason is the Stripe
-// cancellation_details.feedback enum value (too_expensive, missing_features,
-// switched_service, unused, too_complex, customer_service, low_quality, other)
-// chosen from the dropdown in app/agency/settings/page.tsx. feedback is the
-// optional free-text comment from the textarea below the dropdown.
+// Reads { agency_id, feedback } from the body. The pre-cancel reason dropdown
+// was removed; the reason is now graded AFTER cancellation on the post-cancel
+// screen (POST /api/agency/cancel-category). feedback is the optional free-text
+// note from the cancel modal. A `reason` field is still accepted for backward
+// compatibility (e.g. the Stripe portal path), but the app no longer sends one.
 //
 // Side effects in order:
 //   1. Cancel the Stripe subscription (passing reason+feedback as
@@ -425,7 +435,8 @@ app.post('/api/agency/portal', requirePermissionIfAuthed('billing'), createAgenc
 //      (handleAgencySubscriptionDeleted in routes/stripe-platform.js) checks
 //      for an existing row before sending its own SMS, so this path owns
 //      the admin notification for app-initiated cancellations.
-//   6. SMS the platform owner with reason, feedback, plan, MRR lost.
+//   6. SMS the platform owner via sendAndLogSMS as message type
+//      'agency_cancellation' so it is filterable in the admin SMS Log.
 // ============================================================================
 app.post('/api/agency/cancel', requirePermissionIfAuthed('billing'), async (req, res) => {
   const { agency_id, reason, feedback } = req.body;
@@ -456,7 +467,7 @@ app.post('/api/agency/cancel', requirePermissionIfAuthed('billing'), async (req,
       try {
         await stripe.subscriptions.cancel(agency.stripe_subscription_id, {
           cancellation_details: {
-            feedback: reason || undefined,    // Stripe enum
+            feedback: reason || undefined,    // Stripe enum (optional now)
             comment:  feedback || undefined,  // free-text
           },
         });
@@ -526,7 +537,9 @@ app.post('/api/agency/cancel', requirePermissionIfAuthed('billing'), async (req,
     }
 
     // Record cancellation with reason + feedback. Upsert keyed on
-    // stripe_subscription_id so the subsequent webhook won't duplicate.
+    // stripe_subscription_id so the subsequent webhook won't duplicate. reason
+    // is usually null here now; it gets filled in by /cancel-category when the
+    // user grades a reason on the post-cancel screen.
     const mrrLost =
       agency.plan_type === 'pro'   ? 9900  :
       agency.plan_type === 'scale' ? 49900 :
@@ -553,19 +566,14 @@ app.post('/api/agency/cancel', requirePermissionIfAuthed('billing'), async (req,
       console.error('Failed to record cancellation:', recordErr.message);
     }
 
-    // SMS the platform owner with structured cancellation details.
+    // SMS the platform owner with structured cancellation details. Sent via
+    // sendAndLogSMS directly (not sendPlatformNotificationSMS) so it logs to
+    // sms_log under its own message type 'agency_cancellation', making
+    // cancellations filterable in the admin SMS Log instead of lumped in with
+    // generic platform notifications. The reason line is omitted here because
+    // the reason is now graded on the post-cancel screen (/cancel-category).
     try {
-      const REASON_LABELS = {
-        too_expensive:     'Too expensive',
-        missing_features:  'Missing features',
-        switched_service:  'Switched to another service',
-        unused:            'Not using it enough',
-        customer_service:  'Customer service issues',
-        too_complex:       'Too complex',
-        low_quality:       'Quality issues',
-        other:             'Other',
-      };
-      const reasonLabel = REASON_LABELS[reason] || reason || 'No reason given';
+      const { sendAndLogSMS } = require('./lib/sms-logger');
       const planLabel =
         agency.plan_type === 'pro'   ? 'Pro ($99/mo)' :
         agency.plan_type === 'scale' ? 'Scale ($499/mo)' :
@@ -576,7 +584,6 @@ app.post('/api/agency/cancel', requirePermissionIfAuthed('billing'), async (req,
       msg += `Email: ${agency.email}\n`;
       msg += `Plan: ${planLabel}\n`;
       msg += `Status: ${isTrialing ? 'TRIAL' : 'PAID'}\n`;
-      msg += `Reason: ${reasonLabel}\n`;
       if (feedback && feedback.trim()) {
         msg += `\n"${feedback.trim()}"\n`;
       }
@@ -584,7 +591,14 @@ app.post('/api/agency/cancel', requirePermissionIfAuthed('billing'), async (req,
         msg += `\nMRR lost: $${(mrrLost / 100).toFixed(0)}/mo`;
       }
 
-      await sendPlatformNotificationSMS(msg);
+      await sendAndLogSMS({
+        phone: process.env.PLATFORM_OWNER_PHONE || '+16783161454',
+        message: `🔔 VoiceAI Connect\n${msg}`,
+        agencyId: agency.id,
+        recipientType: 'admin',
+        messageType: 'agency_cancellation',
+        metadata: { agencyName: agency.name, plan: agency.plan_type || null, status: isTrialing ? 'trial' : 'paid' },
+      });
     } catch (smsErr) {
       console.error('Failed to send cancellation SMS to platform owner:', smsErr.message);
     }
@@ -595,6 +609,82 @@ app.post('/api/agency/cancel', requirePermissionIfAuthed('billing'), async (req,
   } catch (err) {
     console.error('❌ Cancel error:', err);
     res.status(500).json({ error: 'Failed to cancel subscription' });
+  }
+});
+
+// ============================================================================
+// POST /api/agency/cancel-category
+// ----------------------------------------------------------------------------
+// Post-cancel reason grading. The cancel flow collects the reason AFTER
+// cancellation (optional category chips on the post-cancel screen) instead of a
+// pre-cancel dropdown. This attaches the chosen category to the most recent
+// subscription_cancellations row for the agency, reusing the existing `reason`
+// column (so no schema change, and the vocabulary matches Stripe-portal
+// cancellations), and texts the platform owner a short follow-up logged as
+// 'agency_cancellation_reason'. If the user closes the screen without grading,
+// the cancellation itself is already complete and its SMS already fired.
+// requirePermissionIfAuthed('billing') mirrors /cancel; the JWT is still valid
+// right after cancellation.
+// ============================================================================
+app.post('/api/agency/cancel-category', requirePermissionIfAuthed('billing'), async (req, res) => {
+  const { agency_id, category } = req.body;
+
+  const CATEGORY_LABELS = {
+    too_expensive:     'Too expensive',
+    missing_features:  'Missing features',
+    switched_service:  'Switched to another service',
+    unused:            'Not using it enough',
+    customer_service:  'Customer service issues',
+    too_complex:       'Too complex',
+    low_quality:       'Quality issues',
+    other:             'Other',
+  };
+
+  if (!agency_id || !category || !CATEGORY_LABELS[category]) {
+    return res.status(400).json({ error: 'agency_id and a valid category are required' });
+  }
+
+  try {
+    const { data: agency } = await supabase
+      .from('agencies')
+      .select('id, name')
+      .eq('id', agency_id)
+      .single();
+
+    // Attach the graded reason to the most recent cancellation row.
+    const { data: rows } = await supabase
+      .from('subscription_cancellations')
+      .select('id')
+      .eq('agency_id', agency_id)
+      .order('canceled_at', { ascending: false })
+      .limit(1);
+    const row = (rows && rows[0]) || null;
+    if (row) {
+      await supabase
+        .from('subscription_cancellations')
+        .update({ reason: category })
+        .eq('id', row.id);
+    }
+
+    // Short follow-up to the platform owner, logged distinctly.
+    try {
+      const { sendAndLogSMS } = require('./lib/sms-logger');
+      await sendAndLogSMS({
+        phone: process.env.PLATFORM_OWNER_PHONE || '+16783161454',
+        message: `🔔 VoiceAI Connect\nCancellation reason\n${(agency && agency.name) || 'Agency'}: ${CATEGORY_LABELS[category]}`,
+        agencyId: agency_id,
+        recipientType: 'admin',
+        messageType: 'agency_cancellation_reason',
+        metadata: { agencyName: (agency && agency.name) || null, reason: category },
+      });
+    } catch (smsErr) {
+      console.error('Cancellation reason SMS failed (non-blocking):', smsErr.message);
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('cancel-category error:', err.message);
+    res.status(500).json({ error: 'Failed to record cancellation reason' });
   }
 });
 
