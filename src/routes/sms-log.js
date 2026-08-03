@@ -7,6 +7,11 @@
 // Usage: app.use('/api/admin', smsLogRoutes);
 //
 // CREATED: 2026-05-09
+// UPDATED: 2026-08-03 - Fixed admin auth check. The token minted by
+//          generateToken (auth.js) carries role: 'platform_admin', NOT
+//          type: 'admin'. The old `decoded.type !== 'admin'` check was always
+//          true for a valid admin token, so every request 403'd ("Failed to
+//          fetch SMS logs"). Now matches requireAdmin: role === 'platform_admin'.
 // ============================================================================
 
 const express = require('express');
@@ -18,10 +23,11 @@ router.get('/sms-log', async (req, res) => {
     const token = req.headers.authorization?.replace('Bearer ', '');
     if (!token) return res.status(401).json({ error: 'No token' });
 
-    // Verify admin (reuse existing admin auth pattern)
+    // Verify admin. Tokens from generateToken carry { role: 'platform_admin' }
+    // in camelCase; this mirrors requireAdmin (decoded.role === 'platform_admin').
     const jwt = require('jsonwebtoken');
     const decoded = jwt.verify(token, process.env.JWT_SECRET || process.env.ADMIN_JWT_SECRET);
-    if (!decoded || decoded.type !== 'admin') {
+    if (!decoded || decoded.role !== 'platform_admin') {
       return res.status(403).json({ error: 'Not authorized' });
     }
 
