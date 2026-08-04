@@ -1,9 +1,9 @@
 // ============================================================================
-// USAGE CRON JOBS — Trial Expiration, Monthly Reset, Meter Event Retry
+// USAGE CRON JOBS - Trial Expiration, Monthly Reset, Meter Event Retry
 // Location: src/cron/usage-reporter.js
-// Updated: 2026-05-07 — Removed legacy Stripe usage reporting (replaced by
+// Updated: 2026-05-07 - Removed legacy Stripe usage reporting (replaced by
 //   real-time meter events in usage-tracker.js)
-// Updated: 2026-06-03 — expireAgencyTrials now (a) releases the demo number
+// Updated: 2026-06-03 - expireAgencyTrials now (a) releases the demo number
 //   (VAPI object + underlying Telnyx number) on expiry so the rental stops,
 //   and (b) catches legacy/null plan_types that previously slipped through
 //   both filters and got stuck in 'trialing' forever.
@@ -13,17 +13,27 @@
 //   and it was never being reset here, so it accumulated across months. This is
 //   the fix for the "call counter seems low / never resets" report: the monthly
 //   cron was only resetting the agency minute rollup on a different table.
+// Updated: 2026-08-04. Added monthly usage reports. On the 1st, after the
+//   counters reset, this generates each active agency's usage statement for the
+//   PREVIOUS month (from usage_records + calls, which are not reset) and, if an
+//   email provider is configured (RESEND_API_KEY), emails it. Email is optional;
+//   with no provider the reports still generate and the agency dashboard reads
+//   them live via GET /api/agency/:agencyId/usage-report.
 //
 // CRON ROUTES:
-//   POST /api/cron/expire-agency-trials  — Daily, expires stale agency trials
-//   POST /api/cron/reset-monthly-counters — 1st of month, resets running totals
-//   POST /api/cron/retry-meter-events    — Daily, retries failed meter events
+//   POST /api/cron/expire-agency-trials   - Daily, expires stale agency trials
+//   POST /api/cron/reset-monthly-counters - 1st of month, resets running totals
+//   POST /api/cron/retry-meter-events     - Daily, retries failed meter events
+//   POST /api/cron/monthly-usage-reports  - 1st of month, emails prior-month
+//                                           usage statements (email optional)
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { retryUnreportedMeterEvents } = require('../lib/usage-tracker');
 const { fullyReleaseNumber } = require('../lib/vapi');
+const { getAgencyMonthlyReport, renderReportHTML } = require('../lib/usage-report');
+const { sendReportEmail } = require('../lib/report-email');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 
@@ -35,7 +45,7 @@ const VAPI_API_KEY = process.env.VAPI_API_KEY;
 // Any plan WITH a Stripe subscription → leave alone (Stripe webhooks handle it)
 //
 // On expiry we now RELEASE the agency demo number (VAPI phone object AND the
-// underlying Telnyx number) before nulling the demo fields — otherwise the
+// underlying Telnyx number) before nulling the demo fields - otherwise the
 // Telnyx rental keeps billing every month on a dead agency.
 // ============================================================================
 async function expireAgencyTrials() {
@@ -63,7 +73,7 @@ async function expireAgencyTrials() {
     //    Select first so we can release each demo number before nulling it.
     //    No plan_type filter here on purpose: after step 1, free/starter are
     //    already 'active', so whatever is still trial/trialing here is a real
-    //    expired trial — including legacy/null plan_types that used to slip
+    //    expired trial - including legacy/null plan_types that used to slip
     //    through. (A JS guard below re-activates any free/starter that step 1
     //    somehow failed to update, so they can never be wrongly suspended.)
     const { data: toExpire, error: selErr } = await supabase
@@ -84,7 +94,7 @@ async function expireAgencyTrials() {
       const plan = (agency.plan_type || '').toLowerCase();
 
       // Safety net: free/starter should already be active from step 1.
-      // If one slipped through, activate it — never suspend a free agency.
+      // If one slipped through, activate it - never suspend a free agency.
       if (plan === 'free' || plan === 'starter') {
         await supabase
           .from('agencies')
@@ -100,7 +110,7 @@ async function expireAgencyTrials() {
           if (release.telnyxReleased) demosReleased++;
           console.log(`   📞 Demo released for ${agency.name}: VAPI=${release.vapiDeleted} Telnyx=${release.telnyxReleased}`);
           if (!release.telnyxReleased) {
-            console.error(`   ⚠️ Telnyx demo NOT released for ${agency.name} (${agency.demo_phone_number}) — orphan sweep will catch it`);
+            console.error(`   ⚠️ Telnyx demo NOT released for ${agency.name} (${agency.demo_phone_number}) - orphan sweep will catch it`);
           }
         } catch (relErr) {
           console.error(`   ❌ Demo release failed for ${agency.name}:`, relErr.message);
@@ -232,6 +242,69 @@ async function resetMonthlyCounters() {
 }
 
 // ============================================================================
+// MONTHLY USAGE REPORTS (run on the 1st, for the PREVIOUS month)
+// ----------------------------------------------------------------------------
+// Generates each active agency's usage statement for the month that just ended
+// and emails it if an email provider is configured. usage_records and calls are
+// NOT wiped by resetMonthlyCounters, so the prior month is fully recomputable
+// here. Email is optional: sendReportEmail no-ops without RESEND_API_KEY, so
+// with no provider this still confirms every report generates and the dashboard
+// route serves them live. Safe to run after reset-monthly-counters on the 1st.
+// ============================================================================
+function prevMonthLabel() {
+  const d = new Date();
+  d.setDate(1);
+  d.setMonth(d.getMonth() - 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+async function sendMonthlyUsageReports(monthArg) {
+  const month = (typeof monthArg === 'string' && /^\d{4}-\d{2}$/.test(monthArg)) ? monthArg : prevMonthLabel();
+  console.log(`📊 Generating monthly usage reports for ${month}...`);
+
+  const { data: agencies, error } = await supabase
+    .from('agencies')
+    .select('id, name, email, support_email')
+    .in('subscription_status', ['active', 'trial', 'trialing']);
+
+  if (error) {
+    console.error('❌ Failed to load agencies for reports:', error.message);
+    return { success: false, error: error.message };
+  }
+
+  let generated = 0, emailed = 0, emailSkipped = 0, failed = 0;
+
+  for (const a of agencies || []) {
+    try {
+      const report = await getAgencyMonthlyReport(a.id, { month });
+      if (!report) { failed++; continue; }
+      generated++;
+
+      const to = a.support_email || a.email || null;
+      const html = renderReportHTML(report);
+      const emailRes = await sendReportEmail({
+        to,
+        subject: `Usage statement ${month} - ${a.name}`,
+        html,
+      });
+
+      if (emailRes.sent) {
+        emailed++;
+      } else {
+        emailSkipped++;
+        if (emailRes.error) console.warn(`   ⚠️ Email not sent for ${a.name}: ${emailRes.error}`);
+      }
+    } catch (err) {
+      failed++;
+      console.error(`   ❌ Report failed for ${a.name}:`, err.message);
+    }
+  }
+
+  console.log(`📊 Monthly reports ${month}: generated ${generated}, emailed ${emailed}, email-skipped ${emailSkipped}, failed ${failed}`);
+  return { success: true, month, agencies: (agencies || []).length, generated, emailed, email_skipped: emailSkipped, failed };
+}
+
+// ============================================================================
 // CRON ROUTES
 // ============================================================================
 
@@ -277,9 +350,27 @@ router.post('/retry-meter-events', async (req, res) => {
   }
 });
 
+// Monthly usage reports. Runs on the 1st AFTER reset-monthly-counters. Pass
+// ?month=YYYY-MM to (re)generate a specific month; defaults to last month.
+router.post('/monthly-usage-reports', async (req, res) => {
+  const cronSecret = req.headers['x-cron-secret'];
+  if (process.env.CRON_SECRET && cronSecret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const month = typeof req.query.month === 'string' ? req.query.month : undefined;
+    const result = await sendMonthlyUsageReports(month);
+    res.json({ success: true, message: 'Monthly usage reports completed', ...result });
+  } catch (error) {
+    console.error('❌ Cron monthly-usage-reports error:', error);
+    res.status(500).json({ error: 'Failed to run monthly usage reports' });
+  }
+});
+
 // ============================================================================
 // EXPORTS
 // ============================================================================
 module.exports = router;
 module.exports.expireAgencyTrials = expireAgencyTrials;
 module.exports.resetMonthlyCounters = resetMonthlyCounters;
+module.exports.sendMonthlyUsageReports = sendMonthlyUsageReports;

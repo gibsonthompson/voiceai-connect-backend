@@ -89,6 +89,13 @@ PHONE NUMBERS:
 - Clients forward their existing number to the AI number.
 - International numbers via BYOT/Twilio (Scale plan).
 
+DEMO PHONE (agency's own line for showing prospects):
+- US agencies: the demo number is provisioned automatically on the platform's own telephony, chosen by area code. No Twilio needed.
+- Non-US agencies: the demo number is created on the agency's OWN connected Twilio account. Steps: connect Twilio in Settings first, then create the demo line; the platform provisions a local number in the agency's country and points it at the AI demo.
+- A non-US demo number requires a PAID Twilio account. Twilio does not let trial accounts provision numbers automatically ("Trial subaccounts cannot purchase phone numbers"), so the agency must upgrade Twilio to paid first.
+- Many countries (the UK included) require an approved Twilio regulatory bundle with a registered address before the number can be activated. Set it up in the Twilio Console under Regulatory Compliance; approval takes time, so start early. Without it, Twilio refuses the number and the platform surfaces the reason.
+- The agency does NOT buy the number manually. Once Twilio is connected and eligible, the platform searches and provisions it automatically on demo creation.
+
 CLIENT APP & ACCESS:
 - The client dashboard is a web app (PWA). There is nothing to download from an app store. It opens in any phone or computer browser, and clients can add it to their home screen in one tap for an app-like experience.
 - Each client gets their own login to see calls, recordings, transcripts, and AI summaries, manage their business info and AI settings, and text callers back.

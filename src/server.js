@@ -211,6 +211,7 @@ const restoRoutes = require('./routes/resto');  // Restoration platform routes
 
 // Usage tracking (Phase 1, metered billing)
 const usageReporterRoutes = require('./cron/usage-reporter');
+const usageReportRoutes = require('./routes/usage-report');
 const { getAgencyUsageSummary } = require('./lib/usage-tracker');
 const testClientRoutes = require('./routes/test-client');
 const bookingRoutes = require('./routes/booking');
@@ -1216,6 +1217,7 @@ app.use('/api/leads', leadScraperRoutes);
 // ============================================================================
 app.use('/api/agency', teamRoutes);
 app.use('/api/agency', previewTokenRoutes);
+app.use('/api/agency', usageReportRoutes);
 
 // ============================================================================
 // CLIENT ROUTES (Agencies to Clients)
