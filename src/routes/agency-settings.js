@@ -36,6 +36,18 @@
 //                      validates, creates the connected-account meter, and
 //                      sweeps existing clients). connect_minute_meter_id is
 //                      system-managed and never user-writable.
+// UPDATED: 2026-08-04: Slug is now editable via updateAgencySettings. The slug
+//                      routes the whole white-label site
+//                      ({slug}.myvoiceaiconnect.com), so an edit is guarded
+//                      three ways before it saves: format (3-63 chars,
+//                      a-z 0-9 and hyphen, no leading/trailing hyphen), a
+//                      reserved list of routing-critical subdomains, and
+//                      case-insensitive uniqueness against every other agency.
+//                      Typed errors (slug_invalid 400 / slug_reserved 400 /
+//                      slug_taken 409) let the Settings UI surface the reason
+//                      inline. An unchanged slug is dropped so a plain profile
+//                      save neither re-validates a legacy value nor runs a
+//                      needless uniqueness query.
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
@@ -505,6 +517,23 @@ async function getAgencySettings(req, res) {
 }
 
 // ============================================================================
+// SLUG VALIDATION HELPERS (editable white-label subdomain)
+// ----------------------------------------------------------------------------
+// The slug is the agency's white-label subdomain ({slug}.myvoiceaiconnect.com)
+// and resolves the entire marketing/signup/checkout site via getAgencyBySlug.
+// Because an agency can now edit it from Settings, three guards run before any
+// save: format, a reserved-subdomain list, and case-insensitive uniqueness.
+// ============================================================================
+const RESERVED_SLUGS = new Set([
+  'www', 'api', 'admin', 'app', 'signup', 'login', 'demo', 'dashboard',
+  'platform', 'client', 'agency', 'mail', 'static', 'assets', 'cdn'
+]);
+
+// 3-63 chars, lowercase a-z 0-9 and hyphen, must start and end alphanumeric
+// (no leading/trailing hyphen).
+const SLUG_FORMAT = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+
+// ============================================================================
 // UPDATE AGENCY SETTINGS
 // ============================================================================
 async function updateAgencySettings(req, res) {
@@ -514,7 +543,7 @@ async function updateAgencySettings(req, res) {
     
     // Whitelist allowed fields
     const allowedFields = [
-      'name', 'phone',
+      'name', 'phone', 'slug',
       'logo_url', 'favicon_url',
       'primary_color', 'secondary_color', 'accent_color',
       'marketing_domain', 'domain_verified',
@@ -575,6 +604,76 @@ async function updateAgencySettings(req, res) {
     for (const key of allowedFields) {
       if (updates[key] !== undefined) {
         sanitizedUpdates[key] = updates[key];
+      }
+    }
+
+    // ── Slug (white-label subdomain) ─────────────────────────────────────
+    // Guarded three ways before it can save. Order matters: normalize first,
+    // short-circuit an unchanged value (so a plain profile save is not held to
+    // current format rules and does not run a needless uniqueness query), then
+    // format, reserved list, and case-insensitive uniqueness. Each failure
+    // returns a typed error the Settings UI renders inline.
+    if (sanitizedUpdates.slug !== undefined) {
+      const raw = sanitizedUpdates.slug;
+      if (typeof raw !== 'string') {
+        return res.status(400).json({ error: 'slug_invalid', message: 'Slug must be text.' });
+      }
+      const slug = raw.trim().toLowerCase();
+
+      // Compare against the stored value. Unchanged -> drop it and move on.
+      const { data: currentRow, error: currentErr } = await supabase
+        .from('agencies')
+        .select('slug')
+        .eq('id', agencyId)
+        .single();
+
+      if (currentErr) {
+        console.error('❌ Slug current-value lookup failed:', currentErr);
+        return res.status(500).json({ error: 'Failed to validate slug' });
+      }
+
+      if ((currentRow?.slug || '').toLowerCase() === slug) {
+        // No change (including a case-only difference on a legacy slug). Do not
+        // rewrite it, so we never fail a save over an existing out-of-spec slug.
+        delete sanitizedUpdates.slug;
+      } else {
+        // Format
+        if (slug.length < 3 || slug.length > 63 || !SLUG_FORMAT.test(slug)) {
+          return res.status(400).json({
+            error: 'slug_invalid',
+            message: 'Use 3 to 63 characters: lowercase letters, numbers, and hyphens, not starting or ending with a hyphen.'
+          });
+        }
+        // Reserved routing-critical subdomains
+        if (RESERVED_SLUGS.has(slug)) {
+          return res.status(400).json({
+            error: 'slug_reserved',
+            message: 'That subdomain is reserved. Please choose another.'
+          });
+        }
+        // Case-insensitive uniqueness against every OTHER agency. After format
+        // validation the slug has no % or _ , so ilike acts as case-insensitive
+        // equality here.
+        const { data: clash, error: clashErr } = await supabase
+          .from('agencies')
+          .select('id')
+          .ilike('slug', slug)
+          .neq('id', agencyId)
+          .limit(1);
+
+        if (clashErr) {
+          console.error('❌ Slug uniqueness check failed:', clashErr);
+          return res.status(500).json({ error: 'Failed to validate slug' });
+        }
+        if (clash && clash.length > 0) {
+          return res.status(409).json({
+            error: 'slug_taken',
+            message: 'That subdomain is already taken. Please choose another.'
+          });
+        }
+
+        // Persist the normalized value.
+        sanitizedUpdates.slug = slug;
       }
     }
 
