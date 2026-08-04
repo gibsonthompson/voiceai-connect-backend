@@ -1,11 +1,12 @@
 // ============================================================================
 // DEMO PHONE ROUTES
-// POST   /api/agency/:agencyId/demo-phone         — Create demo phone
-// DELETE /api/agency/:agencyId/demo-phone         — Remove demo phone
-// GET    /api/agency/:agencyId/demo-calls         — List demo calls
-// GET    /api/agency/:agencyId/demo-calls/:callId — Get demo call detail
-// UPDATED: 2026-05-20 — Added demo call history endpoints
-// UPDATED: 2026-06-03 — DELETE now releases the underlying Telnyx number
+// POST   /api/agency/:agencyId/demo-phone         - Create demo phone (async)
+// GET    /api/agency/:agencyId/demo-phone/status  - Poll provisioning status
+// DELETE /api/agency/:agencyId/demo-phone         - Remove demo phone
+// GET    /api/agency/:agencyId/demo-calls         - List demo calls
+// GET    /api/agency/:agencyId/demo-calls/:callId - Get demo call detail
+// UPDATED: 2026-05-20 - Added demo call history endpoints
+// UPDATED: 2026-06-03 - DELETE now releases the underlying Telnyx number
 //          (not just the VAPI object) so the monthly rental actually stops.
 // UPDATED: 2026-07-27 - International demo support. US agencies still get a
 //          platform Telnyx number (provisionAgencyDemo, unchanged). Non-US
@@ -16,6 +17,20 @@
 //          (assistantId null + serverUrl) so the same dynamic demo config
 //          answers. DELETE now also releases the number from the agency's
 //          Twilio (fullyReleaseNumber only covers VAPI + platform Telnyx).
+// UPDATED: 2026-08-04 - Demo creation is now ASYNC. Provisioning a non-US
+//          number does a real Twilio purchase + VAPI import serially, which
+//          could take long enough that the DigitalOcean gateway cut the
+//          connection before the route could answer. The browser then showed
+//          "Failed to connect to server" (its network-error path), the friendly
+//          error never reached it, and because the request was killed mid-flight
+//          the rollback never ran, orphaning the demo assistant. The POST now
+//          validates, kicks provisioning off in the background, and returns 202
+//          immediately. A new GET .../demo-phone/status lets the UI poll until
+//          the number appears (success is read from the agency row, so it
+//          survives a process restart) or an error is recorded. The error
+//          status is held in memory per agency; if the process restarts before
+//          the UI polls, status falls back to 'idle' and the UI stops on its
+//          own timeout and tells the user to refresh.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -25,6 +40,20 @@ const { provisionBYOTNumber, releaseBYOTNumber } = require('./byot');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
+
+// ============================================================================
+// IN-MEMORY DEMO PROVISIONING JOBS
+// ----------------------------------------------------------------------------
+// agencyId -> { status: 'provisioning' | 'error' | 'done', error, startedAt }
+// Success is authoritative from the agency row (demo_phone_number), so this map
+// only needs to carry the "provisioning" and "error" states between the async
+// POST and the status poll. Entries are short-lived; a stale one is ignored
+// once older than _DEMO_JOB_TTL. Single-instance safe; on multi-instance the
+// success path still works via the DB, and the error path degrades to the UI's
+// own poll timeout.
+// ============================================================================
+const _demoJobs = new Map();
+const _DEMO_JOB_TTL = 10 * 60 * 1000;
 
 // ============================================================================
 // HELPER: Check if agency has access (paid or trial)
@@ -102,9 +131,10 @@ function friendlyDemoProvisioningError(err, country) {
 // order (surfaced to the caller as a clear message by the route).
 //
 // Rollback: on any failure after the assistant is created, the orphaned VAPI
-// assistant is deleted. If the number is bought and imported but the DB write
-// fails, the number is released from BOTH VAPI and the agency's Twilio so it
-// does not leak a billable line.
+// assistant is deleted. provisionBYOTNumber now releases a purchased-but-not-
+// imported number itself, so the only cleanup left here is the assistant. If
+// the number is bought and imported but the DB write fails, the number is
+// released from BOTH VAPI and the agency's Twilio so it does not leak.
 // ============================================================================
 async function provisionAgencyDemoBYOT(agency) {
   const country = (agency.country || '').toUpperCase();
@@ -179,9 +209,43 @@ async function provisionAgencyDemoBYOT(agency) {
 }
 
 // ============================================================================
-// CREATE DEMO PHONE
+// BACKGROUND RUNNER
+// ----------------------------------------------------------------------------
+// Runs the actual provisioning after the POST has already answered 202. Never
+// throws out of here: it records the outcome (done / error) in _demoJobs so the
+// status poll can report it. On success the agency row already carries the
+// number (written inside the provision functions), which is the durable source
+// of truth the status poll reads first.
+// ============================================================================
+async function runDemoProvisioning({ agency, country, finalAreaCode }) {
+  const agencyId = agency.id;
+  try {
+    let result;
+    if (country === 'US') {
+      result = await provisionAgencyDemo(agencyId, agency.name, finalAreaCode);
+      // provisionAgencyDemo swallows its real error and returns null on failure.
+      if (!result || !result.phoneNumber) {
+        throw new Error('Failed to create demo phone. Please try again or contact support.');
+      }
+    } else {
+      result = await provisionAgencyDemoBYOT(agency);
+    }
+    _demoJobs.set(agencyId, { status: 'done', error: null, startedAt: Date.now() });
+    console.log(`🎉 [demo async] Demo phone created for ${agency.name}: ${result.phoneNumber}`);
+  } catch (err) {
+    const message = country === 'US'
+      ? (err.message || 'Failed to create demo phone. Please try again.')
+      : friendlyDemoProvisioningError(err, country);
+    _demoJobs.set(agencyId, { status: 'error', error: message, startedAt: Date.now() });
+    console.error(`❌ [demo async] Provisioning failed for ${agency.name}:`, err.message);
+  }
+}
+
+// ============================================================================
+// CREATE DEMO PHONE (async)
 // POST /:agencyId/demo-phone
 // Body: { area_code: "305" } (US only; optional, defaults to agency phone or 404)
+// Returns 202 immediately; the UI polls GET /:agencyId/demo-phone/status.
 // ============================================================================
 router.post('/:agencyId/demo-phone', async (req, res) => {
   try {
@@ -199,7 +263,7 @@ router.post('/:agencyId/demo-phone', async (req, res) => {
       return res.status(404).json({ error: 'Agency not found' });
     }
 
-    // 2. Check access — paid or trial
+    // 2. Check access - paid or trial
     if (!hasAccess(agency)) {
       return res.status(403).json({
         error: 'Subscription required',
@@ -216,76 +280,98 @@ router.post('/:agencyId/demo-phone', async (req, res) => {
       });
     }
 
+    // 3b. Already provisioning? Re-acknowledge instead of starting a second run.
+    const existingJob = _demoJobs.get(agencyId);
+    if (existingJob && existingJob.status === 'provisioning' && (Date.now() - existingJob.startedAt) < _DEMO_JOB_TTL) {
+      return res.status(202).json({ success: true, status: 'provisioning' });
+    }
+
     // 4. Country decides the provisioning path. US uses the platform Telnyx
     //    account; every other country uses the agency's own Twilio (BYOT).
-    //    Country comes from the agency row (set at Stripe Connect onboarding /
-    //    signup). If it is wrong, the wrong path runs, so it must be correct.
     const country = (agency.country || 'US').toUpperCase();
 
-    let result;
+    // 4a. International: require BYOT credentials up front so we fail fast with
+    //     a clear message instead of starting a doomed background job.
+    if (country !== 'US' && !hasByotCredentials(agency)) {
+      return res.status(400).json({
+        error: 'twilio_required',
+        message: `Your agency is set to ${country}. To create a demo line outside the US, connect your own Twilio account in Settings, Twilio (and complete the regulatory bundle for ${country}). Then try again.`,
+        country
+      });
+    }
 
+    // 4b. US: resolve the area code synchronously (validation, not slow work).
+    let finalAreaCode = '404';
     if (country === 'US') {
-      // ── US: platform Telnyx path (unchanged) ──────────────────────────
-      let finalAreaCode = '404'; // Default
-
       if (area_code && /^\d{3}$/.test(area_code)) {
         finalAreaCode = area_code;
       } else if (agency.phone) {
-        // Extract area code from agency phone
         const digits = agency.phone.replace(/\D/g, '');
         const tenDigits = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
         if (tenDigits.length === 10) {
           finalAreaCode = tenDigits.slice(0, 3);
         }
       }
-
-      console.log(`📞 Creating US demo phone for ${agency.name} with area code ${finalAreaCode}`);
-
-      // Provision (creates VAPI assistant + buys number + saves to DB)
-      result = await provisionAgencyDemo(agencyId, agency.name, finalAreaCode);
-
-      if (!result) {
-        return res.status(500).json({
-          error: 'Provisioning failed',
-          message: 'Failed to create demo phone. Please try again or contact support.'
-        });
-      }
-    } else {
-      // ── International: agency's own Twilio (BYOT) ──────────────────────
-      if (!hasByotCredentials(agency)) {
-        return res.status(400).json({
-          error: 'twilio_required',
-          message: `Your agency is set to ${country}. To create a demo line outside the US, connect your own Twilio account in Settings, Twilio (and complete the regulatory bundle for ${country}). Then try again.`,
-          country
-        });
-      }
-
-      console.log(`📞 Creating ${country} demo phone for ${agency.name} via agency Twilio (BYOT)`);
-      try {
-        result = await provisionAgencyDemoBYOT(agency);
-      } catch (err) {
-        console.error(`❌ [BYOT demo] provisioning failed for ${agency.name}:`, err.message);
-        return res.status(502).json({
-          error: 'provisioning_failed',
-          message: friendlyDemoProvisioningError(err, country),
-          country
-        });
-      }
     }
 
-    console.log(`🎉 Demo phone created for ${agency.name}: ${result.phoneNumber}`);
+    // 5. Mark provisioning and answer immediately. The heavy work (Twilio
+    //    purchase, VAPI import) then runs in the background so the request
+    //    can never be cut by a gateway timeout mid-provision.
+    _demoJobs.set(agencyId, { status: 'provisioning', error: null, startedAt: Date.now() });
 
-    res.json({
-      success: true,
-      demo_phone_number: result.phoneNumber,
-      demo_assistant_id: result.assistantId,
-      demo_vapi_phone_id: result.phoneId,
-      country
-    });
+    console.log(`📞 Starting ${country} demo provisioning for ${agency.name}${country === 'US' ? ` (area code ${finalAreaCode})` : ' via agency Twilio (BYOT)'}`);
+
+    res.status(202).json({ success: true, status: 'provisioning', country });
+
+    // Fire-and-forget. runDemoProvisioning never throws; it records the result
+    // in _demoJobs for the status poll.
+    runDemoProvisioning({ agency, country, finalAreaCode });
 
   } catch (error) {
     console.error('❌ Create demo phone error:', error);
-    res.status(500).json({ error: 'Failed to create demo phone' });
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to create demo phone' });
+    }
+  }
+});
+
+// ============================================================================
+// DEMO PHONE STATUS (poll target for the async create)
+// GET /:agencyId/demo-phone/status
+// -> { status: 'done', demo_phone_number } when the number is live
+// -> { status: 'error', message }         when provisioning failed
+// -> { status: 'provisioning' }           while it is still running
+// -> { status: 'idle' }                   when nothing is in flight
+// Success is read from the agency row first, so it is correct even if the
+// process restarted after provisioning finished.
+// ============================================================================
+router.get('/:agencyId/demo-phone/status', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+
+    const { data: agency } = await supabase
+      .from('agencies')
+      .select('demo_phone_number')
+      .eq('id', agencyId)
+      .single();
+
+    if (agency && agency.demo_phone_number) {
+      _demoJobs.delete(agencyId);
+      return res.json({ status: 'done', demo_phone_number: agency.demo_phone_number });
+    }
+
+    const job = _demoJobs.get(agencyId);
+    if (job && job.status === 'error') {
+      return res.json({ status: 'error', message: job.error });
+    }
+    if (job && job.status === 'provisioning' && (Date.now() - job.startedAt) < _DEMO_JOB_TTL) {
+      return res.json({ status: 'provisioning' });
+    }
+
+    return res.json({ status: 'idle' });
+  } catch (error) {
+    console.error('❌ Demo phone status error:', error);
+    res.status(500).json({ status: 'error', message: 'Failed to check demo status' });
   }
 });
 
@@ -316,7 +402,10 @@ router.delete('/:agencyId/demo-phone', async (req, res) => {
 
     console.log(`🗑️ Deleting demo phone for ${agency.name}: ${agency.demo_phone_number}`);
 
-    // 2. Release the demo number — VAPI object AND the underlying Telnyx rental.
+    // Clear any stale job state for this agency.
+    _demoJobs.delete(agencyId);
+
+    // 2. Release the demo number - VAPI object AND the underlying Telnyx rental.
     //    Deleting only the VAPI object leaves the Telnyx number billing monthly.
     if (agency.demo_vapi_phone_id || agency.demo_phone_number) {
       try {

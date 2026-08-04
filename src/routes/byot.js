@@ -1,13 +1,24 @@
 // ============================================================================
 // BYOT (Bring Your Own Twilio) ROUTES
-// Pro + Scale plan feature — agencies use their own Twilio account
+// Pro + Scale plan feature - agencies use their own Twilio account
 // for international number provisioning
-// UPDATED: 2026-05-10 — Lowered requirement from Scale-only to Pro+Scale
+// UPDATED: 2026-05-10 - Lowered requirement from Scale-only to Pro+Scale
 // UPDATED: 2026-07-27 - Added releaseBYOTNumber so a number bought on the
 //          agency's own Twilio (e.g. an international demo line) can be released
 //          from that Twilio account on teardown. Deleting the VAPI object and
 //          releasing the platform Telnyx number does NOT touch the agency's
 //          Twilio, so without this a BYOT number bills forever.
+// UPDATED: 2026-08-04 - Fixed the VAPI import in provisionBYOTNumber. It was
+//          sending twilioApiKey/twilioApiSecret, which are NOT VAPI field
+//          names, so the import failed after the number was already purchased
+//          (leaving an orphaned VAPI assistant and a leaked Twilio number, and
+//          surfacing to the agency as a generic failure). The import now tries
+//          VAPI's documented API-key method (apiKey/apiSecret) first and falls
+//          back to the legacy field spelling, using only the SK API Key +
+//          Secret we actually store (never an account Auth Token, which is not
+//          collected). If every attempt fails, the just-purchased number is
+//          released from the agency's Twilio before throwing, so a failed
+//          import no longer leaks a billable line.
 // Destination: src/routes/byot.js
 // ============================================================================
 const express = require('express');
@@ -239,6 +250,55 @@ router.delete('/:agencyId/byot/credentials', requireProPlan, async (req, res) =>
 });
 
 // ============================================================================
+// IMPORT A TWILIO NUMBER INTO VAPI (self-correcting credential shape)
+// ----------------------------------------------------------------------------
+// VAPI has changed how it accepts Twilio credentials on import, and its docs
+// are not consistent about the exact JSON field names. We only ever store an
+// API Key (SK...) + API Secret for the agency (never the account Auth Token,
+// which the BYOT form does not collect), so those are the only credentials we
+// can send. We therefore try the shapes VAPI is known to accept, in order:
+//   1. apiKey / apiSecret          (VAPI's newer API-key method, Apr 2025)
+//   2. twilioApiKey / twilioApiSecret  (older field spelling, fallback)
+// The first attempt that returns a 2xx wins. VAPI validates strictly and
+// rejects unknown properties, so each attempt sends a clean body (no mixing).
+// Returns the parsed VAPI phone object on success, or throws with the last
+// error text (which contains "VAPI import failed" so demo-phone.js can map it
+// to a friendly message). The caller is responsible for releasing the number
+// on a thrown failure.
+// ============================================================================
+async function importTwilioNumberToVapi({ number, accountSid, apiKey, apiSecret, assistantId, businessName }) {
+  const base = {
+    provider: 'twilio',
+    number,
+    twilioAccountSid: accountSid,
+    name: `${businessName} - Business Line`,
+    assistantId,
+    serverUrl: `${BACKEND_URL}/webhook/vapi`,
+  };
+
+  const credentialShapes = [
+    { apiKey, apiSecret },
+    { twilioApiKey: apiKey, twilioApiSecret: apiSecret },
+  ];
+
+  let lastError = '';
+  for (const cred of credentialShapes) {
+    const res = await fetch('https://api.vapi.ai/phone-number', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...base, ...cred }),
+    });
+    if (res.ok) {
+      return await res.json();
+    }
+    lastError = await res.text().catch(() => '');
+    console.error(`❌ VAPI import attempt failed (HTTP ${res.status}) using fields [${Object.keys(cred).join(', ')}]: ${lastError.slice(0, 200)}`);
+  }
+
+  throw new Error(`VAPI import failed for ${number}: ${lastError.slice(0, 200)}`);
+}
+
+// ============================================================================
 // BYOT PROVISIONING LOGIC (exported for use in client-signup.js)
 // ============================================================================
 async function provisionBYOTNumber(agency, options) {
@@ -305,32 +365,31 @@ async function provisionBYOTNumber(agency, options) {
   const purchasedNumber = await buyResponse.json();
   console.log(`   ✅ Purchased: ${purchasedNumber.phone_number} (SID: ${purchasedNumber.sid})`);
 
-  const vapiResponse = await fetch('https://api.vapi.ai/phone-number', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${VAPI_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      provider: 'twilio',
+  // Import into VAPI, trying each credential shape VAPI may accept. On total
+  // failure the number is ALREADY bought on the agency's Twilio, so release it
+  // before throwing to avoid leaking a billable line (the old code only logged
+  // "CLEANUP NEEDED" and left it renting forever).
+  let vapiPhone;
+  try {
+    vapiPhone = await importTwilioNumberToVapi({
       number: purchasedNumber.phone_number,
-      twilioAccountSid: accountSid,
-      twilioApiKey: apiKey,
-      twilioApiSecret: apiSecret,
-      name: `${businessName} - Business Line`,
-      assistantId: assistantId,
-      serverUrl: `${BACKEND_URL}/webhook/vapi`
-    })
-  });
-
-  if (!vapiResponse.ok) {
-    const vapiError = await vapiResponse.text();
-    console.error(`❌ VAPI import failed: ${vapiError}`);
-    console.error(`⚠️ CLEANUP NEEDED: Number ${purchasedNumber.phone_number} (SID: ${purchasedNumber.sid}) purchased on Twilio but not imported to VAPI`);
-    throw new Error(`VAPI import failed for ${purchasedNumber.phone_number}: ${vapiError}`);
+      accountSid,
+      apiKey,
+      apiSecret,
+      assistantId,
+      businessName,
+    });
+  } catch (importErr) {
+    console.error(`❌ ${importErr.message}`);
+    console.error(`⚠️ Releasing ${purchasedNumber.phone_number} (SID: ${purchasedNumber.sid}) from the agency's Twilio after failed VAPI import.`);
+    try {
+      await releaseBYOTNumber(agency, purchasedNumber.phone_number);
+    } catch (relErr) {
+      console.error(`❌ Release after failed import also failed for ${purchasedNumber.phone_number}:`, relErr.message);
+    }
+    throw importErr;
   }
 
-  const vapiPhone = await vapiResponse.json();
   console.log(`   ✅ Imported to VAPI: ${vapiPhone.id}`);
   console.log(`🎉 BYOT provisioning complete: ${purchasedNumber.phone_number}`);
 
@@ -350,7 +409,8 @@ async function provisionBYOTNumber(agency, options) {
 // lib/vapi.js. Deleting the VAPI phone object (fullyReleaseNumber) does NOT
 // release the underlying carrier number, and for BYOT the carrier is the
 // agency's Twilio, not the platform Telnyx account, so it must be deleted here.
-// Used when tearing down an international demo line.
+// Used when tearing down an international demo line, and now also to release a
+// just-purchased number when the VAPI import fails.
 //
 // No stored SID is required: the number is looked up on the agency's Twilio by
 // its E.164 value to find its IncomingPhoneNumber SID, then deleted. Fully
