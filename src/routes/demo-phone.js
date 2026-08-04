@@ -91,21 +91,81 @@ async function deleteVapiAssistant(assistantId) {
 // ============================================================================
 // HELPER: map an internal provisioning error to a readable, actionable message
 // ============================================================================
+// ============================================================================
+// FRIENDLY, ACTIONABLE ERRORS
+// ----------------------------------------------------------------------------
+// Every demo failure (at create time and on the status poll) flows through
+// here, so this is the single place that turns a raw provider error into a
+// message that says what happened AND exactly how to fix it. Each branch
+// follows the same shape: what went wrong, why, and the precise next step
+// (which Twilio Console section to open, or what to do in the app). The known
+// Twilio account-setup blockers (Trust Hub identity verification, regulatory
+// bundle, address) are matched BEFORE the generic "purchase failed" branch,
+// because Twilio returns those as part of a purchase error, and we want the
+// specific fix rather than the raw truncated provider text.
+//
+// Ordering matters: most specific first. The generic purchase branch extracts
+// and surfaces Twilio's own reason (no longer truncated mid-sentence) when we
+// do not recognize the exact cause, so the user still gets something they can
+// act on or send to support.
+// ============================================================================
 function friendlyDemoProvisioningError(err, country) {
   const msg = (err && err.message) || '';
-  if (/regulatory bundle/i.test(msg)) {
-    return `Twilio requires an approved regulatory bundle for ${country} before it will sell a number. Complete your ${country} bundle in the Twilio Console, then try again.`;
+  const where = country || 'this country';
+
+  // Pull Twilio's own reason out of a "Failed to purchase +44...: <reason>"
+  // error so we can show it in full instead of the 160-char truncation.
+  const purchaseReasonMatch = msg.match(/Failed to purchase[^:]*:\s*([\s\S]+)$/i);
+  const twilioReason = purchaseReasonMatch ? purchaseReasonMatch[1].trim() : '';
+
+  const TRUST_HUB_URL = 'https://console.twilio.com/us1/account/trust-hub/customer-profiles';
+  const BUNDLES_URL = 'https://console.twilio.com/us1/develop/phone-numbers/regulatory-compliance/bundles';
+  const ADDRESSES_URL = 'https://console.twilio.com/us1/develop/phone-numbers/regulatory-compliance/addresses';
+
+  // 1. Trust Hub / identity verification (KYC) not approved. This is the
+  //    account-wide identity check, separate from the per-country bundle, and
+  //    the API enforces it on purchase even when a manual console buy slipped
+  //    through. This is the exact case that returns "Primary compliance profile
+  //    is not approved ... complete the KYC process in Trust Hub".
+  if (/compliance profile|trust hub|\bkyc\b|primary (customer|business) profile|profile is not approved|not approved.*trust/i.test(msg)) {
+    return `Twilio has not approved this Twilio account's identity verification yet, so it will not sell a ${where} number through the API. Fix it in Twilio: open Trust Hub, then Customer Profiles, and submit the Primary Business Profile for review. This is the account-wide identity check, and it is separate from the per-country regulatory bundle. Once Twilio approves it, create the demo again. Trust Hub: ${TRUST_HUB_URL}`;
   }
-  if (/no (phone )?numbers? available/i.test(msg) || /no numbers available/i.test(msg)) {
-    return `No local numbers are currently available in ${country} on your Twilio account. Try again shortly, or check availability in your Twilio Console.`;
+
+  // 2. Regulatory bundle for the country not approved (also Twilio code 21649).
+  if (/regulatory bundle|bundle required|bundle.*not.*(approved|complete)|21649/i.test(msg)) {
+    return `Twilio needs an approved regulatory bundle for ${where} before it will sell a number there. In the Twilio Console open Phone Numbers, then Regulatory Compliance, then Bundles, and complete the ${where} bundle. Once Twilio approves it, create the demo again. Bundles: ${BUNDLES_URL}`;
   }
+
+  // 3. Missing/unverified address for the country's number type.
+  if (/address.*(required|needed|must|missing)|requires an address|no.*valid.*address/i.test(msg)) {
+    return `Twilio needs a verified address on file for ${where} numbers. In the Twilio Console open Phone Numbers, then Regulatory Compliance, then Addresses, add a ${where} address, then create the demo again. Addresses: ${ADDRESSES_URL}`;
+  }
+
+  // 4. No inventory available in the country right now.
+  if (/no (phone )?numbers? available|no numbers available/i.test(msg)) {
+    return `No local numbers are available in ${where} on the connected Twilio account right now. This is usually temporary. Try again in a few minutes, or search ${where} local numbers in the Twilio Console to confirm there is inventory.`;
+  }
+
+  // 5. No Twilio connected for this agency.
   if (/does not have Twilio credentials/i.test(msg)) {
-    return 'Connect your Twilio account in Settings, Twilio to create an international demo line.';
+    return `No Twilio account is connected for this agency. Go to Settings, then Twilio, connect the Twilio account, and complete the regulatory bundle for ${where}. Then create the demo.`;
   }
+
+  // 6. Number bought, but VAPI import failed. byot.js releases the number in
+  //    this case, so reassure that nothing was left billing.
   if (/VAPI import failed/i.test(msg)) {
-    return `Your ${country} number was purchased on Twilio but could not be linked to the AI. Please try again, or contact support if it keeps happening.`;
+    return `The ${where} number was purchased on Twilio but could not be linked to the AI. The number was automatically released so you were not left paying for an unused line. Try creating the demo again. If it keeps failing, contact support.`;
   }
-  return `Could not create your demo line in ${country}. ${msg.slice(0, 160)}`;
+
+  // 7. Generic purchase rejection we did not specifically recognize. Surface
+  //    Twilio's own reason in full and point at the usual account-setup causes.
+  if (/failed to purchase/i.test(msg)) {
+    const reason = twilioReason ? ` Twilio's reason: "${twilioReason.slice(0, 300)}".` : '';
+    return `Twilio would not sell the ${where} number.${reason} This is almost always an account setup step on the Twilio side, usually identity verification in Trust Hub (${TRUST_HUB_URL}) or a missing regulatory bundle or address for ${where}. Fix it in the Twilio Console, then create the demo again.`;
+  }
+
+  // 8. Anything else: give the fullest reason we have plus where to look.
+  return `Could not create the ${where} demo line. Reason: ${msg.slice(0, 240)}. If this looks like a Twilio setup issue, check Trust Hub (${TRUST_HUB_URL}) and your ${where} regulatory bundle in the Twilio Console, then try again.`;
 }
 
 // ============================================================================
