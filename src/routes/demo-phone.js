@@ -71,6 +71,19 @@ function hasByotCredentials(agency) {
 }
 
 // ============================================================================
+// HELPER: is the agency on the free plan? A demo provisions a real phone
+// number (a monthly rental), so it is a paid-plan feature. This is the
+// server-side enforcement behind the UI's "paid plans only" state, so a free
+// agency cannot bypass the greyed button and create a demo we would only have
+// to sweep later. Note hasAccess() alone does not catch this: a free agency
+// can still be subscription_status 'active' or 'trial', so it must be gated on
+// plan_type as well.
+// ============================================================================
+function isFreePlan(agency) {
+  return String(agency.plan_type || '').toLowerCase() === 'free';
+}
+
+// ============================================================================
 // HELPER: best-effort delete of a VAPI assistant (rollback on failed provision)
 // ============================================================================
 async function deleteVapiAssistant(assistantId) {
@@ -328,6 +341,22 @@ router.post('/:agencyId/demo-phone', async (req, res) => {
       return res.status(403).json({
         error: 'Subscription required',
         message: 'Demo phone numbers require an active subscription or trial. Please subscribe to create your demo line.'
+      });
+    }
+
+    // 2b. Paid-plan gate. Demos are a paid feature. This is the server-side
+    //     enforcement behind the UI's "paid plans only" state, so a free
+    //     agency cannot bypass the greyed button and buy a number we would
+    //     only have to sweep later.
+    if (isFreePlan(agency)) {
+      return res.status(403).json({
+        error: 'upgrade_required',
+        upgrade_required: true,
+        feature: 'demo_phone',
+        current_plan: 'free',
+        title: 'Demo lines are a paid feature',
+        message: 'Give prospects a live number to call and hear your AI in action. Upgrade to Pro or Scale to create a branded demo line.',
+        cta: 'Upgrade to unlock demos',
       });
     }
 

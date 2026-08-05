@@ -456,6 +456,12 @@ async function createAgencyCheckout(req, res) {
       customer: customerId,
       mode: 'subscription',
       payment_method_types: ['card'],
+      // Show the "Add promotion code" box on the hosted checkout page. Without
+      // this flag the box never renders, so a coupon (e.g. a 100%-off comp
+      // account) can never be redeemed by the agency at checkout. The customer
+      // types the promotion code (not the coupon id) and Stripe applies the
+      // linked coupon to every invoice per the coupon's duration.
+      allow_promotion_codes: true,
       line_items: lineItems,
       subscription_data: {
         trial_period_days: 14,

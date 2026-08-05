@@ -18,7 +18,7 @@ const TEST_CLIENT_CALL_LIMIT = 30;
 
 // ============================================================================
 // POST /api/agency/:agencyId/provision-test-client
-// Idempotent — returns existing test client if already provisioned
+// Idempotent - returns existing test client if already provisioned
 // ============================================================================
 router.post('/:agencyId/provision-test-client', async (req, res) => {
   try {
@@ -47,9 +47,37 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
       }
     }
 
+    // ------------------------------------------------------------------------
+    // PAID-PLAN GATE
+    // Provisioning a test client buys a real phone number (a monthly Telnyx
+    // rental), so Test AI is a paid-plan feature. Free-plan agencies are
+    // blocked here at the source so we never buy a number we would only have to
+    // sweep later. plan_type is read directly from the row so this does not
+    // depend on getAgencyById's column selection. An agency that already has a
+    // test client is returned above, so this only ever blocks NEW provisioning.
+    // ------------------------------------------------------------------------
+    const { data: planRow } = await supabase
+      .from('agencies')
+      .select('plan_type')
+      .eq('id', agencyId)
+      .single();
+    const planType = String(planRow?.plan_type || '').toLowerCase();
+    if (planType === 'free') {
+      console.log(`⛔ Test client blocked for ${agency.name}: free plan`);
+      return res.status(403).json({
+        error: 'upgrade_required',
+        upgrade_required: true,
+        feature: 'test_ai',
+        current_plan: 'free',
+        title: 'Test AI is a paid feature',
+        message: 'Spin up a live test receptionist so you can hear your AI before you sell it. Upgrade to Pro or Scale to unlock your own test line.',
+        cta: 'Upgrade to unlock Test AI',
+      });
+    }
+
     console.log(`🧪 Provisioning test client for agency: ${agency.name}`);
 
-    const testBusinessName = `${agency.name} — Test Business`;
+    const testBusinessName = `${agency.name} - Test Business`;
     const agencyCountry = (agency.country || 'US').toUpperCase();
     const agencyCity = 'Atlanta'; // Default city for phone provisioning
     const agencyState = 'GA';     // Default state
@@ -80,7 +108,7 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
       phoneNumber = phoneData.number;
       vapiPhoneId = phoneData.id;
 
-      // Configure webhook — serverUrl only (same as regular clients)
+      // Configure webhook - serverUrl only (same as regular clients)
       await fetch(`https://api.vapi.ai/phone-number/${vapiPhoneId}`, {
         method: 'PATCH',
         headers: {
@@ -96,7 +124,7 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
       console.log(`✅ Test phone provisioned: ${phoneNumber}`);
     } catch (phoneErr) {
       console.error('❌ Test phone provisioning failed:', phoneErr.message);
-      // Continue without phone — client record still useful
+      // Continue without phone - client record still useful
     }
 
     // Step 3: Create client record
