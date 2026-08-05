@@ -56,6 +56,20 @@
 //          the card is taken. See recordSignupConsent and the gate in
 //          handleClientSignup. handleAgencyAddClient is unchanged (agency-
 //          initiated, no end-user present to consent, never card-required).
+// UPDATED: 2026-08-05 - Stale-number collision recovery rewritten. The dead-row
+//          test now keys off `status` as the authority and recognizes the
+//          agency-cancel death shape (status 'cancelled'/'canceled') in
+//          addition to trial-expiry ('expired'). It no longer requires
+//          vapi_phone_id to be null: an agency-canceled client keeps its
+//          vapi_phone_id (the cancel cascade never nulled it), and that stale
+//          id was exactly what made the old check treat a dead row as "live"
+//          and abort a legitimate reclaim. On reclaim it also deletes the dead
+//          row's ORPHANED VAPI resources (the old phone-import object, its
+//          assistant, and its query tool), which were being leaked, but it
+//          deliberately does NOT release the carrier number: the number was
+//          already released and re-sold to us for the NEW client, so releasing
+//          it would delete the new client's line. status='active' rows are
+//          NEVER reclaimed, so a live client can never be stomped.
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -283,6 +297,33 @@ async function cleanupVapiResources(assistantId, queryToolId, context) {
     } catch (err) {
       console.warn(`⚠️ VAPI cleanup error (tool): ${err.message}`);
     }
+  }
+}
+
+// ============================================================================
+// DELETE JUST THE VAPI PHONE-NUMBER OBJECT (not the carrier number)
+// ----------------------------------------------------------------------------
+// Used only during stale-number collision recovery. When we reclaim a number
+// from a dead client row, the carrier number was ALREADY released and re-sold
+// to us for the NEW client, so we must NOT touch Telnyx/Twilio (that number is
+// the new client's now). What we DO want to remove is the dead row's leftover
+// VAPI phone-import object, which is an orphan cluttering VAPI. This deletes
+// only that object. Tolerates 404 (already gone) and never throws.
+// ============================================================================
+async function deleteVapiPhoneObject(vapiPhoneId) {
+  if (!vapiPhoneId || !process.env.VAPI_API_KEY) return;
+  try {
+    const res = await fetch(`https://api.vapi.ai/phone-number/${vapiPhoneId}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${process.env.VAPI_API_KEY}` },
+    });
+    if (res.ok || res.status === 404) {
+      console.log(`🧹 Deleted orphaned VAPI phone object from dead row: ${vapiPhoneId}`);
+    } else {
+      console.warn(`⚠️ Could not delete orphaned VAPI phone object ${vapiPhoneId}: HTTP ${res.status}`);
+    }
+  } catch (err) {
+    console.warn(`⚠️ VAPI phone object delete error for ${vapiPhoneId}: ${err.message}`);
   }
 }
 
@@ -567,23 +608,34 @@ async function provisionPhoneForClient(agency, clientData, assistantId, voiceRou
 // INSERT CLIENT WITH STALE-NUMBER RECOVERY
 // ----------------------------------------------------------------------------
 // clients.phone_number carries a UNIQUE constraint (clients_phone_number_key).
-// When a trial expires we release the Telnyx number back to the carrier pool.
-// Historically the dead row kept its phone_number populated (the vapi_* columns
-// were nulled, this one was not), so when Telnyx ages the number back into its
-// available inventory and re-sells it to a later signup, the fresh insert
-// collides (Postgres 23505) with the stale dead row.
+// When a client dies (trial expiry, or an agency cancellation cascade) we
+// release its Telnyx/Twilio number back to the carrier pool, but the dead row
+// keeps its phone_number populated. When the carrier later ages that number
+// back into available inventory and re-sells it to a new signup, the fresh
+// insert collides (Postgres 23505) with the stale dead row.
 //
 // This helper runs the insert and, on a phone_number 23505, splits two cases:
-//   (1) Stale dead row(s) only (status expired / trial_expired, vapi_phone_id
-//       already null): the row no longer owns the number (it was released,
-//       proven by the fact that we just bought it). Null its phone_number and
-//       retry, reusing the number we already paid for.
+//   (1) The colliding row(s) are all DEAD. `status` is the authority: a client
+//       is dead when its own status is terminal, meaning 'expired' (trial
+//       sweep) or 'cancelled'/'canceled' (agency cancel or direct cancel). We
+//       intentionally do NOT treat status='active' as dead even when its
+//       subscription_status looks expired: the DB currently holds many
+//       active/trial_expired rows, and an active client may be on a call right
+//       now. We also no longer require vapi_phone_id to be null; an
+//       agency-canceled client keeps its vapi_phone_id, and that stale id was
+//       what made the old check misread a dead row as live.
+//       For dead rows we: delete their ORPHANED VAPI resources (the leftover
+//       phone-import object, assistant, and query tool), null their
+//       number-identifying columns so they can never collide again, and retry
+//       the insert, reusing the number we already paid for. We deliberately do
+//       NOT release the carrier number here: it was already released and
+//       re-sold to us for THIS new client, so releasing it would delete the new
+//       client's line.
 //   (2) Anything else (a live or unknown row): do NOT stomp it. Throw a typed
-//       error so the caller releases the just-bought Telnyx number and fails
+//       error so the caller releases the just-bought carrier number and fails
 //       cleanly instead of leaking the purchase.
 // ============================================================================
-const DEAD_CLIENT_STATUSES = ['expired'];
-const DEAD_SUBSCRIPTION_STATUSES = ['trial_expired', 'expired'];
+const DEAD_CLIENT_STATUSES = ['expired', 'cancelled', 'canceled'];
 
 async function insertClientWithStaleNumberRecovery(payload) {
   const number = payload.phone_number;
@@ -603,7 +655,7 @@ async function insertClientWithStaleNumberRecovery(payload) {
 
   const { data: colliding, error: lookupErr } = await supabase
     .from('clients')
-    .select('id, business_name, status, subscription_status, vapi_phone_id')
+    .select('id, business_name, status, subscription_status, provisioning_method, vapi_phone_id, vapi_phone_number_id, vapi_assistant_id, vapi_query_tool_id')
     .eq('phone_number', number);
 
   if (lookupErr) {
@@ -612,10 +664,14 @@ async function insertClientWithStaleNumberRecovery(payload) {
   }
 
   const rows = colliding || [];
+
+  // A colliding row is reclaimable ONLY if its own status is terminal. status
+  // is the authority; we do not key off subscription_status, because an
+  // active client can carry a stale subscription_status and must never be
+  // stomped. If ANY colliding row is still live/unknown, refuse and let the
+  // caller release the just-bought number.
   const allDead = rows.length > 0 && rows.every(r =>
-    !r.vapi_phone_id &&
-    (DEAD_CLIENT_STATUSES.includes(r.status) ||
-     DEAD_SUBSCRIPTION_STATUSES.includes(r.subscription_status))
+    DEAD_CLIENT_STATUSES.includes(String(r.status || '').toLowerCase())
   );
 
   if (!allDead) {
@@ -625,20 +681,39 @@ async function insertClientWithStaleNumberRecovery(payload) {
   }
 
   const ids = rows.map(r => r.id);
-  console.log(`🧹 Clearing stale phone_number on dead row(s): ${ids.join(', ')}`);
+  console.log(`🧹 Reclaiming ${number} from dead row(s): ${ids.join(', ')}`);
+
+  // Delete each dead row's ORPHANED VAPI resources. These are safe to remove:
+  // the rows are dead, and their VAPI objects are distinct from the fresh ones
+  // just created for the new client. We do NOT release the carrier number (it
+  // is the new client's now).
+  for (const r of rows) {
+    await deleteVapiPhoneObject(r.vapi_phone_id || r.vapi_phone_number_id);
+    await cleanupVapiResources(r.vapi_assistant_id, r.vapi_query_tool_id, `reclaim-dead-row-${r.id}`);
+  }
+
+  // Null the number-identifying columns so the dead row can never collide
+  // again (and so a later backfill won't try to re-release a number it no
+  // longer holds).
   const { error: clearErr } = await supabase
     .from('clients')
-    .update({ phone_number: null, phone_area_code: null })
+    .update({
+      phone_number: null,
+      phone_area_code: null,
+      vapi_phone_id: null,
+      vapi_phone_number: null,
+      vapi_phone_number_id: null,
+    })
     .in('id', ids);
 
   if (clearErr) {
-    console.error('❌ Failed to clear stale phone_number:', clearErr.message);
+    console.error('❌ Failed to clear number columns on dead row(s):', clearErr.message);
     return first;
   }
 
   const retry = await supabase.from('clients').insert(payload).select().single();
-  if (retry.error) console.error('❌ Retry after clearing stale number failed:', retry.error.message);
-  else console.log(`✅ Recovered stale-number collision, ${number} reassigned`);
+  if (retry.error) console.error('❌ Retry after reclaiming number failed:', retry.error.message);
+  else console.log(`✅ Reclaimed ${number} from dead row(s), reassigned to new client`);
   return retry;
 }
 

@@ -45,6 +45,15 @@
 //                      grades on the post-cancel screen (reuses the existing
 //                      subscription_cancellations.reason column) and texts a
 //                      short follow-up logged as 'agency_cancellation_reason'.
+// UPDATED: 2026-08-05: /api/agency/cancel cascade now RELEASES every client's
+//                      number from all billable systems (VAPI phone object,
+//                      platform Telnyx rental with retry, and the agency's own
+//                      Twilio for BYOT) and deletes their VAPI assistant + query
+//                      tool before marking them cancelled and nulling telephony,
+//                      via releaseClientEverywhere. Previously it only flipped
+//                      status and left every client's number renting forever.
+//                      Also mounts routes/number-cleanup (backfill dead-client
+//                      numbers + reconcile the Telnyx account) under /api/cron.
 // Destination: src/server.js (or src/index.js), FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -68,6 +77,11 @@ const cors = require('cors');
 const { supabase } = require('./lib/supabase');
 const { fullyReleaseNumber } = require('./lib/vapi');
 const { releaseBYOTNumber } = require('./routes/byot');
+// Number cleanup: canonical per-client teardown (used by the agency-cancel
+// cascade below) plus the backfill + Telnyx-reconcile cron routes mounted
+// further down. Requiring the router also gives us its attached helper export.
+const numberCleanupRoutes = require('./routes/number-cleanup');
+const { releaseClientEverywhere } = numberCleanupRoutes;
 const { expressErrorHandler, setupProcessErrorHandlers } = require('./lib/error-monitor');
 const { sendPlatformNotificationSMS, sendAgencySignupNotificationSMS } = require('./lib/notifications');
 
@@ -430,8 +444,12 @@ app.post('/api/agency/portal', requirePermissionIfAuthed('billing'), createAgenc
 //      customer.subscription.deleted webhook fires with the same data).
 //   2. Release the VAPI demo number + Telnyx rental + demo assistant.
 //   3. Mark the agency canceled and null out demo fields.
-//   4. Cascade-suspend all clients (status='cancelled',
-//      subscription_status='agency_canceled').
+//   4. Cascade-cancel all clients: RELEASE each client's number from every
+//      billable system (VAPI object, platform Telnyx with retry, agency Twilio
+//      for BYOT) + delete their assistant/tool, THEN mark them
+//      status='cancelled', subscription_status='agency_canceled' and null their
+//      telephony columns. Anything not confirm-released is logged and the daily
+//      reconcile-telnyx sweep is the backstop.
 //   5. Upsert a row in subscription_cancellations keyed on
 //      stripe_subscription_id. The webhook handler
 //      (handleAgencySubscriptionDeleted in routes/stripe-platform.js) checks
@@ -521,21 +539,50 @@ app.post('/api/agency/cancel', requirePermissionIfAuthed('billing'), async (req,
       })
       .eq('id', agency_id);
 
+    // Cascade to clients. RELEASE each client's number from every billable
+    // system and delete their VAPI resources BEFORE marking them cancelled and
+    // nulling telephony. Previously this only flipped status, which left every
+    // client's number renting forever (the source of the agency_canceled
+    // leaks). The `agency` row selected above carries the Twilio creds needed to
+    // release BYOT clients on the agency's own Twilio. retries is kept low here
+    // so a cancel with many clients stays responsive; the daily reconcile-telnyx
+    // sweep is the guaranteed backstop for anything not confirmed released.
     const { data: clients } = await supabase
       .from('clients')
-      .select('id')
+      .select('id, business_name, agency_id, provisioning_method, phone_number, vapi_phone_number, vapi_phone_id, vapi_phone_number_id, vapi_assistant_id, vapi_query_tool_id')
       .eq('agency_id', agency_id);
 
     if (clients && clients.length > 0) {
+      let leaked = 0;
+      for (const c of clients) {
+        try {
+          const rel = await releaseClientEverywhere(c, { agency, retries: 1, retryDelayMs: 2000 });
+          if (rel.stillLeaking) {
+            leaked++;
+            console.error(`⚠️ Number not confirmed released for ${c.business_name} (${rel.e164}); daily reconcile will catch it`);
+          }
+        } catch (relErr) {
+          console.error(`❌ Release failed for client ${c.id} during agency cancel:`, relErr.message);
+        }
+      }
+
       await supabase
         .from('clients')
-        .update({ 
-          status: 'cancelled', 
-          subscription_status: 'agency_canceled' 
+        .update({
+          status: 'cancelled',
+          subscription_status: 'agency_canceled',
+          vapi_phone_id: null,
+          vapi_phone_number: null,
+          vapi_phone_number_id: null,
+          phone_number: null,
+          phone_area_code: null,
+          vapi_assistant_id: null,
+          vapi_query_tool_id: null,
+          updated_at: new Date().toISOString(),
         })
         .eq('agency_id', agency_id);
-      
-      console.log(`⚠️ Suspended ${clients.length} clients`);
+
+      console.log(`⚠️ Cancelled ${clients.length} client(s), released their numbers${leaked ? `, ${leaked} not confirmed (reconcile will sweep)` : ''}`);
     }
 
     // Record cancellation with reason + feedback. Upsert keyed on
@@ -1476,6 +1523,16 @@ app.use('/api/cron', abandonedCheckoutCleanupRoutes);
 
 // Usage reporting cron (reports voice minutes to Stripe metered billing)
 app.use('/api/cron', usageReporterRoutes);
+
+// Number cleanup. Two tools, both DRY-RUN unless called with ?apply=true:
+//   POST /api/cron/backfill-dead-numbers  - release every dead client still
+//        holding a number (VAPI + Telnyx + agency Twilio), null their telephony.
+//   POST /api/cron/reconcile-telnyx       - list every number on the Telnyx
+//        account and delete any not owned by a live client / demo / platform
+//        number, so nothing keeps billing. Aborts if the allowlist can't build.
+// Guarded by CRON_SECRET inside the router. Schedule reconcile-telnyx daily as
+// the standing backstop for any release that could not confirm in-flight.
+app.use('/api/cron', numberCleanupRoutes);
 
 
 
