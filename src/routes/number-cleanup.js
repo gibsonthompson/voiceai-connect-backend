@@ -1,7 +1,7 @@
 // ============================================================================
 // NUMBER CLEANUP - stop paying for numbers that belong to dead clients
 // ----------------------------------------------------------------------------
-// Three tools, all reachable as cron routes and all DRY-RUN by default (they
+// Four tools, all reachable as cron routes and all DRY-RUN by default (they
 // only act when called with ?apply=true, so nothing is ever deleted by
 // accident):
 //
@@ -30,6 +30,16 @@
 //       delete anything if the allowlist cannot be built or comes back empty, so
 //       an incomplete query can never nuke live numbers.
 //
+//   sweepLowValueNumbers()            - policy sweep for the numbers you decided
+//       you should never have been paying for: TEST clients and agency DEMOS on
+//       agencies that are dead (always) or on the free plan (only with
+//       ?free=true). It NEVER touches real (non-test) clients, and it ALWAYS
+//       excludes CallBird (your own agency) so your own test line and demo
+//       survive. Paid, active agencies keep their test clients and demos. This
+//       is a policy tool, not a correctness one: the sweep clears the backlog,
+//       but preventing NEW free-agency test/demo numbers is a separate change in
+//       the provisioning handlers (test-client.js / demo-phone.js), not here.
+//
 // BYOT numbers live on each agency's own Twilio, never on the platform Telnyx
 // account, so reconcileTelnyxAccount only ever sees platform-provisioned US
 // numbers, demos, and platform numbers. It cannot touch a BYOT line.
@@ -47,6 +57,10 @@ const { updateClientBillingQuantity } = require('../lib/usage-tracker');
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const TELNYX_API_KEY = process.env.TELNYX_API_KEY;
 
+// CallBird is Gibson's own agency instance. Its test client and demo must never
+// be swept, regardless of plan or status.
+const CALLBIRD_AGENCY_ID = '00000000-0000-0000-0000-000000000001';
+
 // A client is DEAD (its number should be released) when its own status is
 // terminal. status is the authority: a paying client is never terminal-status.
 const DEAD_STATUS = ['expired', 'cancelled', 'canceled'];
@@ -56,6 +70,10 @@ const DEAD_STATUS = ['expired', 'cancelled', 'canceled'];
 // upgrades, the webhook flips subscription_status to active/trial, so a row
 // still carrying one of these has not paid and is safe to reclaim.
 const DEAD_SUB_STATUS = ['trial_expired', 'expired', 'agency_canceled', 'canceled', 'cancelled'];
+
+// Agency-level death markers for the low-value sweep.
+const DEAD_AGENCY_STATUS = ['suspended', 'expired', 'canceled', 'cancelled'];
+const DEAD_AGENCY_SUB = ['expired', 'trial_expired', 'canceled', 'cancelled'];
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -98,6 +116,23 @@ async function loadAgency(agencyId) {
     .eq('id', agencyId)
     .single();
   return data || null;
+}
+
+// A joined agency row is DEAD when its status is terminal (suspended, expired,
+// canceled) or it is a trial whose subscription already expired/canceled. A
+// missing agency (orphaned client) is treated as dead.
+function isAgencyDead(a) {
+  if (!a) return true;
+  const st = String(a.status || '').toLowerCase();
+  const sub = String(a.subscription_status || '').toLowerCase();
+  if (DEAD_AGENCY_STATUS.includes(st)) return true;
+  if (st === 'trial' && DEAD_AGENCY_SUB.includes(sub)) return true;
+  return false;
+}
+
+function isAgencyFree(a) {
+  if (!a) return false;
+  return String(a.plan_type || '').toLowerCase() === 'free';
 }
 
 // ============================================================================
@@ -178,6 +213,63 @@ async function releaseClientEverywhere(client, { agency = null, retries = 4, ret
   return out;
 }
 
+// Release ONE agency's DEMO number (VAPI phone object + Telnyx rental with
+// retry + agency Twilio for a BYOT demo) and delete its demo assistant, then
+// null the demo columns. Never throws.
+async function releaseAgencyDemo(agency) {
+  const e164 = normalizeE164(agency.demo_phone_number);
+  const vapiPhoneId = agency.demo_vapi_phone_id || null;
+  const out = {
+    agency_id: agency.id,
+    agency: agency.name,
+    e164,
+    vapiDeleted: false,
+    telnyxReleased: false,
+    byotReleased: null,
+    assistantDeleted: false,
+    stillLeaking: false,
+  };
+
+  if (vapiPhoneId || e164) {
+    try {
+      const r = await fullyReleaseNumber(vapiPhoneId, e164);
+      out.vapiDeleted = r.vapiDeleted;
+      out.telnyxReleased = r.telnyxReleased;
+    } catch (e) {
+      console.error(`demo release failed for ${agency.name}: ${e.message}`);
+    }
+  }
+
+  if (!out.telnyxReleased && e164) {
+    for (let i = 0; i < 3 && !out.telnyxReleased; i++) {
+      await sleep(3000);
+      out.telnyxReleased = await releaseTelnyxNumber(e164);
+    }
+  }
+
+  // BYOT demo (a non-US agency's demo bought on its own Twilio).
+  if (e164 && agency.twilio_account_sid && agency.twilio_api_key_encrypted) {
+    try { out.byotReleased = await releaseBYOTNumber(agency, e164); }
+    catch (e) { console.error(`BYOT demo release failed for ${e164}: ${e.message}`); out.byotReleased = false; }
+  }
+
+  out.assistantDeleted = await deleteVapiResource('assistant', agency.demo_assistant_id);
+
+  await supabase
+    .from('agencies')
+    .update({
+      demo_phone_number: null,
+      demo_vapi_phone_id: null,
+      demo_assistant_id: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', agency.id);
+
+  const carrierOk = out.telnyxReleased === true || out.byotReleased === true || !e164;
+  out.stillLeaking = !!e164 && !carrierOk;
+  return out;
+}
+
 // Null the telephony columns after a release so the dead row can never collide
 // with a future signup (clients_phone_number_key) or be re-processed. Optionally
 // promote a stale active zombie to status='expired' so it reads as retired.
@@ -197,10 +289,10 @@ async function nullClientTelephony(clientId, { markExpired = false } = {}) {
 }
 
 const CLIENT_SELECT =
-  'id, business_name, agency_id, status, subscription_status, provisioning_method, ' +
+  'id, business_name, agency_id, status, subscription_status, provisioning_method, is_test_client, ' +
   'phone_number, phone_area_code, vapi_phone_number, vapi_phone_id, vapi_phone_number_id, ' +
   'vapi_assistant_id, vapi_query_tool_id, ' +
-  'agencies!clients_agency_id_fkey(id, name, twilio_account_sid, twilio_api_key_encrypted, twilio_api_secret_encrypted)';
+  'agencies!clients_agency_id_fkey(id, name, status, subscription_status, plan_type, twilio_account_sid, twilio_api_key_encrypted, twilio_api_secret_encrypted)';
 
 function holdsSomething(c) {
   return !!(c.vapi_phone_number || c.phone_number || c.vapi_phone_id || c.vapi_phone_number_id || c.vapi_assistant_id || c.vapi_query_tool_id);
@@ -270,6 +362,105 @@ async function backfillDeadClientNumbers({ dryRun = true } = {}) {
     stillLeaking: stillLeaking.length,
     stillLeakingNumbers: stillLeaking.map((r) => r.e164),
     results,
+  };
+}
+
+// ============================================================================
+// LOW-VALUE SWEEP: test clients + agency demos on dead (always) or free
+// (only with includeFree) agencies. Never touches real clients or CallBird.
+// ============================================================================
+async function sweepLowValueNumbers({ dryRun = true, includeFree = false } = {}) {
+  // ---- TEST CLIENTS ----
+  const { data: allTest, error: e1 } = await supabase
+    .from('clients')
+    .select(CLIENT_SELECT)
+    .eq('is_test_client', true);
+  if (e1) return { ok: false, error: `test client query failed: ${e1.message}` };
+
+  const testTargets = (allTest || []).filter((c) => {
+    if (!holdsSomething(c)) return false;
+    if (c.agency_id === CALLBIRD_AGENCY_ID) return false; // never touch own agency
+    const dead = isAgencyDead(c.agencies);
+    const free = isAgencyFree(c.agencies);
+    return dead || (includeFree && free);
+  });
+
+  // ---- DEMOS (agency-level) ----
+  const { data: allDemoAgencies, error: e2 } = await supabase
+    .from('agencies')
+    .select('id, name, status, subscription_status, plan_type, demo_phone_number, demo_vapi_phone_id, demo_assistant_id, twilio_account_sid, twilio_api_key_encrypted, twilio_api_secret_encrypted')
+    .not('demo_phone_number', 'is', null);
+  if (e2) return { ok: false, error: `agency demo query failed: ${e2.message}` };
+
+  const demoTargets = (allDemoAgencies || []).filter((a) => {
+    if (a.id === CALLBIRD_AGENCY_ID) return false;
+    const dead = isAgencyDead(a);
+    const free = isAgencyFree(a);
+    return dead || (includeFree && free);
+  });
+
+  const reason = (a) => (isAgencyDead(a) ? 'dead_agency' : 'free_agency');
+
+  if (dryRun) {
+    return {
+      ok: true,
+      dryRun: true,
+      includeFree,
+      testClientCount: testTargets.length,
+      demoCount: demoTargets.length,
+      testClients: testTargets.map((c) => ({
+        id: c.id,
+        business_name: c.business_name,
+        agency: c.agencies ? c.agencies.name : null,
+        agency_status: c.agencies ? c.agencies.status : null,
+        agency_plan: c.agencies ? c.agencies.plan_type : null,
+        reason: reason(c.agencies),
+        e164: normalizeE164(c.vapi_phone_number || c.phone_number),
+      })),
+      demos: demoTargets.map((a) => ({
+        agency_id: a.id,
+        agency: a.name,
+        agency_status: a.status,
+        agency_plan: a.plan_type,
+        reason: reason(a),
+        e164: normalizeE164(a.demo_phone_number),
+      })),
+    };
+  }
+
+  // APPLY. Keep the rows, null their telephony (test clients) / demo columns
+  // (agencies), so the record survives but stops billing and won't be
+  // re-processed on the next run (holdsSomething / demo_phone_number go false).
+  const testResults = [];
+  const agencyIds = new Set();
+  for (const c of testTargets) {
+    const rel = await releaseClientEverywhere(c, { agency: c.agencies, retries: 2, retryDelayMs: 3000 });
+    await nullClientTelephony(c.id);
+    if (c.agency_id) agencyIds.add(c.agency_id);
+    testResults.push(rel);
+  }
+
+  const demoResults = [];
+  for (const a of demoTargets) {
+    const rel = await releaseAgencyDemo(a);
+    demoResults.push(rel);
+  }
+
+  for (const aid of agencyIds) {
+    try { await updateClientBillingQuantity(aid); } catch (e) { console.warn(`billing refresh failed for agency ${aid}: ${e.message}`); }
+  }
+
+  const testLeaking = testResults.filter((r) => r.stillLeaking).map((r) => r.e164);
+  const demoLeaking = demoResults.filter((r) => r.stillLeaking).map((r) => r.e164);
+  return {
+    ok: true,
+    dryRun: false,
+    includeFree,
+    testClientsReleased: testResults.length,
+    demosReleased: demoResults.length,
+    stillLeaking: [...testLeaking, ...demoLeaking],
+    testResults,
+    demoResults,
   };
 }
 
@@ -410,7 +601,7 @@ async function reconcileTelnyxAccount({ dryRun = true } = {}) {
 // ============================================================================
 // ROUTES  (mount under /api/cron)
 // ----------------------------------------------------------------------------
-// Both are DRY-RUN unless called with ?apply=true (or { "apply": true } body),
+// All are DRY-RUN unless called with ?apply=true (or { "apply": true } body),
 // so a plain call only ever reports what WOULD happen. Guarded by CRON_SECRET
 // the same way the other cron routes are.
 // ============================================================================
@@ -446,8 +637,26 @@ router.post('/reconcile-telnyx', cronGuard, async (req, res) => {
   }
 });
 
+// Low-value sweep. Dead-agency test clients + demos are ALWAYS in scope; free
+// agencies are added only with ?free=true. Dry-run unless ?apply=true.
+//   POST /api/cron/sweep-low-value                        (dry-run, dead only)
+//   POST /api/cron/sweep-low-value?free=true              (dry-run, dead + free)
+//   POST /api/cron/sweep-low-value?free=true&apply=true   (apply, dead + free)
+router.post('/sweep-low-value', cronGuard, async (req, res) => {
+  try {
+    const includeFree = req.query.free === 'true' || req.body?.free === true;
+    const result = await sweepLowValueNumbers({ dryRun: !wantsApply(req), includeFree });
+    res.json(result);
+  } catch (e) {
+    console.error('sweep-low-value error:', e.message);
+    res.status(500).json({ ok: false, error: 'Sweep failed' });
+  }
+});
+
 module.exports = router;
 module.exports.releaseClientEverywhere = releaseClientEverywhere;
+module.exports.releaseAgencyDemo = releaseAgencyDemo;
 module.exports.nullClientTelephony = nullClientTelephony;
 module.exports.backfillDeadClientNumbers = backfillDeadClientNumbers;
 module.exports.reconcileTelnyxAccount = reconcileTelnyxAccount;
+module.exports.sweepLowValueNumbers = sweepLowValueNumbers;
