@@ -163,7 +163,10 @@ function publicAgencyShape(agency) {
     // Currency (for marketing page pricing display)
     currency: agency.currency || 'USD',
     display_currency: agency.display_currency || null,
-
+    // Country. Drives the marketing-page currency fallback when the agency
+    // never picked a display_currency in Settings. Without this the site can't
+    // tell a GB agency from a US one and defaults to "$".
+    country: agency.country || 'US',
     // Stripe (needed for checkout)
     stripe_account_id: agency.stripe_account_id,
     stripe_charges_enabled: agency.stripe_charges_enabled,
