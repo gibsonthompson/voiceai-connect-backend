@@ -51,12 +51,17 @@
 // UPDATED: 2026-08-06: Custom marketing nav links. Agencies can add up to 5
 //                      external links (label + url) rendered in the marketing
 //                      site header and footer. custom_nav_links is whitelisted
-//                      and validated (array cap, absolute http(s) URLs only,
-//                      which also rejects javascript:/data: schemes, label and
-//                      url length caps), exposed via publicAgencyShape so the
-//                      public marketing render receives it, and returned in the
-//                      authenticated getAgencySettings branch so the Navigation
-//                      settings tab can load current values.
+//                      and validated (array cap, label and url length caps).
+//                      URLs are normalized: a bare domain like yourmainsite.com
+//                      or www.yourmainsite.com is accepted and stored as
+//                      https://...; a value that already has http:// or https://
+//                      is kept as-is; anything that is not a valid http(s) URL
+//                      after that is rejected, which still blocks javascript:/
+//                      data: and other unsafe schemes. Exposed via
+//                      publicAgencyShape so the public marketing render receives
+//                      it, and returned in the authenticated getAgencySettings
+//                      branch so the Navigation settings tab can load current
+//                      values.
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
@@ -900,7 +905,10 @@ async function updateAgencySettings(req, res) {
     }
 
     // Validate custom_nav_links if provided. Array of { label, url }, max 5.
-    // URLs must be absolute http(s), which also rejects javascript:/data: schemes.
+    // URLs are normalized: a bare domain (yourmainsite.com, www.yourmainsite.com)
+    // is accepted and stored as https://...; an existing http:// or https:// is
+    // kept as-is; anything that is not a valid http(s) URL after normalization
+    // is rejected, which still blocks javascript:/data: and other unsafe schemes.
     if (sanitizedUpdates.custom_nav_links !== undefined) {
       const raw = sanitizedUpdates.custom_nav_links;
       if (raw === null) {
@@ -926,10 +934,27 @@ async function updateAgencySettings(req, res) {
           if (url.length > 500) {
             return res.status(400).json({ error: 'Nav link URLs must be 500 characters or fewer' });
           }
-          if (!/^https?:\/\//i.test(url)) {
-            return res.status(400).json({ error: 'Nav link URLs must start with http:// or https://' });
+          // Accept a bare domain by assuming https:// when no http(s):// scheme
+          // is present, so an agency can type "yourmainsite.com" or
+          // "www.yourmainsite.com" without the prefix. A value that already has
+          // http:// or https:// is left exactly as-is. After normalizing, reject
+          // anything that still is not a valid http(s) URL: this keeps blocking
+          // javascript: and data: links, which become unparseable once https://
+          // is prepended and so are rejected.
+          let normalizedUrl = url;
+          if (!/^https?:\/\//i.test(normalizedUrl)) {
+            normalizedUrl = `https://${normalizedUrl}`;
           }
-          cleaned.push({ label, url });
+          let parsedNav;
+          try {
+            parsedNav = new URL(normalizedUrl);
+          } catch {
+            return res.status(400).json({ error: 'Each nav link needs a valid web address, for example yourmainsite.com' });
+          }
+          if (parsedNav.protocol !== 'http:' && parsedNav.protocol !== 'https:') {
+            return res.status(400).json({ error: 'Nav link URLs must be a web address (http or https).' });
+          }
+          cleaned.push({ label, url: normalizedUrl });
         }
         sanitizedUpdates.custom_nav_links = cleaned;
       }
