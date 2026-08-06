@@ -53,6 +53,14 @@
 //              downgrade to take-a-message so we never dial a loop.
 //          Mirrors the canAutoBook pattern: one decision computed here, passed
 //          into buildSystemPrompt / buildTools / buildHooks.
+// UPDATED: 2026-08-06 — GREETING PRECEDENCE: the client's custom greeting is
+//          now the spoken opener for every caller when set, including
+//          recognized returning callers. Caller recognition still applies in
+//          the system prompt (buildCallerContextBlock), so the AI still knows a
+//          returning caller and their history; the "welcome back {name}" line
+//          now speaks only when NO custom greeting is set. Previously the
+//          welcome-back line overrode the custom greeting for known callers, so
+//          a client who set a greeting never heard it on repeat calls.
 // ============================================================================
 
 const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, TRANSFER_KEYWORDS_BLOCK, VOICES,
@@ -544,11 +552,14 @@ If you transfer a call and the transfer fails or is not answered (you'll know be
 // UPDATED 2026-06-16: accepts customGreeting (client.greeting_message) and
 // gates returning-caller personalization on the Caller Recognition toggle
 // (tool_config.callerRecognition).
-// Precedence: HIPAA message > after-hours message > recognized returning
-// caller's "welcome back, {name}" (ONLY when Caller Recognition is on) >
-// client's custom greeting > industry default. When Caller Recognition is off
-// (or in HIPAA mode, where it is force-disabled), the caller's name is never
-// used and the custom greeting governs every open-hours call.
+// UPDATED 2026-08-06: the client's custom greeting now takes precedence over
+// the returning-caller "welcome back" line. Precedence: HIPAA message >
+// after-hours message > client's custom greeting (new AND returning callers) >
+// recognized returning caller's "welcome back, {name}" (only when Caller
+// Recognition is on AND no custom greeting is set) > industry default. Caller
+// recognition still drives the prompt (buildCallerContextBlock), so the AI
+// still knows a returning caller and their history; this only governs the first
+// spoken line.
 // ============================================================================
 function buildFirstMessage(businessName, industryKey, contact, isAfterHours, toolConfig, hipaaMode, customGreeting) {
   const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
@@ -577,17 +588,19 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
     return `Hi, thanks for calling ${businessName}. We're currently closed, but I can help you leave a message. This call may be recorded.`;
   }
 
-  // Recognized returning caller (Caller Recognition ON) — the personalized
-  // welcome-back wins over the custom greeting, since the custom greeting is a
-  // fixed line that can't include the caller's name.
+  // Custom greeting is the spoken opener for everyone when set (new AND
+  // returning callers). Caller recognition still applies in the system prompt
+  // via buildCallerContextBlock, so the AI still knows a returning caller, has
+  // their history, and won't re-ask their name. This block only governs the
+  // first spoken line.
+  const trimmedGreeting = typeof customGreeting === 'string' ? customGreeting.trim() : '';
+  if (trimmedGreeting) return trimmedGreeting;
+
+  // No custom greeting set: a recognized returning caller still gets the
+  // personalized welcome-back; a new caller gets the industry default.
   if (knownName) {
     return `Hi ${knownName}, welcome back to ${businessName}! This call may be recorded. How can I help you today?`;
   }
-
-  // New caller, or Caller Recognition off: the client's custom greeting governs,
-  // falling back to the industry default.
-  const trimmedGreeting = typeof customGreeting === 'string' ? customGreeting.trim() : '';
-  if (trimmedGreeting) return trimmedGreeting;
 
   return defaultMessage;
 }
