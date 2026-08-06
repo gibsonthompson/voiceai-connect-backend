@@ -1249,6 +1249,7 @@ app.use('/api/agency', aiPlaygroundRoutes);
 app.use('/api/agency', byotRoutes);
 app.use('/api/agency', feedbackRoutes);
 app.use('/api/agency', supportRoutes);
+app.use('/api/agency', require('./routes/agency-support-requests'));
 app.use('/api/help', helpRoutes);
 app.use('/api/yt', ytContentRoutes);
 app.use('/api/agency', leadRoutes);
