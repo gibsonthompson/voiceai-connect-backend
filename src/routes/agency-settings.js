@@ -48,6 +48,15 @@
 //                      inline. An unchanged slug is dropped so a plain profile
 //                      save neither re-validates a legacy value nor runs a
 //                      needless uniqueness query.
+// UPDATED: 2026-08-06: Custom marketing nav links. Agencies can add up to 5
+//                      external links (label + url) rendered in the marketing
+//                      site header and footer. custom_nav_links is whitelisted
+//                      and validated (array cap, absolute http(s) URLs only,
+//                      which also rejects javascript:/data: schemes, label and
+//                      url length caps), exposed via publicAgencyShape so the
+//                      public marketing render receives it, and returned in the
+//                      authenticated getAgencySettings branch so the Navigation
+//                      settings tab can load current values.
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
@@ -122,6 +131,8 @@ function publicAgencyShape(agency) {
     website_subheadline: agency.website_subheadline,
     marketing_config: agency.marketing_config,
     marketing_template: agency.marketing_template || 'classic',
+    // Custom nav links (external header/footer links defined by the agency)
+    custom_nav_links: Array.isArray(agency.custom_nav_links) ? agency.custom_nav_links : [],
 
     // Theme settings
     website_theme: agency.website_theme,
@@ -409,6 +420,7 @@ async function getAgencySettings(req, res) {
         website_subheadline: agency.website_subheadline,
         marketing_config: agency.marketing_config,
         marketing_template: agency.marketing_template || 'classic',
+        custom_nav_links: Array.isArray(agency.custom_nav_links) ? agency.custom_nav_links : [],
         
         // Theme settings
         website_theme: agency.website_theme,
@@ -572,6 +584,8 @@ async function updateAgencySettings(req, res) {
       'website_subheadline',
       'marketing_config',
       'marketing_template',
+      // Custom marketing nav links (agency-defined external header/footer links)
+      'custom_nav_links',
       // Theme settings
       'website_theme',
       'logo_background_color',
@@ -882,6 +896,42 @@ async function updateAgencySettings(req, res) {
       const validTemplates = ['classic', 'beside', 'editorial', 'aurora'];
       if (!validTemplates.includes(sanitizedUpdates.marketing_template)) {
         return res.status(400).json({ error: 'Invalid marketing_template value' });
+      }
+    }
+
+    // Validate custom_nav_links if provided. Array of { label, url }, max 5.
+    // URLs must be absolute http(s), which also rejects javascript:/data: schemes.
+    if (sanitizedUpdates.custom_nav_links !== undefined) {
+      const raw = sanitizedUpdates.custom_nav_links;
+      if (raw === null) {
+        sanitizedUpdates.custom_nav_links = [];
+      } else if (!Array.isArray(raw)) {
+        return res.status(400).json({ error: 'custom_nav_links must be an array' });
+      } else if (raw.length > 5) {
+        return res.status(400).json({ error: 'custom_nav_links cannot exceed 5 links' });
+      } else {
+        const cleaned = [];
+        for (const item of raw) {
+          if (!item || typeof item !== 'object' || Array.isArray(item)) {
+            return res.status(400).json({ error: 'Each nav link must have a label and url' });
+          }
+          const label = typeof item.label === 'string' ? item.label.trim() : '';
+          const url = typeof item.url === 'string' ? item.url.trim() : '';
+          if (!label || !url) {
+            return res.status(400).json({ error: 'Each nav link needs a label and a url' });
+          }
+          if (label.length > 30) {
+            return res.status(400).json({ error: 'Nav link labels must be 30 characters or fewer' });
+          }
+          if (url.length > 500) {
+            return res.status(400).json({ error: 'Nav link URLs must be 500 characters or fewer' });
+          }
+          if (!/^https?:\/\//i.test(url)) {
+            return res.status(400).json({ error: 'Nav link URLs must start with http:// or https://' });
+          }
+          cleaned.push({ label, url });
+        }
+        sanitizedUpdates.custom_nav_links = cleaned;
       }
     }
 
