@@ -19,6 +19,17 @@
 //          collected). If every attempt fails, the just-purchased number is
 //          released from the agency's Twilio before throwing, so a failed
 //          import no longer leaks a billable line.
+// UPDATED: 2026-08-06 - International purchase fix. The buy call previously
+//          sent only PhoneNumber + FriendlyName, so regulated countries (GB in
+//          particular) rejected it: GB requires an approved Regulatory
+//          Compliance Bundle AND a validated Address to be referenced on the
+//          purchase. A validated address merely existing on the account is not
+//          enough; the request must point at it. We now store twilio_bundle_sid
+//          (BU...) and twilio_address_sid (AD...) per agency and pass them as
+//          BundleSid / AddressSid on the buy when present. Present-gated, so US
+//          and Canada buys (which set neither) are unchanged. Added
+//          POST /:agencyId/byot/regulatory to save/clear the two SIDs, and the
+//          status endpoint now returns them so the settings UI can prefill.
 // Destination: src/routes/byot.js
 // ============================================================================
 const express = require('express');
@@ -71,6 +82,10 @@ router.get('/:agencyId/byot/status', requireProPlan, async (req, res) => {
     has_credentials: !!(agency.twilio_account_sid && agency.twilio_api_key_encrypted),
     twilio_account_sid: agency.twilio_account_sid || null,
     verified_at: agency.byot_verified_at || null,
+    // Regulatory SIDs for international purchase. Null when not configured.
+    // The settings UI prefills its Bundle SID / Address SID fields from these.
+    twilio_bundle_sid: agency.twilio_bundle_sid || null,
+    twilio_address_sid: agency.twilio_address_sid || null,
   });
 });
 
@@ -152,6 +167,68 @@ router.post('/:agencyId/byot/credentials', requireProPlan, async (req, res) => {
 });
 
 // ============================================================================
+// POST /api/agency/:agencyId/byot/regulatory
+// ----------------------------------------------------------------------------
+// Save (or clear) the Twilio Regulatory Compliance Bundle SID and Address SID
+// used for international number purchases. Kept separate from /credentials so
+// an agency can add these later (once their bundle is approved) WITHOUT having
+// to re-enter their write-only API secret.
+//
+// Field semantics per key in the body:
+//   - omitted            -> left unchanged
+//   - "" (empty string)  -> cleared (set null)
+//   - a value            -> validated (BU.../AD..., 34 chars) then saved
+// These are what provisionBYOTNumber passes as BundleSid / AddressSid on the
+// buy. A validated address existing in the Twilio account is not enough on its
+// own; the purchase must reference the Address SID, which is what this stores.
+// ============================================================================
+router.post('/:agencyId/byot/regulatory', requireProPlan, async (req, res) => {
+  const { agencyId } = req.params;
+
+  // Normalize: undefined => not provided (leave unchanged); "" => clear (null).
+  const norm = (v) => {
+    if (v === undefined || v === null) return undefined;
+    const s = String(v).trim();
+    return s === '' ? null : s;
+  };
+
+  const bundleSid = norm(req.body.twilio_bundle_sid);
+  const addressSid = norm(req.body.twilio_address_sid);
+
+  if (typeof bundleSid === 'string' && (!bundleSid.startsWith('BU') || bundleSid.length !== 34)) {
+    return res.status(400).json({ error: 'Invalid Bundle SID. It should start with BU and be 34 characters.' });
+  }
+  if (typeof addressSid === 'string' && (!addressSid.startsWith('AD') || addressSid.length !== 34)) {
+    return res.status(400).json({ error: 'Invalid Address SID. It should start with AD and be 34 characters.' });
+  }
+
+  if (bundleSid === undefined && addressSid === undefined) {
+    return res.status(400).json({ error: 'Nothing to update. Provide a Bundle SID and/or an Address SID.' });
+  }
+
+  try {
+    const update = { updated_at: new Date().toISOString() };
+    if (bundleSid !== undefined) update.twilio_bundle_sid = bundleSid;
+    if (addressSid !== undefined) update.twilio_address_sid = addressSid;
+
+    const { error } = await supabase.from('agencies').update(update).eq('id', agencyId);
+    if (error) throw error;
+
+    console.log(`✅ BYOT regulatory SIDs saved for agency ${agencyId}`);
+
+    res.json({
+      success: true,
+      message: 'Regulatory SIDs saved.',
+      twilio_bundle_sid: bundleSid !== undefined ? bundleSid : (req.agency.twilio_bundle_sid || null),
+      twilio_address_sid: addressSid !== undefined ? addressSid : (req.agency.twilio_address_sid || null),
+    });
+  } catch (error) {
+    console.error('❌ Failed to save BYOT regulatory SIDs:', error);
+    res.status(500).json({ error: 'Failed to save regulatory SIDs' });
+  }
+});
+
+// ============================================================================
 // POST /api/agency/:agencyId/byot/test
 // ============================================================================
 router.post('/:agencyId/byot/test', requireProPlan, async (req, res) => {
@@ -202,11 +279,14 @@ router.post('/:agencyId/byot/test', requireProPlan, async (req, res) => {
 
     console.log(`✅ BYOT test: Found ${numbers.length} available numbers in ${country_code}`);
 
+    // NOTE: search validates NEITHER a regulatory bundle NOR an address, so a
+    // successful search does not mean a purchase will succeed in a regulated
+    // country. The message is intentionally about search readiness only.
     res.json({
       success: true,
       country_code,
       available_numbers: numbers,
-      message: `Found ${numbers.length} available numbers in ${country_code}. Your Twilio account is ready for provisioning.`
+      message: `Found ${numbers.length} available numbers in ${country_code}. Numbers are searchable; regulated countries (e.g. GB) also need an approved bundle and address SID saved before purchase.`
     });
 
   } catch (error) {
@@ -342,6 +422,21 @@ async function provisionBYOTNumber(agency, options) {
   const selectedNumber = availableNumbers[0].phone_number;
   console.log(`   Found ${availableNumbers.length} numbers, selected: ${selectedNumber}`);
 
+  // Build the purchase body. Regulated countries (e.g. GB) reject a buy that
+  // does not reference an approved Regulatory Compliance Bundle and/or a
+  // validated Address. Twilio accepts these here as BundleSid / AddressSid. We
+  // pass whichever the agency has stored; when neither is set (US, Canada, and
+  // other non-regulated buys) nothing extra is sent and behavior is unchanged.
+  // A validated address merely existing on the Twilio account is not enough on
+  // its own: the purchase must point at its Address SID, which is what this
+  // sends.
+  const buyParams = {
+    PhoneNumber: selectedNumber,
+    FriendlyName: `${businessName} - AI Receptionist`
+  };
+  if (agency.twilio_bundle_sid) buyParams.BundleSid = agency.twilio_bundle_sid;
+  if (agency.twilio_address_sid) buyParams.AddressSid = agency.twilio_address_sid;
+
   const buyResponse = await fetch(
     `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers.json`,
     {
@@ -350,10 +445,7 @@ async function provisionBYOTNumber(agency, options) {
         'Authorization': `Basic ${authHeader}`,
         'Content-Type': 'application/x-www-form-urlencoded'
       },
-      body: new URLSearchParams({
-        PhoneNumber: selectedNumber,
-        FriendlyName: `${businessName} - AI Receptionist`
-      }).toString()
+      body: new URLSearchParams(buyParams).toString()
     }
   );
 

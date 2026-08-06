@@ -31,6 +31,13 @@
 //          status is held in memory per agency; if the process restarts before
 //          the UI polls, status falls back to 'idle' and the UI stops on its
 //          own timeout and tells the user to refresh.
+// UPDATED: 2026-08-06 - Reworded the bundle and address provisioning-error
+//          branches. The GB purchase failure is caused by the buy not
+//          referencing an approved bundle / validated address, which are now
+//          stored as SIDs and passed by provisionBYOTNumber. The old copy told
+//          agencies to CREATE an address they already had; the new copy tells
+//          them to confirm the bundle/address in Twilio AND paste its SID into
+//          Settings, Twilio, which is the step that was actually missing.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -145,13 +152,19 @@ function friendlyDemoProvisioningError(err, country) {
   }
 
   // 2. Regulatory bundle for the country not approved (also Twilio code 21649).
+  //    Two-part fix now: the bundle must be approved in Twilio AND its Bundle
+  //    SID must be saved in the app, because the purchase call passes it.
   if (/regulatory bundle|bundle required|bundle.*not.*(approved|complete)|21649/i.test(msg)) {
-    return `Twilio needs an approved regulatory bundle for ${where} before it will sell a number there. In the Twilio Console open Phone Numbers, then Regulatory Compliance, then Bundles, and complete the ${where} bundle. Once Twilio approves it, create the demo again. Bundles: ${BUNDLES_URL}`;
+    return `Twilio needs an approved regulatory bundle for ${where}, and its Bundle SID saved in the app, before it will sell a number there. In the Twilio Console open Phone Numbers, then Regulatory Compliance, then Bundles, and confirm the ${where} bundle is Approved. Then copy its Bundle SID (starts with BU) into Settings, Twilio, and create the demo again. Bundles: ${BUNDLES_URL}`;
   }
 
-  // 3. Missing/unverified address for the country's number type.
+  // 3. Missing/unverified address for the country's number type. The usual
+  //    cause here is NOT that no address exists (agencies often already have a
+  //    validated one) but that the purchase referenced none, i.e. the Address
+  //    SID was never saved in the app. Guide to pasting the SID, not to
+  //    creating a duplicate address.
   if (/address.*(required|needed|must|missing)|requires an address|no.*valid.*address/i.test(msg)) {
-    return `Twilio needs a verified address on file for ${where} numbers. In the Twilio Console open Phone Numbers, then Regulatory Compliance, then Addresses, add a ${where} address, then create the demo again. Addresses: ${ADDRESSES_URL}`;
+    return `Twilio needs a validated address for ${where} numbers, and its Address SID saved in the app. In the Twilio Console open Phone Numbers, then Regulatory Compliance, then Addresses, and confirm you have a validated ${where} address (you may already). Then copy its Address SID (starts with AD) into Settings, Twilio, and create the demo again. Addresses: ${ADDRESSES_URL}`;
   }
 
   // 4. No inventory available in the country right now.
