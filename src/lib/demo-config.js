@@ -557,6 +557,100 @@ function buildDemoSmsContent(params, agency) {
   return sms;
 }
 
+// ── Business-name validation and tool-arg harvest ──────────────────────────
+// The demo follow-up SMS used to address a caller's business by a garbage
+// phrase (for example "It only takes a couple minutes") because a transcript
+// regex in the webhook grabbed a fragment of the AI's own opener whenever the
+// transcriber dropped the em dash and capitalized the next word. These helpers
+// give the webhook one reliable source (the send_demo_sms tool argument the AI
+// captured mid-call) plus a guard that rejects sentence fragments, so no
+// source, regex or LLM, can put a non-name into an outbound text.
+
+const _BUSINESS_NAME_BLOCK_PHRASES = [
+  'it only takes', 'couple minutes', 'answer the phone', 'answer your',
+  'type of business', 'what kind of business', "how i'd", 'how i ',
+  'your business', 'your practice', 'your firm', 'your company', 'your office',
+  'generic demo', 'free trial', 'sign up', 'signup', 'receptionist demo',
+  'thanks for calling', 'do you run', 'take a look',
+];
+
+const _BUSINESS_NAME_BLOCK_TOKENS = new Set([
+  'it', 'i', "i'd", 'you', "you're", 'your', 'we', 'our', 'takes', 'take',
+  'only', 'couple', 'minutes', 'minute', 'how', 'what', 'run', 'answer',
+  'calling', 'demo', 'receptionist', 'trial', 'signup', 'thanks',
+]);
+
+// Trim, unwrap quotes, collapse whitespace, drop a trailing sentence mark.
+function sanitizeBusinessName(raw) {
+  if (raw == null) return null;
+  let s = String(raw).trim();
+  if (!s) return null;
+  s = s.replace(/^["'`]+|["'`]+$/g, '').trim();
+  s = s.replace(/\s+/g, ' ');
+  s = s.replace(/[.,!?;:]+$/g, '').trim();
+  return s || null;
+}
+
+// True only for values that read like an actual business name. Rejects empty,
+// too long, placeholder, and sentence-fragment values (by phrase, by word
+// count, and by the presence of script filler or pronoun tokens).
+function isValidBusinessName(raw) {
+  const s = sanitizeBusinessName(raw);
+  if (!s) return false;
+  if (s.length < 2 || s.length > 60) return false;
+  const lower = s.toLowerCase();
+  if (['null', 'unknown', 'n/a', 'none', 'your business', 'business', 'the business'].includes(lower)) return false;
+  for (const p of _BUSINESS_NAME_BLOCK_PHRASES) if (lower.includes(p)) return false;
+  const words = lower.split(' ').filter(Boolean);
+  if (words.length > 6) return false;
+  for (const w of words) {
+    const bare = w.replace(/[^a-z']/g, '');
+    if (_BUSINESS_NAME_BLOCK_TOKENS.has(bare)) return false;
+  }
+  return true;
+}
+
+// Pull the send_demo_sms tool-call arguments out of a VAPI payload. VAPI places
+// tool calls on several shapes depending on event type and version, so this
+// checks each defensively and returns {} on any miss (it never throws).
+function extractDemoToolCallArgs(message) {
+  if (!message || typeof message !== 'object') return {};
+  const entries = [];
+  const add = (v) => { if (Array.isArray(v)) entries.push(...v); };
+  add(message.toolCallList);
+  add(message.toolCalls);
+  add(message.toolWithToolCallList);
+  add(message.artifact && message.artifact.messages);
+  add(message.artifact && message.artifact.messagesOpenAIFormatted);
+  add(message.messages);
+  add(message.call && message.call.messages);
+
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue;
+    const calls = [];
+    if (entry.function || entry.name || entry.toolName) calls.push(entry);
+    if (entry.toolCall) calls.push(entry.toolCall);
+    if (Array.isArray(entry.toolCalls)) calls.push(...entry.toolCalls);
+    if (Array.isArray(entry.tool_calls)) calls.push(...entry.tool_calls);
+
+    for (const c of calls) {
+      if (!c || typeof c !== 'object') continue;
+      const name = (c.function && c.function.name) || c.name || c.toolName;
+      if (name !== 'send_demo_sms') continue;
+      let raw = (c.function && c.function.arguments);
+      if (raw == null) raw = c.arguments;
+      if (raw == null) raw = (c.function && c.function.parameters);
+      if (raw == null) raw = c.parameters;
+      if (raw == null) continue;
+      try {
+        const args = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (args && typeof args === 'object') return args;
+      } catch (e) { /* malformed, keep scanning */ }
+    }
+  }
+  return {};
+}
+
 // ── Exports ───────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -571,4 +665,7 @@ module.exports = {
   buildDemoDynamicConfig,
   buildDemoSmsContent,
   buildSignupUrl,
+  isValidBusinessName,
+  sanitizeBusinessName,
+  extractDemoToolCallArgs,
 };

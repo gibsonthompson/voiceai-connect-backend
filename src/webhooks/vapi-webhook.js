@@ -31,7 +31,7 @@ const { sendCallNotificationSMS, sendDemoCallFollowUpSMS, sendCallSummaryEmail, 
 const { upsertContactFromCall } = require('../lib/contact-upsert');
 const { buildDynamicAssistantConfig } = require('../lib/assistant-config-builder');
 const { notifyTeamMembers } = require('../lib/team-notifications');
-const { buildDemoDynamicConfig, buildDemoSmsContent, getIndustryDemoByPhone, buildIndustryDemoConfig } = require('../lib/demo-config');
+const { buildDemoDynamicConfig, buildDemoSmsContent, getIndustryDemoByPhone, buildIndustryDemoConfig, isValidBusinessName, sanitizeBusinessName, extractDemoToolCallArgs } = require('../lib/demo-config');
 const { getSmsTemplate } = require('../lib/sms-templates');
 const { sendAndLogSMS } = require('../lib/sms-logger');
 const { formatPhone, getPhoneLocation, formatDuration } = require('../lib/area-codes');
@@ -155,21 +155,55 @@ function buildDisconnectedAssistantConfig(businessName) {
 
 // ============================================================================
 // EXTRACT BUSINESS NAME FROM VAPI END-OF-CALL DATA
+// Every candidate is validated so a transcript fragment can never win. Order:
+// VAPI structured extraction, then the send_demo_sms tool argument harvested
+// from the payload, then a transcript regex whose hit must still pass
+// isValidBusinessName. The raw regex once returned "It only takes a couple
+// minutes" when the transcriber dropped the opener's em dash and capitalized
+// the next word, and that truthy garbage then blocked the Claude fallback.
 // ============================================================================
 function extractBusinessNameFromCall(message) {
   const structured = message.analysis?.structuredData
     || message.artifact?.structuredData
     || message.call?.analysis?.structuredData
     || null;
-  if (structured?.business_name) return structured.business_name;
+  if (isValidBusinessName(structured?.business_name)) return sanitizeBusinessName(structured.business_name);
+
+  const toolArgs = extractDemoToolCallArgs(message);
+  if (isValidBusinessName(toolArgs.business_name)) return sanitizeBusinessName(toolArgs.business_name);
 
   const transcript = message.transcript || message.artifact?.transcript || '';
   if (transcript) {
-    const match = transcript.match(/(?:practice|business|company|office)\s+(?:is\s+)?(?:called\s+)?["']?([A-Z][A-Za-z\s&'.]+?)["']?\s*[.,!?]/);
-    if (match?.[1]) return match[1].trim();
+    const match = transcript.match(/(?:practice|business|company|office)\s+(?:is\s+)?(?:called\s+|named\s+)?["']?([A-Z][A-Za-z0-9\s&'.\-]{1,50}?)["']?\s*[.,!?\n]/);
+    if (match?.[1] && isValidBusinessName(match[1])) return sanitizeBusinessName(match[1]);
   }
 
   return null;
+}
+
+// First candidate that reads as a real business name, sanitized. Gives the
+// mid-call tool argument priority over weaker sources at end-of-call.
+function firstValidBusinessName(...vals) {
+  for (const v of vals) if (isValidBusinessName(v)) return sanitizeBusinessName(v);
+  return null;
+}
+
+// The send_demo_sms tool fires mid-call (a separate webhook from end-of-call),
+// so the clean business info the AI passed as tool arguments is cached here by
+// VAPI call id and read back when the end-of-call report arrives. This is the
+// most reliable source; if the cache misses (restart, scale-out) the caller
+// still degrades gracefully to harvesting the tool call from the end-of-call
+// payload, then VAPI analysis, then the validated regex.
+const _demoToolInfo = new Map();
+function setDemoToolInfo(callId, info) {
+  if (!callId || !info) return;
+  _demoToolInfo.set(callId, { info, at: Date.now() });
+  for (const [k, v] of _demoToolInfo) { if (Date.now() - v.at > 10 * 60 * 1000) _demoToolInfo.delete(k); }
+}
+function getDemoToolInfo(callId) {
+  if (!callId) return null;
+  const v = _demoToolInfo.get(callId);
+  return v ? v.info : null;
 }
 
 // ============================================================================
@@ -278,10 +312,30 @@ async function handleDemoCall(agency, message, industryKey = null) {
     || call.analysis?.successEvaluation
     || null;
 
-  let businessName = vapiStructured?.business_name || extractBusinessNameFromCall(message) || null;
-  let businessType = vapiStructured?.business_type || industryKey || null;
+  // Tool arguments the AI captured mid-call (business_name, business_type,
+  // service_requested, customer_name). Prefer the in-memory cache keyed by this
+  // call id; also harvest the same tool call from the end-of-call payload so a
+  // cache miss (restart, scale-out) still recovers a clean name.
+  const callId = call.id || null;
+  const cachedToolInfo = getDemoToolInfo(callId) || {};
+  const artifactToolArgs = extractDemoToolCallArgs(message) || {};
+  const toolArgs = { ...artifactToolArgs, ...cachedToolInfo };
+
+  // Business name, most reliable source first, every candidate validated so a
+  // sentence fragment can never be chosen. The tool argument beats VAPI's
+  // structured extraction, which beats the hardened transcript regex.
+  let businessName = firstValidBusinessName(
+    cachedToolInfo.business_name,
+    artifactToolArgs.business_name,
+    vapiStructured?.business_name,
+    extractBusinessNameFromCall(message),
+  ) || null;
+
+  let businessType = vapiStructured?.business_type || toolArgs.business_type || industryKey || null;
   let interestLevel = vapiStructured?.interest_level || null;
-  let serviceDiscussed = vapiStructured?.service_discussed || null;
+  // customer_name from the tool is the roleplay name, not the caller's real
+  // name, so it feeds serviceDiscussed context only, never callerName.
+  let serviceDiscussed = vapiStructured?.service_discussed || toolArgs.service_requested || null;
   let callerName = vapiStructured?.caller_name || null;
   let askedQuestions = vapiStructured?.asked_questions || false;
   let summary = vapiSummary || null;
@@ -291,7 +345,7 @@ async function handleDemoCall(agency, message, industryKey = null) {
     try {
       const demoSummary = await generateDemoSummary(transcript, callerPhone, industryKey);
       if (demoSummary) {
-        businessName = businessName || demoSummary.businessName;
+        if (!businessName && isValidBusinessName(demoSummary.businessName)) businessName = sanitizeBusinessName(demoSummary.businessName);
         businessType = businessType || demoSummary.businessType;
         interestLevel = interestLevel || demoSummary.interestLevel;
         serviceDiscussed = serviceDiscussed || demoSummary.serviceDiscussed;
@@ -303,6 +357,9 @@ async function handleDemoCall(agency, message, industryKey = null) {
       console.warn('⚠️ Demo AI summary failed:', err.message);
     }
   }
+
+  // Final guard: nothing that fails validation reaches the SMS or the DB.
+  businessName = isValidBusinessName(businessName) ? sanitizeBusinessName(businessName) : null;
 
   const { formatPhoneDisplay } = require('../lib/notifications');
 
@@ -559,6 +616,19 @@ async function handleDemoToolCall(req, res, message) {
     if (funcName !== 'send_demo_sms')
       return res.status(200).json({ results: [{ toolCallId, result: 'Unknown function.' }] });
 
+    // The AI passes the caller's business name as a tool argument. Validate it
+    // here so a fragment (the model sometimes echoes its own opener line, "it
+    // only takes a couple minutes") never reaches the mid-call sample SMS, and
+    // cache the clean value by call id so the end-of-call follow-up reuses it
+    // instead of re-deriving the name from the transcript.
+    const cleanBusinessName = isValidBusinessName(args.business_name) ? sanitizeBusinessName(args.business_name) : null;
+    setDemoToolInfo(callId, {
+      business_name: cleanBusinessName,
+      business_type: args.business_type || null,
+      service_requested: args.service_requested || null,
+      customer_name: args.customer_name || null,
+    });
+
     const callerPhone = message.call?.customer?.number || message.customer?.number || null;
     if (!callerPhone || callerPhone === 'Unknown')
       return res.status(200).json({ results: [{ toolCallId, result: "I wasn't able to send the text - I don't have your phone number. But after every real call, your team would get an instant summary." }] });
@@ -576,7 +646,7 @@ async function handleDemoToolCall(req, res, message) {
     const { formatPhoneDisplay } = require('../lib/notifications');
     const callerDisplay = formatPhoneDisplay ? formatPhoneDisplay(callerPhone) : callerPhone;
     const smsContent = buildDemoSmsContent({
-      business_name: args.business_name || 'Your Business', business_type: args.business_type || 'business',
+      business_name: cleanBusinessName || 'Your Business', business_type: args.business_type || 'business',
       service_requested: args.service_requested || 'General inquiry', customer_name: args.customer_name || 'Customer',
       caller_phone_display: callerDisplay,
     }, agency);
@@ -590,7 +660,7 @@ async function handleDemoToolCall(req, res, message) {
       agencyId: agency.id,
       recipientType: 'prospect',
       messageType: 'demo_sample_summary',
-      metadata: { businessName: args.business_name || null, businessType: args.business_type || null },
+      metadata: { businessName: cleanBusinessName, businessType: args.business_type || null },
     });
     console.log(`✅ Demo SMS sent to ${callerPhone} in ${Date.now() - startTime}ms`);
     return res.status(200).json({ results: [{ toolCallId, result: 'Done! The text has been sent to their phone with the full call summary.' }] });
