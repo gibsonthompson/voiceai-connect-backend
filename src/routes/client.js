@@ -27,6 +27,17 @@
 //          forwarding decision on purpose — one endpoint owns the whole "how
 //          calls reach you and what happens when a caller needs a person"
 //          choice, replacing the retired call_mode/Fallback path.
+// UPDATED: 2026-08-10 - GREETING SAVE FIX: PUT /:id/greeting now writes
+//          clients.greeting_message to the database FIRST (that column is the
+//          source of truth the dynamic assistant builder reads on every live
+//          call via buildFirstMessage), then patches the legacy static VAPI
+//          assistant's firstMessage as a best-effort side effect. Previously
+//          the DB write was gated behind a required, successful VAPI patch: a
+//          missing/stale vapi_assistant_id returned 404 and a failed patch
+//          returned 500, so the greeting was never saved even though live calls
+//          would have honored it. That left greeting_message null and every
+//          call fell back to the industry default. The legacy patch failing no
+//          longer blocks the save.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -375,17 +386,56 @@ router.get('/:id/greeting', requirePermissionIfAuthed('ai_agent'), async (req, r
 
 // ============================================================================
 // PUT /api/client/:id/greeting
+// ----------------------------------------------------------------------------
+// The database column clients.greeting_message is the source of truth. Every
+// live call builds its assistant on the fly (assistant-request →
+// buildDynamicAssistantConfig → buildFirstMessage), and buildFirstMessage reads
+// client.greeting_message. The static VAPI assistant is legacy and is NOT used
+// at call time, so patching it must never gate the DB write.
+//
+// Order therefore matters: write greeting_message FIRST, return success on that
+// write, then patch the legacy static assistant as a best-effort side effect.
+// Previously the DB write only ran after a required, successful VAPI patch, so a
+// missing/stale vapi_assistant_id (404) or a failed patch (500) silently left
+// greeting_message null and every call fell back to the industry default.
 // ============================================================================
 router.put('/:id/greeting', requirePermissionIfAuthed('ai_agent'), async (req, res) => {
   try {
     const { id } = req.params;
     const greeting = req.body.greeting_message || req.body.greeting;
     if (!greeting) return res.status(400).json({ success: false, error: 'greeting_message required' });
-    const { data: client } = await supabase.from('clients').select('vapi_assistant_id').eq('id', id).single();
-    if (!client?.vapi_assistant_id) return res.status(404).json({ success: false, error: 'Client or assistant not found' });
-    const vapiResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, { method: 'PATCH', headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ firstMessage: greeting }) });
-    if (!vapiResponse.ok) { const errorText = await vapiResponse.text(); console.error('VAPI greeting update failed:', errorText); return res.status(500).json({ success: false, error: 'Failed to update greeting in VAPI' }); }
-    await supabase.from('clients').update({ greeting_message: greeting }).eq('id', id);
+
+    // 1. Persist to the DB first. This is what live calls actually read.
+    const { data: updated, error: updateErr } = await supabase
+      .from('clients')
+      .update({ greeting_message: greeting })
+      .eq('id', id)
+      .select('id, vapi_assistant_id')
+      .single();
+    if (updateErr || !updated) {
+      console.error('Greeting DB update failed:', updateErr?.message);
+      return res.status(400).json({ success: false, error: updateErr?.message || 'Client not found' });
+    }
+
+    // 2. Best-effort: keep the legacy static assistant's firstMessage in sync so
+    //    anything still pointing at it stays consistent. A failure here never
+    //    fails the request, because the DB write above is the source of truth.
+    if (updated.vapi_assistant_id) {
+      try {
+        const vapiResponse = await fetch(`https://api.vapi.ai/assistant/${updated.vapi_assistant_id}`, {
+          method: 'PATCH',
+          headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ firstMessage: greeting }),
+        });
+        if (!vapiResponse.ok) {
+          const errorText = await vapiResponse.text().catch(() => '');
+          console.warn(`⚠️ Greeting saved to DB; legacy VAPI assistant PATCH failed (non-blocking, HTTP ${vapiResponse.status}): ${errorText.slice(0, 200)}`);
+        }
+      } catch (vapiErr) {
+        console.warn('⚠️ Greeting saved to DB; legacy VAPI assistant PATCH threw (non-blocking):', vapiErr.message);
+      }
+    }
+
     console.log(`✅ Greeting updated for client ${id}`);
     res.json({ success: true, greeting_message: greeting });
   } catch (error) { console.error('Error updating greeting:', error); res.status(500).json({ success: false, error: 'Server error' }); }

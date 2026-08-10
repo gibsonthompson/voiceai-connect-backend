@@ -5,19 +5,25 @@
 //          entirely. It now fires only at real activation, with the plan: free
 //          via the start-trial route (POST /api/agency/:id/notify-activated),
 //          paid via handleAgencyCheckoutCompleted in stripe-platform.js.
-// UPDATED: 2026-05-07 — Default plan_type changed to 'free', signup status
+// UPDATED: 2026-05-07 - Default plan_type changed to 'free', signup status
 //          changed to 'active' (free tier requires no payment to start).
-// UPDATED: 2026-05-09 — Set onboarding_completed_at timestamp when onboarding
+// UPDATED: 2026-05-09 - Set onboarding_completed_at timestamp when onboarding
 //          finishes, used by activation SMS sequence for timing.
-// UPDATED: 2026-05-10 — Default prices changed to $99/$149/$299, starter plan
+// UPDATED: 2026-05-10 - Default prices changed to $99/$149/$299, starter plan
 //          features updated (email summaries, caller recognition, business
 //          hours, after-hours mode now included).
-// UPDATED: 2026-05-14 — REVERTED signup status back to pending/pending_payment.
+// UPDATED: 2026-05-14 - REVERTED signup status back to pending/pending_payment.
 //          The May 7 change to active at signup broke ALL automated SMS
 //          sequences (abandoned cart, onboarding engagement) because those
 //          crons filter for subscription_status='pending'. Activation now
 //          happens in /api/agency/start-trial after onboarding completes,
 //          which correctly sets active + onboarding_completed=true.
+// UPDATED: 2026-08-07 - Added two_way_sms to DEFAULT_PLAN_FEATURES (Lane 2).
+//          It gates whether a client on a given plan tier gets two-way text
+//          messaging. Seeded off for starter, on for pro/growth (mirrors
+//          google_calendar). For a non-US BYOT agency this flag, ANDed with a
+//          saved mobile bundle, is what drives provisioning a text-capable
+//          mobile number at client signup. US two-way texting is unaffected.
 // ============================================================================
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
@@ -85,7 +91,7 @@ async function createPasswordToken(userId, email) {
 }
 
 // ============================================================================
-// COUNTRY → CURRENCY MAPPING
+// COUNTRY -> CURRENCY MAPPING
 // ============================================================================
 const COUNTRY_CURRENCY_MAP = {
   US: 'USD', CA: 'CAD', MX: 'MXN', GB: 'GBP',
@@ -103,11 +109,19 @@ function getCurrencyForCountry(countryCode) {
 }
 
 // ============================================================================
-// DEFAULT PLAN FEATURES — seeded on every new agency
+// DEFAULT PLAN FEATURES - seeded on every new agency
+// ----------------------------------------------------------------------------
+// two_way_sms gates two-way text messaging for a client on this plan tier. It
+// is off for starter, on for pro/growth (same shape as google_calendar). For a
+// non-US BYOT agency, this flag ANDed with a saved Mobile Bundle SID is what
+// drives provisioning a text-capable MOBILE number at client signup. This copy
+// must stay in sync with the frontend DEFAULT_PLAN_FEATURES in the agency
+// settings pricing tab, which renders the toggle.
 // ============================================================================
 const DEFAULT_PLAN_FEATURES = {
   starter: {
     sms_notifications: true,
+    two_way_sms: false,
     email_summaries: true,
     custom_greeting: false,
     custom_voice: false,
@@ -124,6 +138,7 @@ const DEFAULT_PLAN_FEATURES = {
   },
   pro: {
     sms_notifications: true,
+    two_way_sms: true,
     email_summaries: true,
     custom_greeting: true,
     custom_voice: false,
@@ -140,6 +155,7 @@ const DEFAULT_PLAN_FEATURES = {
   },
   growth: {
     sms_notifications: true,
+    two_way_sms: true,
     email_summaries: true,
     custom_greeting: true,
     custom_voice: true,
@@ -286,7 +302,7 @@ async function handleAgencySignup(req, res) {
     // Create agency record
     // NOTE: Status starts as pending. Activation happens in /api/agency/start-trial
     // after onboarding completes (handles both free and paid plans).
-    // This is critical — abandoned cart and onboarding engagement SMS crons
+    // This is critical: abandoned cart and onboarding engagement SMS crons
     // filter for subscription_status='pending' to find agencies that need nudging.
     const { data: agency, error: agencyError } = await supabase
       .from('agencies')

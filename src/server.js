@@ -168,7 +168,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 app.use((req, res, next) => {
-  if (req.originalUrl === '/webhook/stripe' || req.originalUrl === '/webhook/stripe-connect' || req.originalUrl === '/webhook/telnyx-sms' || req.originalUrl === '/webhook/telnyx-voice') {
+  if (req.originalUrl === '/webhook/stripe' || req.originalUrl === '/webhook/stripe-connect' || req.originalUrl === '/webhook/telnyx-sms' || req.originalUrl === '/webhook/telnyx-voice' || req.originalUrl === '/webhook/twilio-sms') {
     next();
   } else {
     express.json({ limit: '10mb' })(req, res, next);
@@ -289,7 +289,7 @@ const smsTemplatesAdminRoutes = require('./routes/sms-templates-admin');
 const errorReportRoutes = require('./routes/error-report');
 const previewTokenRoutes = require('./routes/preview-token');
 const smsRoutes = require('./routes/sms');
-const { handleTelnyxSMSWebhook } = require('./routes/sms');
+const { handleTelnyxSMSWebhook, handleTwilioSMSWebhook } = require('./routes/sms');
 // ============================================================================
 // HEALTH CHECK
 // ============================================================================
@@ -1547,6 +1547,7 @@ app.post('/webhook/vapi', handleVapiWebhook);
 // SUPPORT LINE ADDITION: Voice support webhook (shared number, dynamic agency context + whisper)
 app.post('/webhook/vapi-support', handleSupportWebhook);
 app.post('/webhook/telnyx-sms', express.raw({ type: '*/*', limit: '2mb' }), handleTelnyxSMSWebhook);
+app.post('/webhook/twilio-sms', express.urlencoded({ extended: false, limit: '2mb' }), handleTwilioSMSWebhook);
 
 // Telnyx Call Control (whisper warm transfer) for telnyx_cc clients.
 //   /webhook/telnyx-voice       -> raw body (Ed25519 signature verification)

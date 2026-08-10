@@ -85,7 +85,8 @@ const {
   formatPhoneE164,
   sendClientWelcomeEmail,
   sendWelcomeSMS,
-  sendClientSignupNotificationSMS
+  sendClientSignupNotificationSMS,
+  isInternationalAgency
 } = require('../lib/notifications');
 
 // Import client limit checker from stripe-platform
@@ -119,6 +120,19 @@ function resolveVoiceRouting(source, agency) {
   const a = agency?.default_voice_routing;
   if (VALID_VOICE_ROUTING.includes(a)) return a;
   return 'vapi_direct';
+}
+
+// ============================================================================
+// TWO-WAY SMS PLAN GATE (Lane 2)
+// A client's plan tier includes two-way texting unless its plan_features flag
+// two_way_sms is explicitly false. A missing key counts as enabled, matching
+// isFeatureEnabled in vapi-webhook.js, so an agency that configured a mobile
+// bundle before this flag existed still provisions texting for its clients.
+// ============================================================================
+function planFeatureEnabled(agency, planType, key) {
+  const pf = agency && agency.plan_features && agency.plan_features[planType];
+  if (!pf) return true;
+  return pf[key] !== false;
 }
 
 // ============================================================================
@@ -538,7 +552,7 @@ async function extractQueryToolId(assistantId) {
 // no webhook to configure. telnyx_cc only applies to platform (Telnyx)
 // provisioning; BYOT (Twilio) numbers always return vapi_direct.
 // ============================================================================
-async function provisionPhoneForClient(agency, clientData, assistantId, voiceRouting = 'vapi_direct') {
+async function provisionPhoneForClient(agency, clientData, assistantId, voiceRouting = 'vapi_direct', planType = 'starter') {
   const agencyCountry = (agency.country || 'US').toUpperCase();
 
   // PATH 1: Platform provisioning (US agencies)
@@ -582,18 +596,47 @@ async function provisionPhoneForClient(agency, clientData, assistantId, voiceRou
   if (agency.byot_enabled && agency.twilio_account_sid && agency.twilio_api_key_encrypted) {
     console.log(`📞 BYOT provisioning (${agencyCountry}) for ${clientData.businessName}`);
 
-    const result = await provisionBYOTNumber(agency, {
-      countryCode: agencyCountry,
-      areaCode: clientData.areaCode || null,
-      assistantId: assistantId,
-      businessName: clientData.businessName
-    });
+    // Two-way texting (Lane 2): provision a MOBILE number instead of Local ONLY
+    // when the agency is non-US with BYOT, has saved a mobile regulatory bundle,
+    // AND this client's plan includes two_way_sms. The mobile-bundle check is the
+    // safety interlock: without it Twilio rejects a mobile buy. US never reaches
+    // this path (PATH 1 handles US), so US behavior is completely unchanged.
+    const wantsSms = isInternationalAgency(agency)
+      && !!agency.twilio_mobile_bundle_sid
+      && planFeatureEnabled(agency, planType, 'two_way_sms');
+
+    let result;
+    try {
+      result = await provisionBYOTNumber(agency, {
+        countryCode: agencyCountry,
+        areaCode: clientData.areaCode || null,
+        assistantId: assistantId,
+        businessName: clientData.businessName,
+        smsCapable: wantsSms
+      });
+    } catch (byotErr) {
+      // If a text-capable MOBILE buy failed (missing or wrong mobile bundle, no
+      // mobile inventory in that country, etc.), do NOT fail the whole signup.
+      // Retry as a voice Local number so the client still gets a working line;
+      // texting is simply off until the agency fixes their Mobile Bundle SID.
+      // If the failure was already on a plain Local buy (wantsSms false), rethrow.
+      if (!wantsSms) throw byotErr;
+      console.error(`⚠️ SMS-capable mobile provisioning failed for ${clientData.businessName}, falling back to a voice Local number. Agency should verify their Mobile Bundle SID. Reason: ${byotErr.message}`);
+      result = await provisionBYOTNumber(agency, {
+        countryCode: agencyCountry,
+        areaCode: clientData.areaCode || null,
+        assistantId: assistantId,
+        businessName: clientData.businessName,
+        smsCapable: false
+      });
+    }
 
     return {
       number: result.number,
       vapiPhoneId: result.vapiPhoneId,
       provisioningMethod: 'byot',
-      voiceRouting: 'vapi_direct'
+      voiceRouting: 'vapi_direct',
+      smsCapable: result.smsCapable === true
     };
   }
 
@@ -901,7 +944,7 @@ async function handleClientSignup(req, res) {
         businessState,
         businessName,
         phone
-      }, assistant.id, voiceRouting);
+      }, assistant.id, voiceRouting, planType);
     } catch (phoneError) {
       // Phone provisioning failed, clean up VAPI resources
       await cleanupVapiResources(createdAssistantId, createdQueryToolId, businessName);
@@ -1325,7 +1368,7 @@ async function handleAgencyAddClient(req, res) {
         businessState,
         businessName,
         phone
-      }, assistant.id, voiceRouting);
+      }, assistant.id, voiceRouting, resolvedPlanType);
     } catch (phoneError) {
       // Phone provisioning failed, clean up orphaned VAPI resources
       await cleanupVapiResources(createdAssistantId, createdQueryToolId, businessName);
@@ -1568,7 +1611,7 @@ async function provisionClient(clientId) {
         businessState: client.business_state,
         businessName: client.business_name,
         phone: client.owner_phone
-      }, assistant.id, voiceRouting);
+      }, assistant.id, voiceRouting, client.plan_type || 'starter');
     } catch (phoneError) {
       await cleanupVapiResources(createdAssistantId, createdQueryToolId, client.business_name);
       throw phoneError;

@@ -30,6 +30,16 @@
 //          and Canada buys (which set neither) are unchanged. Added
 //          POST /:agencyId/byot/regulatory to save/clear the two SIDs, and the
 //          status endpoint now returns them so the settings UI can prefill.
+// UPDATED: 2026-08-07 - Lane 2 (two-way SMS) provisioning. provisionBYOTNumber
+//          now accepts an smsCapable option; when true on a non-US number it
+//          provisions a MOBILE number (the only non-US type that can send AND
+//          receive SMS) instead of a Local number, passes the MOBILE regulatory
+//          bundle (twilio_mobile_bundle_sid, distinct from the Local bundle),
+//          and after the VAPI import points the number's inbound SmsUrl at
+//          /webhook/twilio-sms so two-way texts reach the client's Messages
+//          tab. Default smsCapable=false keeps the existing Local behavior, so
+//          every current caller is unchanged. The regulatory endpoint + status
+//          now also store/return twilio_mobile_bundle_sid for the settings UI.
 // Destination: src/routes/byot.js
 // ============================================================================
 const express = require('express');
@@ -86,6 +96,9 @@ router.get('/:agencyId/byot/status', requireProPlan, async (req, res) => {
     // The settings UI prefills its Bundle SID / Address SID fields from these.
     twilio_bundle_sid: agency.twilio_bundle_sid || null,
     twilio_address_sid: agency.twilio_address_sid || null,
+    // Mobile-type regulatory bundle, used for smsCapable (two-way SMS) mobile
+    // purchases. Distinct from the Local bundle above. Null when not configured.
+    twilio_mobile_bundle_sid: agency.twilio_mobile_bundle_sid || null,
   });
 });
 
@@ -169,10 +182,18 @@ router.post('/:agencyId/byot/credentials', requireProPlan, async (req, res) => {
 // ============================================================================
 // POST /api/agency/:agencyId/byot/regulatory
 // ----------------------------------------------------------------------------
-// Save (or clear) the Twilio Regulatory Compliance Bundle SID and Address SID
-// used for international number purchases. Kept separate from /credentials so
-// an agency can add these later (once their bundle is approved) WITHOUT having
-// to re-enter their write-only API secret.
+// Save (or clear) the Twilio Regulatory Compliance Bundle SID(s) and Address
+// SID used for international number purchases. Kept separate from /credentials
+// so an agency can add these later (once their bundle is approved) WITHOUT
+// having to re-enter their write-only API secret.
+//
+// Three keys, each independently settable:
+//   - twilio_bundle_sid         Local-number bundle (voice / one-way SMS lines)
+//   - twilio_address_sid        validated Address, shared by both number types
+//   - twilio_mobile_bundle_sid  Mobile-number bundle (two-way SMS lines). A
+//                               mobile number is a different regulation set from
+//                               a Local number, so it needs its OWN bundle; the
+//                               Local bundle will not authorize a mobile buy.
 //
 // Field semantics per key in the body:
 //   - omitted            -> left unchanged
@@ -194,6 +215,7 @@ router.post('/:agencyId/byot/regulatory', requireProPlan, async (req, res) => {
 
   const bundleSid = norm(req.body.twilio_bundle_sid);
   const addressSid = norm(req.body.twilio_address_sid);
+  const mobileBundleSid = norm(req.body.twilio_mobile_bundle_sid);
 
   if (typeof bundleSid === 'string' && (!bundleSid.startsWith('BU') || bundleSid.length !== 34)) {
     return res.status(400).json({ error: 'Invalid Bundle SID. It should start with BU and be 34 characters.' });
@@ -201,15 +223,19 @@ router.post('/:agencyId/byot/regulatory', requireProPlan, async (req, res) => {
   if (typeof addressSid === 'string' && (!addressSid.startsWith('AD') || addressSid.length !== 34)) {
     return res.status(400).json({ error: 'Invalid Address SID. It should start with AD and be 34 characters.' });
   }
+  if (typeof mobileBundleSid === 'string' && (!mobileBundleSid.startsWith('BU') || mobileBundleSid.length !== 34)) {
+    return res.status(400).json({ error: 'Invalid Mobile Bundle SID. It should start with BU and be 34 characters.' });
+  }
 
-  if (bundleSid === undefined && addressSid === undefined) {
-    return res.status(400).json({ error: 'Nothing to update. Provide a Bundle SID and/or an Address SID.' });
+  if (bundleSid === undefined && addressSid === undefined && mobileBundleSid === undefined) {
+    return res.status(400).json({ error: 'Nothing to update. Provide a Bundle SID, Address SID, and/or Mobile Bundle SID.' });
   }
 
   try {
     const update = { updated_at: new Date().toISOString() };
     if (bundleSid !== undefined) update.twilio_bundle_sid = bundleSid;
     if (addressSid !== undefined) update.twilio_address_sid = addressSid;
+    if (mobileBundleSid !== undefined) update.twilio_mobile_bundle_sid = mobileBundleSid;
 
     const { error } = await supabase.from('agencies').update(update).eq('id', agencyId);
     if (error) throw error;
@@ -221,6 +247,7 @@ router.post('/:agencyId/byot/regulatory', requireProPlan, async (req, res) => {
       message: 'Regulatory SIDs saved.',
       twilio_bundle_sid: bundleSid !== undefined ? bundleSid : (req.agency.twilio_bundle_sid || null),
       twilio_address_sid: addressSid !== undefined ? addressSid : (req.agency.twilio_address_sid || null),
+      twilio_mobile_bundle_sid: mobileBundleSid !== undefined ? mobileBundleSid : (req.agency.twilio_mobile_bundle_sid || null),
     });
   } catch (error) {
     console.error('❌ Failed to save BYOT regulatory SIDs:', error);
@@ -380,9 +407,19 @@ async function importTwilioNumberToVapi({ number, accountSid, apiKey, apiSecret,
 
 // ============================================================================
 // BYOT PROVISIONING LOGIC (exported for use in client-signup.js)
+// ----------------------------------------------------------------------------
+// options:
+//   countryCode   ISO-2 country of the number to buy (agency country)
+//   areaCode      optional; applies to Local numbers only
+//   assistantId   VAPI assistant to attach on import
+//   businessName  used for FriendlyName / VAPI name
+//   smsCapable    optional (default false). When true on a NON-US number, buys
+//                 a MOBILE number (send + receive SMS) instead of Local and
+//                 wires its inbound SmsUrl to /webhook/twilio-sms. false keeps
+//                 the existing Local behavior, so all current callers unchanged.
 // ============================================================================
 async function provisionBYOTNumber(agency, options) {
-  const { countryCode, areaCode, assistantId, businessName } = options;
+  const { countryCode, areaCode, assistantId, businessName, smsCapable = false } = options;
 
   if (!agency.twilio_account_sid || !agency.twilio_api_key_encrypted) {
     throw new Error('Agency does not have Twilio credentials configured');
@@ -393,10 +430,24 @@ async function provisionBYOTNumber(agency, options) {
   const authHeader = Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
   const accountSid = agency.twilio_account_sid;
 
-  console.log(`📞 BYOT: Provisioning ${countryCode} number for ${businessName} via agency's Twilio`);
+  // Number type. smsCapable on a NON-US number provisions a MOBILE number: it
+  // is the only non-US type that can both send and receive SMS, so it is what
+  // enables two-way texting. The same number still serves voice (callers are
+  // forwarded to it, so the type is invisible to them). US always stays Local.
+  // Default smsCapable=false keeps the existing Local behavior for every current
+  // caller, so this is non-breaking.
+  const cc = (countryCode || 'US').toUpperCase();
+  const useMobile = smsCapable === true && cc !== 'US';
+  const numberType = useMobile ? 'Mobile' : 'Local';
 
-  let searchUrl = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/AvailablePhoneNumbers/${countryCode}/Local.json?Limit=5`;
-  if (areaCode) {
+  console.log(`📞 BYOT: Provisioning ${cc} ${numberType} number for ${businessName} via agency's Twilio${useMobile ? ' (SMS-capable)' : ''}`);
+
+  let searchUrl = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/AvailablePhoneNumbers/${cc}/${numberType}.json?Limit=5`;
+  if (useMobile) {
+    // Only surface mobile numbers that can actually do SMS.
+    searchUrl += '&SmsEnabled=true';
+  } else if (areaCode) {
+    // Area code applies to Local numbers; mobile ranges are not area-coded.
     searchUrl += `&AreaCode=${areaCode}`;
   }
 
@@ -407,34 +458,39 @@ async function provisionBYOTNumber(agency, options) {
   if (!searchResponse.ok) {
     const errorData = await searchResponse.json().catch(() => ({}));
     if (errorData.code === 21649) {
-      throw new Error(`Regulatory bundle required for ${countryCode}. Complete verification at https://console.twilio.com/us1/develop/phone-numbers/regulatory-compliance/bundles`);
+      throw new Error(`Regulatory bundle required for ${cc} ${numberType}. Complete verification at https://console.twilio.com/us1/develop/phone-numbers/regulatory-compliance/bundles`);
     }
-    throw new Error(`No numbers available in ${countryCode}${areaCode ? ` (area code ${areaCode})` : ''}: ${errorData.message || 'Unknown error'}`);
+    throw new Error(`No ${numberType} numbers available in ${cc}${!useMobile && areaCode ? ` (area code ${areaCode})` : ''}: ${errorData.message || 'Unknown error'}`);
   }
 
   const searchData = await searchResponse.json();
   const availableNumbers = searchData.available_phone_numbers || [];
 
   if (availableNumbers.length === 0) {
-    throw new Error(`No phone numbers available in ${countryCode}${areaCode ? ` (area code ${areaCode})` : ''}`);
+    throw new Error(`No ${numberType} phone numbers available in ${cc}${!useMobile && areaCode ? ` (area code ${areaCode})` : ''}`);
   }
 
   const selectedNumber = availableNumbers[0].phone_number;
-  console.log(`   Found ${availableNumbers.length} numbers, selected: ${selectedNumber}`);
+  console.log(`   Found ${availableNumbers.length} ${numberType} number(s), selected: ${selectedNumber}`);
 
   // Build the purchase body. Regulated countries (e.g. GB) reject a buy that
   // does not reference an approved Regulatory Compliance Bundle and/or a
-  // validated Address. Twilio accepts these here as BundleSid / AddressSid. We
-  // pass whichever the agency has stored; when neither is set (US, Canada, and
-  // other non-regulated buys) nothing extra is sent and behavior is unchanged.
-  // A validated address merely existing on the Twilio account is not enough on
-  // its own: the purchase must point at its Address SID, which is what this
-  // sends.
+  // validated Address. Twilio accepts these as BundleSid / AddressSid. A MOBILE
+  // number is a different regulation set from a Local number and needs the
+  // MOBILE bundle (twilio_mobile_bundle_sid); passing the Local bundle for a
+  // mobile buy is rejected by Twilio, so we never fall back to it. Local buys
+  // keep using twilio_bundle_sid. The Address SID is shared. When the relevant
+  // bundle is not set (US, Canada, and other non-regulated buys) nothing extra
+  // is sent and behavior is unchanged.
   const buyParams = {
     PhoneNumber: selectedNumber,
     FriendlyName: `${businessName} - AI Receptionist`
   };
-  if (agency.twilio_bundle_sid) buyParams.BundleSid = agency.twilio_bundle_sid;
+  if (useMobile) {
+    if (agency.twilio_mobile_bundle_sid) buyParams.BundleSid = agency.twilio_mobile_bundle_sid;
+  } else {
+    if (agency.twilio_bundle_sid) buyParams.BundleSid = agency.twilio_bundle_sid;
+  }
   if (agency.twilio_address_sid) buyParams.AddressSid = agency.twilio_address_sid;
 
   const buyResponse = await fetch(
@@ -483,13 +539,42 @@ async function provisionBYOTNumber(agency, options) {
   }
 
   console.log(`   ✅ Imported to VAPI: ${vapiPhone.id}`);
+
+  // For an SMS-capable (mobile) number, point its inbound SmsUrl at our Twilio
+  // SMS webhook so two-way texts land in the client's Messages tab. Best-effort:
+  // voice already works via the VAPI import above (VAPI owns the VoiceUrl), so a
+  // failed SmsUrl update must NOT fail provisioning; it can be re-applied later.
+  // Twilio updates an IncomingPhoneNumber via POST to its instance resource.
+  if (useMobile) {
+    try {
+      const smsUrlRes = await fetch(
+        `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers/${purchasedNumber.sid}.json`,
+        {
+          method: 'POST',
+          headers: { 'Authorization': `Basic ${authHeader}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ SmsUrl: `${BACKEND_URL}/webhook/twilio-sms`, SmsMethod: 'POST' }).toString()
+        }
+      );
+      if (smsUrlRes.ok) {
+        console.log(`   ✅ SmsUrl set on ${purchasedNumber.phone_number} -> ${BACKEND_URL}/webhook/twilio-sms`);
+      } else {
+        const t = await smsUrlRes.text().catch(() => '');
+        console.error(`   ⚠️ Failed to set SmsUrl on ${purchasedNumber.phone_number} (HTTP ${smsUrlRes.status}); voice works, inbound SMS can be re-applied: ${t.slice(0, 160)}`);
+      }
+    } catch (smsUrlErr) {
+      console.error(`   ⚠️ SmsUrl set threw for ${purchasedNumber.phone_number} (voice works; inbound SMS can be re-applied):`, smsUrlErr.message);
+    }
+  }
+
   console.log(`🎉 BYOT provisioning complete: ${purchasedNumber.phone_number}`);
 
   return {
     number: purchasedNumber.phone_number,
     vapiPhoneId: vapiPhone.id,
     twilioSid: purchasedNumber.sid,
-    provisioningMethod: 'byot'
+    provisioningMethod: 'byot',
+    smsCapable: useMobile,
+    numberType: numberType.toLowerCase()
   };
 }
 

@@ -20,13 +20,26 @@
 //          (4) delivery-status webhook maps Telnyx delivery_failed/sending_failed
 //              to the UI's 'failed' so failed sends actually show as failed;
 //          (5) findClientByPhone LIKE fallback bounded with limit(1).maybeSingle().
+// UPDATED: 2026-08-06 - notifyOwnerOfInboundSMS now routes through sendAndLogSMS
+//          with the client's agency_id instead of raw sendTelnyxSMS, so a non-US
+//          (e.g. UK) owner alert goes out on the agency's own Twilio rather than
+//          the platform Telnyx US number that UK carriers block. US clients fall
+//          through to platform Telnyx inside sendAndLogSMS, unchanged. The notify
+//          is now also written to sms_log. NOTE: outbound /send and the inbound
+//          webhook are still Telnyx-only (two-way UK texting is the separate
+//          Lane 2 build: a UK mobile number + /webhook/twilio-sms).
+// UPDATED: 2026-08-07 - Lane 2 shipped. Added handleTwilioSMSWebhook (non-US
+//          inbound over the agency's own Twilio) and made /send transport-aware:
+//          a non-US BYOT client's reply goes out on the agency's Twilio FROM the
+//          client's own mobile. US clients keep the Telnyx /send path unchanged.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const fetch = require('node-fetch');
 const { supabase } = require('../lib/supabase');
 const { requirePermissionIfAuthed } = require('./auth');
-const { sendTelnyxSMS } = require('../lib/notifications');
+const { sendAndLogSMS } = require('../lib/sms-logger');
+const { isInternationalAgency, agencyHasByotCreds, sendViaAgencyTwilio } = require('../lib/notifications');
 
 const crypto = require('crypto');
 
@@ -200,8 +213,12 @@ async function findOrCreateConversation(clientId, callerPhone, callerName) {
 
 // ============================================================================
 // HELPER: Send SMS notification to business owner about new inbound text
-// Reuses sendTelnyxSMS (lib/notifications), which sends from the platform
-// number with the messaging profile already attached, and logs nothing extra.
+// Routes through sendAndLogSMS with the client's agency so a non-US (e.g. UK)
+// owner alert is sent from the agency's OWN Twilio, not the platform Telnyx US
+// number that UK carriers block. US agencies (and clients with no agency) fall
+// through to platform Telnyx inside sendAndLogSMS, so US behavior is unchanged.
+// It also logs the notify to sms_log like every other send. client.agency_id is
+// selected by findClientByPhone, the only caller, so it is always available.
 // ============================================================================
 async function notifyOwnerOfInboundSMS(client, callerPhone, messageContent) {
   if (!client.owner_phone) return;
@@ -213,10 +230,14 @@ async function notifyOwnerOfInboundSMS(client, callerPhone, messageContent) {
 
     const formatted = (callerPhone || '').replace(/(\+1)(\d{3})(\d{3})(\d{4})/, '($2) $3-$4');
 
-    await sendTelnyxSMS(
-      client.owner_phone,
-      `💬 New text from ${formatted}:\n"${preview}"\n\nReply from your dashboard.`
-    );
+    await sendAndLogSMS({
+      phone: client.owner_phone,
+      message: `💬 New text from ${formatted}:\n"${preview}"\n\nReply from your dashboard.`,
+      agencyId: client.agency_id,
+      recipientType: 'client_owner',
+      messageType: 'client_inbound_sms_notify',
+      metadata: { clientId: client.id, callerPhone },
+    });
   } catch (err) {
     console.warn('Failed to notify owner of inbound SMS:', err.message);
   }
@@ -224,6 +245,13 @@ async function notifyOwnerOfInboundSMS(client, callerPhone, messageContent) {
 
 // ============================================================================
 // POST /api/sms/send - Business owner sends a text to a caller
+// ----------------------------------------------------------------------------
+// Transport is chosen by the client's agency:
+//   - Non-US agency with BYOT connected -> send on the agency's OWN Twilio,
+//     FROM the client's own SMS-capable number (a mobile). The platform Telnyx
+//     US number is blocked by non-US carriers, and the alphanumeric fallback is
+//     one-way, so the reply must come from the client's real number.
+//   - Everyone else (US) -> platform Telnyx, exactly as before. Unchanged.
 // ============================================================================
 router.post('/send', requirePermissionIfAuthed('messages'), async (req, res) => {
   try {
@@ -237,10 +265,10 @@ router.post('/send', requirePermissionIfAuthed('messages'), async (req, res) => 
       return res.status(400).json({ error: 'Message too long (max 1600 characters)' });
     }
 
-    // Get client's phone number (the FROM number)
+    // Get client + its agency. The agency decides the transport (see header).
     const { data: client, error: clientError } = await supabase
       .from('clients')
-      .select('id, vapi_phone_number, business_name, hipaa_mode')
+      .select('id, vapi_phone_number, business_name, hipaa_mode, agency_id, agencies!clients_agency_id_fkey(*)')
       .eq('id', client_id)
       .single();
 
@@ -248,6 +276,7 @@ router.post('/send', requirePermissionIfAuthed('messages'), async (req, res) => 
       return res.status(404).json({ error: 'Client not found or no phone number assigned' });
     }
 
+    const agency = client.agencies || null;
     const fromNumber = normalizePhone(client.vapi_phone_number);
     const toNumber = normalizePhone(to);
 
@@ -255,32 +284,52 @@ router.post('/send', requirePermissionIfAuthed('messages'), async (req, res) => 
       return res.status(400).json({ error: 'Invalid phone number' });
     }
 
-    // Send via Telnyx Messaging API.
-    // messaging_profile_id is REQUIRED: the client number must be on the profile
-    // (and its 10DLC campaign) to be authorized to send. Without it Telnyx
-    // rejects the send, which is why outbound replies never went out.
-    const telnyxResponse = await fetch('https://api.telnyx.com/v2/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${TELNYX_API_KEY}`,
-      },
-      body: JSON.stringify({
-        from: fromNumber,
-        to: toNumber,
-        text: message,
-        messaging_profile_id: TELNYX_MESSAGING_PROFILE_ID,
-      }),
-    });
+    // A non-US BYOT agency's client replies over the agency's own Twilio; US
+    // clients (and any agency without BYOT) stay on platform Telnyx.
+    const useAgencyTwilio = !!(agency && isInternationalAgency(agency) && agencyHasByotCreds(agency));
 
-    const telnyxData = await telnyxResponse.json();
+    let providerMessageId = null;
 
-    if (!telnyxResponse.ok) {
-      console.error('Telnyx send failed:', JSON.stringify(telnyxData));
-      return res.status(500).json({ error: 'Failed to send SMS', details: telnyxData.errors?.[0]?.detail || 'Unknown error' });
+    if (useAgencyTwilio) {
+      // Reply via the agency's own Twilio, FROM the client's own SMS-capable
+      // number. fromOverride is required here: resolveAgencySmsSender's
+      // alphanumeric fallback is one-way and cannot carry a reply, so we force
+      // From = the client's mobile.
+      const result = await sendViaAgencyTwilio(agency, toNumber, message, fromNumber);
+      if (!result.sent) {
+        console.error(`Agency Twilio reply failed for ${client.business_name}:`, result.error);
+        return res.status(500).json({ error: 'Failed to send SMS', details: result.error || 'agency_twilio_failed' });
+      }
+      providerMessageId = result.sid || null;
+      console.log(`SMS reply sent via agency Twilio from ${fromNumber} to ${toNumber} (${providerMessageId || 'no-sid'})`);
+    } else {
+      // Platform Telnyx path (US), unchanged.
+      // messaging_profile_id is REQUIRED: the client number must be on the
+      // profile (and its 10DLC campaign) to be authorized to send.
+      const telnyxResponse = await fetch('https://api.telnyx.com/v2/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${TELNYX_API_KEY}`,
+        },
+        body: JSON.stringify({
+          from: fromNumber,
+          to: toNumber,
+          text: message,
+          messaging_profile_id: TELNYX_MESSAGING_PROFILE_ID,
+        }),
+      });
+
+      const telnyxData = await telnyxResponse.json();
+
+      if (!telnyxResponse.ok) {
+        console.error('Telnyx send failed:', JSON.stringify(telnyxData));
+        return res.status(500).json({ error: 'Failed to send SMS', details: telnyxData.errors?.[0]?.detail || 'Unknown error' });
+      }
+
+      providerMessageId = telnyxData.data?.id || null;
+      console.log(`SMS sent via Telnyx from ${fromNumber} to ${toNumber} (${providerMessageId})`);
     }
-
-    const telnyxMessageId = telnyxData.data?.id || null;
 
     // Find or create conversation
     const conversation = await findOrCreateConversation(client_id, toNumber);
@@ -288,7 +337,8 @@ router.post('/send', requirePermissionIfAuthed('messages'), async (req, res) => 
       return res.status(500).json({ error: 'Failed to create conversation thread' });
     }
 
-    // Save the message
+    // Save the message. providerMessageId (Telnyx id or Twilio SID) is stored in
+    // the existing telnyx_message_id column regardless of transport.
     const { data: savedMessage, error: msgError } = await supabase
       .from('sms_messages')
       .insert({
@@ -298,7 +348,7 @@ router.post('/send', requirePermissionIfAuthed('messages'), async (req, res) => 
         content: message,
         sender_phone: fromNumber,
         recipient_phone: toNumber,
-        telnyx_message_id: telnyxMessageId,
+        telnyx_message_id: providerMessageId,
         status: 'sent',
       })
       .select()
@@ -318,13 +368,11 @@ router.post('/send', requirePermissionIfAuthed('messages'), async (req, res) => 
       })
       .eq('id', conversation.id);
 
-    console.log(`SMS sent from ${fromNumber} to ${toNumber} (${telnyxMessageId})`);
-
     res.json({
       success: true,
       message: savedMessage,
       conversation_id: conversation.id,
-      telnyx_message_id: telnyxMessageId,
+      telnyx_message_id: providerMessageId,
     });
 
   } catch (error) {
@@ -605,5 +653,141 @@ module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(re
   } catch (error) {
     console.error('Telnyx SMS webhook error:', error);
     return res.status(200).json({ received: true, error: error.message });
+  }
+};
+
+// ============================================================================
+// TWILIO INBOUND SMS WEBHOOK HANDLER (Lane 2 - non-US two-way texting)
+// ----------------------------------------------------------------------------
+// Mount at POST /webhook/twilio-sms in server.js with express.urlencoded.
+// Twilio posts application/x-www-form-urlencoded with From, To, Body, MessageSid.
+// This is the INBOUND half of two-way texting for non-US clients whose AI number
+// is a MOBILE number on the agency's own Twilio (see routes/byot.js smsCapable +
+// routes/client-signup.js provisioning). US clients are unaffected: their inbound
+// arrives on handleTelnyxSMSWebhook above, which is untouched.
+//
+// Signature validation is intentionally SKIPPED (fail-open), mirroring the
+// Telnyx handler: BYOT stores only Twilio SK API keys, not the account Auth
+// Token that signs Twilio webhooks, so there is no secret here to verify with.
+//
+// HIPAA: for a hipaa_mode client we never store the message body. The thread is
+// still created and the owner is still alerted (with no PHI in the alert), but
+// the content is redacted at rest.
+//
+// STOP/HELP/START: Twilio enforces carrier opt-out and the compliance auto-reply
+// at the account level, so we do not send anything and do not notify the owner
+// for a control keyword. We just return empty TwiML.
+// ============================================================================
+
+// Carrier control words. Lowercased, exact-match against a trimmed single word.
+const SMS_STOP_KEYWORDS = new Set(['stop', 'stopall', 'unsubscribe', 'cancel', 'end', 'quit']);
+const SMS_HELP_KEYWORDS = new Set(['help', 'info']);
+const SMS_START_KEYWORDS = new Set(['start', 'yes', 'unstop']);
+
+function classifyControlKeyword(bodyText) {
+  const t = (bodyText || '').trim().toLowerCase();
+  if (SMS_STOP_KEYWORDS.has(t)) return 'stop';
+  if (SMS_HELP_KEYWORDS.has(t)) return 'help';
+  if (SMS_START_KEYWORDS.has(t)) return 'start';
+  return null;
+}
+
+// Empty TwiML so Twilio does not auto-reply on our behalf. Always 200.
+function emptyTwiml(res) {
+  res.set('Content-Type', 'text/xml');
+  return res.status(200).send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+}
+
+module.exports.handleTwilioSMSWebhook = async function handleTwilioSMSWebhook(req, res) {
+  try {
+    // server.js mounts this route with express.urlencoded, so req.body is a
+    // plain object of Twilio's form fields.
+    const body = req.body || {};
+    const callerPhone = normalizePhone(body.From);
+    const clientPhone = normalizePhone(body.To);
+    const messageText = (body.Body || '').toString();
+    const messageSid = body.MessageSid || body.SmsSid || null;
+
+    if (!callerPhone || !clientPhone) {
+      console.log('Twilio inbound SMS missing From/To');
+      return emptyTwiml(res);
+    }
+
+    // Find which client owns this number
+    const client = await findClientByPhone(clientPhone);
+    if (!client) {
+      console.warn(`No client found for Twilio number ${clientPhone} - ignoring inbound SMS`);
+      return emptyTwiml(res);
+    }
+
+    // Carrier control words (STOP/HELP/START). Twilio handles the compliance
+    // reply and the opt-out list itself at the account level, so we neither
+    // send anything nor notify the owner. Just acknowledge with empty TwiML.
+    const control = classifyControlKeyword(messageText);
+    if (control) {
+      console.log(`Twilio inbound control keyword '${control}' from ${callerPhone} for ${client.business_name} - not stored, owner not notified`);
+      return emptyTwiml(res);
+    }
+
+    if (!messageText.trim()) {
+      return emptyTwiml(res);
+    }
+
+    console.log(`Twilio inbound SMS: ${callerPhone} -> ${clientPhone} (${client.business_name})`);
+
+    // Find or create the conversation thread
+    const conversation = await findOrCreateConversation(client.id, callerPhone);
+    if (!conversation) {
+      console.error('Failed to find/create conversation for Twilio inbound SMS');
+      return emptyTwiml(res);
+    }
+
+    // HIPAA mode: never store the message body. The conversation still threads
+    // and the owner is still alerted, but the content is redacted at rest and
+    // the alert carries no PHI.
+    const hipaa = client.hipaa_mode === true;
+    const storedContent = hipaa ? '[Message hidden - HIPAA mode]' : messageText;
+
+    const { error: msgError } = await supabase
+      .from('sms_messages')
+      .insert({
+        conversation_id: conversation.id,
+        client_id: client.id,
+        direction: 'inbound',
+        content: storedContent,
+        sender_phone: callerPhone,
+        recipient_phone: clientPhone,
+        telnyx_message_id: messageSid, // reuse the existing provider-message-id column
+        status: 'received',
+      });
+    if (msgError) console.error('Failed to save Twilio inbound message:', msgError.message);
+
+    // Update conversation metadata
+    await supabase
+      .from('sms_conversations')
+      .update({
+        last_message_at: new Date().toISOString(),
+        last_message_preview: (hipaa ? 'New message' : messageText).substring(0, 100),
+        last_direction: 'inbound',
+        unread_count: (conversation.unread_count || 0) + 1,
+      })
+      .eq('id', conversation.id);
+
+    // Notify the owner. notifyOwnerOfInboundSMS routes via the agency's own
+    // Twilio for non-US owners (see sms-logger.js), so the alert is deliverable.
+    // For a HIPAA client we pass a generic line so no PHI leaves in the alert.
+    await notifyOwnerOfInboundSMS(
+      client,
+      callerPhone,
+      hipaa ? 'You received a new text (hidden for HIPAA).' : messageText
+    );
+
+    console.log(`Twilio inbound SMS saved for client ${client.business_name}`);
+    return emptyTwiml(res);
+
+  } catch (error) {
+    console.error('Twilio SMS webhook error:', error);
+    // Still return empty TwiML so Twilio does not treat it as a failure and retry-storm.
+    return emptyTwiml(res);
   }
 };

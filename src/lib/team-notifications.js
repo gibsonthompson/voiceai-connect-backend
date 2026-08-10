@@ -1,18 +1,27 @@
 // ============================================================================
-// TEAM NOTIFICATIONS — Send call alerts to team members
-// Destination: src/lib/team-notifications.js (NEW FILE)
-// 
+// TEAM NOTIFICATIONS - Send call alerts to team members
+// Destination: src/lib/team-notifications.js
+//
 // Usage in VAPI webhook (after existing sendCallNotificationSMS):
 //   const { notifyTeamMembers } = require('./lib/team-notifications');
 //   await notifyTeamMembers(client.id, callData, agency);
+//
+// UPDATED: 2026-08-06 - Team SMS now routes through sendAndLogSMS with the
+//          agency id instead of raw sendTelnyxSMS. Raw Telnyx sends from the US
+//          platform number, which UK (and other non-US) carriers block, so team
+//          members under a non-US BYOT agency never received their alerts.
+//          Routing through sendAndLogSMS sends those from the agency's own
+//          Twilio; US agencies still fall through to platform Telnyx unchanged.
+//          Every team alert is now also written to sms_log.
 // ============================================================================
 const { supabase } = require('./supabase');
-const { sendTelnyxSMS, sendEmail, formatPhoneDisplay } = require('./notifications');
+const { sendEmail, formatPhoneDisplay } = require('./notifications');
+const { sendAndLogSMS } = require('./sms-logger');
 
 /**
  * Send call notifications to all team members who have opted in.
  * Checks notification_prefs for sms_new_call, sms_missed_call, email_new_call.
- * 
+ *
  * @param {string} clientId - The client whose call this is
  * @param {object} callData - { customerName, customerPhone, urgency, summary, missed }
  * @param {object} agency - Agency object (for branding in messages)
@@ -43,8 +52,8 @@ async function notifyTeamMembers(clientId, callData, agency) {
       if (prefs[smsKey] && member.phone) {
         try {
           let smsMessage = missed
-            ? `📵 Missed Call — ${brandName}\n`
-            : `🔔 New Call — ${brandName}\n`;
+            ? `📵 Missed Call - ${brandName}\n`
+            : `🔔 New Call - ${brandName}\n`;
 
           smsMessage += `Caller: ${customerName || 'Unknown'}\n`;
           smsMessage += `Phone: ${formatPhoneDisplay(customerPhone) || customerPhone || 'Unknown'}\n`;
@@ -59,7 +68,17 @@ async function notifyTeamMembers(clientId, callData, agency) {
             smsMessage += `Summary: ${shortSummary}`;
           }
 
-          await sendTelnyxSMS(member.phone, smsMessage);
+          // Route through sendAndLogSMS so a non-US BYOT agency sends from its
+          // own Twilio (US carriers block the platform Telnyx number for UK).
+          // US agencies fall through to platform Telnyx unchanged.
+          await sendAndLogSMS({
+            phone: member.phone,
+            message: smsMessage,
+            agencyId: agency?.id,
+            recipientType: 'team_member',
+            messageType: missed ? 'team_missed_call' : 'team_new_call',
+            metadata: { clientId, teamMemberId: member.id, entity: 'client' },
+          });
           console.log(`📱 Team SMS (${smsKey}) sent to ${member.display_name}`);
         } catch (err) {
           console.error(`⚠️ Team SMS failed for ${member.display_name}:`, err.message);
@@ -73,7 +92,7 @@ async function notifyTeamMembers(clientId, callData, agency) {
           await sendEmail({
             from: `${brandName} <notifications@myvoiceaiconnect.com>`,
             to: member.users.email,
-            subject: `${missed ? 'Missed Call' : 'New Call'}${urgencyLabel} — ${customerName || 'Unknown Caller'}`,
+            subject: `${missed ? 'Missed Call' : 'New Call'}${urgencyLabel} - ${customerName || 'Unknown Caller'}`,
             html: `
               <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
                 <h2 style="color: #111; margin-bottom: 16px;">${missed ? '📵 Missed Call' : '🔔 New Call'}</h2>
@@ -120,12 +139,19 @@ async function notifyAgencyTeamMembers(agencyId, clientName, callData) {
 
       if (prefs.sms_new_call && member.phone) {
         try {
-          let msg = `🔔 New Call — ${clientName}\n`;
+          let msg = `🔔 New Call - ${clientName}\n`;
           msg += `Caller: ${customerName || 'Unknown'}\n`;
           msg += `Phone: ${formatPhoneDisplay(customerPhone) || 'Unknown'}`;
           if (urgency === 'high' || urgency === 'emergency') msg += `\n⚠️ HIGH URGENCY`;
 
-          await sendTelnyxSMS(member.phone, msg);
+          await sendAndLogSMS({
+            phone: member.phone,
+            message: msg,
+            agencyId,
+            recipientType: 'team_member',
+            messageType: 'agency_team_new_call',
+            metadata: { agencyId, teamMemberId: member.id, entity: 'agency', clientName },
+          });
           console.log(`📱 Agency team SMS sent to ${member.display_name}`);
         } catch (err) {
           console.error(`⚠️ Agency team SMS failed for ${member.display_name}:`, err.message);

@@ -83,8 +83,21 @@ function parseSender(fromString) {
 async function sendTelnyxSMS(toPhone, message) {
   try {
     if (!process.env.TELNYX_API_KEY) { console.log('⚠️ TELNYX_API_KEY not configured'); return false; }
-    const formattedPhone = toPhone?.startsWith('+') ? toPhone : formatPhoneE164(toPhone, 'US');
-    if (!formattedPhone) { console.log(`⚠️ Invalid phone: ${toPhone}`); return false; }
+    // Normalize the destination to clean E.164 by DIGIT COUNT, ignoring whatever
+    // formatting the number was stored with: parentheses, spaces, dashes, and
+    // invisible unicode direction marks (U+202A/U+202C) that come from numbers
+    // pasted out of a contacts app. Critically, a stray leading "+" on a
+    // national-format number is NOT trusted as a country code. A value like
+    // "+(908) 940-1491" is 10 digits and must become +19089401491, not
+    // +9089401491, so we decide by digit count here rather than passing a
+    // "+"-prefixed value straight through (the old bug that let malformed
+    // numbers reach Telnyx and silently fail to deliver).
+    const digits = (toPhone || '').replace(/\D/g, '');
+    let formattedPhone = null;
+    if (digits.length === 10) formattedPhone = `+1${digits}`;
+    else if (digits.length === 11 && digits.startsWith('1')) formattedPhone = `+${digits}`;
+    else if (digits.length >= 11 && digits.length <= 15) formattedPhone = `+${digits}`;
+    if (!formattedPhone) { console.log(`⚠️ Invalid phone (need 10-15 digits): ${toPhone}`); return false; }
     console.log('📱 Sending SMS via Telnyx to:', formattedPhone);
     const response = await fetch('https://api.telnyx.com/v2/messages', {
       method: 'POST',
@@ -412,7 +425,7 @@ async function resolveAgencySmsSender(agency, accountSid, authHeader) {
 
 // Send one SMS via the agency's own Twilio account.
 // Returns { sent, from, sid, error, code }. Never throws.
-async function sendViaAgencyTwilio(agency, toPhone, message) {
+async function sendViaAgencyTwilio(agency, toPhone, message, fromOverride = null) {
   try {
     if (!agencyHasByotCreds(agency)) {
       return { sent: false, from: null, error: 'no_twilio_credentials' };
@@ -428,7 +441,13 @@ async function sendViaAgencyTwilio(agency, toPhone, message) {
     const accountSid = agency.twilio_account_sid;
     const authHeader = Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
 
-    const sender = await resolveAgencySmsSender(agency, accountSid, authHeader);
+    // fromOverride forces From = a specific number, used by two-way replies where
+    // the reply MUST come from the client's own SMS-capable number (a mobile).
+    // resolveAgencySmsSender's alphanumeric fallback is one-way and cannot carry
+    // a reply, so it is bypassed here. When null, resolve the best sender as before.
+    const sender = fromOverride
+      ? { From: fromOverride }
+      : await resolveAgencySmsSender(agency, accountSid, authHeader);
     const senderLabel = sender.MessagingServiceSid
       ? `MessagingService ${sender.MessagingServiceSid}`
       : `From ${sender.From}`;
