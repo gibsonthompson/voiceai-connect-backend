@@ -1456,6 +1456,7 @@ app.use('/api/admin', smsTemplatesAdminRoutes);
 app.use('/api/admin', errorReportRoutes);
 app.use('/api/admin', require('./routes/admin-expenses'));
 app.use('/api/admin', require('./routes/admin-margin'));
+app.use('/api/admin', require('./routes/admin-support'));  
 // ============================================================================
 // CRON ROUTES (Trial Expiration)
 // ============================================================================
