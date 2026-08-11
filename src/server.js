@@ -331,6 +331,8 @@ app.get('/health', (req, res) => {
   });
 });
 
+// TEMP read-only debug route (delete after greeting diagnosis)
+app.use('/api', require('./routes/debug-number'));
 // ============================================================================
 // CONTENT RENDER SERVICE (Social Media Image Generation)
 // ============================================================================
