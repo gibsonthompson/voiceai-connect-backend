@@ -54,6 +54,13 @@
 //                      status and left every client's number renting forever.
 //                      Also mounts routes/number-cleanup (backfill dead-client
 //                      numbers + reconcile the Telnyx account) under /api/cron.
+// UPDATED: 2026-08-11: Added POST /api/agency/:agencyId/ping. The agency
+//                      dashboard layout fires this (client-throttled to ~4 min)
+//                      on navigation, and it does one blind indexed update of
+//                      agencies.last_active_at by id and nothing else, so the
+//                      admin Agencies list can show "last active". Registered as
+//                      an exact route before the app.use('/api/agency', ...)
+//                      routers so the specific path wins.
 // Destination: src/server.js (or src/index.js), FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -406,6 +413,34 @@ app.post('/api/agency/:agencyId/notify-activated', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+// ============================================================================
+// AGENCY "LAST ACTIVE" PING
+// ----------------------------------------------------------------------------
+// The agency dashboard layout (app/agency/layout.tsx) fires this on navigation
+// within /agency/*, client-throttled to about once per 4 minutes per browser
+// session. It does ONE blind indexed update of agencies.last_active_at by id and
+// nothing else, so it is intentionally cheap to call often. The write is by the
+// primary key `id`, which is already indexed, so no new index is needed. No auth
+// middleware and never surfaces an error: this only stamps a cosmetic timestamp
+// by id, matching the other open agency-by-id routes, and a metrics ping must
+// never break navigation. Registered here, before the app.use('/api/agency',...)
+// routers below, so this exact path wins over the mounted routers.
+// ============================================================================
+app.post('/api/agency/:agencyId/ping', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    await supabase
+      .from('agencies')
+      .update({ last_active_at: new Date().toISOString() })
+      .eq('id', agencyId);
+    res.json({ success: true });
+  } catch (err) {
+    // Swallow errors: a "last active" ping must never break the dashboard.
+    res.json({ success: true });
+  }
+});
+
 app.get('/api/agency/by-host', getAgencyByHost);
 // Embed-widget Path A: iframe loads myvoiceaiconnect.com/get-started?agency=UUID
 // and looks the agency up by ID since there's no host-based context to derive.
