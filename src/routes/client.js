@@ -38,11 +38,24 @@
 //          would have honored it. That left greeting_message null and every
 //          call fell back to the industry default. The legacy patch failing no
 //          longer blocks the save.
+// UPDATED: 2026-08-11 - RECORDING PLAYBACK FIX: GET /:id/calls/:callId now
+//          resolves recording_url through VAPI's authenticated artifact API
+//          before returning it. As of Aug 2026 VAPI made recording storage
+//          access-controlled: the stored URL points at VAPI's private bucket
+//          and a browser <audio> can no longer fetch it (authorization error),
+//          so the player showed "Unable to load recording."
+//          resolveVapiRecordingUrl (see lib/vapi-recording.js) calls
+//          GET api.vapi.ai/call/{id}/mono-recording with the existing
+//          VAPI_API_KEY, follows the 302 to a short-lived signed URL, and
+//          returns that playable URL. It is a no-op for legacy/public urls and
+//          returns the stored URL unchanged on any failure, so nothing else
+//          changes. Docs: docs.vapi.ai/assistants/retrieve-call-artifacts
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const fetch = require('node-fetch');
 const { supabase, getClientById } = require('../lib/supabase');
+const { resolveVapiRecordingUrl } = require('../lib/vapi-recording');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 
@@ -493,12 +506,17 @@ router.put('/:id/knowledge-base', requirePermissionIfAuthed('my_business'), asyn
 
 // ============================================================================
 // GET /api/client/:id/calls/:callId - Single call detail
+// recording_url is resolved through VAPI's authenticated artifact API into a
+// short-lived signed URL, so the dashboard audio player receives a URL it can
+// actually play (see the RECORDING PLAYBACK FIX note in the header). No-op for
+// legacy/public urls; returns the stored url unchanged on any failure.
 // ============================================================================
 router.get('/:id/calls/:callId', requirePermissionIfAuthed('calls'), async (req, res) => {
   try {
     const { id, callId } = req.params;
     const { data: call, error } = await supabase.from('calls').select('*').eq('id', callId).eq('client_id', id).single();
     if (error || !call) return res.status(404).json({ error: 'Call not found' });
+    if (call.recording_url) call.recording_url = await resolveVapiRecordingUrl(call.recording_url);
     res.json({ call });
   } catch (error) { console.error('Error fetching call:', error); res.status(500).json({ error: 'Server error' }); }
 });

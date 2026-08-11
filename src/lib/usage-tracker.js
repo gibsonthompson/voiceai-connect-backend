@@ -17,6 +17,13 @@
 //   columns (see migration). Fully backward compatible: both params default to
 //   null, so existing callers that do not pass a cost store null and behave
 //   exactly as before.
+// Updated: 2026-08-10. Removed duration_minutes from the usage_records insert.
+//   usage_records.duration_minutes is a Postgres GENERATED column (computed
+//   from duration_seconds), and Postgres rejects any insert that supplies a
+//   value for a generated column with "cannot insert a non-DEFAULT value into
+//   column duration_minutes", which failed the whole insert so no usage row
+//   was written. The database now computes duration_minutes itself. billedMinutes
+//   is still computed and used for the Stripe meter events below (unchanged).
 // ============================================================================
 const Stripe = require('stripe');
 const { supabase } = require('./supabase');
@@ -104,7 +111,6 @@ async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds, 
         client_id: clientId,
         call_id: callId || null,
         duration_seconds: seconds,
-        duration_minutes: billedMinutes,
         vapi_cost: cost,
         cost_breakdown: costBreakdown || null,
         billing_month: billingMonth.toISOString().split('T')[0],

@@ -1451,6 +1451,7 @@ app.get('/api/auth/google/callback', googleCallback);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin', adminCallsRoutes);
 app.use('/api/admin', adminAgencyDetail);
+app.use('/api/admin', require('./routes/admin-impersonate'));
 app.use('/api/admin', smsLogRoutes);
 app.use('/api/admin', smsTemplatesAdminRoutes);
 app.use('/api/admin', errorReportRoutes);
