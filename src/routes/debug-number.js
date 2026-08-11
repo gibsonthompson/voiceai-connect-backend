@@ -3,12 +3,13 @@
 // ----------------------------------------------------------------------------
 // GET /api/debug-number/coastal
 //
-// Confirmed so far from the VAPI object: the number is dynamic (assistantId
-// null, serverUrl points at this backend), gates pass, greeting is saved. The
-// only thing left to prove is what buildDynamicAssistantConfig actually emits
-// as the first message for THIS client. This route now runs that builder with
-// the exact arguments the webhook uses and returns the literal firstMessage, so
-// we can see what a caller hears with no phone call. It performs NO writes.
+// Pulls VAPI's own record of the recent real calls to +13615890163 and shows,
+// per call, what actually happened: whether a dynamic (transient) or a static
+// assistant served it, the exact firstMessage VAPI was told to speak, and the
+// literal first line spoken from the transcript. Also runs the builder once to
+// show what a call RIGHT NOW would be handed. It performs NO writes.
+//
+// This is the ground truth for "it plays the default, not the custom greeting".
 //
 // DELETE this file and its one mount line in src/server.js after diagnosis.
 // ============================================================================
@@ -20,6 +21,7 @@ const { buildDynamicAssistantConfig } = require('../lib/assistant-config-builder
 
 const CLIENT_ID = 'af190bc2-995a-451f-a045-a3d2c828a445';
 const TARGET_E164 = '+13615890163';
+const VAPI_PHONE_ID_FALLBACK = 'a8e2c649-734f-4fde-8076-f7a0f778c645';
 const VAPI_BASE = 'https://api.vapi.ai';
 
 async function vapiGet(path) {
@@ -36,75 +38,78 @@ async function vapiGet(path) {
   }
 }
 
-router.get('/debug-number/coastal', async (req, res) => {
-  const out = {
-    generatedAt: new Date().toISOString(),
-    target: TARGET_E164,
-    clientId: CLIENT_ID,
-    backendUrlEnv: process.env.BACKEND_URL || null,
-  };
+function firstSpokenLine(call) {
+  const msgs = (call.artifact && Array.isArray(call.artifact.messages))
+    ? call.artifact.messages
+    : (Array.isArray(call.messages) ? call.messages : []);
+  const bot = msgs.find((m) => m && (m.role === 'bot' || m.role === 'assistant'));
+  if (!bot) return null;
+  return bot.message || bot.content || null;
+}
 
-  // Live lookup via the exact function the webhook uses.
-  let liveClient = null;
+router.get('/debug-number/coastal', async (req, res) => {
+  const out = { generatedAt: new Date().toISOString(), target: TARGET_E164 };
+
+  // Current DB greeting + the VAPI phone id to list calls for.
+  let vapiPhoneId = VAPI_PHONE_ID_FALLBACK;
   try {
-    liveClient = await getClientByVapiPhoneNumber(TARGET_E164);
-    if (!liveClient) {
-      out.liveLookup = { found: false };
-    } else {
-      out.liveLookup = {
-        found: true,
-        matchedClientId: liveClient.id,
-        matchesTargetClient: liveClient.id === CLIENT_ID,
-        greetingCharsSeenByHandler: liveClient.greeting_message ? liveClient.greeting_message.length : 0,
-        greetingSeenByHandler: liveClient.greeting_message || null,
-        embedsAgency: Boolean(liveClient.agencies),
-        embeddedAgencySubStatus: liveClient.agencies ? (liveClient.agencies.subscription_status ?? null) : null,
-        voice_id: liveClient.voice_id || null,
-      };
+    const { data } = await supabase
+      .from('clients')
+      .select('greeting_message, vapi_phone_id, vapi_phone_number_id, updated_at, industry')
+      .eq('id', CLIENT_ID)
+      .single();
+    if (data) {
+      out.currentGreetingInDb = data.greeting_message || null;
+      out.currentGreetingChars = data.greeting_message ? data.greeting_message.length : 0;
+      out.clientUpdatedAt = data.updated_at || null;
+      out.industry = data.industry || null;
+      vapiPhoneId = data.vapi_phone_id || data.vapi_phone_number_id || VAPI_PHONE_ID_FALLBACK;
     }
   } catch (err) {
-    out.liveLookup = { error: err.message };
+    out.currentGreetingInDb = { error: err.message };
   }
 
-  // THE DECISIVE TEST: run the real builder with the same args the handler uses
-  // (client, client.agencies, callerContext=null for a fresh caller) and report
-  // the literal firstMessage a caller would hear. If it throws, that is exactly
-  // the crash the live handler would catch and mask by falling back to static.
-  if (liveClient && liveClient.id) {
-    try {
+  // What a call RIGHT NOW would be handed by the builder.
+  try {
+    const liveClient = await getClientByVapiPhoneNumber(TARGET_E164);
+    if (liveClient) {
       const built = await buildDynamicAssistantConfig(liveClient, liveClient.agencies || null, null);
-      const fm = (built && built.firstMessage != null) ? built.firstMessage : null;
-      const greet = liveClient.greeting_message || null;
-      out.builderOutput = {
+      out.builderNow = {
         ok: true,
-        firstMessage: fm,
-        firstMessageMatchesGreeting: Boolean(fm && greet && fm.trim() === greet.trim()),
-        voiceProvider: built && built.voice ? (built.voice.provider ?? null) : null,
-        voiceId: built && built.voice ? (built.voice.voiceId ?? built.voice.voice_id ?? null) : null,
-        modelProvider: built && built.model ? (built.model.provider ?? null) : null,
-        modelName: built && built.model ? (built.model.model ?? null) : null,
-        configKeys: built ? Object.keys(built) : null,
+        firstMessage: built && built.firstMessage != null ? built.firstMessage : null,
+        matchesDbGreeting: Boolean(
+          built && built.firstMessage && out.currentGreetingInDb &&
+          typeof out.currentGreetingInDb === 'string' &&
+          built.firstMessage.trim() === out.currentGreetingInDb.trim()
+        ),
       };
-    } catch (err) {
-      out.builderOutput = {
-        ok: false,
-        error: err.message,
-        stack: (err.stack || '').split('\n').slice(0, 8).join(' || '),
-      };
+    } else {
+      out.builderNow = { ok: false, note: 'live client lookup returned null' };
     }
-  } else {
-    out.builderOutput = { skipped: 'no live client to build for' };
+  } catch (err) {
+    out.builderNow = { ok: false, error: err.message, stack: (err.stack || '').split('\n').slice(0, 6).join(' || ') };
   }
 
-  // VAPI object (kept for the record, already known dynamic).
-  const listRes = await vapiGet('/phone-number?limit=1000');
-  if (Array.isArray(listRes.body)) {
-    const match = listRes.body.find((n) => n && n.number === TARGET_E164);
-    out.vapiNumber = match
-      ? { id: match.id ?? null, assistantId: match.assistantId ?? null, serverUrl: match.serverUrl ?? null, provider: match.provider ?? null, status: match.status ?? null }
-      : { note: 'no match' };
+  // THE GROUND TRUTH: VAPI's own record of recent real calls on this number.
+  out.vapiPhoneIdUsed = vapiPhoneId;
+  const callsRes = await vapiGet(`/call?phoneNumberId=${vapiPhoneId}&limit=10`);
+  if (Array.isArray(callsRes.body)) {
+    out.recentVapiCalls = callsRes.body.map((call) => {
+      const servedBy = call.assistantId
+        ? `STATIC assistantId=${call.assistantId}`
+        : (call.assistant ? 'TRANSIENT (dynamic assistant-request)' : 'NONE / unknown');
+      return {
+        id: call.id,
+        startedAt: call.startedAt || call.createdAt || null,
+        endedReason: call.endedReason || null,
+        caller: (call.customer && call.customer.number) || null,
+        servedBy,
+        greetingVapiWasToldToSay: call.assistant ? (call.assistant.firstMessage ?? null) : null,
+        firstLineActuallySpoken: firstSpokenLine(call),
+      };
+    });
   } else {
-    out.vapiNumber = { error: 'unexpected list response', status: listRes.status };
+    out.recentVapiCalls = { error: 'Unexpected /call response', status: callsRes.status, body: callsRes.body };
   }
 
   res.json(out);
