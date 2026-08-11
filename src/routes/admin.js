@@ -9,6 +9,15 @@
 // UPDATED: 2026-07-31: Added support-requests endpoints (GET list/filter + PATCH
 //          status/notes) backing the admin Support page. Inbound help-widget
 //          escalations are persisted to support_requests by routes/help.js.
+// UPDATED: 2026-08-11: Fixed the 500 on GET /clients and GET /clients/:clientId.
+//          The agency embed used the bare table-name form `agencies (...)`,
+//          which PostgREST cannot resolve to a single relationship on clients
+//          and answers with a 500 (PGRST200). Switched both to the explicit FK
+//          constraint name `agencies!clients_agency_id_fkey (...)` that the rest
+//          of the app already uses (routes/client.js, server.js). Also added
+//          is_test_client to the list select (so the frontend billable filter
+//          is correct) and hardened the list route .range() with parseInt so a
+//          string limit/offset from the query string can no longer concatenate.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -261,6 +270,13 @@ router.get('/agencies/:agencyId', requireAdmin, async (req, res) => {
 
 // ============================================================================
 // LIST ALL CLIENTS (across all agencies)
+// ----------------------------------------------------------------------------
+// The agency embed uses the explicit FK constraint name
+// (agencies!clients_agency_id_fkey). The bare `agencies (...)` form makes
+// PostgREST 500 with PGRST200 because it cannot pick a single relationship by
+// table name alone, which is what emptied this tab. is_test_client is selected
+// so the frontend billable filter is accurate, and .range is parseInt-guarded
+// so string query params cannot concatenate into a bad range.
 // ============================================================================
 router.get('/clients', requireAdmin, async (req, res) => {
   try {
@@ -275,10 +291,11 @@ router.get('/clients', requireAdmin, async (req, res) => {
         calls_this_month, monthly_call_limit,
         trial_ends_at, created_at,
         agency_id,
-        agencies (id, name, slug)
+        is_test_client,
+        agencies!clients_agency_id_fkey (id, name, slug)
       `)
       .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1);
+      .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
 
     if (status) {
       query = query.eq('subscription_status', status);
@@ -309,6 +326,10 @@ router.get('/clients', requireAdmin, async (req, res) => {
 
 // ============================================================================
 // GET SINGLE CLIENT DETAILS
+// ----------------------------------------------------------------------------
+// Same embed fix as the list route: explicit FK name so PostgREST does not 500.
+// This 500 was surfacing in the UI as "Client not found" on every client tap,
+// because the detail page treats a failed fetch as not-found.
 // ============================================================================
 router.get('/clients/:clientId', requireAdmin, async (req, res) => {
   try {
@@ -318,7 +339,7 @@ router.get('/clients/:clientId', requireAdmin, async (req, res) => {
       .from('clients')
       .select(`
         *,
-        agencies (id, name, slug, email)
+        agencies!clients_agency_id_fkey (id, name, slug, email)
       `)
       .eq('id', clientId)
       .single();
