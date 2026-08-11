@@ -40,6 +40,19 @@
 //          tab. Default smsCapable=false keeps the existing Local behavior, so
 //          every current caller is unchanged. The regulatory endpoint + status
 //          now also store/return twilio_mobile_bundle_sid for the settings UI.
+// UPDATED: 2026-08-11 - Fixed VAPI import failing on the "name" field. VAPI
+//          caps the phone-number label at 40 characters and 400s the whole
+//          import when it is longer. The demo path builds businessName as
+//          "<agency name> Demo" and then this import appended " - Business
+//          Line", which for a normal-length agency name pushed past 40 (e.g.
+//          "Wexl Voice Receptionist Demo - Business Line" is 44) and failed
+//          EVERY non-US import AFTER the number had already been bought, then
+//          rolled it back. The credential form (twilioApiKey/twilioApiSecret)
+//          was already correct; length was the only thing VAPI rejected. The
+//          label is now capped: full "<name> - Business Line" when it fits,
+//          otherwise the business name trimmed to 40. This also silently
+//          repaired real non-US CLIENT signups, where any business name of 25+
+//          characters hit the same 400 (the 16-char suffix leaves only 24).
 // Destination: src/routes/byot.js
 // ============================================================================
 const express = require('express');
@@ -372,13 +385,27 @@ router.delete('/:agencyId/byot/credentials', requireProPlan, async (req, res) =>
 // error text (which contains "VAPI import failed" so demo-phone.js can map it
 // to a friendly message). The caller is responsible for releasing the number
 // on a thrown failure.
+//
+// NOTE (2026-08-11): VAPI also caps the "name" (label) at 40 characters and
+// 400s the entire import if it is longer. This is enforced regardless of which
+// credential shape is used, so a too-long name fails BOTH attempts and looks
+// like a credential problem when it is not. We cap the name below before
+// building the body.
 // ============================================================================
 async function importTwilioNumberToVapi({ number, accountSid, apiKey, apiSecret, assistantId, businessName }) {
+  // VAPI caps the phone-number "name" at 40 chars (inclusive). Keep the full
+  // "<business name> - Business Line" label when it fits; otherwise fall back to
+  // the business name trimmed to 40 so the label stays meaningful and the
+  // import never 400s on length. Trailing whitespace is trimmed so a cut never
+  // leaves a dangling space.
+  const fullName = `${businessName} - Business Line`;
+  const name = fullName.length <= 40 ? fullName : businessName.slice(0, 40).trimEnd();
+
   const base = {
     provider: 'twilio',
     number,
     twilioAccountSid: accountSid,
-    name: `${businessName} - Business Line`,
+    name,
     assistantId,
     serverUrl: `${BACKEND_URL}/webhook/vapi`,
   };
