@@ -24,10 +24,16 @@
 //   value reported to the client meter, so the client dashboard's Voice
 //   Minutes display reflects real usage. Billing itself still runs off the
 //   Stripe meter, not this counter.
+// UPDATED: 2026-08-12 - Removed the client-facing call-summary EMAIL for
+//   white-label integrity (it could leak the platform from-address). The
+//   per-call owner SMS + team SMS already cover the client. The now-unused
+//   email_summaries plan gate (isFeatureEnabled + DEFAULT_PLAN_FEATURES) and
+//   the sendCallSummaryEmail import were removed with it. emailSent stays in
+//   the webhook JSON response (always false) so the response shape is unchanged.
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
-const { sendCallNotificationSMS, sendDemoCallFollowUpSMS, sendCallSummaryEmail, sendSpamBlockedSMS } = require('../lib/notifications');
+const { sendCallNotificationSMS, sendDemoCallFollowUpSMS, sendSpamBlockedSMS } = require('../lib/notifications');
 const { upsertContactFromCall } = require('../lib/contact-upsert');
 const { buildDynamicAssistantConfig } = require('../lib/assistant-config-builder');
 const { notifyTeamMembers } = require('../lib/team-notifications');
@@ -36,19 +42,6 @@ const { getSmsTemplate } = require('../lib/sms-templates');
 const { sendAndLogSMS } = require('../lib/sms-logger');
 const { formatPhone, getPhoneLocation, formatDuration } = require('../lib/area-codes');
 const { insertUsageRecord } = require('../lib/usage-tracker');
-
-const DEFAULT_PLAN_FEATURES = {
-  starter: { sms_notifications: true, email_summaries: false, custom_greeting: false, custom_voice: false, knowledge_base: false, business_hours: false, advanced_analytics: false, priority_support: false },
-  pro: { sms_notifications: true, email_summaries: true, custom_greeting: true, custom_voice: false, knowledge_base: true, business_hours: true, advanced_analytics: true, priority_support: false },
-  growth: { sms_notifications: true, email_summaries: true, custom_greeting: true, custom_voice: true, knowledge_base: true, business_hours: true, advanced_analytics: true, priority_support: true },
-};
-
-function isFeatureEnabled(client, agency, featureKey) {
-  const planType = client.plan_type || 'starter';
-  const planConfig = agency?.plan_features?.[planType] || DEFAULT_PLAN_FEATURES[planType];
-  if (!planConfig) return true;
-  return planConfig[featureKey] !== false;
-}
 
 function detectTransferStatus(endedReason, transcript) {
   if (!endedReason) return { transferStatus: null, wasTransferred: false };
@@ -1110,7 +1103,11 @@ async function handleVapiWebhook(req, res) {
     }
 
     // ── STEP 8: NOTIFICATIONS ─────────────────────────────────────────
-    let smsSent = false, emailSent = false;
+    // Client-facing call-summary EMAIL removed for white-label integrity
+    // (2026-08-12). The owner SMS + team SMS cover the client, both agency-
+    // branded. emailSent stays in the response (always false) for shape parity.
+    let smsSent = false;
+    const emailSent = false;
     if (client.owner_phone) {
       smsSent = await sendCallNotificationSMS(client, agency, aiData);
       console.log(`📲 Owner SMS to ${client.owner_phone}: ${smsSent ? 'sent' : 'FAILED'}`);
@@ -1118,10 +1115,6 @@ async function handleVapiWebhook(req, res) {
       console.log(`📲 No owner_phone on client - skipping owner SMS`);
     }
     await notifyTeamMembers(client.id, aiData, agency);
-    if (isFeatureEnabled(client, agency, 'email_summaries') && client.email) {
-      const r = await sendCallSummaryEmail(client, agency, aiData, { duration_seconds: durationSeconds, transcript: storedTranscript, created_at: new Date().toISOString() });
-      emailSent = r?.success || false;
-    }
 
     return res.status(200).json({ received: true, saved: true, callId: savedCallId,
       smsSent, emailSent, firstCall: isFirst, agency: agency?.name, duration: durationSeconds,

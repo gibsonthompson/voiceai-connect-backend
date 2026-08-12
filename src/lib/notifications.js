@@ -3,6 +3,10 @@
 // Multi-tenant aware with agency branding
 // UPDATED: 2026-05-10 — All SMS functions use sendAndLogSMS for centralized logging
 // UPDATED: 2026-05-10 — Welcome email plan-aware (Free vs Pro/Scale)
+// UPDATED: 2026-08-12 — Removed client-facing emails for white-label integrity:
+//          sendClientWelcomeEmail and sendCallSummaryEmail are gone (every
+//          client touchpoint is now agency-branded SMS). sendEmail,
+//          parseSender, and the agency-facing sendAgencyWelcomeEmail remain.
 // ============================================================================
 const fetch = require('node-fetch');
 const { decrypt } = require('./encryption');
@@ -279,48 +283,9 @@ async function sendEmail(emailData) {
   } catch (error) { console.error('❌ Email error:', error); return { success: false, error: error.message }; }
 }
 
-async function sendCallSummaryEmail(client, agency, callData, callRecord) {
-  if (!client.email) return { success: false, reason: 'no_email' };
-  const agencyName = agency?.name || 'Your AI Receptionist';
-  const agencyLogo = agency?.logo_url || null;
-  const primaryColor = agency?.primary_color || '#2563eb';
-  const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
-  let baseUrl = agency?.marketing_domain && agency?.domain_verified ? `https://${agency.marketing_domain}` : agency?.slug ? `https://${agency.slug}.${platformDomain}` : `https://${platformDomain}`;
-  const { customerName, customerPhone, customerEmail, urgency, summary } = callData;
-  const duration = callRecord?.duration_seconds;
-  const durationDisplay = duration ? `${Math.floor(duration / 60)}m ${duration % 60}s` : 'N/A';
-  const urgencyColors = { emergency: { bg: '#fef2f2', text: '#dc2626', border: '#fecaca', label: '🚨 Emergency' }, high: { bg: '#fef2f2', text: '#dc2626', border: '#fecaca', label: '⚠️ High' }, medium: { bg: '#fffbeb', text: '#d97706', border: '#fde68a', label: 'Medium' }, routine: { bg: '#f0fdf4', text: '#16a34a', border: '#bbf7d0', label: 'Routine' } };
-  const urg = urgencyColors[urgency] || urgencyColors.routine;
-  const transcript = callRecord?.transcript || '';
-  const transcriptPreview = transcript.length > 500 ? transcript.substring(0, 500) + '...' : transcript;
-  const fromEmail = agency?.support_email ? `${agencyName} <${agency.support_email}>` : `${agencyName} <notifications@myvoiceaiconnect.com>`;
-  const callTime = callRecord?.created_at ? new Date(callRecord.created_at).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }) : new Date().toLocaleString('en-US');
-
-  return sendEmail({
-    from: fromEmail, to: client.email,
-    subject: `New Call${urgency === 'high' || urgency === 'emergency' ? ' ⚠️ URGENT' : ''} — ${customerName || 'Unknown Caller'} | ${client.business_name}`,
-    html: `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f4f4f5;"><div style="max-width: 600px; margin: 0 auto; padding: 20px;"><div style="background-color: #ffffff; border-radius: 12px 12px 0 0; padding: 24px; text-align: center; border-bottom: 3px solid ${primaryColor};">${agencyLogo ? `<img src="${agencyLogo}" alt="${agencyName}" style="max-height: 40px; margin-bottom: 12px;">` : ''}<h2 style="margin: 0; font-size: 18px; color: #111;">New Call Summary</h2><p style="margin: 4px 0 0; font-size: 13px; color: #666;">${callTime}</p></div><div style="background-color: #ffffff; padding: 24px;">${(urgency === 'high' || urgency === 'emergency') ? `<div style="background-color: ${urg.bg}; border: 1px solid ${urg.border}; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px;"><p style="margin: 0; font-size: 14px; font-weight: 600; color: ${urg.text};">${urg.label} Priority — Follow up immediately</p></div>` : ''}<div style="background-color: #f9fafb; border-radius: 8px; padding: 16px; margin-bottom: 20px;"><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 6px 0; font-size: 13px; color: #666; width: 100px;">Caller</td><td style="padding: 6px 0; font-size: 14px; font-weight: 600; color: #111;">${customerName || 'Unknown'}</td></tr><tr><td style="padding: 6px 0; font-size: 13px; color: #666;">Phone</td><td style="padding: 6px 0; font-size: 14px; color: #111;"><a href="tel:${customerPhone}" style="color: ${primaryColor}; text-decoration: none;">${formatPhoneDisplay(customerPhone) || customerPhone || 'Unknown'}</a></td></tr>${customerEmail ? `<tr><td style="padding: 6px 0; font-size: 13px; color: #666;">Email</td><td style="padding: 6px 0; font-size: 14px; color: #111;"><a href="mailto:${customerEmail}" style="color: ${primaryColor}; text-decoration: none;">${customerEmail}</a></td></tr>` : ''}<tr><td style="padding: 6px 0; font-size: 13px; color: #666;">Duration</td><td style="padding: 6px 0; font-size: 14px; color: #111;">${durationDisplay}</td></tr><tr><td style="padding: 6px 0; font-size: 13px; color: #666;">Urgency</td><td style="padding: 6px 0;"><span style="display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 12px; background-color: ${urg.bg}; color: ${urg.text}; border: 1px solid ${urg.border};">${urg.label}</span></td></tr></table></div><div style="margin-bottom: 20px;"><h3 style="font-size: 14px; color: #111; margin: 0 0 8px;">Summary</h3><p style="font-size: 14px; color: #444; margin: 0; line-height: 1.6;">${summary || 'No summary available.'}</p></div>${transcriptPreview ? `<div style="margin-bottom: 20px;"><h3 style="font-size: 14px; color: #111; margin: 0 0 8px;">Transcript Preview</h3><div style="background-color: #f9fafb; border-radius: 8px; padding: 14px; font-size: 13px; color: #555; line-height: 1.7; white-space: pre-wrap; word-wrap: break-word; max-height: 200px; overflow: hidden;">${transcriptPreview}</div></div>` : ''}<div style="text-align: center; margin: 24px 0 8px;"><a href="${baseUrl}/client/dashboard" style="display: inline-block; background-color: ${primaryColor}; color: #ffffff; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 14px;">View Full Call Details →</a></div></div><div style="background-color: #ffffff; border-radius: 0 0 12px 12px; padding: 16px 24px; border-top: 1px solid #e5e7eb; text-align: center;"><p style="margin: 0; font-size: 12px; color: #999;">${client.business_name} — Powered by ${agencyName}</p><p style="margin: 4px 0 0; font-size: 11px; color: #bbb;">You're receiving this because a call was handled by your AI receptionist.</p></div></div></body></html>`
-  });
-}
-
 // ============================================================================
 // WELCOME EMAILS — Plan-aware messaging
 // ============================================================================
-async function sendClientWelcomeEmail(client, agency, tempPassword, passwordToken) {
-  const agencyName = agency?.name || 'VoiceAI Connect';
-  const agencyLogo = agency?.logo_url || 'https://voiceaiconnect.com/logo.png';
-  const primaryColor = agency?.primary_color || '#2563eb';
-  const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
-  let baseUrl = agency?.marketing_domain && agency?.domain_verified ? `https://${agency.marketing_domain}` : agency?.slug ? `https://${agency.slug}.${platformDomain}` : `https://${platformDomain}`;
-  const fromEmail = agency?.support_email ? `${agencyName} <${agency.support_email}>` : `${agencyName} <onboarding@myvoiceaiconnect.com>`;
-
-  return sendEmail({
-    from: fromEmail, to: client.email,
-    subject: `Welcome to ${agencyName} - Your AI Receptionist is Ready!`,
-    html: `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f9f9f9;"><div style="max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;">${agency?.logo_url ? `<div style="text-align: center; margin-bottom: 30px;"><img src="${agencyLogo}" alt="${agencyName}" style="max-height: 60px;"></div>` : ''}<h1 style="color: ${primaryColor}; font-size: 24px;">Welcome, ${client.owner_name || client.business_name}! 🎉</h1><p>Your AI receptionist for <strong>${client.business_name}</strong> is ready to start answering calls.</p><div style="background-color: #f0f4ff; border-left: 4px solid ${primaryColor}; padding: 20px; margin: 20px 0;"><p style="margin: 0 0 10px 0;"><strong>Your AI Phone Number:</strong></p><p style="font-size: 24px; font-weight: bold; color: ${primaryColor}; margin: 0;">${formatPhoneDisplay(client.vapi_phone_number)}</p></div><p><strong>Next Steps:</strong></p><ol><li>Set your password to access your dashboard</li><li>Forward your business line to your new AI number</li><li>Start receiving call summaries instantly!</li></ol><div style="text-align: center; margin: 30px 0;"><a href="${baseUrl}/auth/set-password?token=${passwordToken}" style="display: inline-block; background-color: ${primaryColor}; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold;">Set Your Password →</a></div><p>Your <strong>7-day free trial</strong> has started. No credit card required.</p><hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;"><p style="color: #666; font-size: 14px;">Questions? Reply to this email or contact us at ${agency?.support_email || 'support@myvoiceaiconnect.com'}</p><p style="color: #999; font-size: 12px;">© ${new Date().getFullYear()} ${agencyName}</p></div></body></html>`
-  });
-}
-
 async function sendAgencyWelcomeEmail(agency, passwordToken) {
   const dashboardUrl = process.env.FRONTEND_URL || 'https://myvoiceaiconnect.com';
   const isFree = !agency.plan_type || agency.plan_type === 'free' || agency.plan_type === 'starter';
@@ -493,6 +458,6 @@ module.exports = {
   sendDemoCallFollowUpSMS, sendCallNotificationSMS, sendWelcomeSMS,
   sendClientTrialExpiredSMS, sendClientPaymentFailedSMS,
   sendClientSubscriptionActivatedSMS, sendSpamBlockedSMS,
-  sendEmail, sendCallSummaryEmail, sendClientWelcomeEmail, sendAgencyWelcomeEmail,
+  sendEmail, sendAgencyWelcomeEmail,
   getReferralSourceLabel
 };

@@ -70,6 +70,11 @@
 //          already released and re-sold to us for the NEW client, so releasing
 //          it would delete the new client's line. status='active' rows are
 //          NEVER reclaimed, so a live client can never be stomped.
+// UPDATED: 2026-08-12 - Removed the client welcome EMAIL (white-label). The
+//          set-password token is returned in the signup response body (widget
+//          routes straight to /auth/set-password), and card-required signups
+//          land on set-password via the Stripe checkout success_url, so no
+//          email was load-bearing. Agency-branded welcome SMS still fires.
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -83,7 +88,6 @@ const {
 } = require('../lib/vapi');
 const { 
   formatPhoneE164,
-  sendClientWelcomeEmail,
   sendWelcomeSMS,
   sendClientSignupNotificationSMS,
   isInternationalAgency
@@ -1147,10 +1151,13 @@ async function handleClientSignup(req, res) {
     }
 
     // ============================================
-    // STEP 7: SEND WELCOME EMAIL
+    // STEP 7: CLIENT WELCOME (SMS ONLY)
+    // ────────────────────────────────────────────
+    // Client welcome EMAIL removed 2026-08-12 (white-label). The set-password
+    // link is delivered without email: this handler returns `token` in the
+    // response body (widget routes to /auth/set-password), and card-required
+    // signups land on set-password via the Stripe checkout success_url.
     // ============================================
-    console.log('📧 Sending welcome email...');
-    await sendClientWelcomeEmail(newClient, agency, null, passwordToken);
 
     // ============================================
     // STEP 8: SEND WELCOME SMS (guarded)
@@ -1660,7 +1667,7 @@ async function provisionClient(clientId) {
       .single();
     
     if (!existingUser) {
-      const { data: newUser } = await supabase
+      await supabase
         .from('users')
         .insert({
           agency_id: client.agency_id,
@@ -1672,9 +1679,10 @@ async function provisionClient(clientId) {
         })
         .select()
         .single();
-      
-      const token = await createPasswordToken(newUser.id, client.email);
-      await sendClientWelcomeEmail(updatedClient, agency, null, token);
+
+      // Client welcome EMAIL removed 2026-08-12 (white-label). A client created
+      // here without a password sets one via the "Password not set" recovery
+      // flow (auth.js recoverAccountSetup); the welcome SMS below is the push.
 
       // Guard SMS against undefined phone
       if (client.owner_phone && client.owner_phone !== 'undefined') {

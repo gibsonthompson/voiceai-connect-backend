@@ -13,14 +13,19 @@
 //          Routing through sendAndLogSMS sends those from the agency's own
 //          Twilio; US agencies still fall through to platform Telnyx unchanged.
 //          Every team alert is now also written to sms_log.
+// UPDATED: 2026-08-12 - Removed the client-facing team EMAIL branch (white-label
+//          integrity: it sent from notifications@myvoiceaiconnect.com, leaking
+//          the platform brand to a client's team). Team members are still
+//          notified by agency-branded SMS. The unused sendEmail import, the
+//          email preference key, and the users email join were dropped with it.
 // ============================================================================
 const { supabase } = require('./supabase');
-const { sendEmail, formatPhoneDisplay } = require('./notifications');
+const { formatPhoneDisplay } = require('./notifications');
 const { sendAndLogSMS } = require('./sms-logger');
 
 /**
  * Send call notifications to all team members who have opted in.
- * Checks notification_prefs for sms_new_call, sms_missed_call, email_new_call.
+ * Checks notification_prefs for sms_new_call, sms_missed_call.
  *
  * @param {string} clientId - The client whose call this is
  * @param {object} callData - { customerName, customerPhone, urgency, summary, missed }
@@ -31,7 +36,7 @@ async function notifyTeamMembers(clientId, callData, agency) {
     // Fetch all active team members for this client who have any notification enabled
     const { data: members, error } = await supabase
       .from('team_members')
-      .select('id, display_name, phone, notification_prefs, member_user_id, users:member_user_id (email)')
+      .select('id, display_name, phone, notification_prefs, member_user_id')
       .eq('entity_type', 'client')
       .eq('entity_id', clientId)
       .eq('status', 'active');
@@ -43,7 +48,6 @@ async function notifyTeamMembers(clientId, callData, agency) {
 
     // Determine which notification key to check
     const smsKey = missed ? 'sms_missed_call' : 'sms_new_call';
-    const emailKey = 'email_new_call';
 
     for (const member of members) {
       const prefs = member.notification_prefs || {};
@@ -82,33 +86,6 @@ async function notifyTeamMembers(clientId, callData, agency) {
           console.log(`📱 Team SMS (${smsKey}) sent to ${member.display_name}`);
         } catch (err) {
           console.error(`⚠️ Team SMS failed for ${member.display_name}:`, err.message);
-        }
-      }
-
-      // Email notification
-      if (prefs[emailKey] && member.users?.email) {
-        try {
-          const urgencyLabel = (urgency === 'high' || urgency === 'emergency') ? ' ⚠️ URGENT' : '';
-          await sendEmail({
-            from: `${brandName} <notifications@myvoiceaiconnect.com>`,
-            to: member.users.email,
-            subject: `${missed ? 'Missed Call' : 'New Call'}${urgencyLabel} - ${customerName || 'Unknown Caller'}`,
-            html: `
-              <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
-                <h2 style="color: #111; margin-bottom: 16px;">${missed ? '📵 Missed Call' : '🔔 New Call'}</h2>
-                <table style="width: 100%; border-collapse: collapse;">
-                  <tr><td style="padding: 8px 0; color: #666; width: 80px;">Caller</td><td style="padding: 8px 0; font-weight: 600;">${customerName || 'Unknown'}</td></tr>
-                  <tr><td style="padding: 8px 0; color: #666;">Phone</td><td style="padding: 8px 0;"><a href="tel:${customerPhone}">${formatPhoneDisplay(customerPhone) || customerPhone || 'Unknown'}</a></td></tr>
-                  ${urgency ? `<tr><td style="padding: 8px 0; color: #666;">Urgency</td><td style="padding: 8px 0; ${(urgency === 'high' || urgency === 'emergency') ? 'color: #dc2626; font-weight: 600;' : ''}">${urgency}</td></tr>` : ''}
-                </table>
-                ${summary ? `<div style="margin-top: 16px; padding: 12px; background: #f9fafb; border-radius: 8px;"><p style="margin: 0; font-size: 14px; color: #444;">${summary}</p></div>` : ''}
-                <p style="margin-top: 20px; font-size: 12px; color: #999;">Sent by ${brandName}</p>
-              </div>
-            `
-          });
-          console.log(`📧 Team email (${emailKey}) sent to ${member.display_name}`);
-        } catch (err) {
-          console.error(`⚠️ Team email failed for ${member.display_name}:`, err.message);
         }
       }
     }

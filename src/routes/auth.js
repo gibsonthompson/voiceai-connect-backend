@@ -25,13 +25,16 @@
 //          the rest of the signup flow. It only ever acts on an account whose
 //          password_hash is null, so an active account can't be taken over
 //          through it. See the SECURITY note on the function for gating.
+// UPDATED: 2026-08-12: Removed the dead requestPasswordReset email function and
+//          its sendEmail import. It was never mounted to a route (the real
+//          reset flow is the 6-digit SMS in password-reset.js) and it sent an
+//          unbranded email from the platform address. No route referenced it.
 // Destination: src/routes/auth.js (FULL REPLACEMENT)
 // ============================================================================
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { supabase, getUserByEmail, getUserById } = require('../lib/supabase');
-const { sendEmail } = require('../lib/notifications');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const JWT_EXPIRES_IN = '30d';
@@ -328,30 +331,6 @@ async function changePassword(req, res) {
 }
 
 // ============================================================================
-// REQUEST PASSWORD RESET (unchanged)
-// ============================================================================
-async function requestPasswordReset(req, res) {
-  try {
-    const { email } = req.body;
-    if (!email) return res.status(400).json({ error: 'Email required' });
-
-    const user = await getUserByEmail(email.toLowerCase());
-    if (!user) return res.json({ success: true, message: 'If an account exists, a reset link has been sent' });
-
-    const crypto = require('crypto');
-    const token = crypto.randomBytes(32).toString('hex');
-    const expiresAt = new Date(); expiresAt.setHours(expiresAt.getHours() + 1);
-    await supabase.from('password_reset_tokens').insert({ user_id: user.id, email: email.toLowerCase(), token, expires_at: expiresAt.toISOString(), used: false });
-
-    const resetUrl = `${process.env.FRONTEND_URL}/auth/reset-password?token=${token}`;
-    await sendEmail({ to: email, subject: 'Reset Your Password', html: `<h2>Reset Your Password</h2><p>Click the link below to reset your password. This link expires in 1 hour.</p><p><a href="${resetUrl}">Reset Password</a></p><p>If you didn't request this, you can ignore this email.</p>` });
-
-    console.log('✅ Password reset email sent to:', email);
-    res.json({ success: true, message: 'If an account exists, a reset link has been sent' });
-  } catch (error) { console.error('❌ Password reset request error:', error); res.status(500).json({ error: 'Failed to process request' }); }
-}
-
-// ============================================================================
 // AUTH MIDDLEWARE (unchanged)
 // ============================================================================
 function authMiddleware(requiredRoles = []) {
@@ -588,4 +567,4 @@ function requireAgencyAccess(permissionKey) {
   };
 }
 
-module.exports = { agencyLogin, clientLogin, recoverAccountSetup, verifyToken, setPassword, changePassword, requestPasswordReset, authMiddleware, requirePermission, requirePermissionIfAuthed, requireAgencyAccess, generateToken };
+module.exports = { agencyLogin, clientLogin, recoverAccountSetup, verifyToken, setPassword, changePassword, authMiddleware, requirePermission, requirePermissionIfAuthed, requireAgencyAccess, generateToken };
