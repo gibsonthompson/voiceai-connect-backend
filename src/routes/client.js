@@ -50,6 +50,16 @@
 //          returns that playable URL. It is a no-op for legacy/public urls and
 //          returns the stored URL unchanged on any failure, so nothing else
 //          changes. Docs: docs.vapi.ai/assistants/retrieve-call-artifacts
+// UPDATED: 2026-08-12 - VOICE SAVE FIX: PUT /:id/voice now writes
+//          clients.voice_id to the database FIRST (that column is the source of
+//          truth the dynamic assistant builder reads on every live call), then
+//          patches the legacy static VAPI assistant's voice as a best-effort
+//          side effect. Previously the DB write was gated behind a required,
+//          successful VAPI patch: a missing/stale vapi_assistant_id returned 404
+//          and a failed patch returned 500, so voice_id was never saved and live
+//          calls kept the old voice, even though a dynamic call never reads the
+//          static assistant. This is the same bug and the same fix that was
+//          applied to the greeting endpoint on 2026-08-10.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -361,6 +371,18 @@ router.get('/:id/voice', requirePermissionIfAuthed('ai_agent'), async (req, res)
 
 // ============================================================================
 // PUT /api/client/:id/voice - Update voice
+// ----------------------------------------------------------------------------
+// The database column clients.voice_id is the source of truth. Every live call
+// builds its assistant on the fly (assistant-request → buildDynamicAssistantConfig),
+// which reads client.voice_id. The static VAPI assistant is legacy and is NOT
+// used at call time, so patching it must never gate the DB write.
+//
+// Order therefore matters: write voice_id to the DB FIRST, return success on
+// that write, then patch the legacy static assistant as a best-effort side
+// effect. Previously the DB write only ran after a required, successful VAPI
+// patch, so a missing/stale vapi_assistant_id (404) or a failed patch (500)
+// silently left voice_id unchanged and every call kept the old voice. This is
+// the same fix that was applied to the greeting endpoint on 2026-08-10.
 // ============================================================================
 router.put('/:id/voice', requirePermissionIfAuthed('ai_agent'), async (req, res) => {
   try {
@@ -369,11 +391,38 @@ router.put('/:id/voice', requirePermissionIfAuthed('ai_agent'), async (req, res)
     if (!voiceId) return res.status(400).json({ success: false, error: 'voice_id required' });
     const validVoice = VOICE_OPTIONS.find(v => v.id === voiceId);
     if (!validVoice) return res.status(400).json({ success: false, error: 'Invalid voice ID' });
-    const { data: client } = await supabase.from('clients').select('vapi_assistant_id').eq('id', id).single();
-    if (!client?.vapi_assistant_id) return res.status(404).json({ success: false, error: 'Client or assistant not found' });
-    const vapiResponse = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, { method: 'PATCH', headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ voice: { provider: '11labs', voiceId: voiceId } }) });
-    if (!vapiResponse.ok) { const errorText = await vapiResponse.text(); console.error('VAPI voice update failed:', errorText); return res.status(500).json({ success: false, error: 'Failed to update voice in VAPI' }); }
-    await supabase.from('clients').update({ voice_id: voiceId }).eq('id', id);
+
+    // 1. Persist to the DB first. This is what live calls actually read.
+    const { data: updated, error: updateErr } = await supabase
+      .from('clients')
+      .update({ voice_id: voiceId })
+      .eq('id', id)
+      .select('id, vapi_assistant_id')
+      .single();
+    if (updateErr || !updated) {
+      console.error('Voice DB update failed:', updateErr?.message);
+      return res.status(400).json({ success: false, error: updateErr?.message || 'Client not found' });
+    }
+
+    // 2. Best-effort: keep the legacy static assistant's voice in sync so
+    //    anything still pointing at it stays consistent. A failure here never
+    //    fails the request, because the DB write above is the source of truth.
+    if (updated.vapi_assistant_id) {
+      try {
+        const vapiResponse = await fetch(`https://api.vapi.ai/assistant/${updated.vapi_assistant_id}`, {
+          method: 'PATCH',
+          headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ voice: { provider: '11labs', voiceId: voiceId } }),
+        });
+        if (!vapiResponse.ok) {
+          const errorText = await vapiResponse.text().catch(() => '');
+          console.warn(`⚠️ Voice saved to DB; legacy VAPI assistant PATCH failed (non-blocking, HTTP ${vapiResponse.status}): ${errorText.slice(0, 200)}`);
+        }
+      } catch (vapiErr) {
+        console.warn('⚠️ Voice saved to DB; legacy VAPI assistant PATCH threw (non-blocking):', vapiErr.message);
+      }
+    }
+
     console.log(`✅ Voice updated for client ${id}: ${validVoice.name}`);
     res.json({ success: true, voice: validVoice });
   } catch (error) { console.error('Error updating voice:', error); res.status(500).json({ success: false, error: 'Server error' }); }

@@ -1,15 +1,16 @@
 // ============================================================================
 // NOTIFICATIONS - SMS (Telnyx) & Email (Brevo)
 // Multi-tenant aware with agency branding
-// UPDATED: 2026-05-10 — All SMS functions use sendAndLogSMS for centralized logging
-// UPDATED: 2026-05-10 — Welcome email plan-aware (Free vs Pro/Scale)
-// UPDATED: 2026-08-12 — Removed client-facing emails for white-label integrity:
+// UPDATED: 2026-05-10, All SMS functions use sendAndLogSMS for centralized logging
+// UPDATED: 2026-05-10, Welcome email plan-aware (Free vs Pro/Scale)
+// UPDATED: 2026-08-12, Removed client-facing emails for white-label integrity:
 //          sendClientWelcomeEmail and sendCallSummaryEmail are gone (every
 //          client touchpoint is now agency-branded SMS). sendEmail,
 //          parseSender, and the agency-facing sendAgencyWelcomeEmail remain.
 // ============================================================================
 const fetch = require('node-fetch');
 const { decrypt } = require('./encryption');
+const { renderBrandedEmail } = require('./email-layout');
 
 const PLATFORM_OWNER_PHONE = process.env.PLATFORM_OWNER_PHONE || '+16783161454';
 
@@ -82,7 +83,7 @@ function parseSender(fromString) {
 }
 
 // ============================================================================
-// SMS VIA TELNYX (low-level transport — kept for sms-logger.js to import)
+// SMS VIA TELNYX (low-level transport, kept for sms-logger.js to import)
 // ============================================================================
 async function sendTelnyxSMS(toPhone, message) {
   try {
@@ -145,7 +146,7 @@ async function sendAgencySignupNotificationSMS(agency) {
 }
 
 async function sendAgencyWelcomeSMS(agency, passwordToken) {
-  if (!agency?.phone) { console.log(`⚠️ Agency ${agency?.name || 'Unknown'} has no phone — skipping welcome SMS`); return false; }
+  if (!agency?.phone) { console.log(`⚠️ Agency ${agency?.name || 'Unknown'} has no phone, skipping welcome SMS`); return false; }
   const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
   const platformUrl = `https://${platformDomain}`;
   let agencyUrl = agency.slug ? `https://${agency.slug}.${platformDomain}` : platformUrl;
@@ -154,7 +155,7 @@ async function sendAgencyWelcomeSMS(agency, passwordToken) {
     const returnTo = encodeURIComponent(`/onboarding?agency=${agency.id}`);
     setupLink = `${platformUrl}/auth/set-password?token=${passwordToken}&returnTo=${returnTo}`;
   } else { setupLink = `${platformUrl}/agency/login`; }
-  const message = `Welcome to VoiceAI Connect! 🚀\n\nYour agency is ready:\n${agencyUrl}\n\nFinish setting up — takes about 2 minutes:\n${setupLink}`;
+  const message = `Welcome to VoiceAI Connect! 🚀\n\nYour agency is ready:\n${agencyUrl}\n\nFinish setting up, takes about 2 minutes:\n${setupLink}`;
   return _logSMS({ phone: formatPhoneE164(agency.phone, agency.country || 'US'), message, agencyId: agency.id, recipientType: 'agency_owner', messageType: 'agency_welcome' });
 }
 
@@ -209,7 +210,7 @@ async function sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName, 
     lines.push(`Here's what we showed you:`);
     if (serviceDiscussed) lines.push(`✅ ${serviceDiscussed}`);
     lines.push(`✅ Instant text summaries after every call`);
-    lines.push(`✅ 24/7 coverage — never miss a call`);
+    lines.push(`✅ 24/7 coverage, never miss a call`);
     lines.push('');
   }
   lines.push(`Ready to get one${callerBusinessName ? ` for ${callerBusinessName}` : ' for your business'}? Start free, no credit card needed:`);
@@ -259,7 +260,7 @@ async function sendClientSubscriptionActivatedSMS(client, agency, plan) {
 async function sendSpamBlockedSMS(client, agency, callerPhone, spamReason) {
   if (!client.owner_phone) return false;
   const callerDisplay = formatPhoneDisplay(callerPhone) || callerPhone || 'Unknown';
-  const message = `🚫 Spam Blocked — ${client.business_name}\n\nYour AI receptionist detected and blocked a spam call.\n\nCaller: ${callerDisplay}\nType: ${spamReason || 'Robocall / telemarketer'}\n\nNo action needed — this call was not counted against your limit.`;
+  const message = `🚫 Spam Blocked, ${client.business_name}\n\nYour AI receptionist detected and blocked a spam call.\n\nCaller: ${callerDisplay}\nType: ${spamReason || 'Robocall / telemarketer'}\n\nNo action needed, this call was not counted against your limit.`;
   return _logSMS({ phone: client.owner_phone, message, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_spam_blocked', metadata: { clientName: client.business_name, callerPhone } });
 }
 
@@ -284,20 +285,40 @@ async function sendEmail(emailData) {
 }
 
 // ============================================================================
-// WELCOME EMAILS — Plan-aware messaging
+// WELCOME EMAILS, Plan-aware messaging
 // ============================================================================
-async function sendAgencyWelcomeEmail(agency, passwordToken) {
-  const dashboardUrl = process.env.FRONTEND_URL || 'https://myvoiceaiconnect.com';
-  const isFree = !agency.plan_type || agency.plan_type === 'free' || agency.plan_type === 'starter';
+// Getting-started email. NO password link: agencies set their password
+// in-browser (the set-password token is delivered in the signup RESPONSE BODY,
+// not by email). The second arg is accepted but unused so agency-signup.js does
+// not need to change. No plan/trial copy: this fires at signup before a plan is
+// chosen, which is exactly why the old "14-day trial / no card" line was wrong.
+async function sendAgencyWelcomeEmail(agency, _passwordTokenUnused) {
+  const loginUrl = `${process.env.FRONTEND_URL || 'https://myvoiceaiconnect.com'}/agency/login`;
+  const agencyUrl = `https://${agency.slug}.myvoiceaiconnect.com`;
 
-  const trialLine = isFree
-    ? `<p>Your <strong>free account</strong> is active. Add a payment method when you're ready to onboard your first client.</p>`
-    : `<p>Your <strong>14-day free trial</strong> starts when you finish setup. No credit card required.</p>`;
+  const bodyHtml =
+    `<p style="margin:0 0 18px;">Hi ${agency.name}, your agency workspace is live. Here is where it lives and what to do next.</p>` +
+    `<div style="padding:14px 16px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;">` +
+    `<div style="font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#94a3b8;margin:0 0 4px;">Your agency URL</div>` +
+    `<div style="font-size:16px;font-weight:700;color:#0f172a;word-break:break-all;">${agencyUrl}</div>` +
+    `</div>` +
+    `<p style="margin:22px 0 8px;font-weight:700;color:#0f172a;">What to do next</p>` +
+    `<ol style="margin:0;padding-left:20px;color:#334155;">` +
+    `<li style="margin:0 0 6px;">Finish your branding and pricing in the dashboard</li>` +
+    `<li style="margin:0 0 6px;">Connect Stripe so client payments land in your account</li>` +
+    `<li style="margin:0;">Share your signup link and onboard your first client</li>` +
+    `</ol>`;
 
   return sendEmail({
-    from: 'VoiceAI Connect <onboarding@myvoiceaiconnect.com>', to: agency.email,
-    subject: 'Welcome to VoiceAI Connect - Start Your AI Agency!',
-    html: `<!DOCTYPE html><html><body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0;"><div style="max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;"><h1 style="color: #2563eb;">Welcome to VoiceAI Connect! 🚀</h1><p>Hi ${agency.name},</p><p>Your AI agency platform is ready.</p><div style="background-color: #f0f4ff; border-left: 4px solid #2563eb; padding: 20px; margin: 20px 0;"><p style="margin: 0;"><strong>Your agency URL:</strong></p><p style="font-size: 18px; color: #2563eb; margin: 5px 0;">https://${agency.slug}.myvoiceaiconnect.com</p></div><p><strong>What to do next:</strong></p><ol><li>Set your password and access your dashboard</li><li>Upload your logo and customize your branding</li><li>Set your pricing</li><li>Connect your Stripe account</li><li>Share your signup link!</li></ol><div style="text-align: center; margin: 30px 0;"><a href="${dashboardUrl}/auth/set-password?token=${passwordToken}" style="display: inline-block; background-color: #2563eb; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold;">Set Password & Get Started →</a></div>${trialLine}<hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;"><p style="color: #666; font-size: 14px;">Need help? Reply to this email.</p></div></body></html>`
+    from: 'VoiceAI Connect <onboarding@myvoiceaiconnect.com>',
+    to: agency.email,
+    subject: 'Your VoiceAI Connect agency is live',
+    html: renderBrandedEmail({
+      preheader: 'Your agency workspace is live. Here is what to do next.',
+      heading: 'Your agency is live',
+      bodyHtml,
+      cta: { label: 'Log in to your dashboard', url: loginUrl },
+    }),
   });
 }
 
