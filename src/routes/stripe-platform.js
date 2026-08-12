@@ -8,34 +8,41 @@
 // STRIPE_PRICE_PRO_CLIENT, STRIPE_PRICE_PRO_MINUTE, STRIPE_PRICE_SCALE_PLATFORM,
 // STRIPE_PRICE_SCALE_MINUTE).
 //
-// Updated 2026-06-10 — replaces the pre-3-Product version that used the stale
+// Updated 2026-06-10, replaces the pre-3-Product version that used the stale
 // starter/professional/enterprise keys and STRIPE_PRICE_AGENCY_* env vars.
 //
-// Updated 2026-07-02 — handleAgencySubscriptionDeleted now cascades a number
+// Updated 2026-07-02, handleAgencySubscriptionDeleted now cascades a number
 // release to every client under the canceled agency (releaseAgencyClientNumbers).
 // Previously an agency platform-cancel suspended the agency but left all of its
 // clients' Telnyx numbers renting monthly forever. This closes the agency-level
 // half of the number-release leak (the client-level half is fixed in
 // stripe-connect.js).
+//
+// Updated 2026-08-12, the four agency billing emails (cancellation, payment
+// failed, trial ending, trial warning) now render through the shared branded
+// email layout (lib/email-layout.js) instead of bare unstyled HTML. Copy on the
+// two trial emails was corrected: paid trials are card-required, so the plan
+// continues automatically on the card on file rather than needing one added.
 // ============================================================================
 const Stripe = require('stripe');
 const { supabase, getAgencyByStripeCustomerId } = require('../lib/supabase');
 const { sendEmail, sendPlatformNotificationSMS, sendAgencySignupNotificationSMS } = require('../lib/notifications');
 const { fullyReleaseNumber, disableAssistant } = require('../lib/vapi');
+const { renderBrandedEmail } = require('../lib/email-layout');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 // ============================================================================
 // PLAN CONFIGURATION
 // ----------------------------------------------------------------------------
-// platform → flat recurring fee. quantity is always 1.
-// client   → per-unit recurring (not metered). The subscription item is added
+// platform -> flat recurring fee. quantity is always 1.
+// client   -> per-unit recurring (not metered). The subscription item is added
 //            in handleAgencyCheckoutCompleted with qty = current real (non-
 //            test) client count, then kept in sync by updateClientBillingQuantity
 //            as clients are added/removed. We don't include it in checkout
 //            line_items because Stripe Checkout requires qty>=1, and a newly-
 //            upgraded agency typically has 0 paying clients.
-// minute   → metered via voice_minutes meter. Stripe rejects `quantity` on
+// minute   -> metered via voice_minutes meter. Stripe rejects `quantity` on
 //            metered prices, so the line item must omit it entirely.
 // ============================================================================
 const PLATFORM_PLANS = {
@@ -51,7 +58,7 @@ const PLATFORM_PLANS = {
     name: 'Scale',
     price: 49900, // $499/mo flat
     platformPrice: process.env.STRIPE_PRICE_SCALE_PLATFORM,
-    clientPrice: null, // Scale is unlimited clients at $0 — no per-client item
+    clientPrice: null, // Scale is unlimited clients at $0, no per-client item
     minutePrice: process.env.STRIPE_PRICE_SCALE_MINUTE,
     clientLimit: -1,
   },
@@ -130,11 +137,11 @@ function detectPlanFromSubscription(subscription) {
 // client item if applicable and not already attached.
 //
 // Flow per plan transition:
-//   Pro → Scale: removes Pro $9.99/client item, adds nothing (Scale has no
+//   Pro -> Scale: removes Pro $9.99/client item, adds nothing (Scale has no
 //                per-client price)
-//   Scale → Pro: adds Pro $9.99/client item at current client count
-//   Pro → Pro / Scale → Scale: no-op (target already matches)
-//   anything → Free: not reached (Free has no Stripe subscription)
+//   Scale -> Pro: adds Pro $9.99/client item at current client count
+//   Pro -> Pro / Scale -> Scale: no-op (target already matches)
+//   anything -> Free: not reached (Free has no Stripe subscription)
 async function syncPerClientSubscriptionItem(agencyId, planId, subscriptionId) {
   if (!subscriptionId) return;
   const planConfig = PLATFORM_PLANS[planId];
@@ -207,14 +214,14 @@ async function syncPerClientSubscriptionItem(agencyId, planId, subscriptionId) {
 // Enforces the agency team-member seat cap after a plan change or cancel.
 // checkTeamLimit() in routes/team.js gates seats at ADD time, but members
 // already added under a roomier plan would otherwise keep logging in after a
-// downgrade — agencyLogin only blocks team_members whose status is 'disabled'.
+// downgrade, agencyLogin only blocks team_members whose status is 'disabled'.
 // This disables the newest-over-cap members so that existing login gate takes
 // over, with NO change needed in auth.js.
 //
 // Policy (approved): oldest kept, newest disabled. Caps by plan:
-//   scale / enterprise → unlimited (no-op)
-//   pro / professional → 3
-//   free / anything else → 0  (disable every active agency staff member)
+//   scale / enterprise -> unlimited (no-op)
+//   pro / professional -> 3
+//   free / anything else -> 0  (disable every active agency staff member)
 //
 // Notes:
 //   - Only agency-scope team_members are touched. Client team members and the
@@ -233,7 +240,7 @@ async function reconcileAgencyTeamSeats(agencyId, plan) {
     (p === 'pro' || p === 'professional')    ? 3  :
     0;
 
-  // Unlimited — nothing to enforce.
+  // Unlimited, nothing to enforce.
   if (cap === -1) return;
 
   // Active (non-disabled) agency members, oldest first so the first `cap`
@@ -308,7 +315,7 @@ async function releaseAgencyClientNumbers(agencyId) {
 
   if (!clients || clients.length === 0) return;
 
-  console.log(`📞 Agency ${agencyId} canceled - releasing ${clients.length} client number(s)`);
+  console.log(`📞 Agency ${agencyId} canceled, releasing ${clients.length} client number(s)`);
 
   for (const c of clients) {
     try {
@@ -429,7 +436,7 @@ async function createAgencyCheckout(req, res) {
     }
 
     // Build line items: platform fee (flat, qty 1) + metered minute price
-    // (no quantity allowed — Stripe rejects it on metered prices). The per-
+    // (no quantity allowed, Stripe rejects it on metered prices). The per-
     // client subscription item is added after subscription creation in the
     // checkout.session.completed webhook handler.
     const lineItems = [
@@ -780,7 +787,7 @@ async function handleAgencySubscriptionUpdated(subscription) {
   };
 
   if (planChanged) {
-    console.log(`📈 Plan change detected: ${agency.plan_type} → ${detectedPlan}`);
+    console.log(`📈 Plan change detected: ${agency.plan_type} -> ${detectedPlan}`);
     updates.plan_type = detectedPlan;
     updates.max_team_members_agency = null;
     updates.max_team_members_client = null;
@@ -794,7 +801,7 @@ async function handleAgencySubscriptionUpdated(subscription) {
   if (planChanged) {
     await syncPerClientSubscriptionItem(agency.id, detectedPlan, subscription.id);
     // Downgrade enforcement: if the new plan's cap is lower than the current
-    // active staff count (e.g. Scale → Pro), disable the newest over-cap
+    // active staff count (e.g. Scale -> Pro), disable the newest over-cap
     // members so they can no longer log in.
     await reconcileAgencyTeamSeats(agency.id, detectedPlan);
   }
@@ -927,13 +934,15 @@ async function handleAgencySubscriptionDeleted(subscription) {
 
   await sendEmail({
     to: agency.email,
-    subject: 'VoiceAI Connect Subscription Cancelled',
-    html: `
-      <h2>Your subscription has been cancelled</h2>
-      <p>Hi ${agency.name},</p>
-      <p>Your VoiceAI Connect subscription has been cancelled. Your agency and all client AI assistants will be suspended.</p>
-      <p>To reactivate, visit your dashboard.</p>
-    `,
+    subject: 'Your VoiceAI Connect subscription was cancelled',
+    html: renderBrandedEmail({
+      preheader: 'Your subscription was cancelled and your agency is now suspended.',
+      heading: 'Your subscription was cancelled',
+      bodyHtml:
+        `<p style="margin:0 0 16px;">Hi ${agency.name}, your VoiceAI Connect subscription has been cancelled. Your agency and all of its client AI assistants are now suspended.</p>` +
+        `<p style="margin:0;">You can reactivate any time from your billing settings. Your branding, pricing, and clients are all preserved.</p>`,
+      cta: { label: 'Reactivate your agency', url: `${process.env.FRONTEND_URL}/agency/settings?tab=billing` },
+    }),
   }).catch((e) => console.error('Failed to send cancellation email:', e.message));
 }
 
@@ -967,13 +976,14 @@ async function handleAgencyPaymentFailed(invoice) {
 
   await sendEmail({
     to: agency.email,
-    subject: '🚨 VoiceAI Connect Payment Failed - Action Required',
-    html: `
-      <h2>Payment Failed</h2>
-      <p>Hi ${agency.name},</p>
-      <p>We couldn't process your payment. Please update your payment method to avoid service interruption.</p>
-      <p><a href="${invoice.hosted_invoice_url}">Update Payment Method</a></p>
-    `,
+    subject: 'Payment failed, action required',
+    html: renderBrandedEmail({
+      preheader: 'We could not process your payment. Update your method to avoid interruption.',
+      heading: 'Payment failed',
+      bodyHtml:
+        `<p style="margin:0 0 16px;">Hi ${agency.name}, we could not process your latest payment. Please update your payment method to avoid any interruption to your agency and its clients.</p>`,
+      cta: { label: 'Update payment method', url: invoice.hosted_invoice_url },
+    }),
   }).catch((e) => console.error('Failed to send payment-failed email:', e.message));
 }
 
@@ -988,13 +998,15 @@ async function handleAgencyTrialEnding(subscription) {
 
   await sendEmail({
     to: agency.email,
-    subject: `⏰ Your VoiceAI Connect trial ends in ${daysLeft} days`,
-    html: `
-      <h2>Your trial is ending soon</h2>
-      <p>Hi ${agency.name},</p>
-      <p>Your 14-day trial ends on ${trialEnd.toLocaleDateString()}.</p>
-      <p>Add a payment method to continue growing your AI agency.</p>
-    `,
+    subject: `Your VoiceAI Connect trial ends in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`,
+    html: renderBrandedEmail({
+      preheader: `Your trial ends on ${trialEnd.toLocaleDateString()}.`,
+      heading: 'Your trial is ending soon',
+      bodyHtml:
+        `<p style="margin:0 0 16px;">Hi ${agency.name}, your 14-day trial ends on <strong>${trialEnd.toLocaleDateString()}</strong>. Your plan continues automatically after that using the card on file, so there is nothing you need to do to stay active.</p>` +
+        `<p style="margin:0;">Want to review or change anything first? You can manage it in your billing settings.</p>`,
+      cta: { label: 'Manage subscription', url: `${process.env.FRONTEND_URL}/agency/settings?tab=billing` },
+    }),
   }).catch((e) => console.error('Failed to send trial-ending email:', e.message));
 }
 
@@ -1005,7 +1017,9 @@ async function handleAgencyTrialEnding(subscription) {
 // declared the import in server.js but never defined or exported the function,
 // which would crash the cron endpoint with "warnExpiringAgencyTrials is not a
 // function". Stripe also fires customer.subscription.trial_will_end 3 days
-// before trial end automatically, so this is a redundant safety net.
+// before trial end automatically, so this is a redundant safety net. NOTE: as
+// a result an agency can receive BOTH this email and handleAgencyTrialEnding's
+// around the same time; if that double-send is unwanted, disable one.
 // ============================================================================
 async function warnExpiringAgencyTrials() {
   console.log('⏰ Running agency trial warning check...');
@@ -1029,15 +1043,18 @@ async function warnExpiringAgencyTrials() {
     let warned = 0;
     for (const agency of agencies || []) {
       try {
+        const planName = PLATFORM_PLANS[agency.plan_type]?.name || agency.plan_type;
         await sendEmail({
           to: agency.email,
-          subject: '⏰ Your VoiceAI Connect trial ends in 3 days',
-          html: `
-            <h2>Your trial ends soon</h2>
-            <p>Hi ${agency.name},</p>
-            <p>Your 14-day trial of the ${PLATFORM_PLANS[agency.plan_type]?.name || agency.plan_type} plan ends on ${new Date(agency.trial_ends_at).toLocaleDateString()}.</p>
-            <p>Add a payment method now to keep your agency active and avoid service interruption.</p>
-          `,
+          subject: 'Your VoiceAI Connect trial ends in 3 days',
+          html: renderBrandedEmail({
+            preheader: `Your ${planName} trial ends soon.`,
+            heading: 'Your trial ends in 3 days',
+            bodyHtml:
+              `<p style="margin:0 0 16px;">Hi ${agency.name}, your 14-day trial of the <strong>${planName}</strong> plan ends on <strong>${new Date(agency.trial_ends_at).toLocaleDateString()}</strong>. Your plan continues automatically after that using the card on file.</p>` +
+              `<p style="margin:0;">Want to review or change anything first? You can manage it in your billing settings.</p>`,
+            cta: { label: 'Manage subscription', url: `${process.env.FRONTEND_URL}/agency/settings?tab=billing` },
+          }),
         });
         warned++;
       } catch (e) {

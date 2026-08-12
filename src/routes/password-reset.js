@@ -7,19 +7,20 @@
 //                      Email is universal and reaches UK agencies, where the US
 //                      Telnyx SMS number does not deliver. Agencies are the
 //                      platform's own customer, so platform branding is correct.
-//   - CLIENT users  -> code delivered by SMS (unchanged). A VoiceAI-branded
-//                      email to a client would break white-label, so clients
-//                      stay on SMS. (KNOWN GAP: client reset SMS still sends via
-//                      the raw US Telnyx number, so it will not deliver to a
-//                      BYOT/non-US client. Route client reset SMS through
-//                      sendAndLogSMS with the client's agency later so BYOT
-//                      clients get it from the agency's own Twilio.)
+//   - CLIENT users  -> code delivered by SMS. A VoiceAI-branded email to a
+//                      client would break white-label, so clients stay on SMS.
+//                      The send routes through sendAndLogSMS WITH the client's
+//                      agency, so a non-US BYOT agency sends from its OWN Twilio
+//                      (the raw US Telnyx number does not deliver to UK/
+//                      international handsets). US clients fall through to
+//                      platform Telnyx inside sendAndLogSMS.
 //
 // Also closes a silent-lockout hole: previously, a user with no phone on file
 // got a fake "code sent" success and nothing was sent. Agencies now always have
 // email, so they can always reset.
 //
-// UPDATED: 2026-08-12 - Agency reset delivered by branded email (email-layout).
+// UPDATED: 2026-08-12 - Agency reset by branded email (email-layout); client
+//          reset SMS routed through the agency (BYOT Twilio for non-US).
 // Destination: src/routes/password-reset.js (FULL REPLACEMENT)
 // ============================================================================
 const express = require('express');
@@ -27,7 +28,8 @@ const router = express.Router();
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { supabase, getUserByEmail } = require('../lib/supabase');
-const { sendTelnyxSMS, formatPhoneDisplay, sendEmail } = require('../lib/notifications');
+const { sendEmail } = require('../lib/notifications');
+const { sendAndLogSMS } = require('../lib/sms-logger');
 const { getSmsTemplate } = require('../lib/sms-templates');
 const { renderBrandedEmail, BRAND_NAME } = require('../lib/email-layout');
 
@@ -88,6 +90,7 @@ router.post('/forgot-password', async (req, res) => {
     // Resolve the delivery channel by user type.
     let userType = 'client';
     let phone = null;
+    let clientAgencyId = null;
 
     if (user.agency_id && ['agency_owner', 'agency_staff', 'super_admin'].includes(user.role)) {
       userType = 'agency';
@@ -95,8 +98,9 @@ router.post('/forgot-password', async (req, res) => {
     } else if (user.client_id && user.role === 'client') {
       userType = 'client';
       const { data: client } = await supabase
-        .from('clients').select('owner_phone').eq('id', user.client_id).single();
+        .from('clients').select('owner_phone, agency_id').eq('id', user.client_id).single();
       phone = client?.owner_phone;
+      clientAgencyId = client?.agency_id || null;
     } else {
       // Unknown role shape. Treat as client and require a phone.
       userType = 'client';
@@ -174,10 +178,31 @@ router.post('/forgot-password', async (req, res) => {
       });
     }
 
-    // ---- CLIENT: deliver the code by SMS (unchanged, white-label safe) -------
+    // ---- CLIENT: deliver the code by SMS (white-label safe) ------------------
+    // Route through sendAndLogSMS WITH the client's agency, so a non-US BYOT
+    // agency sends the code from its OWN Twilio. The raw US Telnyx number does
+    // not deliver to UK/international handsets, which locked out those clients.
+    // US clients still fall through to platform Telnyx inside sendAndLogSMS.
     const templateMsg = await getSmsTemplate('password_reset_code', { code });
     const smsMessage = templateMsg || `Your verification code is: ${code}\n\nThis code expires in 15 minutes. Do not share it with anyone.`;
-    const smsSent = await sendTelnyxSMS(phone, smsMessage);
+
+    // sendAndLogSMS returns a boolean (true = sent), handles its own errors, and
+    // logs every attempt to sms_log. It routes to the agency's own Twilio for a
+    // non-US BYOT agency and to platform Telnyx otherwise.
+    let smsSent = false;
+    try {
+      smsSent = (await sendAndLogSMS({
+        phone,
+        message: smsMessage,
+        agencyId: clientAgencyId,
+        recipientType: 'client_owner',
+        messageType: 'client_password_reset',
+        metadata: { clientId: user.client_id },
+      })) === true;
+    } catch (e) {
+      console.error('❌ Client reset SMS send threw:', e.message);
+      smsSent = false;
+    }
 
     if (!smsSent) {
       console.error('❌ Failed to send SMS to:', phone);
