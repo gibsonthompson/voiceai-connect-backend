@@ -29,18 +29,19 @@
 //          its sendEmail import. It was never mounted to a route (the real
 //          reset flow is the 6-digit SMS in password-reset.js) and it sent an
 //          unbranded email from the platform address. No route referenced it.
-// UPDATED: 2026-08-12: agencyLogin no longer hard-blocks a 'suspended' agency
+// UPDATED: 2026-08-13: agencyLogin no longer hard-blocks a 'suspended' agency
 //          with a 403 "Your account has been suspended. Please contact support."
 //          The password is verified FIRST, so by the time status is checked the
 //          account is already known valid. Instead of dead-ending them, we mint
 //          the normal token and return the SAME success shape an active login
-//          returns, plus requires_upgrade:true and
-//          redirect:'/agency/settings?tab=billing' so the login page routes them
-//          to the Billing tab to reactivate. 'suspended' is the ONLY status
-//          gated at login; expired/cancelled/past_due already logged in and are
-//          handled downstream by the agency layout. A genuine permanent ban, if
-//          ever needed, should be a DISTINCT status blocked explicitly at the
-//          BAN GATE marked in agencyLogin, not a reuse of 'suspended'.
+//          returns, plus requires_upgrade:true and redirect:'/agency/reactivate'
+//          so the login page sends them to the dedicated, branded reactivation
+//          page (a standalone Stripe Checkout flow, outside the dashboard shell).
+//          'suspended' is the ONLY status gated at login; expired/cancelled/
+//          past_due already logged in and are handled downstream by the agency
+//          layout. A genuine permanent ban, if ever needed, should be a DISTINCT
+//          status blocked explicitly at the BAN GATE marked in agencyLogin, not
+//          a reuse of 'suspended'.
 // Destination: src/routes/auth.js (FULL REPLACEMENT)
 // ============================================================================
 const bcrypt = require('bcryptjs');
@@ -65,8 +66,9 @@ function generateToken(user) {
 // Password is verified FIRST. A valid password on a 'suspended' agency is no
 // longer dead-ended with a 403 "contact support" wall: the account is real, so
 // we log the user in with the normal token and success shape and add
-// requires_upgrade + redirect, and the login page sends them to the Billing tab
-// to reactivate. Active agencies are completely unchanged.
+// requires_upgrade + redirect, and the login page sends them to the dedicated
+// /agency/reactivate page to restart their subscription. Active agencies are
+// completely unchanged.
 // ============================================================================
 async function agencyLogin(req, res) {
   try {
@@ -87,14 +89,14 @@ async function agencyLogin(req, res) {
     // BAN GATE: if a genuine, permanent ban state is ever introduced (e.g. an
     // agency removed for abuse), block it HERE with a hard 403 before the
     // requires_upgrade logic below. Use a DISTINCT status for it (e.g.
-    // 'banned'); do NOT reuse 'suspended', which now routes to billing so the
-    // owner can pay and reactivate rather than hitting a dead end.
+    // 'banned'); do NOT reuse 'suspended', which now routes to reactivation so
+    // the owner can pay and come back rather than hitting a dead end.
 
     // Lapsed billing state. The password already verified above, so the account
     // is valid. Rather than wall it off, log the user in normally and flag the
-    // frontend to route them to the Billing tab. 'suspended' is the only lapsed
-    // status gated at login; expired/cancelled/past_due already log in and are
-    // handled downstream by the agency layout.
+    // frontend to route them to the dedicated reactivation page. 'suspended' is
+    // the only lapsed status gated at login; expired/cancelled/past_due already
+    // log in and are handled downstream by the agency layout.
     const requiresUpgrade = !!(agency && agency.status === 'suspended');
 
     let teamPermissions = null;
@@ -110,7 +112,7 @@ async function agencyLogin(req, res) {
     if (user.agency_id) await supabase.from('agencies').update({ last_login_at: new Date().toISOString() }).eq('id', user.agency_id);
 
     const token = generateToken(user);
-    console.log('✅ Agency login:', user.email, '| Agency:', agency?.name, '| Role:', user.role, requiresUpgrade ? '| LAPSED → billing' : '');
+    console.log('✅ Agency login:', user.email, '| Agency:', agency?.name, '| Role:', user.role, requiresUpgrade ? '| LAPSED → reactivate' : '');
 
     const responsePayload = {
       success: true, token,
@@ -118,11 +120,11 @@ async function agencyLogin(req, res) {
       agency
     };
     // Lapsed billing state: same success shape as an active login, plus the two
-    // flags the login page reads to redirect to the Billing tab instead of the
-    // dashboard (which the layout would otherwise wall behind a payment screen).
+    // flags the login page reads to redirect to the dedicated reactivation page
+    // instead of the dashboard (which the layout would otherwise wall).
     if (requiresUpgrade) {
       responsePayload.requires_upgrade = true;
-      responsePayload.redirect = '/agency/settings?tab=billing';
+      responsePayload.redirect = '/agency/reactivate';
     }
 
     res.json(responsePayload);
