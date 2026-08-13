@@ -23,6 +23,17 @@
 // email layout (lib/email-layout.js) instead of bare unstyled HTML. Copy on the
 // two trial emails was corrected: paid trials are card-required, so the plan
 // continues automatically on the card on file rather than needing one added.
+//
+// Updated 2026-08-13, createAgencyCheckout now honors skipTrial from the body.
+// Reactivation and trial-expired resubscribe flows (both already send
+// skipTrial:true) previously still got a fresh 14-day trial because the flag
+// was ignored, letting an agency farm repeat free trials by cancelling and
+// resubscribing. With skipTrial:true we omit trial_period_days (Stripe charges
+// immediately on the card entered at checkout) and stamp skip_trial:'true' into
+// the subscription + session metadata. handleAgencyCheckoutCompleted reads that
+// flag and activates the agency straight to 'active' with no trial_ends_at,
+// instead of 'trial'. New signups do NOT send skipTrial, so they keep the
+// 14-day trial exactly as before.
 // ============================================================================
 const Stripe = require('stripe');
 const { supabase, getAgencyByStripeCustomerId } = require('../lib/supabase');
@@ -352,10 +363,16 @@ async function releaseAgencyClientNumbers(agencyId) {
 
 // ============================================================================
 // CREATE CHECKOUT SESSION (Agency subscribes to platform)
+// ----------------------------------------------------------------------------
+// skipTrial (body, optional): when true, no free trial is granted. Stripe
+// charges the card entered at checkout immediately and the agency activates
+// straight to 'active'. Sent by the reactivation page and the trial-expired
+// resubscribe screen, both of which involve agencies that already used their
+// one trial. Absent/false (new signups) keeps the standard 14-day trial.
 // ============================================================================
 async function createAgencyCheckout(req, res) {
   try {
-    const { agency_id, plan } = req.body;
+    const { agency_id, plan, skipTrial } = req.body;
 
     if (!agency_id || !plan) {
       return res.status(400).json({
@@ -388,14 +405,17 @@ async function createAgencyCheckout(req, res) {
       return res.status(404).json({ error: 'Agency not found' });
     }
 
-    console.log(`🛒 Creating ${plan} checkout for: ${agency.email}`);
+    const noTrial = skipTrial === true || skipTrial === 'true';
+    console.log(`🛒 Creating ${plan} checkout for: ${agency.email}${noTrial ? ' (no trial, immediate charge)' : ''}`);
 
     // Defense against duplicate subscriptions. If the agency already has an
     // active/trialing/past_due subscription, force them through the Stripe
     // Customer Portal to change plans instead of letting createAgencyCheckout
     // mint a second concurrent subscription that would double-charge them.
     // Frontend gates this at the button level on /agency/settings, but a
-    // direct API hit (or stale tab) could otherwise sneak through.
+    // direct API hit (or stale tab) could otherwise sneak through. A suspended
+    // agency has had its stripe_subscription_id nulled on cancel/delete, so
+    // reactivation passes this guard and proceeds to a fresh checkout.
     if (agency.stripe_subscription_id) {
       try {
         const existingSub = await stripe.subscriptions.retrieve(agency.stripe_subscription_id);
@@ -446,14 +466,30 @@ async function createAgencyCheckout(req, res) {
       lineItems.push({ price: planConfig.minutePrice });
     }
 
-    // Create checkout session with 14-day trial.
-    // The frontend (signup-plan-page.tsx, agency-settings-page.tsx) passes
-    // successUrl / cancelUrl in the request body so the signup flow can chain
-    // through /auth/set-password before landing on the dashboard. Without
+    // subscription_data: attach a 14-day trial ONLY when not skipping. On a
+    // skipTrial checkout we omit trial_period_days (immediate charge) and mark
+    // skip_trial in metadata so the completed webhook activates straight to
+    // 'active' instead of 'trial'.
+    const subscriptionData = {
+      metadata: {
+        agency_id: agency_id,
+        plan: plan,
+      },
+    };
+    if (noTrial) {
+      subscriptionData.metadata.skip_trial = 'true';
+    } else {
+      subscriptionData.trial_period_days = 14;
+    }
+
+    // Create checkout session.
+    // The frontend (signup-plan-page.tsx, agency-settings-page.tsx, the
+    // reactivation page) passes successUrl / cancelUrl in the request body so
+    // each flow can chain to the right place (signup -> set-password;
+    // reactivation -> an activating screen that waits for the webhook). Without
     // honoring these, the new agency user never sets a password and the
     // post-checkout redirect auto-logs them in as whatever auth_token is
-    // already in localStorage (potentially a different agency entirely).
-    // Fall back to sensible defaults for direct/non-signup callers.
+    // already in localStorage. Fall back to sensible defaults otherwise.
     const defaultSuccess = `${process.env.FRONTEND_URL}/agency/dashboard?upgraded=${plan}&session_id={CHECKOUT_SESSION_ID}`;
     const defaultCancel = `${process.env.FRONTEND_URL}/agency/settings?tab=billing&canceled=true`;
     const successUrl = req.body.successUrl || defaultSuccess;
@@ -470,19 +506,14 @@ async function createAgencyCheckout(req, res) {
       // linked coupon to every invoice per the coupon's duration.
       allow_promotion_codes: true,
       line_items: lineItems,
-      subscription_data: {
-        trial_period_days: 14,
-        metadata: {
-          agency_id: agency_id,
-          plan: plan,
-        },
-      },
+      subscription_data: subscriptionData,
       success_url: successUrl,
       cancel_url: cancelUrl,
       metadata: {
         agency_id: agency_id,
         plan: plan,
         type: 'agency_subscription',
+        skip_trial: noTrial ? 'true' : 'false',
       },
     });
 
@@ -616,6 +647,7 @@ async function handleAgencyCheckoutCompleted(session) {
 
   const agencyId = session.metadata?.agency_id;
   const plan = session.metadata?.plan;
+  const skipTrial = session.metadata?.skip_trial === 'true';
 
   if (!agencyId) return;
   if (!plan || !PLATFORM_PLANS[plan]) {
@@ -629,8 +661,8 @@ async function handleAgencyCheckoutCompleted(session) {
   // its first activation. checkout.session.completed can be retried by Stripe,
   // and customer.subscription.created fires alongside it; keying off status is
   // robust because at signup status is 'pending_payment' and only this handler
-  // moves it to 'trial'. A retry then sees 'trial' and skips, so the owner is
-  // texted exactly once, with the plan they picked.
+  // moves it off pending. A retry then sees a non-pending status and skips, so
+  // the owner is texted exactly once, with the plan they picked.
   const { data: agencyBefore } = await supabase
     .from('agencies')
     .select('id, name, email, phone, referral_source, country, status')
@@ -641,30 +673,53 @@ async function handleAgencyCheckoutCompleted(session) {
     !!agencyBefore &&
     (agencyBefore.status === 'pending' || agencyBefore.status === 'pending_payment');
 
-  // Compute trial_ends_at. The checkout.session event doesn't include the
-  // subscription's trial_end, so we use Date.now + 14 days as an initial
-  // value. handleAgencySubscriptionUpdated will overwrite this with
-  // subscription.trial_end (Stripe's authoritative value) within seconds,
-  // since customer.subscription.created fires alongside this event.
-  const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+  if (skipTrial) {
+    // Reactivation / resubscribe: no new trial. Stripe charged the card at
+    // checkout, so activate the agency straight to 'active' with no
+    // trial_ends_at. This is the path a suspended agency takes; flipping
+    // status off 'suspended' here is what lets the dashboard back in.
+    await supabase
+      .from('agencies')
+      .update({
+        status: 'active',
+        subscription_status: 'active',
+        plan_type: plan,
+        stripe_subscription_id: session.subscription,
+        trial_ends_at: null,
+        max_team_members_agency: null,
+        max_team_members_client: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', agencyId);
 
-  await supabase
-    .from('agencies')
-    .update({
-      status: 'trial',
-      subscription_status: 'trial', // normalized (Stripe will say 'trialing')
-      plan_type: plan,
-      stripe_subscription_id: session.subscription,
-      trial_ends_at: trialEndsAt,
-      // Clear per-row team caps so plan-based defaults in routes/team.js
-      // (checkTeamLimit) take effect. The column is treated as a hard
-      // override when non-null, including the value 0 which would block
-      // adding team members on an otherwise unlimited Pro/Scale plan.
-      max_team_members_agency: null,
-      max_team_members_client: null,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', agencyId);
+    console.log('✅ Agency reactivated (no trial):', agencyId);
+  } else {
+    // New signup: standard 14-day trial. The checkout.session event doesn't
+    // include the subscription's trial_end, so use Date.now + 14 days as an
+    // initial value; handleAgencySubscriptionUpdated overwrites it with
+    // subscription.trial_end (Stripe's authoritative value) within seconds.
+    const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+
+    await supabase
+      .from('agencies')
+      .update({
+        status: 'trial',
+        subscription_status: 'trial', // normalized (Stripe will say 'trialing')
+        plan_type: plan,
+        stripe_subscription_id: session.subscription,
+        trial_ends_at: trialEndsAt,
+        // Clear per-row team caps so plan-based defaults in routes/team.js
+        // (checkTeamLimit) take effect. The column is treated as a hard
+        // override when non-null, including the value 0 which would block
+        // adding team members on an otherwise unlimited Pro/Scale plan.
+        max_team_members_agency: null,
+        max_team_members_client: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', agencyId);
+
+    console.log('✅ Agency activated (trial):', agencyId);
+  }
 
   // Reconcile the per-client subscription item against the new plan. Sync
   // is idempotent so a Stripe webhook retry won't create duplicates, and it
@@ -679,13 +734,14 @@ async function handleAgencyCheckoutCompleted(session) {
     agency_id: agencyId,
     event_type: 'checkout_completed',
     stripe_event_id: session.id,
-    metadata: { plan },
+    metadata: { plan, skip_trial: skipTrial },
   });
 
   // Notify the platform owner that a paid agency just activated, WITH the plan.
-  // Guarded on the pending -> trial transition above so a webhook retry or the
-  // parallel subscription.created event cannot double-text. Best-effort: a
-  // failed SMS must not fail the webhook.
+  // Guarded on the pending -> activated transition above so a webhook retry or
+  // the parallel subscription.created event cannot double-text. A reactivation
+  // (status was 'suspended', not pending) is not a first activation and does
+  // not fire this. Best-effort: a failed SMS must not fail the webhook.
   if (isFirstActivation) {
     try {
       await sendAgencySignupNotificationSMS({ ...agencyBefore, plan_type: plan });
@@ -693,8 +749,6 @@ async function handleAgencyCheckoutCompleted(session) {
       console.error('Failed to send agency activation SMS:', e.message);
     }
   }
-
-  console.log('✅ Agency activated:', agencyId);
 }
 
 async function handleAgencySubscriptionCreated(subscription) {
