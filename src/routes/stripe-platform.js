@@ -1050,16 +1050,29 @@ async function handleAgencyTrialEnding(subscription) {
   const trialEnd = new Date(subscription.trial_end * 1000);
   const daysLeft = Math.ceil((trialEnd - new Date()) / (1000 * 60 * 60 * 24));
 
+  // State the plan, the exact amount that will be charged, the date, and how to
+  // cancel. Auto-renewal laws (e.g. California ARL) want the pre-conversion
+  // notice to give the amount, the conversion date, and an easy way to cancel,
+  // not just the bare fact of an automatic charge. Plan/price come from the
+  // agency's current plan_type, which the subscription handlers keep in sync.
+  const planCfg = PLATFORM_PLANS[agency.plan_type];
+  const planName = planCfg?.name || agency.plan_type || 'your';
+  const priceLabel = planCfg?.price ? `$${(planCfg.price / 100).toFixed(0)}/mo` : null;
+  const endDateLabel = trialEnd.toLocaleDateString();
+  const chargeLine = priceLabel
+    ? `the card on file will be charged <strong>${priceLabel}</strong> for the ${planName} plan, and then ${priceLabel} each month until you cancel`
+    : `the card on file will be charged for the ${planName} plan, and then each month until you cancel`;
+
   await sendEmail({
     to: agency.email,
-    subject: `Your VoiceAI Connect trial ends in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`,
+    subject: `Your VoiceAI Connect trial ends in ${daysLeft} day${daysLeft === 1 ? '' : 's'}${priceLabel ? ` (${priceLabel} after)` : ''}`,
     html: renderBrandedEmail({
-      preheader: `Your trial ends on ${trialEnd.toLocaleDateString()}.`,
+      preheader: `Your trial ends on ${endDateLabel}${priceLabel ? `, then ${priceLabel}` : ''}.`,
       heading: 'Your trial is ending soon',
       bodyHtml:
-        `<p style="margin:0 0 16px;">Hi ${agency.name}, your 14-day trial ends on <strong>${trialEnd.toLocaleDateString()}</strong>. Your plan continues automatically after that using the card on file, so there is nothing you need to do to stay active.</p>` +
-        `<p style="margin:0;">Want to review or change anything first? You can manage it in your billing settings.</p>`,
-      cta: { label: 'Manage subscription', url: `${process.env.FRONTEND_URL}/agency/settings?tab=billing` },
+        `<p style="margin:0 0 16px;">Hi ${agency.name}, your 14-day trial ends on <strong>${endDateLabel}</strong>. Unless you cancel before then, your ${planName} plan begins automatically and ${chargeLine}.</p>` +
+        `<p style="margin:0;">You can review, change, or cancel your plan any time in your billing settings. Cancel before ${endDateLabel} to avoid any charge.</p>`,
+      cta: { label: 'Manage or cancel subscription', url: `${process.env.FRONTEND_URL}/agency/settings?tab=billing` },
     }),
   }).catch((e) => console.error('Failed to send trial-ending email:', e.message));
 }
@@ -1097,17 +1110,26 @@ async function warnExpiringAgencyTrials() {
     let warned = 0;
     for (const agency of agencies || []) {
       try {
-        const planName = PLATFORM_PLANS[agency.plan_type]?.name || agency.plan_type;
+        // Give the plan, the exact price, the conversion date, and how to
+        // cancel, so the pre-conversion notice meets auto-renewal-law
+        // expectations (amount + date + easy cancel), not just "auto-charges".
+        const planCfg = PLATFORM_PLANS[agency.plan_type];
+        const planName = planCfg?.name || agency.plan_type;
+        const priceLabel = planCfg?.price ? `$${(planCfg.price / 100).toFixed(0)}/mo` : null;
+        const endDateLabel = new Date(agency.trial_ends_at).toLocaleDateString();
+        const chargeLine = priceLabel
+          ? `the card on file will be charged <strong>${priceLabel}</strong> for the ${planName} plan, and then ${priceLabel} each month until you cancel`
+          : `the card on file will be charged for the ${planName} plan, and then each month until you cancel`;
         await sendEmail({
           to: agency.email,
-          subject: 'Your VoiceAI Connect trial ends in 3 days',
+          subject: `Your VoiceAI Connect trial ends in 3 days${priceLabel ? ` (${priceLabel} after)` : ''}`,
           html: renderBrandedEmail({
-            preheader: `Your ${planName} trial ends soon.`,
+            preheader: `Your ${planName} trial ends on ${endDateLabel}${priceLabel ? `, then ${priceLabel}` : ''}.`,
             heading: 'Your trial ends in 3 days',
             bodyHtml:
-              `<p style="margin:0 0 16px;">Hi ${agency.name}, your 14-day trial of the <strong>${planName}</strong> plan ends on <strong>${new Date(agency.trial_ends_at).toLocaleDateString()}</strong>. Your plan continues automatically after that using the card on file.</p>` +
-              `<p style="margin:0;">Want to review or change anything first? You can manage it in your billing settings.</p>`,
-            cta: { label: 'Manage subscription', url: `${process.env.FRONTEND_URL}/agency/settings?tab=billing` },
+              `<p style="margin:0 0 16px;">Hi ${agency.name}, your 14-day trial of the <strong>${planName}</strong> plan ends on <strong>${endDateLabel}</strong>. Unless you cancel before then, your ${planName} plan begins automatically and ${chargeLine}.</p>` +
+              `<p style="margin:0;">You can review, change, or cancel your plan any time in your billing settings. Cancel before ${endDateLabel} to avoid any charge.</p>`,
+            cta: { label: 'Manage or cancel subscription', url: `${process.env.FRONTEND_URL}/agency/settings?tab=billing` },
           }),
         });
         warned++;
