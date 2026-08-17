@@ -30,6 +30,15 @@
 //   email_summaries plan gate (isFeatureEnabled + DEFAULT_PLAN_FEATURES) and
 //   the sendCallSummaryEmail import were removed with it. emailSent stays in
 //   the webhook JSON response (always false) so the response shape is unchanged.
+// UPDATED: 2026-08-13 - Manual client billing. 'manual' is now a live client
+//   subscription_status everywhere the webhook decides whether a client is
+//   allowed to take/save calls: the assistant-request gate (so a manual
+//   client's phone actually answers instead of "no longer in service"), the
+//   end-of-call gate (so the call is saved), and the crash-fallback lookup. A
+//   manual client is billed by its agency outside Stripe; it takes calls like
+//   an active/trial client. Its monthly call cap is still enforced by the
+//   call-limit gate below (and reset each cycle by the reset-manual-usage cron),
+//   and -1 still means uncapped. No other behavior changes for connect clients.
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -42,6 +51,14 @@ const { getSmsTemplate } = require('../lib/sms-templates');
 const { sendAndLogSMS } = require('../lib/sms-logger');
 const { formatPhone, getPhoneLocation, formatDuration } = require('../lib/area-codes');
 const { insertUsageRecord } = require('../lib/usage-tracker');
+
+// Live client subscription_status values that may take/save calls. 'manual' is
+// a first-class live status (billed by the agency outside Stripe), so it sits
+// alongside 'active' and 'trial'. Used by the client-status gates in both
+// handleAssistantRequest and the end-of-call handler, and by the crash
+// fallback. The trial-expiry sub-check only fires for 'trial', so a manual
+// client (which carries no trial_ends_at) is never treated as expired.
+const LIVE_CLIENT_STATUSES = ['active', 'trial', 'manual'];
 
 function detectTransferStatus(endedReason, transcript) {
   if (!endedReason) return { transferStatus: null, wasTransferred: false };
@@ -776,7 +793,11 @@ async function handleAssistantRequest(req, res, message) {
       }
     }
 
-    if (!['active', 'trial'].includes(client.subscription_status))
+    // 'manual' is a live client status (billed by the agency outside Stripe);
+    // manual clients answer calls exactly like active/trial clients. The
+    // monthly call cap below still applies. The trial-expiry sub-check only
+    // fires for 'trial', so a manual client (no trial_ends_at) is never expired.
+    if (!LIVE_CLIENT_STATUSES.includes(client.subscription_status))
       return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
     if (client.subscription_status === 'trial' && isTrialExpired(client.trial_ends_at)) {
       await supabase.from('clients').update({ subscription_status: 'trial_expired', status: 'suspended' }).eq('id', client.id);
@@ -824,7 +845,10 @@ async function handleAssistantRequest(req, res, message) {
       const v = message.phoneNumber?.number;
       if (v) {
         const { data: fb } = await supabase.from('clients').select('vapi_assistant_id, subscription_status').eq('vapi_phone_number', v).single();
-        if (fb?.vapi_assistant_id && ['active', 'trial'].includes(fb.subscription_status))
+        // Fall back to the client's own assistant only for a live status
+        // (active/trial/manual), so a manual client still gets a working
+        // assistant if config building crashes.
+        if (fb?.vapi_assistant_id && LIVE_CLIENT_STATUSES.includes(fb.subscription_status))
           return res.status(200).json({ assistantId: fb.vapi_assistant_id });
       }
     } catch {}
@@ -920,8 +944,13 @@ async function handleVapiWebhook(req, res) {
       }
     }
 
-    if (!['active', 'trial'].includes(client.subscription_status)) {
-      console.log(`🚫 BLOCKED at client-status gate: client.subscription_status='${client.subscription_status}' not in [active,trial]`);
+    // 'manual' is a live, billed-outside-Stripe client status: manual clients
+    // save calls exactly like active/trial clients. The monthly call cap below
+    // still applies (and is reset each cycle by the reset-manual-usage cron).
+    // The trial-expiry sub-check only fires for 'trial', so a manual client is
+    // never treated as expired.
+    if (!LIVE_CLIENT_STATUSES.includes(client.subscription_status)) {
+      console.log(`🚫 BLOCKED at client-status gate: client.subscription_status='${client.subscription_status}' not in [active,trial,manual]`);
       return res.status(200).json({ received: true, blocked: true, reason: 'Not active' });
     }
     if (client.subscription_status === 'trial' && isTrialExpired(client.trial_ends_at)) {

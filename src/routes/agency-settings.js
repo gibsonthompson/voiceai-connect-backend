@@ -62,6 +62,24 @@
 //                      it, and returned in the authenticated getAgencySettings
 //                      branch so the Navigation settings tab can load current
 //                      values.
+// UPDATED: 2026-08-13: Manual client billing. client_billing_mode ('connect'
+//                      default | 'manual') is whitelisted and validated in
+//                      updateAgencySettings (only those two values), and
+//                      returned in the authenticated getAgencySettings payload
+//                      so the settings toggle can render its state. It is NOT
+//                      added to publicAgencyShape: the public marketing/embed
+//                      surface never needs it, and the backend decides manual
+//                      behavior server-side at signup. The authenticated stats
+//                      block now counts a manual client (subscription_status
+//                      'manual') as an active client, since a manual client is
+//                      live; without this an agency's own dashboard would show
+//                      its manual clients as neither active nor trial. MRR also
+//                      counts manual clients at their plan price (same treatment
+//                      as an active connect client); if you would rather exclude
+//                      manual clients from platform-computed MRR (because a
+//                      manual agency may charge its clients outside these plan
+//                      prices), drop 'manual' from the ACTIVE_STAT_STATUSES set
+//                      used in the mrr reducer only.
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
@@ -75,6 +93,11 @@ const { supabase, getAgencyBySlug, getAgencyByDomain, getAgencyById } = require(
 const { repriceMinuteItemsForAgency } = require('./stripe-connect');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+
+// Client subscription_status values that count as a live/active client in the
+// agency's own dashboard stats. 'manual' is a first-class live status (a manual
+// client is provisioned and taking calls), so it counts here alongside 'active'.
+const ACTIVE_STAT_STATUSES = new Set(['active', 'manual']);
 
 // ============================================================================
 // CALLER OWNS AGENCY
@@ -116,6 +139,10 @@ function callerOwnsAgency(req, agencyId) {
 // getAgencyByIdPublic (Path A embed flow - iframe knows agency UUID from the
 // embed snippet's data-agency attribute), and by the unauthenticated branch of
 // getAgencySettings.
+//
+// client_billing_mode is deliberately NOT exposed here: the public
+// marketing/embed surface never needs it (manual behavior is decided
+// server-side in the signup handlers), so it stays out of the public shape.
 // ============================================================================
 function publicAgencyShape(agency) {
   return {
@@ -380,11 +407,17 @@ async function getAgencySettings(req, res) {
     
     const stats = {
       total_clients: clients?.length || 0,
-      active_clients: clients?.filter(c => c.subscription_status === 'active').length || 0,
+      // A manual client (subscription_status 'manual') is live, so it counts as
+      // active here alongside connect 'active' clients. Trial is unchanged.
+      active_clients: clients?.filter(c => ACTIVE_STAT_STATUSES.has(c.subscription_status)).length || 0,
       trial_clients: clients?.filter(c => c.subscription_status === 'trial').length || 0,
       total_calls_this_month: clients?.reduce((sum, c) => sum + (c.calls_this_month || 0), 0) || 0,
       mrr_cents: clients?.reduce((sum, c) => {
-        if (c.subscription_status !== 'active') return sum;
+        // Count active AND manual clients at their plan price. If you would
+        // rather exclude manual clients from platform-computed MRR (a manual
+        // agency may bill its clients outside these plan prices), change this
+        // guard to `c.subscription_status !== 'active'`.
+        if (!ACTIVE_STAT_STATUSES.has(c.subscription_status)) return sum;
         const prices = {
           starter: agency.price_starter,
           pro: agency.price_pro,
@@ -475,6 +508,13 @@ async function getAgencySettings(req, res) {
         included_minutes_starter: agency.included_minutes_starter ?? 0,
         included_minutes_pro: agency.included_minutes_pro ?? 0,
         included_minutes_growth: agency.included_minutes_growth ?? 0,
+
+        // Client billing mode. 'connect' (default) routes clients through
+        // Stripe Connect; 'manual' onboards clients with no Stripe step (the
+        // agency bills them by invoice / payment link). Returned so the Settings
+        // toggle can render its current state. Written via the settings PUT
+        // (validated to connect|manual there).
+        client_billing_mode: agency.client_billing_mode || 'connect',
         
         // Client trial card requirement (require_card_for_trial). Returned so
         // the Settings pricing tab can render and toggle it. The signup flow
@@ -553,6 +593,11 @@ const RESERVED_SLUGS = new Set([
 // (no leading/trailing hyphen).
 const SLUG_FORMAT = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 
+// Valid client billing modes. 'connect' (default) routes clients through Stripe
+// Connect; 'manual' onboards clients with no Stripe step (agency bills its own
+// clients). Any other value is rejected by updateAgencySettings.
+const VALID_CLIENT_BILLING_MODES = new Set(['connect', 'manual']);
+
 // ============================================================================
 // UPDATE AGENCY SETTINGS
 // ============================================================================
@@ -579,6 +624,12 @@ async function updateAgencySettings(req, res) {
       // connect_minute_meter_id is system-managed and never user-writable.
       'client_minute_rate_cents',
       'included_minutes_starter', 'included_minutes_pro', 'included_minutes_growth',
+      // Client billing mode ('connect' | 'manual'). A plain settings write:
+      // switching to manual changes what NEW clients get (each client is stamped
+      // billing_mode at creation), so it has no retroactive side effects and
+      // needs no dedicated endpoint. Validated below against
+      // VALID_CLIENT_BILLING_MODES.
+      'client_billing_mode',
       // Phase 3 - white-label plan customization
       'plan_starter_name', 'plan_pro_name', 'plan_growth_name',
       'plan_starter_description', 'plan_pro_description', 'plan_growth_description',
@@ -696,6 +747,24 @@ async function updateAgencySettings(req, res) {
 
         // Persist the normalized value.
         sanitizedUpdates.slug = slug;
+      }
+    }
+
+    // ── Client billing mode ('connect' | 'manual') ───────────────────────
+    // Normalize and validate. Anything outside the set is a 400 so a typo can
+    // never silently write an unknown mode (which the signup handlers would
+    // then treat as connect). null / '' resets to the default 'connect'.
+    if (sanitizedUpdates.client_billing_mode !== undefined) {
+      const raw = sanitizedUpdates.client_billing_mode;
+      if (raw === null || raw === '') {
+        sanitizedUpdates.client_billing_mode = 'connect';
+      } else if (typeof raw !== 'string' || !VALID_CLIENT_BILLING_MODES.has(raw.trim().toLowerCase())) {
+        return res.status(400).json({
+          error: 'client_billing_mode_invalid',
+          message: "client_billing_mode must be 'connect' or 'manual'.",
+        });
+      } else {
+        sanitizedUpdates.client_billing_mode = raw.trim().toLowerCase();
       }
     }
 

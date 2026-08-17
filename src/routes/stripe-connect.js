@@ -67,6 +67,23 @@
 //          change applies to the whole existing book. Called from
 //          updateAgencySettings after a rate/included change; no-ops when
 //          pass-through is off.
+// UPDATED: 2026-08-13: Manual client billing guards. A manual-billing client
+//          (billing_mode='manual') is billed by its agency outside the platform
+//          and has NO Stripe Connect customer or subscription, so every
+//          client-facing Stripe entry point refuses it: createClientCheckout
+//          and createClientPortal return a clear manual_billing_client error,
+//          and createTrialCheckoutForSignup throws (the signup handler already
+//          never routes a manual client here; this is the hard backstop).
+//          changeClientPlan gains a manual branch that sets plan_type and
+//          monthly_call_limit directly in the DB (no Stripe), so an agency can
+//          still change a manual client's plan and cap, including setting the
+//          cap to -1 to uncap it. That branch is restricted to the managing
+//          agency or super_admin, never the client themselves, so a manual
+//          client cannot uncap its own limit and run up the agency's platform
+//          minute bill. The teardown crons (expireTrials, reconcile) need no
+//          change: expireTrials filters on trial/trialing status and reconcile
+//          filters on a present connected subscription id, and a manual client
+//          is neither.
 // ============================================================================
 const Stripe = require('stripe');
 const fetch = require('node-fetch');
@@ -1098,6 +1115,14 @@ async function disconnectConnectAccount(req, res) {
 // Returns: { url } on success, throws on error. Caller handles errors.
 // ============================================================================
 async function createTrialCheckoutForSignup({ client, agency, plan, passwordToken }) {
+  // Manual-billing clients never take a card and have no Stripe subscription.
+  // The signup handler already skips this path for a manual client; this is the
+  // hard backstop so a manual client can never be routed into a Stripe trial
+  // checkout even if some future caller forgets to check.
+  if (client.billing_mode === 'manual') {
+    throw new Error('Manual-billing client cannot use Stripe trial checkout');
+  }
+
   if (!agency.stripe_account_id || !agency.stripe_charges_enabled) {
     throw new Error('Agency Stripe Connect not configured');
   }
@@ -1214,6 +1239,19 @@ async function createClientCheckout(req, res) {
 
     const agency = client.agencies;
     if (!agency) return res.status(404).json({ error: 'Agency not found' });
+
+    // Manual-billing clients are billed by the agency outside the platform
+    // (invoice / payment link) and have no Stripe Connect subscription, so there
+    // is nothing to check out. Refuse clearly instead of creating a dead-end
+    // Stripe session. The client dashboard hides this action for manual clients;
+    // this is the backend guard behind it.
+    if (client.billing_mode === 'manual') {
+      return res.status(400).json({
+        error: 'manual_billing_client',
+        message: 'This account is billed directly by your provider and does not use online checkout.',
+      });
+    }
+
     if (!agency.stripe_account_id || !agency.stripe_charges_enabled) {
       return res.status(400).json({ error: 'Agency has not completed Stripe Connect setup' });
     }
@@ -1313,6 +1351,16 @@ async function createClientPortal(req, res) {
 
     const client = await getClientById(client_id);
     if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    // Manual-billing clients have no Stripe customer or subscription on the
+    // connected account, so there is no billing portal to open. Refuse clearly.
+    if (client.billing_mode === 'manual') {
+      return res.status(400).json({
+        error: 'manual_billing_client',
+        message: 'This account is billed directly by your provider and has no online billing portal.',
+      });
+    }
+
     if (!client.stripe_connected_customer_id) return res.status(400).json({ error: 'No Stripe customer found' });
 
     const agency = client.agencies;
@@ -1359,6 +1407,12 @@ async function createClientPortal(req, res) {
 //   5. Writes plan_type AND monthly_call_limit in the SAME handler, so the two
 //      fields that define the plan can never desync from Stripe again.
 //
+// MANUAL BILLING (2026-08-13): a manual client has no Stripe subscription and
+// its agency may not use Connect, so it takes a separate branch that writes
+// plan_type + monthly_call_limit directly with no Stripe. That branch is limited
+// to the managing agency / super_admin (never the client itself) so a manual
+// client cannot uncap its own limit and run up the agency's platform minute bill.
+//
 // The resulting customer.subscription.updated webhook fires
 // handleClientSubscriptionUpdated, which only touches status fields and so does
 // not clobber the plan_type/limit written here. Usage (calls_this_month) is left
@@ -1400,6 +1454,52 @@ async function changeClientPlan(req, res) {
 
     const agency = client.agencies;
     if (!agency) return res.status(404).json({ error: 'Agency not found' });
+
+    // ── Manual-billing client: change plan WITHOUT touching Stripe ──────────
+    // A manual client has no Stripe Connect subscription, and its agency may not
+    // use Connect at all, so the normal path (which requires charges enabled and
+    // a live subscription) does not apply. Here the plan is purely a DB concept:
+    // it sets plan_type and the monthly call cap. The cap comes from the plan by
+    // default; an explicit monthly_call_limit in the body overrides it and may
+    // be -1 to remove the cap entirely (the uncapped escape hatch for a manual
+    // client the agency trusts to self-manage).
+    //
+    // Restricted to the managing agency or super_admin: the client itself must
+    // NOT change its own manual plan/cap, or it could set its limit to -1 and
+    // run up the agency's platform minute bill with no payment signal to stop it.
+    if (client.billing_mode === 'manual') {
+      if (!isSuperAdmin && !isManagingAgency) {
+        return res.status(403).json({ error: 'Forbidden', message: 'Only your provider can change this plan.' });
+      }
+
+      const callLimits = { starter: agency.limit_starter || 50, pro: agency.limit_pro || 150, growth: agency.limit_growth || 500 };
+      let limit = callLimits[plan];
+
+      // Optional explicit cap override. Integer >= -1 (-1 = unlimited). Anything
+      // else is rejected so a bad value cannot silently mis-set the cap.
+      const rawLimit = req.body.monthly_call_limit;
+      if (rawLimit !== undefined && rawLimit !== null && rawLimit !== '') {
+        const n = Number(rawLimit);
+        if (!Number.isInteger(n) || n < -1) {
+          return res.status(400).json({ error: 'monthly_call_limit must be an integer of -1 or greater' });
+        }
+        limit = n;
+      }
+
+      const { error: manualErr } = await supabase
+        .from('clients')
+        .update({ plan_type: plan, monthly_call_limit: limit })
+        .eq('id', client.id);
+
+      if (manualErr) {
+        console.error('❌ Manual client plan change DB write failed:', manualErr.message);
+        return res.status(500).json({ error: 'Failed to update plan' });
+      }
+
+      console.log(`✅ Manual client ${client.id} plan changed ${client.plan_type} -> ${plan} (limit ${limit})`);
+      return res.json({ success: true, plan, monthly_call_limit: limit, manual: true });
+    }
+
     if (!agency.stripe_account_id || !agency.stripe_charges_enabled) {
       return res.status(400).json({ error: 'Agency has not completed Stripe Connect setup' });
     }
@@ -1533,6 +1633,10 @@ async function changeClientPlan(req, res) {
 //   whose trial Stripe converts automatically via invoice.payment_succeeded
 //   (or invoice.payment_failed). The DB-only cron must not touch those.
 //   Filter: stripe_connected_subscription_id IS NULL.
+//
+// Manual clients (billing_mode='manual') are never touched here: their status
+// is 'manual', not 'trial'/'trialing', so the status filter below excludes them
+// (and they carry no trial_ends_at). No manual-specific clause is needed.
 // ============================================================================
 async function expireTrials() {
   console.log('Checking for expired trials...');
@@ -1814,6 +1918,11 @@ const TERMINAL_SUB_STATUSES = ['canceled', 'incomplete_expired'];
 //     active/trial (a recovery whose invoice.payment_succeeded webhook missed).
 //   - Stripe 'past_due'/'unpaid' -> leave as-is; Stripe is still retrying and a
 //     live retry must not be torn down.
+//
+// Manual clients (billing_mode='manual') are never in scope: they carry no
+// stripe_connected_subscription_id and their status is 'manual', so the query
+// filter (.in active/past_due AND .not sub id is null) excludes them. No
+// manual-specific clause is needed.
 //
 // dryRun reports what WOULD change and touches nothing. Guarded by CRON_SECRET
 // like the other cron functions; server.js wraps it in a route.

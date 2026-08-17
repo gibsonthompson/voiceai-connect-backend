@@ -61,6 +61,13 @@
 //                      admin Agencies list can show "last active". Registered as
 //                      an exact route before the app.use('/api/agency', ...)
 //                      routers so the specific path wins.
+// UPDATED: 2026-08-13: Manual client billing. Mounts routes/manual-usage-reset
+//                      under /api/cron (POST /api/cron/reset-manual-usage). A
+//                      manual-billing client has no Stripe invoice to reset its
+//                      monthly counters, so this daily job zeroes
+//                      calls_this_month + minutes_this_period on the client's
+//                      activation-day anchor, keeping the VAPI hard call cap
+//                      refreshing each cycle. Guarded by CRON_SECRET in-router.
 // Destination: src/server.js (or src/index.js), FULL REPLACEMENT
 // ============================================================================
 require('dotenv').config();
@@ -220,6 +227,9 @@ const leadScraperRoutes = require('./routes/lead-scraper');
 const byotRoutes = require('./routes/byot');
 const abandonedCartRoutes = require('./routes/abandoned-cart');
 const abandonedCheckoutCleanupRoutes = require('./routes/abandoned-checkout-cleanup');
+// Manual client monthly usage reset (manual-billing clients have no Stripe
+// invoice to reset their counters). Mounted under /api/cron below.
+const manualUsageResetRoutes = require('./routes/manual-usage-reset');
 const agencyOnboardingSmsRoutes = require('./routes/agency-onboarding-sms');
 const activationSmsRoutes = require('./routes/activation-sms');
 const feedbackRoutes = require('./routes/feedback');
@@ -326,7 +336,8 @@ app.get('/health', (req, res) => {
       expireTrials: true,
       abandonedCart: true,
       agencyOnboardingSms: true,
-      usageReporter: true
+      usageReporter: true,
+      resetManualUsage: true
     }
   });
 });
@@ -1560,6 +1571,13 @@ app.use('/api/cron', cleanupOrphanedTestClients);
 // VAPI assistant for pending_payment clients that never completed Stripe
 // checkout. POST /api/cron/cleanup-abandoned-checkouts
 app.use('/api/cron', abandonedCheckoutCleanupRoutes);
+
+// Manual client monthly usage reset: zeroes calls_this_month + minutes_this_period
+// for manual-billing clients on their activation-day anchor, so the VAPI hard
+// call cap refreshes each cycle (manual clients have no Stripe invoice to reset
+// them). POST /api/cron/reset-manual-usage. Guarded by CRON_SECRET in-router.
+// Run daily.
+app.use('/api/cron', manualUsageResetRoutes);
 
 // Usage reporting cron (reports voice minutes to Stripe metered billing)
 app.use('/api/cron', usageReporterRoutes);

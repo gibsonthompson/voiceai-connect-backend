@@ -68,13 +68,23 @@
 //          assistant, and its query tool), which were being leaked, but it
 //          deliberately does NOT release the carrier number: the number was
 //          already released and re-sold to us for the NEW client, so releasing
-//          it would delete the new client's line. status='active' rows are
-//          NEVER reclaimed, so a live client can never be stomped.
+//          it would delete the new client's line.
 // UPDATED: 2026-08-12 - Removed the client welcome EMAIL (white-label). The
 //          set-password token is returned in the signup response body (widget
 //          routes straight to /auth/set-password), and card-required signups
 //          land on set-password via the Stripe checkout success_url, so no
 //          email was load-bearing. Agency-branded welcome SMS still fires.
+// UPDATED: 2026-08-13 - Manual client billing. When an agency runs
+//          client_billing_mode='manual' (it bills its own clients via invoices
+//          / payment links and does not use Stripe Connect), BOTH signup paths
+//          create the client with NO Stripe step: no card, no checkout, no
+//          pending_payment. The client goes live immediately as
+//          subscription_status='manual', billing_mode='manual', trial_ends_at
+//          null, status 'active', with usage_resets_at set one month out so the
+//          monthly call-count reset cron can refresh its cap. The agency still
+//          pays the platform per client + per minute (updateClientBillingQuantity
+//          still fires), so manual mode removes ONLY the agency->client rail.
+//          See isManualBillingAgency / manualUsageResetAt below.
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -107,6 +117,40 @@ const { updateClientBillingQuantity } = require('../lib/usage-tracker');
 // across handleClientSignup, handleAgencyAddClient, and provisionClient.
 // ============================================================================
 const VALID_CLIENT_PLANS = ['starter', 'pro', 'growth'];
+
+// ============================================================================
+// MANUAL CLIENT BILLING
+// ----------------------------------------------------------------------------
+// An agency in client_billing_mode='manual' bills its own clients (invoices or
+// payment links) and does not use Stripe Connect, so its clients must be created
+// WITHOUT any Stripe step: no connected account, no card, no checkout, and never
+// the 'pending_payment' limbo state. A manual client goes live the instant it is
+// added, with subscription_status='manual' and billing_mode='manual'.
+//
+// 'manual' is a first-class LIVE status. The VAPI webhook treats it exactly like
+// 'active' (so the phone rings), and every teardown cron skips it for free: the
+// trial-expiry sweep only looks at 'trial'/'trialing' rows, reconcile only looks
+// at rows that carry a Stripe subscription id, and the abandoned-checkout sweep
+// only looks at 'pending_payment'. A manual client is none of those.
+//
+// The agency still owes the platform per client and per minute:
+// updateClientBillingQuantity still fires below, exactly as for a connect client.
+// Manual mode removes only the agency->client billing rail, never the
+// agency->platform one.
+// ============================================================================
+function isManualBillingAgency(agency) {
+  return !!(agency && agency.client_billing_mode === 'manual');
+}
+
+// Manual clients have no Stripe invoice to reset calls_this_month each cycle, so
+// their monthly call-cap reset is anchored to their activation day and advanced
+// one calendar month at a time by the resetManualClientUsage cron. This returns
+// the first reset time (one month from now).
+function manualUsageResetAt() {
+  const d = new Date();
+  d.setMonth(d.getMonth() + 1);
+  return d.toISOString();
+}
 
 // ============================================================================
 // VALID VOICE ROUTING - vapi_direct (default; native VAPI) vs telnyx_cc
@@ -769,6 +813,10 @@ async function insertClientWithStaleNumberRecovery(payload) {
 // UPDATED 2026-06-08, Phase 1: now honors req.body.planType so plan selection
 // in /signup/plan is no longer theater. Same validation pattern as
 // handleAgencyAddClient below.
+// UPDATED 2026-08-13, Manual billing: when the agency runs
+// client_billing_mode='manual', this path creates the client live with NO
+// Stripe checkout (skips the card-required branch entirely, see manualBilling
+// below).
 // ============================================================================
 async function handleClientSignup(req, res) {
   // Track created resources for rollback on failure
@@ -821,6 +869,19 @@ async function handleClientSignup(req, res) {
       return res.status(403).json({ error: 'Agency is not active' });
     }
 
+    // ────────────────────────────────────────────────────────────────────
+    // MANUAL BILLING (2026-08-13). A manual-billing agency bills its own
+    // clients (invoices / payment links) and has no Stripe Connect, so this
+    // client is created live with NO card, NO checkout, and NO pending_payment.
+    // manualBilling below forces the card-required path OFF everywhere it is
+    // read, so the two settings (require_card_for_trial + manual) can never
+    // contradict each other: manual always wins.
+    // ────────────────────────────────────────────────────────────────────
+    const manualBilling = isManualBillingAgency(agency);
+    if (manualBilling) {
+      console.log('🧾 Manual-billing agency: client will be created live with no Stripe checkout');
+    }
+
     const clientCountry = (businessCountry || agency.country || 'US').toUpperCase();
 
     // Whisper vs native transfer for this client (defaults to vapi_direct).
@@ -836,11 +897,13 @@ async function handleClientSignup(req, res) {
     // signup never creates a VAPI assistant or rents a Telnyx number.
     //
     // willRequireCard mirrors the cardRequired computation in STEP 6b exactly,
-    // so the gate and the checkout decision can never disagree. No-card signups
-    // are not gated here (consent is still recorded below for TCPA), so a
-    // missing consent flag never breaks a no-card trial.
+    // so the gate and the checkout decision can never disagree. Manual billing
+    // forces it false (no auto-charge exists in manual mode), so a manual signup
+    // is never gated here. No-card signups are not gated here either (consent is
+    // still recorded below for TCPA), so a missing consent flag never breaks a
+    // no-card or manual trial.
     // ────────────────────────────────────────────────────────────────────
-    const willRequireCard = agency.require_card_for_trial === true && agency.stripe_charges_enabled === true;
+    const willRequireCard = !manualBilling && agency.require_card_for_trial === true && agency.stripe_charges_enabled === true;
     if (willRequireCard && req.body.consent_agreed !== true) {
       console.warn(`🚫 Card-required signup for agency ${agency.name} missing affirmative consent, rejecting before provisioning`);
       return res.status(400).json({
@@ -864,7 +927,7 @@ async function handleClientSignup(req, res) {
     }
     
     console.log(`✅ Client limit check passed: ${limitCheck.current}/${limitCheck.limit === -1 ? 'unlimited' : limitCheck.limit}`);
-    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Client country: ${clientCountry} | Plan: ${planType} | Routing: ${voiceRouting}`);
+    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Client country: ${clientCountry} | Plan: ${planType} | Routing: ${voiceRouting} | Billing: ${manualBilling ? 'manual' : 'connect'}`);
 
     let websiteUrl = rawWebsiteUrl;
     if (websiteUrl && !websiteUrl.startsWith('http')) {
@@ -972,6 +1035,13 @@ async function handleClientSignup(req, res) {
     // ────────────────────────────────────────────
     // Phase 1: monthly_call_limit now derived from the chosen plan's column
     // (agency[`limit_${planType}`]) instead of hardcoded agency.limit_starter.
+    //
+    // Manual billing (2026-08-13): a manual client is born LIVE and permanent,
+    // so subscription_status='manual', trial_ends_at is null (no countdown),
+    // billing_mode='manual', and usage_resets_at is set one month out so the
+    // monthly call-cap reset cron can refresh it. A connect client is unchanged
+    // (7-day trial), and is stamped billing_mode='connect' for an explicit,
+    // per-client source of truth.
     // ============================================
     const trialEndsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     const callLimitKey = `limit_${planType}`;
@@ -995,9 +1065,11 @@ async function handleClientSignup(req, res) {
       vapi_query_tool_id: queryToolId,
       knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
       knowledge_base_data: templateKB,
-      subscription_status: 'trial',
-      trial_ends_at: trialEndsAt,
+      subscription_status: manualBilling ? 'manual' : 'trial',
+      trial_ends_at: manualBilling ? null : trialEndsAt,
       status: 'active',
+      billing_mode: manualBilling ? 'manual' : 'connect',
+      usage_resets_at: manualBilling ? manualUsageResetAt() : null,
       plan_type: planType,
       monthly_call_limit: callLimit,
       calls_this_month: 0,
@@ -1049,9 +1121,11 @@ async function handleClientSignup(req, res) {
     createdAssistantId = null;
     createdQueryToolId = null;
 
-    console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult.provisioningMethod}, ${planType}, limit=${callLimit})`);
+    console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult.provisioningMethod}, ${planType}, limit=${callLimit}, billing=${manualBilling ? 'manual' : 'connect'})`);
 
     // ── Update per-client billing for the agency (non-blocking) ─────
+    // Fires for manual clients too: the agency still owes the platform per
+    // client. Manual mode removes the agency->client rail, not this one.
     try {
       const billingResult = await updateClientBillingQuantity(agencyId);
       if (billingResult.updated) {
@@ -1065,9 +1139,9 @@ async function handleClientSignup(req, res) {
 
     // ── Record the signup consent audit row (non-blocking) ──────────
     // willRequireCard reflects whether the auto-renew disclosure was part of
-    // the agreed text. For card-required signups the consent gate above has
-    // already guaranteed consent_agreed === true; for no-card signups we still
-    // record the TCPA/terms consent the client gave.
+    // the agreed text (always false in manual mode). For card-required signups
+    // the consent gate above has already guaranteed consent_agreed === true;
+    // for no-card and manual signups we still record the TCPA/terms consent.
     await recordSignupConsent({ client: newClient, agency, cardRequired: willRequireCard, req });
 
     // ============================================
@@ -1102,12 +1176,17 @@ async function handleClientSignup(req, res) {
     // ============================================
     // STEP 6b: CARD-REQUIRED TRIAL CHECKOUT (if agency toggle on)
     // ────────────────────────────────────────────
-    // When agency.require_card_for_trial=true AND stripe_charges_enabled=true,
-    // create a Stripe Connect Checkout with trial_period_days=7 and flip the
-    // client to subscription_status='pending_payment'. The checkout.session
-    // .completed webhook (handleClientCheckoutCompleted in stripe-connect.js)
-    // then transitions to 'trial' with trial_ends_at from Stripe and sends
-    // the deferred welcome SMS.
+    // When agency.require_card_for_trial=true AND stripe_charges_enabled=true
+    // AND the agency is NOT in manual billing mode, create a Stripe Connect
+    // Checkout with trial_period_days=7 and flip the client to
+    // subscription_status='pending_payment'. The checkout.session.completed
+    // webhook (handleClientCheckoutCompleted in stripe-connect.js) then
+    // transitions to 'trial' with trial_ends_at from Stripe and sends the
+    // deferred welcome SMS.
+    //
+    // Manual billing skips this entirely (manualBilling short-circuits
+    // cardRequired to false), so a manual client never enters pending_payment
+    // and never gets a checkout URL.
     //
     // VAPI + phone are already provisioned above. Abandoned checkouts leave
     // those active; a Phase 2 cleanup cron sweeps pending_payment >24h old.
@@ -1121,9 +1200,9 @@ async function handleClientSignup(req, res) {
     // fall back to the no-card flow so signup never breaks.
     // ============================================
     let cardRequiredCheckoutUrl = null;
-    const cardRequired = agency.require_card_for_trial === true && agency.stripe_charges_enabled === true;
+    const cardRequired = !manualBilling && agency.require_card_for_trial === true && agency.stripe_charges_enabled === true;
 
-    if (agency.require_card_for_trial === true && agency.stripe_charges_enabled !== true) {
+    if (!manualBilling && agency.require_card_for_trial === true && agency.stripe_charges_enabled !== true) {
       console.warn(`⚠️ Agency ${agency.name} has require_card_for_trial=true but stripe_charges_enabled=false, falling back to no-card trial`);
     }
 
@@ -1162,10 +1241,10 @@ async function handleClientSignup(req, res) {
     // ============================================
     // STEP 8: SEND WELCOME SMS (guarded)
     // ────────────────────────────────────────────
-    // Skipped for card-required pending_payment signups. Welcome SMS is
-    // deferred to handleClientCheckoutCompleted (after the user actually
-    // enters their card), so we don't tell them "your AI is live at [num]"
-    // before payment is on file.
+    // Skipped only for card-required pending_payment signups, where the welcome
+    // SMS is deferred to handleClientCheckoutCompleted (after the card is on
+    // file). A manual client has no checkout URL, so it takes the immediate-send
+    // path below, exactly like a no-card trial.
     // ============================================
     if (cardRequiredCheckoutUrl) {
       console.log('📱 Welcome SMS deferred (card-required pending_payment); webhook will send after activation');
@@ -1189,15 +1268,19 @@ async function handleClientSignup(req, res) {
     // widget redirects the top-level window to this URL so the user enters
     // their card on Stripe. After completion, Stripe redirects to the paid
     // client's set-password page on the agency domain and our webhook activates.
+    //
+    // For manual clients there is no checkout_url (requires_card false) and the
+    // reported status is 'manual', so the widget just routes to set-password
+    // like a no-card trial.
     // ============================================
-    console.log('🎉 Client onboarding complete:', businessName, cardRequiredCheckoutUrl ? '(card-required, awaiting payment)' : '(no-card trial active)');
+    console.log('🎉 Client onboarding complete:', businessName, cardRequiredCheckoutUrl ? '(card-required, awaiting payment)' : (manualBilling ? '(manual billing, live)' : '(no-card trial active)'));
 
     res.status(200).json({
       success: true,
       message: 'Account created successfully!',
       token: passwordToken,
       hasPassword: !!hasPassword,
-      checkout_url: cardRequiredCheckoutUrl, // null for no-card mode, Stripe URL for card-required
+      checkout_url: cardRequiredCheckoutUrl, // null for no-card / manual, Stripe URL for card-required
       requires_card: !!cardRequiredCheckoutUrl,
       client: {
         id: newClient.id,
@@ -1206,8 +1289,8 @@ async function handleClientSignup(req, res) {
         email: newClient.email,
         country: clientCountry,
         location: `${businessCity}, ${businessState}`,
-        trial_ends_at: cardRequiredCheckoutUrl ? null : newClient.trial_ends_at,
-        subscription_status: cardRequiredCheckoutUrl ? 'pending_payment' : 'trial',
+        trial_ends_at: cardRequiredCheckoutUrl ? null : (manualBilling ? null : newClient.trial_ends_at),
+        subscription_status: cardRequiredCheckoutUrl ? 'pending_payment' : (manualBilling ? 'manual' : 'trial'),
         plan_type: planType,
         monthly_call_limit: callLimit,
         agency: agency.name
@@ -1231,6 +1314,11 @@ async function handleClientSignup(req, res) {
 
 // ============================================================================
 // AGENCY ADD CLIENT HANDLER
+// UPDATED 2026-08-13, Manual billing: when the agency runs
+// client_billing_mode='manual', the added client is created live with
+// subscription_status='manual' / billing_mode='manual' (no trial countdown).
+// This path never had a Stripe checkout step (it is always no-card), so the
+// only change here is the status/billing fields on the inserted row.
 // ============================================================================
 async function handleAgencyAddClient(req, res) {
   // Track created resources for rollback on failure
@@ -1291,6 +1379,9 @@ async function handleAgencyAddClient(req, res) {
       return res.status(403).json({ error: 'Agency is not active' });
     }
 
+    // Manual-billing agencies add clients live with no Stripe step (see header).
+    const manualBilling = isManualBillingAgency(agency);
+
     const clientCountry = (businessCountry || agency.country || 'US').toUpperCase();
 
     // Whisper vs native transfer for this client (defaults to vapi_direct).
@@ -1309,7 +1400,7 @@ async function handleAgencyAddClient(req, res) {
     }
 
     console.log(`✅ Limit check passed: ${limitCheck.current}/${limitCheck.limit === -1 ? 'unlimited' : limitCheck.limit}`);
-    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Adding: ${businessName} (${clientCountry}, ${resolvedPlanType}, routing: ${voiceRouting})`);
+    console.log(`🏢 Agency: ${agency.name} (${agency.country || 'US'}) → Adding: ${businessName} (${clientCountry}, ${resolvedPlanType}, routing: ${voiceRouting}, billing: ${manualBilling ? 'manual' : 'connect'})`);
 
     let websiteUrl = rawWebsiteUrl;
     if (websiteUrl && !websiteUrl.startsWith('http')) {
@@ -1395,6 +1486,10 @@ async function handleAgencyAddClient(req, res) {
     try { await enableSMSForNumber(phoneResult.number); } catch (e) { console.warn('⚠️ SMS enable failed:', e.message); }
 
     // === STEP 4: Create Client Record ===
+    // Manual billing (2026-08-13): manual clients are LIVE and permanent, so
+    // subscription_status='manual', no trial countdown, billing_mode='manual',
+    // and usage_resets_at one month out for the monthly cap reset. Connect
+    // clients are unchanged (7-day trial) and stamped billing_mode='connect'.
     const trialEndsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     const callLimitKey = `limit_${resolvedPlanType}`;
     const callLimit = agency[callLimitKey] ?? agency.limit_starter ?? 50;
@@ -1417,9 +1512,11 @@ async function handleAgencyAddClient(req, res) {
       vapi_query_tool_id: queryToolId,
       knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
       knowledge_base_data: templateKB,
-      subscription_status: 'trial',
-      trial_ends_at: trialEndsAt,
+      subscription_status: manualBilling ? 'manual' : 'trial',
+      trial_ends_at: manualBilling ? null : trialEndsAt,
       status: 'active',
+      billing_mode: manualBilling ? 'manual' : 'connect',
+      usage_resets_at: manualBilling ? manualUsageResetAt() : null,
       plan_type: resolvedPlanType,
       monthly_call_limit: callLimit,
       calls_this_month: 0,
@@ -1471,9 +1568,10 @@ async function handleAgencyAddClient(req, res) {
     createdAssistantId = null;
     createdQueryToolId = null;
 
-    console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult.provisioningMethod})`);
+    console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult.provisioningMethod}, billing=${manualBilling ? 'manual' : 'connect'})`);
 
     // ── Update per-client billing for the agency (non-blocking) ─────
+    // Fires for manual clients too: the agency still owes the platform per client.
     try {
       const billingResult = await updateClientBillingQuantity(agencyId);
       if (billingResult.updated) {
@@ -1518,7 +1616,7 @@ async function handleAgencyAddClient(req, res) {
     await sendClientSignupNotificationSMS(newClient, agency);
 
     // === Done ===
-    console.log('🎉 Agency add client complete:', businessName);
+    console.log('🎉 Agency add client complete:', businessName, manualBilling ? '(manual billing, live)' : '(trial)');
 
     res.status(200).json({
       success: true,
@@ -1532,8 +1630,8 @@ async function handleAgencyAddClient(req, res) {
         industry: newClient.industry,
         country: clientCountry,
         location: `${businessCity}, ${businessState}`,
-        trial_ends_at: newClient.trial_ends_at,
-        subscription_status: 'trial',
+        trial_ends_at: manualBilling ? null : newClient.trial_ends_at,
+        subscription_status: manualBilling ? 'manual' : 'trial',
         plan_type: newClient.plan_type,
         provisioning_method: phoneResult.provisioningMethod
       }
@@ -1556,6 +1654,9 @@ async function handleAgencyAddClient(req, res) {
 
 // ============================================================================
 // PROVISION CLIENT (Called after Stripe checkout)
+// ----------------------------------------------------------------------------
+// Only ever runs after a Stripe Connect checkout completes, which a manual
+// client never does, so this path needs no manual-billing branch.
 // ============================================================================
 async function provisionClient(clientId) {
   let createdAssistantId = null;
