@@ -16,6 +16,20 @@
 //          selection (no cloning), feedback path. Added a hard compliance rule:
 //          the bot must NOT claim HIPAA compliance or a BAA (neither exists
 //          today); healthcare questions are directed to the team.
+// UPDATED: 2026-08-17 - /message now accepts an ANONYMOUS marketing-site
+//          prospect. The platform support widget (components/SupportWidget.tsx)
+//          on myvoiceaiconnect.com forwards { name, contact, message,
+//          conversationSummary } here via /api/widget/escalate with no auth
+//          token. Previously this endpoint only read identity from a token, so
+//          a token-less prospect logged as "Unknown" (and the widget used to
+//          hit the agency inbox intake, which 404'd on the platform host). Now
+//          a token-less request carrying name/contact is treated as a prospect:
+//          the record is populated from those fields (user_type kept at the
+//          proven-safe 'agency' value so the queue insert can never be rejected
+//          by an enum/CHECK constraint, and tagged as a prospect in the message
+//          body), and the owner SMS shows the prospect name + contact so a
+//          callback request is actionable. The logged-in dashboard widget path
+//          (token + { message }) is unchanged.
 
 const express = require('express');
 const router = express.Router();
@@ -31,7 +45,7 @@ const SUPPORT_PHONE = process.env.SUPPORT_PHONE_NUMBER || '';
 // Platform notification number for sending
 const PLATFORM_NUMBER = process.env.TELNYX_SMS_FROM_NUMBER || process.env.TELNYX_PHONE_NUMBER || process.env.PLATFORM_PHONE_NUMBER || '';
 
-// ── Knowledge Base Context (embedded for AI) ────────────────────────
+// -- Knowledge Base Context (embedded for AI) ------------------------
 const KB_CONTEXT = `
 You are the VoiceAI Connect support assistant. Answer questions about the platform accurately and helpfully using ONLY the information below. If a question isn't covered, say you don't have that information and suggest the user contact support.
 
@@ -158,7 +172,7 @@ MEDICAL & HEALTHCARE USE:
 
 GOOGLE CALENDAR INTEGRATION:
 - Built-in Google Calendar integration - AI can check real-time availability and book appointments during calls.
-- Caller says they want an appointment → AI checks Google Calendar → offers available slots → books it automatically.
+- Caller says they want an appointment -> AI checks Google Calendar -> offers available slots -> books it automatically.
 - Calendar events include caller name, phone, and reason for appointment.
 - Agencies control which client plan tiers get calendar access (Settings > Pricing, toggle "Google Calendar" per plan).
 - Clients connect their own Google account via OAuth (secure, agency never sees credentials).
@@ -182,7 +196,7 @@ SUPPORT & FEEDBACK:
 - Email support@myvoiceaiconnect.com. Support responds within a few hours.
 `;
 
-// ── POST /api/help/chat ─────────────────────────────────────────────
+// -- POST /api/help/chat ---------------------------------------------
 // AI chatbot powered by Claude
 router.post('/chat', async (req, res) => {
   try {
@@ -229,31 +243,37 @@ router.post('/chat', async (req, res) => {
   }
 });
 
-// ── POST /api/help/message ──────────────────────────────────────────
+// -- POST /api/help/message ------------------------------------------
 // Support escalation. Persists to support_requests (admin Support queue) AND
 // texts the platform owner. Both are independent best-effort: a DB failure must
 // not lose the SMS, and an SMS failure must not lose the DB record. Returns
 // success as long as the request was captured in at least one place.
+//
+// Two callers:
+//   1. Logged-in dashboard widget (components/support-widget.tsx): sends a
+//      Bearer token + { message }. Identity comes from the token.
+//   2. Anonymous marketing-site prospect (components/SupportWidget.tsx via
+//      /api/widget/escalate): no token, sends { name, contact, message,
+//      conversationSummary }. Treated as a prospect; the record + SMS are built
+//      from those fields.
 router.post('/message', async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, name, contact, conversationSummary } = req.body || {};
 
-    if (!message || typeof message !== 'string' || message.trim().length === 0) {
-      return res.status(400).json({ error: 'Message is required' });
-    }
-
-    // Pull identity from the auth token. generateToken mints
+    // Pull identity from the auth token when present. generateToken mints
     // { userId, email, role, agencyId, clientId } (camelCase); fall back to
     // snake_case defensively. role distinguishes agency vs client callers.
     let userEmail = 'Unknown';
     let agencyId = null;
     let clientId = null;
     let role = null;
+    let hasToken = false;
     try {
       const token = req.headers.authorization?.replace('Bearer ', '');
       if (token) {
         const jwt = require('jsonwebtoken');
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        hasToken = true;
         userEmail = decoded.email || 'Unknown';
         agencyId = decoded.agencyId || decoded.agency_id || null;
         clientId = decoded.clientId || decoded.client_id || null;
@@ -263,27 +283,68 @@ router.post('/message', async (req, res) => {
       // Token parsing failed, continue as anonymous.
     }
 
-    const userType =
-      (role && String(role).startsWith('client')) || (clientId && !agencyId)
-        ? 'client'
-        : 'agency';
+    // Anonymous marketing-site prospect: no valid token but name/contact given
+    // by the /api/widget/escalate forwarder. Contact is required upstream.
+    const trimmedName = typeof name === 'string' ? name.trim() : '';
+    const trimmedContact = typeof contact === 'string' ? contact.trim() : '';
+    const isProspect = !hasToken && (trimmedName.length > 0 || trimmedContact.length > 0);
 
-    // Resolve a human-readable name for the record and SMS. The token does not
-    // carry the agency/client name, so look it up (best effort).
-    let displayName = 'Unknown';
-    try {
-      if (userType === 'agency' && agencyId) {
-        const { data } = await supabase.from('agencies').select('name').eq('id', agencyId).single();
-        if (data?.name) displayName = data.name;
-      } else if (clientId) {
-        const { data } = await supabase.from('clients').select('business_name').eq('id', clientId).single();
-        if (data?.business_name) displayName = data.business_name;
+    // Compose the effective message. For a prospect we fold the typed message
+    // and the chat transcript into one body and tag it so it is unmistakable in
+    // the admin queue. A prospect who typed nothing still counts as a valid
+    // callback request (contact was required upstream).
+    let composed = typeof message === 'string' ? message.trim() : '';
+
+    if (isProspect) {
+      const parts = [];
+      parts.push('[Marketing site prospect - requested a person]');
+      parts.push(`Name: ${trimmedName || 'Not given'}`);
+      parts.push(`Contact: ${trimmedContact || 'Not given'}`);
+      parts.push('');
+      parts.push(composed || '(No message typed - prospect asked to be contacted.)');
+      const transcript = typeof conversationSummary === 'string' ? conversationSummary.trim() : '';
+      if (transcript) {
+        parts.push('');
+        parts.push('--- Chat history ---');
+        parts.push(transcript);
       }
-    } catch {
-      // non-blocking
+      composed = parts.join('\n');
     }
 
-    const cleanMessage = message.trim().substring(0, 2000);
+    if (!composed) {
+      return res.status(400).json({ error: 'Message is required' });
+    }
+
+    // Derive identity fields for the record and SMS.
+    let userType;
+    let displayName;
+    if (isProspect) {
+      // Keep user_type at a proven-safe value so a queue-table enum/CHECK
+      // constraint can never reject the insert; the prospect is identified by
+      // the message tag above and the SMS label below.
+      userType = 'agency';
+      displayName = trimmedName || 'Website visitor';
+      userEmail = trimmedContact || 'Unknown';
+    } else {
+      userType =
+        (role && String(role).startsWith('client')) || (clientId && !agencyId)
+          ? 'client'
+          : 'agency';
+      displayName = 'Unknown';
+      try {
+        if (userType === 'agency' && agencyId) {
+          const { data } = await supabase.from('agencies').select('name').eq('id', agencyId).single();
+          if (data?.name) displayName = data.name;
+        } else if (clientId) {
+          const { data } = await supabase.from('clients').select('business_name').eq('id', clientId).single();
+          if (data?.business_name) displayName = data.business_name;
+        }
+      } catch {
+        // non-blocking
+      }
+    }
+
+    const cleanMessage = composed.substring(0, 2000);
 
     // 1) Persist to support_requests so it lands in the admin Support queue.
     let persisted = false;
@@ -304,14 +365,15 @@ router.post('/message', async (req, res) => {
       console.error('support_requests insert threw (non-blocking):', dbErr.message);
     }
 
-    // 2) Text the platform owner, as before.
+    // 2) Text the platform owner.
     let smsSent = false;
     if (SUPPORT_PHONE) {
       try {
+        const whoLabel = isProspect ? 'Prospect' : (userType === 'client' ? 'Client' : 'Agency');
         const smsBody = [
-          '🆘 VoiceAI Support Request',
-          `${userType === 'client' ? 'Client' : 'Agency'}: ${displayName}`,
-          `Email: ${userEmail}`,
+          isProspect ? '📞 VoiceAI Callback Request' : '🆘 VoiceAI Support Request',
+          `${whoLabel}: ${displayName}`,
+          `Contact: ${userEmail}`,
           `Message: ${cleanMessage.substring(0, 600)}`,
           `Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}`,
         ].join('\n');
@@ -322,7 +384,7 @@ router.post('/message', async (req, res) => {
           agencyId: agencyId,
           recipientType: 'admin',
           messageType: 'support_escalation',
-          metadata: { name: displayName, email: userEmail, userType },
+          metadata: { name: displayName, contact: userEmail, userType: isProspect ? 'prospect' : userType },
         });
         smsSent = true;
       } catch (smsErr) {

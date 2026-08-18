@@ -24,12 +24,72 @@
 //          google_calendar). For a non-US BYOT agency this flag, ANDed with a
 //          saved mobile bundle, is what drives provisioning a text-capable
 //          mobile number at client signup. US two-way texting is unaffected.
+// UPDATED: 2026-08-17 - Signup dedupe hardening. Two agencies signed up back to
+//          back with the same phone and a one-character-different email
+//          (chadab15@gmail.com vs the typo chadab15@gmai.com). The old email
+//          check was an exact lower(trim) match, so the typo slipped through,
+//          and phone was never checked at all. Now:
+//            (1) EMAIL is matched on a gmail-aware NORMALIZED form (dots and
+//                +tags stripped, googlemail unified to gmail) so alias farming
+//                collapses to one account. Backed by a DB unique index on the
+//                generated normalized_email column (see the migration), so the
+//                database is the real backstop, not app code. A 23505 on insert
+//                is caught and returned as a clean 409.
+//            (2) PHONE is a SOFT check (no DB unique constraint, by design: the
+//                platform's own number has dozens of test rows and some real
+//                businesses legitimately share a line). A signup is blocked when
+//                the same digits already belong to an agency that is active or
+//                trial, or a pending_payment created in the last 24h (the true
+//                back-to-back case). Long-dead suspended rows and old abandoned
+//                pending rows never burn a number. An env allowlist
+//                (SIGNUP_PHONE_ALLOWLIST, seeded with the platform number) lets
+//                internal testing bypass the check.
+//          Both new checks fail OPEN if their generated columns are missing, so
+//          deploying this before the migration cannot break signups; the
+//          existing exact-email unique constraint still applies as a floor.
 // ============================================================================
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { supabase } = require('../lib/supabase');
 const { sendAgencyWelcomeEmail, sendAgencyWelcomeSMS } = require('../lib/notifications');
 const { seedDefaultTemplatesIfNeeded } = require('../lib/default-templates');
+
+// ============================================================================
+// DEDUPE NORMALIZATION
+// ----------------------------------------------------------------------------
+// normalizeEmail MUST mirror the SQL generated column agencies.normalized_email
+// exactly, or the app pre-check and the DB unique index could disagree. Both
+// use the FIRST '@' to split, lowercase+trim, and for gmail/googlemail strip
+// the +tag then strip dots in the local part and unify the domain to gmail.com.
+// ============================================================================
+function normalizeEmail(email) {
+  const e = String(email || '').trim().toLowerCase();
+  const at = e.indexOf('@');
+  if (at < 0) return e;
+  const local = e.slice(0, at);
+  const domain = e.slice(at + 1);
+  if (domain === 'gmail.com' || domain === 'googlemail.com') {
+    const cleanedLocal = local.replace(/\+.*$/, '').replace(/\./g, '');
+    return `${cleanedLocal}@gmail.com`;
+  }
+  return e;
+}
+
+// Digits only, mirroring the SQL normalized_phone column. Empty -> null.
+function normalizePhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length ? digits : null;
+}
+
+// Phone numbers allowed to bypass the soft duplicate check (internal testing).
+// Seeded with the platform's own number so signup testing never trips. Add more
+// via SIGNUP_PHONE_ALLOWLIST (comma-separated), any formatting is stripped.
+const PHONE_ALLOWLIST = new Set(
+  (process.env.SIGNUP_PHONE_ALLOWLIST || '6783161454')
+    .split(',')
+    .map((s) => s.replace(/\D/g, ''))
+    .filter(Boolean)
+);
 
 // ============================================================================
 // SLUG GENERATION
@@ -45,25 +105,25 @@ function generateSlug(name) {
 async function ensureUniqueSlug(baseSlug, excludeAgencyId = null) {
   let slug = baseSlug;
   let counter = 1;
-  
+
   while (true) {
     let query = supabase
       .from('agencies')
       .select('id')
       .eq('slug', slug);
-    
+
     if (excludeAgencyId) {
       query = query.neq('id', excludeAgencyId);
     }
-    
+
     const { data } = await query.single();
-    
+
     if (!data) break;
-    
+
     slug = `${baseSlug}-${counter}`;
     counter++;
   }
-  
+
   return slug;
 }
 
@@ -78,7 +138,7 @@ async function createPasswordToken(userId, email) {
   const token = generatePasswordToken();
   const expiresAt = new Date();
   expiresAt.setHours(expiresAt.getHours() + 24);
-  
+
   await supabase.from('password_reset_tokens').insert({
     user_id: userId,
     email: email,
@@ -86,7 +146,7 @@ async function createPasswordToken(userId, email) {
     expires_at: expiresAt.toISOString(),
     used: false
   });
-  
+
   return token;
 }
 
@@ -177,15 +237,82 @@ const DEFAULT_PLAN_FEATURES = {
 // ============================================================================
 function validateAgencySignup(body) {
   const errors = [];
-  
+
   if (!body.email || !body.email.includes('@')) {
     errors.push('Valid email is required');
   }
   if (!body.firstName || body.firstName.trim().length < 1) {
     errors.push('First name is required');
   }
-  
+
   return errors;
+}
+
+// ============================================================================
+// DUPLICATE CHECKS
+// ----------------------------------------------------------------------------
+// emailAlreadyTaken: matches on the normalized_email generated column so gmail
+// aliases collapse to one account. Falls back to an exact lower(trim) match on
+// the raw email column if the normalized column does not exist yet (handler
+// deployed before the migration). The DB unique index is the real backstop; a
+// racing insert that beats this check is caught as a 23505 at insert time.
+async function emailAlreadyTaken(rawEmail) {
+  const normalized = normalizeEmail(rawEmail);
+  try {
+    const { data, error } = await supabase
+      .from('agencies')
+      .select('id')
+      .eq('normalized_email', normalized)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    if (data) return true;
+  } catch (e) {
+    // normalized_email column missing (pre-migration) or transient error: fall
+    // back to the exact-email check, which the existing unique constraint also
+    // enforces. Fail closed on a genuine match, open on infra error.
+    console.warn('Normalized email check unavailable, falling back to exact match:', e.message);
+    const { data } = await supabase
+      .from('agencies')
+      .select('id')
+      .eq('email', String(rawEmail || '').trim().toLowerCase())
+      .limit(1)
+      .maybeSingle();
+    if (data) return true;
+  }
+  return false;
+}
+
+// phoneAlreadyInUse: SOFT check. Blocks only when the same digits belong to an
+// agency that is committed (active/trial) or a very recent pending_payment (the
+// genuine back-to-back duplicate). Old abandoned pending rows and dead suspended
+// rows never burn a number. Allowlisted numbers bypass entirely. Fails OPEN on
+// any error (a soft guard must never break signups): a missing normalized_phone
+// column or infra hiccup simply skips the check.
+async function phoneAlreadyInUse(rawPhone) {
+  const normalized = normalizePhone(rawPhone);
+  if (!normalized) return false;
+  if (PHONE_ALLOWLIST.has(normalized)) return false;
+
+  try {
+    const cutoffIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data, error } = await supabase
+      .from('agencies')
+      .select('id, status, created_at')
+      .eq('normalized_phone', normalized)
+      .in('status', ['active', 'trial', 'pending_payment'])
+      .limit(50);
+    if (error) throw error;
+
+    return (data || []).some((a) =>
+      a.status === 'active' ||
+      a.status === 'trial' ||
+      (a.status === 'pending_payment' && a.created_at && a.created_at > cutoffIso)
+    );
+  } catch (e) {
+    console.warn('Phone dedupe check skipped (non-blocking):', e.message);
+    return false;
+  }
 }
 
 // ============================================================================
@@ -256,49 +383,53 @@ async function attributeReferral(agencyId, referralCode) {
 async function handleAgencySignup(req, res) {
   try {
     console.log('📝 Agency Signup Request');
-    
+
     const validationErrors = validateAgencySignup(req.body);
     if (validationErrors.length > 0) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Validation failed',
         errors: validationErrors
       });
     }
-    
-    const { 
-      email, 
-      firstName, 
-      lastName, 
+
+    const {
+      email,
+      firstName,
+      lastName,
       referralCode,
       name: agencyName,
       phone,
       country
     } = req.body;
-    
-    // Check for duplicate email
-    const { data: existing } = await supabase
-      .from('agencies')
-      .select('id')
-      .eq('email', email.toLowerCase())
-      .single();
-    
-    if (existing) {
-      return res.status(409).json({ 
+
+    // Check for duplicate email (gmail-aware normalized match; DB unique index
+    // is the hard backstop).
+    if (await emailAlreadyTaken(email)) {
+      return res.status(409).json({
         error: 'Account already exists',
         message: 'An agency with this email already exists. Please log in.'
       });
     }
-    
+
+    // Check for duplicate phone (soft: committed or very-recent accounts only,
+    // allowlist bypass, fail-open).
+    if (await phoneAlreadyInUse(phone)) {
+      return res.status(409).json({
+        error: 'phone_exists',
+        message: 'An account with this phone number already exists. Please log in, or contact support if you need another workspace.'
+      });
+    }
+
     const tempName = agencyName || `${firstName}'s Agency`;
     const baseSlug = generateSlug(tempName);
     const slug = await ensureUniqueSlug(baseSlug);
-    
+
     // Resolve country and currency
     const resolvedCountry = country || 'US';
     const resolvedCurrency = getCurrencyForCountry(resolvedCountry);
-    
+
     console.log(`🏢 Creating agency for: ${firstName} ${lastName || ''} (${email}) [${resolvedCountry}/${resolvedCurrency}]`);
-    
+
     // Create agency record
     // NOTE: Status starts as pending. Activation happens in /api/agency/start-trial
     // after onboarding completes (handles both free and paid plans).
@@ -332,14 +463,24 @@ async function handleAgencySignup(req, res) {
       })
       .select()
       .single();
-    
+
     if (agencyError) {
+      // 23505 = unique violation. This fires when a duplicate raced past the
+      // pre-check above and hit the DB unique index (raw email, or the new
+      // normalized_email index). Surface it as a clean 409, not a 500.
+      if (agencyError.code === '23505') {
+        console.warn('Duplicate agency insert blocked by DB constraint:', agencyError.message);
+        return res.status(409).json({
+          error: 'Account already exists',
+          message: 'An agency with this email already exists. Please log in.'
+        });
+      }
       console.error('❌ Agency creation error:', agencyError);
       throw agencyError;
     }
-    
+
     console.log(`✅ Agency created: ${agency.id}`);
-    
+
     // Attribute referral if code provided
     if (referralCode) {
       const result = await attributeReferral(agency.id, referralCode);
@@ -349,13 +490,13 @@ async function handleAgencySignup(req, res) {
         console.log(`⚠️ Referral attribution failed: ${result.reason}`);
       }
     }
-    
+
     // Seed default outreach templates
     const templateResult = await seedDefaultTemplatesIfNeeded(agency.id);
     if (templateResult.success && !templateResult.skipped) {
       console.log(`✅ Default templates seeded: ${templateResult.count} templates`);
     }
-    
+
     // Create user record
     const { data: user, error: userError } = await supabase
       .from('users')
@@ -369,29 +510,29 @@ async function handleAgencySignup(req, res) {
       })
       .select()
       .single();
-    
+
     if (userError) {
       console.error('❌ User creation error:', userError);
       throw userError;
     }
-    
+
     console.log(`✅ Agency user created: ${user.id}`);
-    
+
     // Generate password token
     const token = await createPasswordToken(user.id, email.toLowerCase());
-    
+
     // Send welcome email (non-blocking)
     try {
       await sendAgencyWelcomeEmail(agency, token);
     } catch (emailError) {
       console.warn('⚠️ Welcome email failed (non-blocking):', emailError.message);
     }
-    
+
     // REMOVED: sendAgencySignupNotificationSMS here.
     // It was firing with temp name ("firstName's Agency") causing a duplicate SMS.
     // The real notification now only fires in handleAgencyOnboarding step 1,
     // after the agency sets their actual name and phone number.
-    
+
     // Welcome SMS to agency owner (non-blocking)
     console.log('📱 Sending welcome SMS to agency owner...');
     try {
@@ -399,9 +540,9 @@ async function handleAgencySignup(req, res) {
     } catch (smsError) {
       console.warn('⚠️ Agency welcome SMS failed (non-blocking):', smsError.message);
     }
-    
+
     console.log('🎉 Agency signup complete:', email);
-    
+
     res.status(200).json({
       success: true,
       agencyId: agency.id,
@@ -413,10 +554,10 @@ async function handleAgencySignup(req, res) {
         slug: agency.slug,
       }
     });
-    
+
   } catch (error) {
     console.error('❌ Agency signup error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Signup failed',
       message: 'Something went wrong. Please try again.'
     });
@@ -440,38 +581,38 @@ async function handleAgencySignup(req, res) {
 async function handleAgencyOnboarding(req, res) {
   try {
     const { agency_id, step, data } = req.body;
-    
+
     if (!agency_id || !step) {
       return res.status(400).json({ error: 'agency_id and step required' });
     }
-    
+
     const { data: agency, error } = await supabase
       .from('agencies')
       .select('*')
       .eq('id', agency_id)
       .single();
-    
+
     if (error || !agency) {
       return res.status(404).json({ error: 'Agency not found' });
     }
-    
+
     console.log(`📝 Onboarding step ${step} for: ${agency.name}`);
-    
-    let updateData = { 
+
+    let updateData = {
       onboarding_step: step + 1,
       updated_at: new Date().toISOString()
     };
-    
+
     switch (step) {
       case 1: // Agency Details
         if (data.name && data.name.trim()) {
           updateData.name = data.name.trim();
-          
+
           const baseSlug = generateSlug(data.name);
           const uniqueSlug = await ensureUniqueSlug(baseSlug, agency_id);
           updateData.slug = uniqueSlug;
           updateData.referral_code = uniqueSlug;
-          
+
           console.log(`📛 Agency name set: ${data.name} (slug: ${uniqueSlug})`);
         }
         if (data.phone !== undefined) {
@@ -492,7 +633,7 @@ async function handleAgencyOnboarding(req, res) {
           console.log(`🌍 Country set: ${resolvedCountry} (currency: ${updateData.currency})`);
         }
         break;
-        
+
       case 2: // Pricing
         if (data.price_starter !== undefined) updateData.price_starter = data.price_starter;
         if (data.price_pro !== undefined) updateData.price_pro = data.price_pro;
@@ -501,7 +642,7 @@ async function handleAgencyOnboarding(req, res) {
         if (data.limit_pro !== undefined) updateData.limit_pro = data.limit_pro;
         if (data.limit_growth !== undefined) updateData.limit_growth = data.limit_growth;
         break;
-        
+
       case 3: // Logo upload
         if (data.logo_url !== undefined) {
           updateData.logo_url = data.logo_url || null;
@@ -510,7 +651,7 @@ async function handleAgencyOnboarding(req, res) {
           updateData.logo_background_color = data.logo_background_color || null;
         }
         break;
-        
+
       case 4: // Brand colors + theme
         if (data.primary_color) updateData.primary_color = data.primary_color;
         if (data.secondary_color) updateData.secondary_color = data.secondary_color;
@@ -523,23 +664,23 @@ async function handleAgencyOnboarding(req, res) {
           updateData.logo_background_color = data.logo_background_color || null;
         }
         break;
-        
+
       case 5: // Password step
         updateData.onboarding_completed = true;
         updateData.onboarding_completed_at = new Date().toISOString();
         break;
-        
+
       case 6: // Complete
         updateData.onboarding_completed = true;
         updateData.onboarding_completed_at = new Date().toISOString();
         break;
     }
-    
+
     await supabase
       .from('agencies')
       .update(updateData)
       .eq('id', agency_id);
-    
+
     // NOTE: The admin "agency activated" SMS is NOT sent here anymore. Saving a
     // name + phone in onboarding step 1 is not activation, it is just an early
     // step toward it (plan, password, and card still come after). Firing here
@@ -547,14 +688,14 @@ async function handleAgencyOnboarding(req, res) {
     // notification now fires only at real activation, with the chosen plan:
     //   Free -> app/api/agency/start-trial POSTs /api/agency/:id/notify-activated
     //   Paid -> handleAgencyCheckoutCompleted in routes/stripe-platform.js
-    
+
     res.json({
       success: true,
       step: step,
       next_step: step < 6 ? step + 1 : null,
       completed: step >= 6
     });
-    
+
   } catch (error) {
     console.error('❌ Onboarding error:', error);
     res.status(500).json({ error: 'Onboarding step failed' });
@@ -570,5 +711,7 @@ module.exports = {
   attributeReferral,
   createPasswordToken,
   getReferralSourceLabel,
-  getCurrencyForCountry
+  getCurrencyForCountry,
+  normalizeEmail,
+  normalizePhone,
 };
