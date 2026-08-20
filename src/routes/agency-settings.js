@@ -80,6 +80,14 @@
 //                      manual agency may charge its clients outside these plan
 //                      prices), drop 'manual' from the ACTIVE_STAT_STATUSES set
 //                      used in the mrr reducer only.
+// UPDATED: 2026-08-20: One-time client setup fee. setup_fee_cents (agency
+//                      currency, cents; null/0 = no fee) is whitelisted and
+//                      range-validated in updateAgencySettings, returned in the
+//                      authenticated getAgencySettings payload so the Pricing
+//                      tab can load it, and exposed on publicAgencyShape so the
+//                      signup widget / marketing site can show it before
+//                      checkout. The fee itself is charged by stripe-connect's
+//                      buildSetupFeeLineItem on the client's first paid invoice.
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
@@ -181,6 +189,11 @@ function publicAgencyShape(agency) {
     price_starter: agency.price_starter,
     price_pro: agency.price_pro,
     price_growth: agency.price_growth,
+
+    // One-time client setup fee (cents, agency currency; null = none). Public
+    // so the signup widget and marketing site can show it before checkout. The
+    // charge itself is added server-side by stripe-connect at checkout.
+    setup_fee_cents: agency.setup_fee_cents ?? null,
 
     // Limits
     limit_starter: agency.limit_starter,
@@ -479,6 +492,12 @@ async function getAgencySettings(req, res) {
         price_starter: agency.price_starter,
         price_pro: agency.price_pro,
         price_growth: agency.price_growth,
+
+        // One-time client setup fee (cents, agency currency; null = none).
+        // Loaded by the Pricing tab. Charged on the client's first paid invoice
+        // by stripe-connect's buildSetupFeeLineItem.
+        setup_fee_cents: agency.setup_fee_cents ?? null,
+
         limit_starter: agency.limit_starter,
         limit_pro: agency.limit_pro,
         limit_growth: agency.limit_growth,
@@ -613,6 +632,8 @@ async function updateAgencySettings(req, res) {
       'primary_color', 'secondary_color', 'accent_color',
       'marketing_domain', 'domain_verified',
       'price_starter', 'price_pro', 'price_growth',
+      // One-time client setup fee (cents). Range-validated below. NULL/0 = none.
+      'setup_fee_cents',
       'limit_starter', 'limit_pro', 'limit_growth',
       // Client per-minute billing: the agency-wide overage rate (cents/min)
       // and the per-plan included-minute allotments. Written via the normal
@@ -839,6 +860,28 @@ async function updateAgencySettings(req, res) {
         }
         // Clamp to numeric(10,4): at most 4 decimal places of cents.
         sanitizedUpdates.client_minute_rate_cents = Math.round(cents * 10000) / 10000;
+      }
+    }
+
+    // Validate the one-time client setup fee.
+    // Stored in the agency's currency, in CENTS, as a whole integer. Range
+    // guard: >= 0 and a sane ceiling of 1,000,000 cents (10,000.00) to catch a
+    // fat-fingered value. Empty/null clears it (no setup fee). The frontend
+    // collects dollars and multiplies by 100 before sending, so what arrives
+    // here is already whole cents.
+    if (sanitizedUpdates.setup_fee_cents !== undefined) {
+      const raw = sanitizedUpdates.setup_fee_cents;
+      if (raw === null || raw === '') {
+        sanitizedUpdates.setup_fee_cents = null;
+      } else {
+        const cents = Number(raw);
+        if (!Number.isInteger(cents) || cents < 0) {
+          return res.status(400).json({ error: 'setup_fee_cents must be an integer of 0 or greater (in cents)' });
+        }
+        if (cents > 1000000) {
+          return res.status(400).json({ error: 'setup_fee_cents cannot exceed 1000000 (10,000.00)' });
+        }
+        sanitizedUpdates.setup_fee_cents = cents;
       }
     }
 

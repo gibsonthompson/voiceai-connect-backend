@@ -84,6 +84,19 @@
 //          change: expireTrials filters on trial/trialing status and reconcile
 //          filters on a present connected subscription id, and a manual client
 //          is neither.
+// UPDATED: 2026-08-20: One-time client setup fee. buildSetupFeeLineItem returns
+//          a one-time Checkout line item (a one-time Price on the connected
+//          account) for agency.setup_fee_cents when set, and both client
+//          subscription builders (createTrialCheckoutForSignup and
+//          createClientCheckout) append it. In mode:'subscription' a one-time
+//          line item bills on the FIRST invoice only, so it is charged
+//          immediately on a no-card conversion and at trial end (with the first
+//          month, never during the free trial) on a card-required trial. It is
+//          on the agency's connected account (agency keeps 100 percent), shows
+//          as its own line at checkout, and is Connect-only (a manual client
+//          never reaches these builders). changeClientPlan does NOT add it, and
+//          the createClientCheckout active-subscription guard prevents a paying
+//          client from being re-charged it.
 // ============================================================================
 const Stripe = require('stripe');
 const fetch = require('node-fetch');
@@ -152,6 +165,51 @@ function getCurrencyForCountry(countryCode) {
 function isSupportedConnectCountry(countryCode) {
   return typeof countryCode === 'string'
     && Object.prototype.hasOwnProperty.call(countryCurrencyMap, countryCode.trim().toUpperCase());
+}
+
+// ============================================================================
+// ONE-TIME CLIENT SETUP FEE
+// ----------------------------------------------------------------------------
+// Returns a Checkout line_item for the agency's one-time setup fee (a one-time
+// Price created on the CONNECTED account), or null when no fee is set
+// (setup_fee_cents null / 0 / non-positive).
+//
+// In mode:'subscription', a one-time line item bills on the FIRST invoice only:
+//   - createClientCheckout (no trial)         -> charged immediately at checkout
+//   - createTrialCheckoutForSignup (7d trial) -> charged on the first invoice at
+//                                                trial end, with the first month,
+//                                                never during the free trial
+//
+// Priced in the agency's currency, same as the plan, and it rides the same
+// direct charge on the connected account (agency keeps 100 percent). Connect-
+// only: a manual-billing client never reaches these builders, so it never gets
+// a Stripe setup fee (a manual agency collects any setup fee on its own invoice).
+// ============================================================================
+async function buildSetupFeeLineItem(agency, plan) {
+  const feeCents = Number(agency.setup_fee_cents);
+  if (!(feeCents > 0)) return null;
+
+  const acct = agency.stripe_account_id;
+  const currency = getCurrencyForCountry(agency.country || 'US');
+
+  const product = await stripe.products.create(
+    { name: 'One-time setup fee', metadata: { kind: 'setup_fee', plan: plan || '' } },
+    { stripeAccount: acct }
+  );
+
+  const price = await stripe.prices.create(
+    {
+      product: product.id,
+      unit_amount: feeCents,
+      currency,
+      // no `recurring` => one-time price; on a subscription-mode Checkout this
+      // is billed on the first invoice only.
+      metadata: { kind: 'setup_fee' },
+    },
+    { stripeAccount: acct }
+  );
+
+  return { price: price.id, quantity: 1 };
 }
 
 // ============================================================================
@@ -1191,6 +1249,13 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     lineItems.push({ price: minutePrice.id }); // metered, no quantity
   }
 
+  // One-time setup fee (when set). A one-time line item on a subscription-mode
+  // Checkout bills on the FIRST invoice only, which for a trialing subscription
+  // is the invoice generated at trial end, so the fee lands with the first
+  // month and never during the free trial.
+  const setupFeeItem = await buildSetupFeeLineItem(agency, plan);
+  if (setupFeeItem) lineItems.push(setupFeeItem);
+
   const session = await stripe.checkout.sessions.create({
     customer: connectedCustomerId,
     mode: 'subscription',
@@ -1322,6 +1387,11 @@ async function createClientCheckout(req, res) {
       const minutePrice = await createConnectMinutePrice(agency, plan);
       upgradeLineItems.push({ price: minutePrice.id }); // metered, no quantity
     }
+
+    // One-time setup fee (when set). No trial on this flow, so the one-time
+    // line item is billed immediately on the first invoice at checkout.
+    const setupFeeItem = await buildSetupFeeLineItem(agency, plan);
+    if (setupFeeItem) upgradeLineItems.push(setupFeeItem);
 
     const session = await stripe.checkout.sessions.create({
       customer: connectedCustomerId, mode: 'subscription', payment_method_types: ['card'],
@@ -2346,5 +2416,6 @@ module.exports = {
   ensureClientMinuteItem,       // attach the metered item to one existing subscription
   attachMinuteItemsForAgency,   // ON sweep: attach to every existing client (used by toggle + backfill)
   repriceMinuteItemsForAgency,  // rate/included change sweep: re-point existing metered items to a fresh price
-  setMinutePassThrough          // POST handler for the on/off toggle
+  setMinutePassThrough,         // POST handler for the on/off toggle
+  buildSetupFeeLineItem         // one-time client setup fee line item (used by both client checkout builders)
 };
