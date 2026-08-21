@@ -352,6 +352,7 @@ app.use('/media', express.static(MEDIA_DIR, { maxAge: '30d' }));
 app.use('/thumbnails', express.static('/workspace/thumbnails', { maxAge: '1d' }));
 const mediaUpload = require('./media-upload');
 app.use('/api/media', mediaUpload);
+app.use('/api/migrate', require('./routes/migrate-media'));   // TEMP, delete after migration
 
 app.use('/api/content-render', contentRender);
 app.use('/api/resto', restoRoutes);
