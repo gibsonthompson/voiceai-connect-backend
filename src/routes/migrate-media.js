@@ -152,4 +152,116 @@ router.get('/spaces', async (req, res) => {
   }
 });
 
+// ============================================================================
+// CLEANUP: delete old copies from the Supabase content-media bucket.
+//
+// SAFETY: for every file, it first confirms the file EXISTS in the Space before
+// deleting it from Supabase. A file that is not confirmed in the Space is left
+// alone. So this can never delete something that was not already migrated.
+//
+// Deletes through the Supabase Storage API (not SQL), so no S3 orphans.
+// Skips the resto-media bucket entirely; only touches content-media.
+//
+// USE (browser):
+//   Dry run, counts only:
+//     /api/migrate/cleanup?secret=YOUR_CRON_SECRET
+//   Live delete:
+//     /api/migrate/cleanup?secret=YOUR_CRON_SECRET&live=true
+//   Also clear old thumbnails (they regenerate):
+//     /api/migrate/cleanup?secret=YOUR_CRON_SECRET&live=true&thumbnails=true
+// ============================================================================
+router.get('/cleanup', async (req, res) => {
+  if (!process.env.CRON_SECRET || req.query.secret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized. Append ?secret=YOUR_CRON_SECRET' });
+  }
+
+  const LIVE = req.query.live === 'true';
+  const INCLUDE_THUMBS = req.query.thumbnails === 'true';
+  const REGION = process.env.SPACES_REGION || 'nyc3';
+  const BUCKET = process.env.SPACES_BUCKET || 'voiceai-connect-media';
+
+  const missing = ['SUPABASE_URL', 'SUPABASE_SERVICE_KEY', 'SPACES_KEY', 'SPACES_SECRET']
+    .filter(k => !process.env[k]);
+  if (missing.length) return res.status(500).json({ error: `Missing env vars: ${missing.join(', ')}` });
+
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+  const s3 = new S3Client({
+    endpoint: `https://${REGION}.digitaloceanspaces.com`,
+    region: REGION,
+    forcePathStyle: false,
+    credentials: { accessKeyId: process.env.SPACES_KEY, secretAccessKey: process.env.SPACES_SECRET },
+  });
+
+  const existsInSpace = async (key) => {
+    try { await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: key })); return true; }
+    catch { return false; }
+  };
+
+  const listSupabaseFolder = async (folder) => {
+    const all = [];
+    let offset = 0;
+    for (;;) {
+      const { data, error } = await supabase.storage.from(SUPA_BUCKET)
+        .list(folder, { limit: 100, offset, sortBy: { column: 'name', order: 'asc' } });
+      if (error) throw new Error(`list ${folder}: ${error.message}`);
+      if (!data || !data.length) break;
+      for (const o of data) if (o.id) all.push(`${folder}/${o.name}`);
+      if (data.length < 100) break;
+      offset += 100;
+    }
+    return all;
+  };
+
+  const folders = [...FOLDERS];
+  if (INCLUDE_THUMBS) folders.push('thumbnails');
+
+  const log = [];
+  let deleted = 0, kept_not_in_space = 0, failed = 0;
+
+  try {
+    for (const folder of folders) {
+      let keys = [];
+      try { keys = await listSupabaseFolder(folder); }
+      catch (e) { log.push(`${folder}: ${e.message}`); continue; }
+
+      const toDelete = [];
+      for (const key of keys) {
+        // Thumbnails are regenerable, so we do not require them in the Space.
+        if (folder === 'thumbnails') { toDelete.push(key); continue; }
+        // Everything else: only delete if we can confirm it is in the Space.
+        if (await existsInSpace(key)) toDelete.push(key);
+        else { kept_not_in_space++; log.push(`  KEPT (not in Space) ${key}`); }
+      }
+
+      log.push(`${folder}/  ${keys.length} files, ${toDelete.length} safe to delete`);
+
+      if (LIVE && toDelete.length) {
+        // Supabase remove() accepts up to 100 paths per call.
+        for (let i = 0; i < toDelete.length; i += 100) {
+          const batch = toDelete.slice(i, i + 100);
+          const { data, error } = await supabase.storage.from(SUPA_BUCKET).remove(batch);
+          if (error) { failed += batch.length; log.push(`  batch delete failed: ${error.message}`); }
+          else deleted += (data ? data.length : batch.length);
+        }
+      } else if (!LIVE) {
+        deleted += toDelete.length; // dry run reports would-delete count
+      }
+    }
+
+    return res.json({
+      mode: LIVE ? 'LIVE' : 'DRY RUN (nothing deleted)',
+      files_deleted: deleted,
+      files_kept_because_not_in_space: kept_not_in_space,
+      files_failed: failed,
+      thumbnails_included: INCLUDE_THUMBS,
+      note: LIVE
+        ? 'Supabase copies removed. Storage gauge updates in a few minutes.'
+        : 'Dry run. Re-run with &live=true to delete. Add &thumbnails=true to also clear thumbnails.',
+      detail: log,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message, partial: { deleted, kept_not_in_space, failed }, detail: log });
+  }
+});
+
 module.exports = router;
