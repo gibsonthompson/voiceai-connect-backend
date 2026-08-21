@@ -11,11 +11,24 @@
 //   app.use('/api/admin', adminCallsRoutes);
 //
 // Requires the RPC functions from admin_calls_feed.sql to be applied first.
+//
+// UPDATED: 2026-08-20 - Recording playback fix. The call/demo detail RPCs return
+//   calls.recording_url verbatim, which points at VAPI's PRIVATE bucket
+//   (r2.cloudflarestorage.com) and is NOT browser-playable, so the admin
+//   drawer's <audio> element silently failed (403). The client dashboard
+//   already resolves this via resolveVapiRecordingUrl (src/lib/vapi-recording.js,
+//   which trades the stored URL for a fresh short-lived VAPI signed URL using
+//   VAPI_API_KEY). The admin detail handlers never called it. They now resolve
+//   recording_url per-request before responding. The resolver never throws and
+//   returns the original URL on any failure, so the worst case is exactly the
+//   prior behavior. HIPAA calls store no recording, so there is nothing to
+//   resolve there.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const jwt = require('jsonwebtoken');
+const { resolveVapiRecordingUrl, isVapiPrivateRecording } = require('../lib/vapi-recording');
 
 // ----------------------------------------------------------------------------
 // ADMIN AUTH
@@ -51,6 +64,30 @@ function clampInt(value, fallback, min, max) {
   const n = parseInt(value, 10);
   if (Number.isNaN(n)) return fallback;
   return Math.min(Math.max(n, min), max);
+}
+
+// Replace a detail payload's stored (private, unplayable) recording URL with a
+// fresh VAPI signed URL the browser can actually play. Operates on the
+// { call: {...} } shape both detail RPCs return. Safe on any shape: if there is
+// no recording, or it is already a public/legacy URL, or resolution fails, the
+// payload is returned unchanged (resolveVapiRecordingUrl returns the original
+// URL on any problem, so this can never make playback worse than before).
+async function withResolvedRecording(data, recordKey = 'call') {
+  try {
+    const rec = data && data[recordKey];
+    const url = rec && rec.recording_url;
+    if (url && isVapiPrivateRecording(url)) {
+      const playable = await resolveVapiRecordingUrl(url);
+      if (playable && playable !== url) {
+        // Do not mutate the RPC result object identity in surprising ways; a
+        // shallow copy of the inner record is enough and keeps everything else.
+        data[recordKey] = { ...rec, recording_url: playable };
+      }
+    }
+  } catch (e) {
+    console.warn('Admin recording resolve skipped:', e.message);
+  }
+  return data;
 }
 
 // ============================================================================
@@ -90,13 +127,14 @@ router.get('/calls', requireAdmin, async (req, res) => {
 // ============================================================================
 // GET /api/admin/calls/:id
 // Single call with transcript, recording, cost, and linked contact (drawer).
+// recording_url is resolved to a playable VAPI signed URL before responding.
 // ============================================================================
 router.get('/calls/:id', requireAdmin, async (req, res) => {
   try {
     const { data, error } = await supabase.rpc('admin_call_detail', { p_call_id: req.params.id });
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Call not found' });
-    res.json(data);
+    res.json(await withResolvedRecording(data, 'call'));
   } catch (error) {
     console.error('Admin call detail error:', error.message);
     res.status(500).json({ error: 'Failed to load call' });
@@ -142,14 +180,14 @@ router.get('/demos', requireAdmin, async (req, res) => {
 
 // ============================================================================
 // GET /api/admin/demos/:id
-// Single demo call (drawer).
+// Single demo call (drawer). recording_url resolved to a playable signed URL.
 // ============================================================================
 router.get('/demos/:id', requireAdmin, async (req, res) => {
   try {
     const { data, error } = await supabase.rpc('admin_demo_detail', { p_demo_id: req.params.id });
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Demo not found' });
-    res.json(data);
+    res.json(await withResolvedRecording(data, 'call'));
   } catch (error) {
     console.error('Admin demo detail error:', error.message);
     res.status(500).json({ error: 'Failed to load demo' });
