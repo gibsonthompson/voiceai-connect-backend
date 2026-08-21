@@ -23,6 +23,17 @@
 //          focus, real prospect intake flow, prospect vs current-member routing,
 //          richer class/amenity handling. Only affects gyms created from now on
 //          (existing gym clients read client.system_prompt).
+// UPDATED: 2026-08-21 — SPAM_DETECTION_BLOCK rewritten to clarify-first. The old
+//          block let the model decline and end a call the instant it "detected"
+//          spam, so a transcription error could confidently misread a real
+//          prospective client as a salesperson and hang up (seen on a live
+//          Liberty Defence Lawyers call). The new block defaults every caller to
+//          prospective-customer, makes ONE clarifying question mandatory before
+//          any decline (even when the model feels certain, since speech-to-text
+//          can mishear), and only ends the call after the caller confirms they
+//          are soliciting. Heading kept identical so the dedup guard in
+//          assistant-config-builder still recognizes it; dynamic assembly means
+//          it reaches every client on their next call.
 // ============================================================================
 const fetch = require('node-fetch');
 const FormData = require('form-data');
@@ -1484,19 +1495,39 @@ For what you take, what's not allowed, dumpster sizes, rental periods, areas ser
 
 // ============================================================================
 // SPAM DETECTION BLOCK — Appended to every assistant's system prompt
+// ----------------------------------------------------------------------------
+// REWRITTEN 2026-08-21 (clarify-first). The previous version told the model to
+// decline and end the call the instant it "detected" spam, which let a
+// transcription error confidently misclassify a genuine prospective client as a
+// salesperson and hang up. This version:
+//   1. Defaults every caller to prospective-customer (spam is the high-burden
+//      exception, not the assumption).
+//   2. Makes ONE clarifying question MANDATORY before any decline, every time,
+//      even when the model feels certain, because speech-to-text can mishear and
+//      the model's own confidence is not reliable evidence of intent.
+//   3. Only permits ending the call AFTER the caller confirms they are soliciting.
+// The "# Spam Detection" heading is intentionally unchanged so the dedup guard in
+// assistant-config-builder (which skips appending when the base prompt already
+// contains the heading) keeps working.
 // ============================================================================
 const SPAM_DETECTION_BLOCK = `
 
 # Spam Detection
-If the caller appears to be a robocall, telemarketer, or spam:
-- They play a pre-recorded message or sales pitch
-- They don't respond to your questions naturally
-- They're trying to sell a product or service TO the business (SEO, Google ads, insurance leads, credit card processing, etc.)
-- They ask for "the business owner" or "the person in charge of your Google listing"
-- The line goes silent after connecting
-- They use high-pressure tactics or claim there's an urgent issue with the business's online presence
+Treat every caller as a prospective customer of this business until they clearly and explicitly state they are selling or offering a product or service TO the business. The burden of proof for treating a caller as spam is high, and a genuine prospective customer must never be turned away.
 
-If you detect spam: say "We're not interested, thanks. Have a good day." Then end the call using the endCall tool if available. If you cannot end the call, simply stop responding after your goodbye.`;
+Some signals MIGHT suggest a solicitor, but you must never act on them alone:
+- A pre-recorded message or an obvious sales pitch
+- Trying to sell the business something (SEO, Google ads, insurance leads, card processing, business listings)
+- Asking for "the owner" or "whoever handles your Google listing"
+- High-pressure claims about an urgent problem with the business's online presence
+
+Even when these seem present, you MUST first ask exactly one brief clarifying question to confirm intent before declining or ending the call. For example: "Just to clarify, are you looking for our services yourself, or are you reaching out to offer us something?" Ask this every time, even when you feel certain. Speech-to-text can mishear, and a single misheard word can make a real customer sound like a salesperson, so your own certainty is not reliable evidence of intent.
+
+Only if the caller then confirms they are selling or offering something to the business should you politely decline: "Thanks, but we're not interested. Have a good day." Then you may end the call. If they indicate they need what the business offers, or their answer is unclear, continue assisting them as a normal caller.
+
+If a statement seems logically out of place for someone who called this business (for example, an inbound caller saying they "offer services"), treat it as a likely mis-transcription and clarify rather than act on it.
+
+Turning away a genuine prospective customer is a serious failure. Asking one extra question of an actual salesperson costs nothing. When in any doubt, clarify and continue.`;
 
 // ============================================================================
 // TRANSFER KEYWORDS BLOCK — Appended when transfer tool is available
