@@ -14,6 +14,23 @@
 //              + Telnyx telephony leg for whisper (telnyx_cc) clients only
 //   margin   = revenue - cost
 //
+// UPDATED: 2026-08-21 - Revenue is no longer collapsed into one blended number.
+//   The response now breaks it into the three real streams so the Money page
+//   can show each on its own line:
+//     platform_fee_revenue  -> MRR (recurring; counted only for agencies that
+//                              are subscription_status='active' AND have a live
+//                              stripe_subscription_id, so trials, canceled, and
+//                              dev/comped agencies never inflate MRR)
+//     per_client_revenue    -> per active non-test client, at the plan rate
+//     per_minute_revenue    -> VOICE revenue (billed minutes * plan per-minute)
+//   Each also has a `_billed` total that counts only agencies with
+//   usage_billing_enabled = true (the usage that actually reaches Stripe), so
+//   the UI can show billed vs should-be side by side. Costs (vapi_cost,
+//   telnyx_cost) are unchanged. `net` = actually-billed revenue - real cost.
+//   `collected_all_time` sums succeeded rows in `payments` (cash to date),
+//   surfaced separately from MRR on purpose. All previously-returned fields are
+//   kept for backward compatibility.
+//
 // VAPI cost is the ACTUAL figure VAPI reports on each end-of-call-report
 // (message.cost), captured onto usage_records.vapi_cost by the webhook. It
 // already includes hosting + STT + LLM + TTS + transport for vapi_direct
@@ -84,6 +101,30 @@ async function resolveTelnyxRate() {
   return TELNYX_DEFAULT_RATE;
 }
 
+// All-time collected cash: succeeded rows in `payments` (amount is integer
+// cents), summed platform-wide and per agency. Never throws: a read failure
+// yields zeros so the margin call still returns. Cash collected is surfaced
+// separately from MRR because they are different numbers (collected is
+// historical cash, MRR is recurring run-rate).
+async function loadCollected() {
+  const byAgency = {};
+  let allTimeCents = 0;
+  try {
+    const { data } = await supabase
+      .from('payments')
+      .select('agency_id, amount, status')
+      .eq('status', 'succeeded');
+    (data || []).forEach((p) => {
+      const cents = Number(p.amount) || 0;
+      allTimeCents += cents;
+      if (p.agency_id) byAgency[p.agency_id] = (byAgency[p.agency_id] || 0) + cents;
+    });
+  } catch (e) {
+    console.warn('Collected payments lookup failed (non-fatal):', e.message);
+  }
+  return { byAgency, allTimeCents };
+}
+
 // ============================================================================
 // GET /api/admin/margin/settings  reads the editable Telnyx rate
 // PUT /api/admin/margin/settings  sets it { telnyx_cost_per_minute: number }
@@ -135,19 +176,26 @@ router.get('/margin', requireAdmin, async (req, res) => {
     const filterAgencyId = req.query.agencyId || null;
     const telnyxRate = await resolveTelnyxRate();
 
-    // 1. Agencies in scope
-    let agencyQuery = supabase.from('agencies').select('id, name, plan_type');
+    // 1. Agencies in scope. subscription_status + usage_billing_enabled drive
+    //    MRR (active-only) and billed-vs-should-be respectively.
+    let agencyQuery = supabase
+      .from('agencies')
+      .select('id, name, plan_type, subscription_status, status, usage_billing_enabled, stripe_subscription_id');
     if (filterAgencyId) agencyQuery = agencyQuery.eq('id', filterAgencyId);
     const { data: agencies, error: aErr } = await agencyQuery;
     if (aErr) throw aErr;
 
     const agencyIds = (agencies || []).map(a => a.id);
+
+    // Collected cash (all-time succeeded payments), platform-wide + per agency.
+    const collected = await loadCollected();
+
     if (agencyIds.length === 0) {
       return res.json({
         billing_month: billingMonth,
         telnyx_rate_per_min: telnyxRate,
         agencies: [],
-        totals: { minutes: 0, revenue: 0, vapi_cost: 0, telnyx_cost: 0, total_cost: 0, margin: 0, margin_pct: null },
+        totals: emptyTotals(collected.allTimeCents),
       });
     }
 
@@ -204,14 +252,29 @@ router.get('/margin', requireAdmin, async (req, res) => {
       if (isTelnyx) C.telnyxSeconds += secs;
     });
 
-    // Build per-agency rows
+    // Build per-agency rows, with revenue split into its three streams.
     const results = (agencies || []).map(a => {
       const A = perAgency[a.id] || bucket();
       const rates = getPlanRates(a.plan_type);
       const minutes = Math.ceil(A.seconds / 60);
       const billableClients = billableByAgency[a.id] || 0;
 
-      const revenue = rates.platformFee + billableClients * rates.perClient + minutes * rates.perMinute;
+      // MRR counts only agencies actively PAYING with a real Stripe subscription
+      // attached. subscription_status='active' alone is NOT enough: dev, comped,
+      // and manually-set agencies sit at 'active' on a paid plan without ever
+      // billing through Stripe, which inflates MRR. Requiring a live
+      // stripe_subscription_id ties MRR to agencies that actually recur. Trials,
+      // canceled, and past_due never count.
+      const isPaying = a.subscription_status === 'active' && !!a.stripe_subscription_id;
+      const metered = a.usage_billing_enabled === true;
+
+      const platformFeeRevenue = isPaying ? (rates.platformFee || 0) : 0;
+      const perClientRevenue = billableClients * (rates.perClient || 0);
+      const perMinuteRevenue = minutes * (rates.perMinute || 0); // voice
+
+      // Gross = everything the plan entitles you to charge (should-be).
+      const revenue = platformFeeRevenue + perClientRevenue + perMinuteRevenue;
+
       const telnyxMinutes = Math.ceil(A.telnyxSeconds / 60);
       const telnyxCost = telnyxMinutes * telnyxRate;
       const vapiCost = round2(A.vapiCost);
@@ -225,32 +288,73 @@ router.get('/margin', requireAdmin, async (req, res) => {
         agency_id: a.id,
         agency_name: a.name,
         plan_type: a.plan_type || 'free',
+        subscription_status: a.subscription_status || null,
+        is_paying: isPaying,
+        usage_billing_enabled: metered,
         billable_clients: billableClients,
         minutes,
+        // revenue streams (each on its own line in the UI)
+        platform_fee_revenue: round2(platformFeeRevenue),
+        per_client_revenue: round2(perClientRevenue),
+        per_minute_revenue: round2(perMinuteRevenue), // voice
         revenue: round2(revenue),
+        // cost
         vapi_cost: vapiCost,
         telnyx_cost: round2(telnyxCost),
         total_cost: totalCost,
         margin,
         margin_pct: revenue > 0 ? Math.round((margin / revenue) * 1000) / 10 : null,
+        // cash collected from this agency, all-time (payments.amount is cents)
+        collected: round2((collected.byAgency[a.id] || 0) / 100),
         cost_capture_complete: costCaptureComplete,
         usage_rows: A.totalRows,
         cost_captured_rows: A.costRows,
       };
     });
 
-    // Platform totals
+    // Platform totals, streams kept separate. `_billed` variants count only
+    // metered agencies (the usage that actually reaches Stripe); the plain
+    // stream totals are should-be across everyone.
     const totals = results.reduce((t, r) => {
       t.minutes += r.minutes;
-      t.revenue += r.revenue;
+      t.mrr += r.platform_fee_revenue;              // recurring, active-only
+      t.per_client_revenue += r.per_client_revenue;
+      t.voice_revenue += r.per_minute_revenue;
+      t.revenue += r.revenue;                       // gross should-be
       t.vapi_cost += r.vapi_cost;
       t.telnyx_cost += r.telnyx_cost;
       t.total_cost += r.total_cost;
       t.margin += r.margin;
+      if (r.usage_billing_enabled) {
+        t.per_client_revenue_billed += r.per_client_revenue;
+        t.voice_revenue_billed += r.per_minute_revenue;
+      }
       return t;
-    }, { minutes: 0, revenue: 0, vapi_cost: 0, telnyx_cost: 0, total_cost: 0, margin: 0 });
-    ['revenue', 'vapi_cost', 'telnyx_cost', 'total_cost', 'margin'].forEach(k => { totals[k] = round2(totals[k]); });
+    }, {
+      minutes: 0, mrr: 0,
+      per_client_revenue: 0, per_client_revenue_billed: 0,
+      voice_revenue: 0, voice_revenue_billed: 0,
+      revenue: 0, vapi_cost: 0, telnyx_cost: 0, total_cost: 0, margin: 0,
+    });
+
+    // Actually-billed revenue = recurring platform fees + metered usage.
+    totals.billed_revenue = totals.mrr + totals.per_client_revenue_billed + totals.voice_revenue_billed;
+    // Usage you are entitled to but not metering (revenue-side exposure).
+    totals.unbilled_usage_revenue =
+      (totals.per_client_revenue - totals.per_client_revenue_billed) +
+      (totals.voice_revenue - totals.voice_revenue_billed);
+    // Net profit = what you actually bill minus what the minutes actually cost.
+    totals.net = totals.billed_revenue - totals.total_cost;
+
+    [
+      'mrr', 'per_client_revenue', 'per_client_revenue_billed', 'voice_revenue',
+      'voice_revenue_billed', 'revenue', 'vapi_cost', 'telnyx_cost', 'total_cost',
+      'margin', 'billed_revenue', 'unbilled_usage_revenue', 'net',
+    ].forEach(k => { totals[k] = round2(totals[k]); });
+
     totals.margin_pct = totals.revenue > 0 ? Math.round((totals.margin / totals.revenue) * 1000) / 10 : null;
+    totals.net_pct = totals.billed_revenue > 0 ? Math.round((totals.net / totals.billed_revenue) * 1000) / 10 : null;
+    totals.collected_all_time = round2(collected.allTimeCents / 100);
 
     const response = {
       billing_month: billingMonth,
@@ -280,12 +384,25 @@ router.get('/margin', requireAdmin, async (req, res) => {
       }).sort((x, y) => y.total_cost - x.total_cost);
     }
 
-    console.log(`\uD83D\uDCB0 Admin margin: ${results.length} agencies, ${billingMonth}, margin $${totals.margin}`);
+    console.log(`\uD83D\uDCB0 Admin margin: ${results.length} agencies, ${billingMonth}, MRR $${totals.mrr}, net $${totals.net}, collected $${totals.collected_all_time}`);
     res.json(response);
   } catch (error) {
     console.error('Admin margin error:', error.message);
     res.status(500).json({ error: 'Failed to compute margin' });
   }
 });
+
+// Zero totals in the new shape, used when no agencies are in scope.
+function emptyTotals(collectedAllTimeCents) {
+  return {
+    minutes: 0, mrr: 0,
+    per_client_revenue: 0, per_client_revenue_billed: 0,
+    voice_revenue: 0, voice_revenue_billed: 0,
+    revenue: 0, vapi_cost: 0, telnyx_cost: 0, total_cost: 0,
+    margin: 0, margin_pct: null,
+    billed_revenue: 0, unbilled_usage_revenue: 0, net: 0, net_pct: null,
+    collected_all_time: round2((Number(collectedAllTimeCents) || 0) / 100),
+  };
+}
 
 module.exports = router;
