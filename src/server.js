@@ -232,6 +232,7 @@ const abandonedCheckoutCleanupRoutes = require('./routes/abandoned-checkout-clea
 const manualUsageResetRoutes = require('./routes/manual-usage-reset');
 const agencyOnboardingSmsRoutes = require('./routes/agency-onboarding-sms');
 const activationSmsRoutes = require('./routes/activation-sms');
+const onboardingEmailRoutes = require('./routes/onboarding-emails');
 const feedbackRoutes = require('./routes/feedback');
 const supportRoutes = require('./routes/support');
 const helpRoutes = require('./routes/help');
@@ -1565,6 +1566,7 @@ app.use('/api/cron', abandonedCartRoutes);
 // Agency onboarding engagement SMS (called by cron-job.org every hour)
 app.use('/api/cron', agencyOnboardingSmsRoutes);
 app.use('/api/cron', activationSmsRoutes);
+app.use('/api/cron', onboardingEmailRoutes);
 
 app.use('/api/cron', cleanupOrphanedTestClients);
 
