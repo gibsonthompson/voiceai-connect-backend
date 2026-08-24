@@ -1006,6 +1006,16 @@ async function handleAgencyPaymentSucceeded(invoice) {
   const agency = await getAgencyByStripeCustomerId(invoice.customer);
   if (!agency) return;
 
+  // A $0 invoice is Stripe's trial-start invoice (or a 100%-off comp), which
+  // Stripe auto-marks paid and fires invoice.payment_succeeded for. That is NOT
+  // a real payment. Flipping the agency to 'active' here mislabels every trial
+  // as active the moment it starts, which is why trialing agencies show up as
+  // active and paying counts look inflated. Only a real charge activates.
+  if (!invoice.amount_paid || invoice.amount_paid <= 0) {
+    console.log(`Skipping activation for $0 invoice ${invoice.id} (trial start / comp) for agency ${agency.id}`);
+    return;
+  }
+
   await supabase
     .from('agencies')
     .update({

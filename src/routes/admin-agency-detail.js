@@ -122,6 +122,20 @@ router.get('/agencies/:agencyId/expanded', requireAdmin, async (req, res) => {
       };
     }
 
+    // ── Email History (manual admin emails, last 20 from email_log) ─────
+    let emailHistory = [];
+    try {
+      const { data: emailLogs } = await supabase
+        .from('email_log')
+        .select('id, subject, template_key, sent_via, created_at')
+        .eq('agency_id', agencyId)
+        .order('created_at', { ascending: false })
+        .limit(20);
+      emailHistory = emailLogs || [];
+    } catch (e) {
+      // email_log table might not exist yet
+    }
+
     // ── Referral Chain ──────────────────────────────────────────────────
     let referredAgencies = [];
     if (agency.referral_code) {
@@ -162,6 +176,7 @@ router.get('/agencies/:agencyId/expanded', requireAdmin, async (req, res) => {
         step: agency.onboarding_email_step || 0,
         last_sent: agency.onboarding_email_last_sent_at || null,
       },
+      email_history: emailHistory,
     });
 
   } catch (error) {
@@ -216,6 +231,45 @@ router.post('/agencies/:agencyId/onboarding-email-sent', requireAdmin, async (re
   } catch (error) {
     console.error('Onboarding email log error:', error);
     res.status(500).json({ error: 'Failed to log onboarding email' });
+  }
+});
+
+// ============================================================================
+// POST /agencies/:agencyId/log-email
+// Record an email the admin sent to the agency (composed in the admin, sent
+// from Gmail as support@). Mirrors the sms_log pattern so the agency detail can
+// show an email history. Body: { subject, body, template_key, recipient_email }.
+// ============================================================================
+router.post('/agencies/:agencyId/log-email', requireAdmin, async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const { subject, body, template_key, recipient_email } = req.body || {};
+    if (!subject || !subject.trim()) {
+      return res.status(400).json({ error: 'A subject is required' });
+    }
+
+    const { data, error } = await supabase
+      .from('email_log')
+      .insert({
+        agency_id: agencyId,
+        recipient_email: recipient_email || null,
+        subject: subject.trim(),
+        body: body || null,
+        template_key: template_key || null,
+        sent_via: 'gmail_manual',
+      })
+      .select('id, subject, template_key, sent_via, created_at')
+      .single();
+
+    if (error) {
+      console.error('Log email insert error:', error);
+      return res.status(500).json({ error: 'Failed to log email' });
+    }
+
+    res.json({ success: true, email: data });
+  } catch (error) {
+    console.error('Log email error:', error);
+    res.status(500).json({ error: 'Failed to log email' });
   }
 });
 
