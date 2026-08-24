@@ -158,11 +158,64 @@ router.get('/agencies/:agencyId/expanded', requireAdmin, async (req, res) => {
         earnings_cents: agency.referral_earnings_cents || 0,
       },
       activation: activationProgress,
+      onboarding_email: {
+        step: agency.onboarding_email_step || 0,
+        last_sent: agency.onboarding_email_last_sent_at || null,
+      },
     });
 
   } catch (error) {
     console.error('Admin agency expanded error:', error);
     res.status(500).json({ error: 'Failed to load agency detail' });
+  }
+});
+
+// ============================================================================
+// POST /agencies/:agencyId/onboarding-email-sent
+// Manually record that an onboarding email was sent to the agency. The admin
+// sends the email from Gmail (as support@); this only logs progress so the UI
+// can show which step they are on. Body: { step }.
+// ============================================================================
+router.post('/agencies/:agencyId/onboarding-email-sent', requireAdmin, async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const step = parseInt(req.body?.step, 10);
+    if (!Number.isInteger(step) || step < 1) {
+      return res.status(400).json({ error: 'A valid step is required' });
+    }
+
+    const { data: current } = await supabase
+      .from('agencies')
+      .select('onboarding_email_step')
+      .eq('id', agencyId)
+      .single();
+
+    const nextStep = Math.max(current?.onboarding_email_step || 0, step);
+
+    const { data: agency, error } = await supabase
+      .from('agencies')
+      .update({
+        onboarding_email_step: nextStep,
+        onboarding_email_last_sent_at: new Date().toISOString(),
+      })
+      .eq('id', agencyId)
+      .select('onboarding_email_step, onboarding_email_last_sent_at')
+      .single();
+
+    if (error || !agency) {
+      return res.status(404).json({ error: 'Agency not found' });
+    }
+
+    res.json({
+      success: true,
+      onboarding_email: {
+        step: agency.onboarding_email_step,
+        last_sent: agency.onboarding_email_last_sent_at,
+      },
+    });
+  } catch (error) {
+    console.error('Onboarding email log error:', error);
+    res.status(500).json({ error: 'Failed to log onboarding email' });
   }
 });
 
