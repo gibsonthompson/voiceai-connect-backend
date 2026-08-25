@@ -1587,9 +1587,9 @@ async function getAgencyTemplate(agencyId, industryKey) {
       .single();
     
     const isTrialing = ['trialing', 'trial'].includes(agency?.subscription_status);
-    const effectivePlan = isTrialing ? 'enterprise' : agency?.plan_type;
+    const effectivePlan = isTrialing ? 'scale' : agency?.plan_type;
     
-    if (agencyError || effectivePlan !== 'enterprise') return null;
+    if (agencyError || effectivePlan !== 'scale') return null;
     
     const { data: template, error } = await supabase
       .from('agency_prompt_templates')

@@ -648,9 +648,9 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
   if (agency?.id && supabase) {
     try {
       const isTrialing = ['trialing', 'trial'].includes(agency.subscription_status);
-      const effectivePlan = isTrialing ? 'enterprise' : agency.plan_type;
+      const effectivePlan = isTrialing ? 'scale' : agency.plan_type;
 
-      if (effectivePlan === 'enterprise') {
+      if (effectivePlan === 'scale') {
         const { data: template, error } = await supabase
           .from('agency_prompt_templates')
           .select('*')
@@ -1136,9 +1136,9 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   if (agency?.id && supabase) {
     try {
       const isTrialing = ['trialing', 'trial'].includes(agency.subscription_status);
-      const effectivePlan = isTrialing ? 'enterprise' : agency.plan_type;
+      const effectivePlan = isTrialing ? 'scale' : agency.plan_type;
 
-      if (effectivePlan === 'enterprise') {
+      if (effectivePlan === 'scale') {
         const { data: template } = await supabase
           .from('agency_prompt_templates')
           .select('voice_id, temperature, model')
