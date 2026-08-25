@@ -1451,11 +1451,11 @@ async function requireEnterprisePlan(req, res, next) {
     }
     
     const isTrialing = ['trialing', 'trial'].includes(agency.subscription_status);
-    const effectivePlan = isTrialing ? 'enterprise' : agency.plan_type;
+    const effectivePlan = isTrialing ? 'scale' : agency.plan_type;
     
-    if (effectivePlan !== 'enterprise') {
+    if (effectivePlan !== 'scale') {
       return res.status(403).json({ 
-        error: 'Enterprise plan required',
+        error: 'Scale plan required',
         feature: 'ai_templates',
         current_plan: agency.plan_type,
         upgrade_url: '/agency/settings?tab=billing'
@@ -1484,10 +1484,10 @@ router.get('/:agencyId/ai-templates/check', async (req, res) => {
     }
     
     const isTrialing = ['trialing', 'trial'].includes(agency.subscription_status);
-    const effectivePlan = isTrialing ? 'enterprise' : agency.plan_type;
+    const effectivePlan = isTrialing ? 'scale' : agency.plan_type;
     
     res.json({
-      hasAccess: effectivePlan === 'enterprise',
+      hasAccess: effectivePlan === 'scale',
       plan_type: agency.plan_type,
       effective_plan: effectivePlan,
       upgrade_url: '/agency/settings?tab=billing',
