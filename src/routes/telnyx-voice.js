@@ -40,6 +40,7 @@ const crypto = require('crypto');
 const router = express.Router();
 
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
+const { sendAndLogSMS } = require('../lib/sms-logger');
 const {
   callAction,
   answerCall,
@@ -540,6 +541,71 @@ router.post('/api/voice/request-transfer', async (req, res) => {
   } catch (err) {
     console.error('telnyx-voice: request-transfer error:', err.message);
     return reply('I ran into a problem connecting that call. Apologize and offer to take a detailed message instead.');
+  }
+});
+
+
+// ============================================================================
+// AI SENDS SMS TO CALLER
+// The assistant's send_sms function tool calls this to text the person on the
+// call (booking link, confirmation, address, reminder). The destination is the
+// caller's own number, pulled from the session server-side, never from the
+// model, so the AI can only ever text the person who actually called in.
+// ============================================================================
+router.post('/api/voice/send-sms', async (req, res) => {
+  const body = req.body || {};
+  const msg = body.message || body;
+  const vapiCallId = msg.call?.id || body.call?.id || null;
+
+  const toolCalls = msg.toolCallList || msg.toolCalls
+    || (Array.isArray(msg.toolWithToolCallList)
+        ? msg.toolWithToolCallList.map(t => t.toolCall).filter(Boolean)
+        : []);
+  const tc = (toolCalls || []).find(t => (t.function?.name || t.name) === 'send_sms')
+    || (toolCalls || [])[0]
+    || {};
+  const toolCallId = tc.id || tc.toolCallId || 'send_sms';
+
+  let args = tc.function?.arguments ?? tc.arguments ?? {};
+  if (typeof args === 'string') {
+    try { args = JSON.parse(args); } catch { args = { message: args }; }
+  }
+  const text = (args.message || '').toString().trim();
+
+  const reply = (result) => res.status(200).json({ results: [{ toolCallId, result }] });
+
+  if (!text) {
+    return reply('No message text was provided, so nothing was sent. Ask the caller what they would like texted.');
+  }
+
+  try {
+    const session = await getSessionByVapiCallId(vapiCallId);
+    if (!session || !session.caller_number) {
+      return reply('I could not send that text right now. Apologize and offer to read the information out loud instead.');
+    }
+
+    const { data: client } = await supabase
+      .from('clients')
+      .select('agency_id')
+      .eq('id', session.client_id)
+      .single();
+
+    const sent = await sendAndLogSMS({
+      phone: session.caller_number,
+      message: text,
+      agencyId: client?.agency_id || null,
+      recipientType: 'caller',
+      messageType: 'ai_call_sms',
+      metadata: { source: 'ai_receptionist', vapi_call_id: vapiCallId, client_id: session.client_id },
+    });
+
+    if (sent) {
+      return reply('The text has been sent to the caller. Tell them you have just texted it.');
+    }
+    return reply('The text did not go through. Apologize and offer to read the information out loud instead.');
+  } catch (err) {
+    console.error('telnyx-voice: send-sms error', err.message);
+    return reply('I could not send the text right now. Apologize and offer to read it out loud instead.');
   }
 });
 

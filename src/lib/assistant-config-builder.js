@@ -915,6 +915,31 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
     });
   }
 
+  // SMS to caller. Texts the person on the call (booking link, confirmation,
+  // address, reminder). Off by default; enable per client via tool_config
+  // smsToCaller. The destination is resolved server-side from the session (the
+  // caller's own number), so the AI can only text whoever called in.
+  if (toolConfig.smsToCaller && !isAfterHours) {
+    tools.push({
+      type: 'function',
+      function: {
+        name: 'send_sms',
+        description: 'Send a text message to the caller during the call. Use this when the caller asks you to text them something, or when a booking link, confirmation, address, or reminder is more useful in writing than spoken aloud. The text goes to the number they are calling from. After sending, tell the caller you have texted it.',
+        parameters: {
+          type: 'object',
+          properties: {
+            message: {
+              type: 'string',
+              description: 'The text to send. Keep it short and useful, for example a booking link, address, appointment confirmation, or the specific detail the caller asked for.',
+            },
+          },
+          required: ['message'],
+        },
+      },
+      server: { url: `${BACKEND_URL}/api/voice/send-sms` },
+    });
+  }
+
   tools.push({
     type: 'endCall',
     function: {
