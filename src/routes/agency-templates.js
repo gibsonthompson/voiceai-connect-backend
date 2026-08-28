@@ -100,6 +100,42 @@ const INDUSTRY_CONFIG = {
     description: 'Junk hauling, dumpster rental, cleanouts, debris removal',
     icon: 'Truck',
   },
+  hvac: {
+    key: 'hvac',
+    label: 'HVAC / Heating & Cooling',
+    description: 'Heating, cooling, no-heat/no-cool triage, gas & CO safety routing',
+    icon: 'Wind',
+  },
+  plumbing: {
+    key: 'plumbing',
+    label: 'Plumbing',
+    description: 'Leaks, drains, water heaters, active-water triage',
+    icon: 'Wrench',
+  },
+  electrical: {
+    key: 'electrical',
+    label: 'Electrical',
+    description: 'Wiring, panels, outlets, electrical safety triage',
+    icon: 'Zap',
+  },
+  roofing: {
+    key: 'roofing',
+    label: 'Roofing',
+    description: 'Leaks, storm damage, free inspections, insurance-claim aware',
+    icon: 'HardHat',
+  },
+  pest_control: {
+    key: 'pest_control',
+    label: 'Pest Control',
+    description: 'Extermination, prevention, recurring service scheduling',
+    icon: 'Bug',
+  },
+  landscaping: {
+    key: 'landscaping',
+    label: 'Landscaping & Lawn Care',
+    description: 'Maintenance, cleanups, design and installs, free estimates',
+    icon: 'Trees',
+  },
 };
 
 // ============================================================================
