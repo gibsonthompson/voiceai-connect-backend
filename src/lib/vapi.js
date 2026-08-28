@@ -2625,6 +2625,7 @@ async function provisionPhoneNumber(areaCode, options = {}) {
     // Assign for two-way SMS (messaging profile + 10DLC campaign). Non-fatal.
     await assignNumberForSMS(selectedNumber);
 
+    await pinPhoneToDynamic(retryData.id);
     return retryData;
   }
 
@@ -2634,6 +2635,7 @@ async function provisionPhoneNumber(areaCode, options = {}) {
   // Assign for two-way SMS (messaging profile + 10DLC campaign). Non-fatal.
   await assignNumberForSMS(selectedNumber);
 
+  await pinPhoneToDynamic(importData.id);
   return importData;
 }
 
@@ -2767,6 +2769,26 @@ async function enableAssistant(assistantId) {
 // ============================================================================
 // PHONE NUMBER ENABLE/DISABLE
 // ============================================================================
+
+// Put a freshly provisioned phone into dynamic assistant-request mode
+// (assistantId: null + serverUrl -> /webhook/vapi). Live calls then fire
+// assistant-request and use the dynamic builder that reads greeting_message,
+// voice_id, and the system prompt from the DB, so dashboard edits take effect
+// on the next call. Without this a phone stays static and edits never land.
+// Non-fatal: a failure here shouldn't block provisioning.
+async function pinPhoneToDynamic(phoneId) {
+  if (!phoneId) return false;
+  try {
+    const res = await fetch(`https://api.vapi.ai/phone-number/${phoneId}`, {
+      method: 'PATCH',
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assistantId: null, serverUrl: `${BACKEND_URL}/webhook/vapi` }),
+    });
+    if (res.ok) { console.log(`   ✅ Phone pinned to dynamic assistant-request: ${phoneId}`); return true; }
+    console.warn(`   ⚠️ Failed to pin phone ${phoneId} to dynamic: ${res.status}`);
+    return false;
+  } catch (e) { console.warn(`   ⚠️ Error pinning phone ${phoneId} to dynamic: ${e.message}`); return false; }
+}
 
 async function disablePhoneNumber(phoneId) {
   if (!phoneId) return false;

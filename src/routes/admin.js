@@ -1575,4 +1575,60 @@ router.patch('/feedback/:id', requireAdmin, async (req, res) => {
   }
 });
 
+// ============================================================================
+// POST /api/admin/migrate-phones-dynamic
+// One-time fix for the greeting-not-updating bug: put client VAPI phones into
+// dynamic assistant-request mode so live calls read greeting_message / voice /
+// prompt from the DB. Dry-run by default; pass ?apply=1 to actually patch, and
+// ?number=+1555XXXXXXX to do a single client first. Safe to re-run.
+// ============================================================================
+router.post('/migrate-phones-dynamic', requireAdmin, async (req, res) => {
+  const VAPI_API_KEY = process.env.VAPI_API_KEY;
+  const BACKEND_URL = process.env.BACKEND_URL;
+  const apply = req.query.apply === '1' || req.query.apply === 'true';
+  const onlyNumber = req.query.number || null;
+  const digits = (s) => (s || '').replace(/\D/g, '').slice(-10);
+
+  try {
+    const { data: clients, error } = await supabase
+      .from('clients').select('id, business_name, vapi_phone_number').not('vapi_phone_number', 'is', null);
+    if (error) throw error;
+
+    const byDigits = new Map();
+    for (const c of clients) if (c.vapi_phone_number) byDigits.set(digits(c.vapi_phone_number), c);
+
+    const listRes = await fetch('https://api.vapi.ai/phone-number?limit=1000', { headers: { Authorization: `Bearer ${VAPI_API_KEY}` } });
+    if (!listRes.ok) return res.status(502).json({ error: 'VAPI list failed', status: listRes.status });
+    const phones = await listRes.json();
+
+    const report = [];
+    let changed = 0, alreadyDynamic = 0;
+    for (const p of phones) {
+      if (!p.number) continue;
+      if (onlyNumber && digits(onlyNumber) !== digits(p.number)) continue;
+      const client = byDigits.get(digits(p.number));
+      if (!client) continue; // demo / SIP door / unrelated
+      const isDynamic = !p.assistantId && !!p.serverUrl;
+      if (isDynamic) { alreadyDynamic++; continue; }
+
+      let patched = 'dry-run';
+      if (apply) {
+        const pr = await fetch(`https://api.vapi.ai/phone-number/${p.id}`, {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ assistantId: null, serverUrl: `${BACKEND_URL}/webhook/vapi` }),
+        });
+        patched = pr.ok;
+      }
+      if (apply ? patched : true) changed++;
+      report.push({ business: client.business_name, number: p.number, was: { assistantId: p.assistantId || null, serverUrl: p.serverUrl || null }, patched });
+    }
+
+    res.json({ apply, onlyNumber, changedOrWouldChange: changed, alreadyDynamic, totalClients: clients.length, report });
+  } catch (e) {
+    console.error('migrate-phones-dynamic error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
