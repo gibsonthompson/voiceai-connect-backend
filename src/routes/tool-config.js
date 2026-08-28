@@ -20,6 +20,8 @@ const DEFAULT_TOOL_CONFIG = {
   speechTimeoutSeconds: 12,
   transferFallbackToMessage: true,
   smsToCaller: false,
+  smsInstructions: '',
+  smsSnippets: [],
 };
 
 // ============================================================================
@@ -73,6 +75,8 @@ router.put('/:id/tool-config', requirePermissionIfAuthed('ai_agent'), async (req
       'speechTimeout', 'speechTimeoutSeconds',
       'transferFallbackToMessage',
       'smsToCaller',
+      'smsInstructions',
+      'smsSnippets',
     ];
 
     // Get current config

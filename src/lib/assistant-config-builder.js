@@ -535,6 +535,36 @@ ${nextOpenInfo ? `- If they ask when you're open: "${nextOpenInfo}"` : ''}
 }
 
 // ============================================================================
+// SMS-TO-CALLER BLOCK — tells the AI what it may text and when.
+// Saved texts (booking link, address, etc.) are sent verbatim; instructions
+// govern timing. Only present when the Text Callers tool is enabled.
+// ============================================================================
+function buildSmsBlock(toolConfig) {
+  if (!toolConfig || !toolConfig.smsToCaller) return '';
+  const snippets = Array.isArray(toolConfig.smsSnippets)
+    ? toolConfig.smsSnippets.filter(s => s && (s.label || s.value))
+    : [];
+  const instructions = typeof toolConfig.smsInstructions === 'string' ? toolConfig.smsInstructions.trim() : '';
+
+  if (!snippets.length && !instructions) {
+    return `\n\n## Texting the caller\nYou can text the person on this call using the send_sms tool when they ask for something in writing (for example a booking link or an address they can save). Only text the person currently on the call, keep it short, and tell them once you have sent it.`;
+  }
+
+  let block = `\n\n## Texting the caller\nYou can text the person on this call using the send_sms tool. Only ever text the person currently on the call.`;
+  if (snippets.length) {
+    block += `\n\nSaved texts you can send. Send these EXACTLY as written, never change a link, phone number, or address:`;
+    for (const s of snippets) {
+      const label = (s.label || 'Text').toString().trim();
+      const value = (s.value || '').toString().trim();
+      if (value) block += `\n- ${label}: ${value}`;
+    }
+  }
+  if (instructions) block += `\n\nWhen to text: ${instructions}`;
+  block += `\n\nKeep texts short and useful. After sending, tell the caller you have just texted it. If you are unsure a text is wanted, offer first ("want me to text you that?").`;
+  return block;
+}
+
+// ============================================================================
 // BUILD TRANSFER FALLBACK BLOCK
 // ============================================================================
 function buildTransferFallbackBlock() {
@@ -924,7 +954,7 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
       type: 'function',
       function: {
         name: 'send_sms',
-        description: 'Send a text message to the caller during the call. Use this when the caller asks you to text them something, or when a booking link, confirmation, address, or reminder is more useful in writing than spoken aloud. The text goes to the number they are calling from. After sending, tell the caller you have texted it.',
+        description: 'Send a text message to the caller during the call. Use it when the caller asks you to text something, or when a booking link, address, confirmation, or reminder is more useful in writing. If a saved text fits the situation, send that saved text exactly as written, never alter a link or address. The text goes to the number they are calling from. After sending, tell the caller you have texted it.',
         parameters: {
           type: 'object',
           properties: {
