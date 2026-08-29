@@ -570,12 +570,13 @@ router.post('/api/voice/send-sms', async (req, res) => {
   if (typeof args === 'string') {
     try { args = JSON.parse(args); } catch { args = { message: args }; }
   }
-  const text = (args.message || '').toString().trim();
+  const savedKey = (args.saved_text || '').toString().trim();
+  let text = (args.message || '').toString().trim();
 
   const reply = (result) => res.status(200).json({ results: [{ toolCallId, result }] });
 
-  if (!text) {
-    return reply('No message text was provided, so nothing was sent. Ask the caller what they would like texted.');
+  if (!text && !savedKey) {
+    return reply('No message was provided, so nothing was sent. Ask the caller what they would like texted.');
   }
 
   try {
@@ -586,17 +587,43 @@ router.post('/api/voice/send-sms', async (req, res) => {
 
     const { data: client } = await supabase
       .from('clients')
-      .select('agency_id')
+      .select('agency_id, tool_config')
       .eq('id', session.client_id)
       .single();
+
+    // Resolve a saved-text key to its EXACT configured value, so links and
+    // addresses are never reworded by the model.
+    if (savedKey) {
+      const preset = client && client.tool_config && client.tool_config.smsPresets && client.tool_config.smsPresets[savedKey];
+      if (preset && preset.enabled && (preset.value || '').toString().trim()) {
+        text = preset.value.toString().trim();
+      } else if (!text) {
+        return reply('That saved text is not set up, so nothing was sent. Read the information out loud instead.');
+      }
+    }
+
+    // Per-call cap: never text the same caller more than a few times on one call.
+    // Fails open (a broken count query must not block a legitimate send).
+    try {
+      const { count } = await supabase
+        .from('sms_log')
+        .select('id', { count: 'exact', head: true })
+        .eq('message_type', 'ai_call_sms')
+        .filter('metadata->>vapi_call_id', 'eq', vapiCallId);
+      if ((count || 0) >= 5) {
+        return reply('You have already texted the caller several times on this call. Read the information out loud instead.');
+      }
+    } catch (capErr) {
+      console.warn('telnyx-voice: send-sms cap check failed', capErr.message);
+    }
 
     const sent = await sendAndLogSMS({
       phone: session.caller_number,
       message: text,
-      agencyId: client?.agency_id || null,
+      agencyId: (client && client.agency_id) || null,
       recipientType: 'caller',
       messageType: 'ai_call_sms',
-      metadata: { source: 'ai_receptionist', vapi_call_id: vapiCallId, client_id: session.client_id },
+      metadata: { source: 'ai_receptionist', vapi_call_id: vapiCallId, client_id: session.client_id, saved_text: savedKey || null },
     });
 
     if (sent) {

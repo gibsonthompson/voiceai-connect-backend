@@ -543,39 +543,40 @@ ${nextOpenInfo ? `- If they ask when you're open: "${nextOpenInfo}"` : ''}
 // the dashboard. The client only supplies the value (their link/address); the
 // "when to send" is defined here so the AI fires consistently.
 const SMS_PRESET_TRIGGERS = {
-  address: "When the caller asks where you're located or for directions, text them this address",
-  website: 'When the caller wants more information or to see your work, text them your website',
-  review: 'If the call goes well and it feels natural, offer to text them a link to leave a review',
-  payment: 'When the caller needs to pay or asks how to pay, text them this payment link',
+  address: "when the caller asks where you're located or for directions",
+  website: 'when the caller wants more information or to see your work',
+  review: 'if the call goes well and it feels natural, to ask them to leave a review',
+  payment: 'when the caller needs to pay or asks how to pay',
 };
 
-function buildSmsBlock(toolConfig) {
-  if (!toolConfig || !toolConfig.smsToCaller) return '';
+function buildSmsBlock(toolConfig, isAfterHours) {
+  // Gated to match the send_sms tool in buildTools: both require smsToCaller and
+  // NOT after-hours, so the prompt never tells the AI to text when the tool is absent.
+  if (!toolConfig || !toolConfig.smsToCaller || isAfterHours) return '';
 
   const presets = (toolConfig.smsPresets && typeof toolConfig.smsPresets === 'object') ? toolConfig.smsPresets : {};
-  const enabledPresets = Object.keys(SMS_PRESET_TRIGGERS)
-    .map(key => ({ key, ...(presets[key] || {}) }))
-    .filter(p => p.enabled && (p.value || '').toString().trim());
+  const enabled = Object.keys(SMS_PRESET_TRIGGERS)
+    .filter(k => presets[k] && presets[k].enabled && (presets[k].value || '').toString().trim());
 
   const snippets = Array.isArray(toolConfig.smsSnippets)
     ? toolConfig.smsSnippets.filter(s => s && (s.label || s.value))
     : [];
   const instructions = typeof toolConfig.smsInstructions === 'string' ? toolConfig.smsInstructions.trim() : '';
 
-  if (!enabledPresets.length && !snippets.length && !instructions) {
-    return `\n\n## Texting the caller\nYou can text the person on this call using the send_sms tool when they ask for something in writing (for example a booking link or an address they can save). Only text the person currently on the call, keep it short, and tell them once you have sent it.`;
+  if (!enabled.length && !snippets.length && !instructions) {
+    return `\n\n## Texting the caller\nYou can text the person on this call using the send_sms tool when they ask for something in writing. Only text the person on the call, keep it short, and tell them once you have sent it.`;
   }
 
-  let block = `\n\n## Texting the caller\nYou can text the person on this call using the send_sms tool. Only ever text the person currently on the call, and send links, addresses, and phone numbers EXACTLY as written, never change them.`;
+  let block = `\n\n## Texting the caller\nYou can text the person on this call using the send_sms tool. Only ever text the person currently on the call.`;
 
-  if (enabledPresets.length) {
-    block += `\n\nWhat you can text, and when:`;
-    for (const p of enabledPresets) {
-      block += `\n- ${SMS_PRESET_TRIGGERS[p.key]}: ${p.value.toString().trim()}`;
+  if (enabled.length) {
+    block += `\n\nSaved texts. To send one, call send_sms with saved_text set to the key in quotes. It is sent EXACTLY as configured, so do not type the link or address yourself, just pass the key:`;
+    for (const k of enabled) {
+      block += `\n- "${k}": ${SMS_PRESET_TRIGGERS[k]}.`;
     }
   }
   if (snippets.length) {
-    block += `\n\nOther saved texts (send exactly as written):`;
+    block += `\n\nOther saved texts (call send_sms and copy the exact wording, never change a link or address):`;
     for (const s of snippets) {
       const label = (s.label || 'Text').toString().trim();
       const value = (s.value || '').toString().trim();
@@ -583,7 +584,7 @@ function buildSmsBlock(toolConfig) {
     }
   }
   if (instructions) block += `\n\nAdditional guidance: ${instructions}`;
-  block += `\n\nKeep texts short. After sending, tell the caller you have just texted it. If you are unsure a text is wanted, offer first ("want me to text you that?").`;
+  block += `\n\nFor anything else, call send_sms with a short custom message. After sending, tell the caller you have just texted it. If unsure a text is wanted, offer first ("want me to text you that?").`;
   return block;
 }
 
@@ -973,23 +974,34 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
   // smsToCaller. The destination is resolved server-side from the session (the
   // caller's own number), so the AI can only text whoever called in.
   if (toolConfig.smsToCaller && !isAfterHours) {
+    const enabledPresetKeys = Object.entries((toolConfig.smsPresets && typeof toolConfig.smsPresets === 'object') ? toolConfig.smsPresets : {})
+      .filter(([, v]) => v && v.enabled && (v.value || '').toString().trim())
+      .map(([k]) => k);
+    const smsProperties = {
+      message: {
+        type: 'string',
+        description: 'A short custom text to send when it is not one of the saved texts. Ignored if saved_text is set.',
+      },
+    };
+    if (enabledPresetKeys.length) {
+      smsProperties.saved_text = {
+        type: 'string',
+        enum: enabledPresetKeys,
+        description: 'To send one of the saved texts (address, website, review, payment), pass its key here. It is sent exactly as the business configured it, never reworded. Use this instead of message for saved texts.',
+      };
+    }
     tools.push({
       type: 'function',
       function: {
         name: 'send_sms',
-        description: 'Send a text message to the caller during the call. Use it when the caller asks you to text something, or when a booking link, address, confirmation, or reminder is more useful in writing. If a saved text fits the situation, send that saved text exactly as written, never alter a link or address. The text goes to the number they are calling from. After sending, tell the caller you have texted it.',
+        description: 'Send a text message to the caller during the call. Use it when the caller asks you to text something, or when an address, confirmation, or reminder is more useful in writing. For a saved text, pass its key as saved_text so it goes exactly as configured. The text goes to the number they are calling from. After sending, tell the caller you have texted it.',
         parameters: {
           type: 'object',
-          properties: {
-            message: {
-              type: 'string',
-              description: 'The text to send. Keep it short and useful, for example a booking link, address, appointment confirmation, or the specific detail the caller asked for.',
-            },
-          },
-          required: ['message'],
+          properties: smsProperties,
+          required: [],
         },
       },
-      server: { url: `${BACKEND_URL}/api/voice/send-sms` },
+      server: { url: `${BACKEND_URL}/api/voice/send-sms`, timeoutSeconds: 15 },
     });
   }
 
