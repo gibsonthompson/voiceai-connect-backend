@@ -1583,6 +1583,582 @@ A: Yes, single-item pickups are no problem.
 - **Cleanout**: clearing an entire space, such as an estate, hoarder, eviction, or foreclosure cleanout
 - **Curbside**: items placed at the curb for an easier, lower-cost pickup
 `,
+
+  hvac: (businessName) => `# ${businessName} (AI Receptionist Knowledge Base)
+
+## Company Overview
+${businessName} is a heating and cooling (HVAC) company. We repair, maintain, install, and replace heating and air conditioning systems, and help with indoor air quality, keeping homes comfortable year-round. We offer free estimates on system replacements.
+
+## Common Services
+
+### Heating
+- Furnace repair, maintenance, and replacement (gas, electric, oil)
+- Heat pump repair, maintenance, and installation
+- Boiler service
+- Ductless mini-split heating
+- Thermostat repair and smart-thermostat installation
+- No-heat diagnostics
+
+### Cooling
+- Central air conditioning repair, maintenance, and replacement
+- Heat pump cooling
+- Ductless mini-split AC
+- Refrigerant leak diagnosis and recharge
+- Condenser and coil cleaning
+- No-cooling diagnostics
+
+### Air Quality
+- Air filter replacement and upgrades
+- Whole-home air purifiers and UV lights
+- Humidifiers and dehumidifiers
+- Duct cleaning and sealing
+
+### Maintenance
+- Seasonal tune-ups (heating and cooling)
+- Maintenance plans / service agreements
+- System inspections
+
+### Installation and Replacement
+- Full system replacement (free estimates)
+- New-construction and add-on systems
+- System sizing and load evaluation
+- Financing options on replacements
+
+## Frequently Asked Questions
+
+**Q: Do you offer free estimates?**
+A: Yes, estimates on system replacements are free. For a repair or diagnostic visit there is usually a service or diagnostic fee, which the team can confirm.
+
+**Q: Do you handle emergencies?**
+A: Yes. No heat in cold weather and no cooling in dangerous heat are treated urgently, especially when there is an elderly person, an infant, or a medical need in the home.
+
+**Q: What brands do you service?**
+A: Our techs service most major heating and cooling brands. If you know your brand, mention it and we can confirm.
+
+**Q: Do you offer maintenance plans?**
+A: Yes. Maintenance plans cover seasonal tune-ups and often include priority service and discounts. The team can go over what is included.
+
+**Q: How often should I service my system?**
+A: Generally once a year for each, cooling in spring and heating in fall. Regular maintenance keeps efficiency up and prevents breakdowns.
+
+**Q: Do you offer financing?**
+A: Financing is commonly available on new-system installations. The team can walk you through the options.
+
+**Q: My system is old, should I repair or replace it?**
+A: It depends on the age, condition, and repair cost. A tech will give you an honest recommendation, and replacement estimates are free.
+
+## Urgency Guidelines
+
+### Urgent (get the team on it fast)
+- No heat when it is cold out, especially with elderly people, infants, or medical needs at home
+- No cooling during dangerous heat, especially with vulnerable people at home
+- Any gas smell or suspected carbon monoxide (safety first: leave and call the gas company or 911)
+
+### Soon (new-lead intake, book a visit promptly)
+- System running but not keeping up, short-cycling, or making unusual noises
+- Water or ice around the unit
+- Rising energy bills or weak airflow
+
+### Routine (book the visit or free estimate)
+- Seasonal tune-ups and maintenance
+- Replacement or new-system quotes
+- Thermostat or air-quality upgrades
+
+## What to Expect
+1. A technician comes out and diagnoses the heating, cooling, or air-quality issue
+2. They explain what is going on in plain language
+3. They provide options and pricing (replacement estimates are free)
+4. With your approval, they complete the repair or schedule the install
+5. You get a comfortable, working system
+
+## Terminology
+- **SEER / SEER2**: a cooling-efficiency rating, higher is more efficient
+- **AFUE**: a furnace-efficiency rating, the percentage of fuel turned into heat
+- **Tonnage**: the cooling capacity of an AC system (one ton equals 12,000 BTU)
+- **Heat pump**: a system that both heats and cools by moving heat rather than burning fuel
+- **Ductless / mini-split**: a system that heats or cools without ductwork, using wall units
+- **Refrigerant**: the fluid that absorbs and releases heat in an AC or heat pump
+- **Condenser**: the outdoor unit that releases heat
+- **Evaporator coil**: the indoor coil that absorbs heat
+- **Load calculation**: sizing a system to a home so it is not over- or under-powered
+- **Short-cycling**: a system turning on and off too frequently, a sign of a problem`,
+
+  plumbing: (businessName) => `# ${businessName} (AI Receptionist Knowledge Base)
+
+## Company Overview
+${businessName} is a plumbing company. We fix leaks, clear drains, service and install water heaters, repair and replace fixtures and pipes, and handle sewer and water-line work, keeping water flowing where it should and out of where it should not. We offer free estimates on larger jobs.
+
+## Common Services
+
+### Repairs
+- Leak detection and repair
+- Faucet, sink, and toilet repair
+- Pipe repair and replacement
+- Low water pressure diagnosis
+- Running or clogged toilets
+
+### Drains and Sewer
+- Drain cleaning and unclogging
+- Hydro jetting
+- Sewer camera inspection
+- Sewer line repair and replacement
+- Root intrusion and backups
+
+### Water Heaters
+- Water heater repair and replacement
+- Tankless water heater installation
+- No-hot-water diagnostics
+- Flushing and maintenance
+
+### Fixtures and Remodel
+- Faucet, sink, toilet, and shower installation
+- Garbage disposal repair and install
+- Bathroom and kitchen plumbing for remodels
+- Water filtration systems
+
+### Pipes and Lines
+- Repiping
+- Water-line repair and replacement
+- Gas-line work
+- Sump pump repair and installation
+
+## Frequently Asked Questions
+
+**Q: Do you offer free estimates?**
+A: Estimates on larger jobs are typically free. Diagnostic or service visits may carry a fee, which the team can confirm.
+
+**Q: Do you handle emergencies?**
+A: Yes. Active leaks, burst pipes, sewer backups, and no water to the home are treated urgently.
+
+**Q: My water heater is leaking, what should I do?**
+A: If it is leaking heavily, you can shut off the water supply to it, and we will get a plumber out. If there is any gas smell near a gas unit, leave and call the gas company or 911.
+
+**Q: How long do water heaters last?**
+A: A traditional tank heater usually lasts 8 to 12 years, tankless units longer. If yours is older and giving trouble, replacement may be worth discussing.
+
+**Q: Do you do tankless water heaters?**
+A: Yes, we install and service tankless units. They save space and can lower energy use, the team can go over whether one fits your home.
+
+**Q: What is hydro jetting?**
+A: A high-pressure water method that fully clears a drain or sewer line, useful for stubborn clogs and grease or root buildup.
+
+**Q: Do you offer financing?**
+A: Financing is commonly available on larger jobs like repipes and water-heater replacements.
+
+## Urgency Guidelines
+
+### Urgent (get a plumber on it fast)
+- An active leak or burst pipe with water coming out now
+- A sewage or sewer backup in the home
+- No water at all to the house
+- A gas smell near a gas water heater (safety first: leave and call the gas company or 911)
+
+### Soon (new-lead intake, book a visit promptly)
+- No hot water
+- A slow or fully clogged drain
+- A running toilet, dripping fixture, or low water pressure
+
+### Routine (book the visit or free estimate)
+- Fixture installs and upgrades
+- Remodels and repipes
+- Inspections and general questions
+
+## What to Expect
+1. A plumber comes out and diagnoses the issue
+2. They explain the problem and the fix in plain language
+3. They provide pricing and options (estimates on larger jobs are free)
+4. With your approval, they complete the work
+5. Your plumbing is back in working order
+
+## Terminology
+- **Hydro jetting**: clearing a drain or sewer line with high-pressure water
+- **Sewer camera**: a camera run down a line to find clogs, breaks, or root intrusion
+- **Tankless water heater**: a unit that heats water on demand instead of storing it in a tank
+- **PEX**: a flexible plastic piping commonly used in modern plumbing
+- **Main shutoff**: the valve that stops all water to the home
+- **P-trap**: the curved pipe under a sink that blocks sewer gas
+- **Backflow**: water flowing the wrong direction, which can contaminate clean water
+- **Sump pump**: a pump that removes water collecting in a basin, often in a basement
+- **Repipe**: replacing the pipes throughout part or all of a home`,
+
+  electrical: (businessName) => `# ${businessName} (AI Receptionist Knowledge Base)
+
+## Company Overview
+${businessName} is an electrical company. We repair and install wiring, panels, outlets, lighting, and EV chargers, troubleshoot electrical problems, and handle safety upgrades, keeping homes powered safely and up to code. We offer free estimates on projects, and we take safety issues seriously.
+
+## Common Services
+
+### Repairs
+- Tripping breakers and blown fuses
+- Dead or faulty outlets and switches
+- Flickering or dimming lights
+- Electrical troubleshooting and diagnostics
+- Partial power loss
+
+### Panels and Service
+- Electrical panel upgrades and replacement
+- Sub-panel installation
+- Service upgrades (higher amperage)
+- Fuse box to breaker conversions
+
+### Wiring
+- Rewiring and new circuits
+- Outlet and switch installation
+- Whole-home rewires
+- Aluminum wiring remediation
+
+### Lighting
+- Fixture installation and replacement
+- Recessed and under-cabinet lighting
+- Outdoor and landscape lighting
+- Ceiling fans
+
+### Safety and Upgrades
+- Surge protection
+- GFCI and AFCI installation
+- Smoke and carbon-monoxide detectors
+- Electrical safety inspections
+- Code corrections
+
+### EV and Power
+- EV charger installation
+- Generator installation and transfer switches
+- Backup power
+
+## Frequently Asked Questions
+
+**Q: Do you offer free estimates?**
+A: Estimates on projects are typically free. A diagnostic or troubleshooting visit may carry a fee, which the team can confirm.
+
+**Q: Do you handle emergencies?**
+A: Yes. A burning smell, smoke, sparks, or exposed live wiring is treated as urgent, and safety comes first.
+
+**Q: My breaker keeps tripping, is that dangerous?**
+A: A breaker tripping occasionally is doing its job, but if it trips repeatedly, or there is any burning smell or heat, it is worth having a licensed electrician look at it.
+
+**Q: How do I know if I need a panel upgrade?**
+A: Common signs are an old fuse box, frequent tripping, flickering lights, not enough outlets, or adding a big load like an EV charger or addition. A tech can assess it.
+
+**Q: Do you install EV chargers?**
+A: Yes. We install home EV chargers and can advise on whether your panel can support one.
+
+**Q: Do you pull permits?**
+A: Yes, we handle permits and inspections where required, and our work is done to code.
+
+**Q: Do you offer financing?**
+A: Financing is commonly available on larger projects like panel upgrades and rewires.
+
+## Urgency Guidelines
+
+### Urgent (safety, get the team on it fast)
+- A burning smell, smoke, or heat around an outlet, switch, or the panel
+- Sparks, or exposed or damaged live wiring
+- Partial power loss with any burning smell or buzzing
+(For any smoke or fire, the caller should get out and call 911.)
+
+### Soon (new-lead intake, book a visit promptly)
+- A breaker that keeps tripping
+- Dead outlets or switches, flickering lights
+- Total power loss after confirming it is not a utility outage
+
+### Routine (book the visit or free estimate)
+- Panel upgrades and new circuits
+- Lighting, fans, and outlet additions
+- EV chargers, generators, and safety upgrades
+
+## What to Expect
+1. A licensed electrician comes out and diagnoses the issue safely
+2. They explain what is going on and what it will take to fix
+3. They provide pricing and options (project estimates are free)
+4. With your approval, they complete the work to code
+5. Your electrical is safe and working
+
+## Terminology
+- **Panel / breaker box**: the box that distributes power to a home circuits
+- **Amps / amperage**: the amount of electrical current a service or circuit can carry
+- **Service upgrade**: increasing a home electrical capacity, often 100A to 200A
+- **Sub-panel**: a smaller panel branching off the main to serve an area or addition
+- **Circuit**: a single path of wiring protected by one breaker
+- **GFCI**: an outlet that shuts off power fast to prevent shock, used near water
+- **AFCI**: a breaker that guards against arc-fault fires
+- **Surge protector**: a device that protects a home from voltage spikes
+- **Code**: the electrical safety standards work must meet
+- **Permit**: local authorization required for certain electrical work`,
+
+  roofing: (businessName) => `# ${businessName} (AI Receptionist Knowledge Base)
+
+## Company Overview
+${businessName} is a roofing company. We repair and replace roofs, handle leaks and storm damage, perform inspections, and help homeowners through the insurance-claim process, keeping roofs sound and homes dry. We offer free inspections.
+
+## Common Services
+
+### Repairs
+- Roof leak repair
+- Missing, cracked, or curling shingle replacement
+- Flashing repair (around chimneys, vents, valleys)
+- Emergency tarping
+
+### Replacement
+- Full roof replacement (tear-off and re-roof)
+- Asphalt shingle, metal, tile, and flat roofing
+- New-construction roofing
+- Free replacement estimates
+
+### Storm and Insurance
+- Hail and wind damage assessment
+- Storm-damage repair and replacement
+- Insurance-claim assistance and documentation
+
+### Inspections
+- Free roof inspections
+- Pre-purchase and maintenance inspections
+- Leak diagnosis
+
+### Related
+- Gutter installation and repair
+- Attic ventilation and insulation
+- Skylight installation and repair
+
+## Frequently Asked Questions
+
+**Q: Do you offer free inspections?**
+A: Yes. A specialist comes out, inspects the roof, and gives you a clear assessment and estimate at no cost.
+
+**Q: How much will a repair or replacement cost?**
+A: It depends on the size, materials, and condition, so the inspection is how we give you an accurate number, and inspections are free.
+
+**Q: Do you help with insurance claims?**
+A: Yes, the team can document the damage and walk you through the claim process. We cannot tell you what your insurance will cover, but we help you work with your insurer.
+
+**Q: I have a leak, what should I do?**
+A: If water is actively coming in during a storm, put a bucket down, move valuables, and we will get someone out. If it is a stain or an occasional drip, we will book an inspection.
+
+**Q: How long does a roof last?**
+A: An asphalt-shingle roof commonly lasts 15 to 30 years depending on the material and conditions, metal and tile longer. An inspection can tell you where yours stands.
+
+**Q: Do you offer financing?**
+A: Financing is commonly available on replacements, the team can go over the options.
+
+**Q: Do you offer a warranty?**
+A: Yes, our work is backed by a warranty, and materials carry manufacturer warranties. The team will go over the specifics.
+
+## Urgency Guidelines
+
+### Urgent (get the team on it fast)
+- Water actively pouring or dripping into the home during rain or a storm
+
+### Soon (new-lead intake, book the inspection promptly)
+- A leak showing as a ceiling stain or occasional drip
+- Storm or hail damage after the weather has passed
+- Missing or damaged shingles, visible sagging
+
+### Routine (book the free inspection)
+- Aging-roof and replacement quotes
+- Gutters, ventilation, and skylights
+- General questions and estimates
+
+## What to Expect at the Free Inspection
+1. A specialist inspects the roof, flashing, and problem areas
+2. They identify the source of the leak or damage
+3. They explain what they found in plain language
+4. They provide a written estimate and, if relevant, help with the insurance claim
+5. You decide, with no obligation
+
+## Terminology
+- **Shingle**: the overlapping surface material on most residential roofs
+- **Flashing**: metal that seals joints and transitions, around chimneys, vents, and valleys
+- **Underlayment**: the protective layer between the decking and the shingles
+- **Decking / sheathing**: the wood surface the roof is built on
+- **Ridge / soffit vents**: parts of the attic ventilation system
+- **Valley**: where two roof slopes meet, a common leak point
+- **Fascia**: the board along the roof edge that gutters attach to
+- **Square**: a roofing measurement equal to 100 square feet
+- **Tear-off**: removing the old roof before installing a new one
+- **Ice dam**: ice buildup at the roof edge that can force water under shingles
+- **Adjuster**: the insurance representative who assesses storm-damage claims`,
+
+  pest_control: (businessName) => `# ${businessName} (AI Receptionist Knowledge Base)
+
+## Company Overview
+${businessName} is a pest control company. We handle infestations and prevention, ants, roaches, rodents, bed bugs, termites, stinging insects, and more, with one-time treatments and recurring service to keep pests away. We offer free inspections.
+
+## Common Services
+
+### General Pest
+- Ants, cockroaches, spiders, silverfish
+- Interior and exterior perimeter treatments
+- One-time and recurring service
+
+### Rodents
+- Mice and rat control
+- Exclusion (sealing entry points)
+- Trapping and cleanup
+
+### Bed Bugs
+- Bed bug inspection and treatment
+- Heat and chemical treatments
+- Follow-up service
+
+### Termites
+- Termite inspection
+- Termite treatment and baiting systems
+- Prevention and warranties
+
+### Stinging Insects
+- Wasp, hornet, and bee nest removal
+- Yellowjacket control
+
+### Other
+- Mosquito control
+- Flea and tick treatment
+- Wildlife and nuisance animals
+- Recurring prevention plans (monthly, quarterly)
+
+## Frequently Asked Questions
+
+**Q: Do you offer free inspections?**
+A: Yes. A technician assesses the situation and gives you a plan and pricing at no cost.
+
+**Q: How much does treatment cost?**
+A: It depends on the pest and the severity, so we usually take a quick look first, and inspections are free.
+
+**Q: Are your treatments safe for kids and pets?**
+A: The technician will go over safety and any short waiting period before re-entering treated areas. Follow their guidance for your specific treatment.
+
+**Q: Do you offer recurring service?**
+A: Yes. Many customers use monthly or quarterly plans to keep pests away year-round, which is often the most effective approach.
+
+**Q: Do you guarantee your work?**
+A: Many services come with a guarantee or free re-treatment within a period. The team will explain what applies to your service.
+
+**Q: How should I prepare for a treatment?**
+A: It varies by pest, bed bug and roach treatments need more prep. The team will give you a prep list when you schedule.
+
+**Q: How long until the pests are gone?**
+A: Some pests clear quickly, others take a few visits. The technician will set realistic expectations and a follow-up plan.
+
+## Urgency Guidelines
+
+### Urgent (get the team on it fast)
+- A stinging-insect situation (wasps, hornets, bees) where someone is allergic or reacting (a medical reaction means call 911 first)
+
+### Soon (new-lead intake, book promptly)
+- An active infestation, bed bugs, or a rodent problem
+- A wasp or hornet nest near the home
+
+### Routine (book the visit or free inspection)
+- Recurring prevention service
+- Termite inspections and quotes
+- General questions and estimates
+
+## What to Expect
+1. A technician inspects and identifies the pest and the source
+2. They explain the treatment plan in plain language
+3. They provide pricing and options (inspections are free)
+4. With your approval, they treat and set any follow-up
+5. Your pest problem is handled
+
+## Terminology
+- **Extermination**: eliminating a pest infestation
+- **Exclusion**: sealing entry points so pests cannot get back in
+- **IPM (Integrated Pest Management)**: a prevention-first approach combining several methods
+- **Perimeter treatment**: treating the exterior boundary to keep pests out
+- **Baiting system**: stations that pests carry back to the colony, common for termites and ants
+- **Infestation**: an established pest population in or around a home
+- **Re-treatment**: a follow-up service, often covered by a guarantee`,
+
+  landscaping: (businessName) => `# ${businessName} (AI Receptionist Knowledge Base)
+
+## Company Overview
+${businessName} is a landscaping and lawn care company. We handle lawn maintenance, cleanups, landscape design and installation, mulch, irrigation, and seasonal work, keeping yards healthy and looking great. We offer free estimates.
+
+## Common Services
+
+### Lawn Care
+- Mowing and edging
+- Fertilization and weed control
+- Aeration and overseeding
+- Lawn treatments and disease control
+
+### Maintenance
+- Trimming, pruning, and shrub care
+- Seasonal cleanups (spring and fall)
+- Leaf removal
+- Bed maintenance and weeding
+
+### Design and Installation
+- Landscape design
+- Planting (trees, shrubs, flowers)
+- Sod installation
+- Hardscaping (patios, walkways, retaining walls)
+
+### Mulch and Beds
+- Mulch and rock installation
+- Bed edging and refresh
+- Soil and grading
+
+### Irrigation
+- Sprinkler installation and repair
+- Irrigation system maintenance
+- Drip systems
+
+### Seasonal
+- Leaf and debris cleanup
+- Seasonal color and plantings
+- Snow removal (where offered)
+
+## Frequently Asked Questions
+
+**Q: Do you offer free estimates?**
+A: Yes. Every property is a little different, so we come take a look and give you an accurate quote at no cost.
+
+**Q: Do you offer recurring service, or just one-time?**
+A: Both. Many customers set up regular mowing and maintenance, and we also do one-time cleanups and projects.
+
+**Q: How much does service cost?**
+A: It depends on the property size and what is involved, which is why estimates are free.
+
+**Q: Do you require a contract?**
+A: For recurring service the team will go over the options, some are seasonal agreements and some are month to month.
+
+**Q: What area do you serve?**
+A: The team can confirm whether your property is in the service area when you provide the address.
+
+**Q: Do you do design and installation, not just mowing?**
+A: Yes. We do full landscape design, planting, sod, and hardscaping in addition to maintenance.
+
+**Q: When is the best time for aeration or seeding?**
+A: It depends on your grass type and region, the team can recommend the right timing for your lawn.
+
+## Urgency Guidelines
+
+### Soon (new-lead intake, book promptly)
+- An overgrown property or a cleanup needed before an event or listing
+- Time-sensitive seasonal work
+
+### Routine (book the estimate or service)
+- Recurring mowing and maintenance
+- Design, installation, and hardscaping projects
+- Mulch, irrigation, and general questions
+
+## What to Expect
+1. The team looks at the property and discusses what you want done
+2. They provide a free estimate and, for recurring work, a service plan
+3. With your approval, they schedule the service
+4. The crew completes the work
+5. Your yard looks and stays great
+
+## Terminology
+- **Hardscape**: the non-living features, patios, walkways, walls, edging
+- **Softscape**: the living elements, grass, plants, trees, shrubs
+- **Aeration**: pulling small plugs from the lawn so air, water, and nutrients reach the roots
+- **Overseeding**: spreading grass seed over an existing lawn to thicken it
+- **Mulch**: material spread over beds to retain moisture and suppress weeds
+- **Sod**: pre-grown grass laid down for an instant lawn
+- **Irrigation / sprinkler zones**: sections of a yard watered by a controlled system
+- **Retaining wall**: a wall that holds back soil and manages grade
+- **Grading**: shaping the ground for drainage and a level surface
+- **Perennial / annual**: plants that return each year versus those that last one season`,
 };
 
 module.exports = { INDUSTRY_KNOWLEDGE_BASES };
