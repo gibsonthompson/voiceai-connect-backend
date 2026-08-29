@@ -539,28 +539,51 @@ ${nextOpenInfo ? `- If they ask when you're open: "${nextOpenInfo}"` : ''}
 // Saved texts (booking link, address, etc.) are sent verbatim; instructions
 // govern timing. Only present when the Text Callers tool is enabled.
 // ============================================================================
+// Fixed, reliable triggers for the common SMS presets the client toggles on in
+// the dashboard. The client only supplies the value (their link/address); the
+// "when to send" is defined here so the AI fires consistently.
+const SMS_PRESET_TRIGGERS = {
+  address: "When the caller asks where you're located or for directions, text them this address",
+  website: 'When the caller wants more information or to see your work, text them your website',
+  review: 'If the call goes well and it feels natural, offer to text them a link to leave a review',
+  payment: 'When the caller needs to pay or asks how to pay, text them this payment link',
+};
+
 function buildSmsBlock(toolConfig) {
   if (!toolConfig || !toolConfig.smsToCaller) return '';
+
+  const presets = (toolConfig.smsPresets && typeof toolConfig.smsPresets === 'object') ? toolConfig.smsPresets : {};
+  const enabledPresets = Object.keys(SMS_PRESET_TRIGGERS)
+    .map(key => ({ key, ...(presets[key] || {}) }))
+    .filter(p => p.enabled && (p.value || '').toString().trim());
+
   const snippets = Array.isArray(toolConfig.smsSnippets)
     ? toolConfig.smsSnippets.filter(s => s && (s.label || s.value))
     : [];
   const instructions = typeof toolConfig.smsInstructions === 'string' ? toolConfig.smsInstructions.trim() : '';
 
-  if (!snippets.length && !instructions) {
+  if (!enabledPresets.length && !snippets.length && !instructions) {
     return `\n\n## Texting the caller\nYou can text the person on this call using the send_sms tool when they ask for something in writing (for example a booking link or an address they can save). Only text the person currently on the call, keep it short, and tell them once you have sent it.`;
   }
 
-  let block = `\n\n## Texting the caller\nYou can text the person on this call using the send_sms tool. Only ever text the person currently on the call.`;
+  let block = `\n\n## Texting the caller\nYou can text the person on this call using the send_sms tool. Only ever text the person currently on the call, and send links, addresses, and phone numbers EXACTLY as written, never change them.`;
+
+  if (enabledPresets.length) {
+    block += `\n\nWhat you can text, and when:`;
+    for (const p of enabledPresets) {
+      block += `\n- ${SMS_PRESET_TRIGGERS[p.key]}: ${p.value.toString().trim()}`;
+    }
+  }
   if (snippets.length) {
-    block += `\n\nSaved texts you can send. Send these EXACTLY as written, never change a link, phone number, or address:`;
+    block += `\n\nOther saved texts (send exactly as written):`;
     for (const s of snippets) {
       const label = (s.label || 'Text').toString().trim();
       const value = (s.value || '').toString().trim();
       if (value) block += `\n- ${label}: ${value}`;
     }
   }
-  if (instructions) block += `\n\nWhen to text: ${instructions}`;
-  block += `\n\nKeep texts short and useful. After sending, tell the caller you have just texted it. If you are unsure a text is wanted, offer first ("want me to text you that?").`;
+  if (instructions) block += `\n\nAdditional guidance: ${instructions}`;
+  block += `\n\nKeep texts short. After sending, tell the caller you have just texted it. If you are unsure a text is wanted, offer first ("want me to text you that?").`;
   return block;
 }
 

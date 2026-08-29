@@ -22,6 +22,7 @@ const DEFAULT_TOOL_CONFIG = {
   smsToCaller: false,
   smsInstructions: '',
   smsSnippets: [],
+  smsPresets: {},
 };
 
 // ============================================================================
@@ -77,6 +78,7 @@ router.put('/:id/tool-config', requirePermissionIfAuthed('ai_agent'), async (req
       'smsToCaller',
       'smsInstructions',
       'smsSnippets',
+      'smsPresets',
     ];
 
     // Get current config
