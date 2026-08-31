@@ -134,11 +134,13 @@ async function checkTeamLimit(entityType, entityId) {
     // 1. Check per-client override first
     const { data: client } = await supabase
       .from('clients')
-      .select('max_team_members, agency_id, plan_type, subscription_status')
+      .select('max_team_members, agency_id, plan_type, subscription_status, is_test_client')
       .eq('id', entityId)
       .single();
 
-    let maxAllowed = client?.max_team_members;
+    // Test clients are a sandbox: unlimited team members so agencies can
+    // explore dashboard users regardless of plan gating.
+    let maxAllowed = client?.is_test_client ? -1 : client?.max_team_members;
 
     // 2. If no per-client override, check agency's per-plan-tier config
     if (maxAllowed === null || maxAllowed === undefined) {
