@@ -27,13 +27,17 @@ async function checkPlanAccess(clientId) {
   try {
     const { data: client, error: clientError } = await supabase
       .from('clients')
-      .select('plan_type, agency_id, subscription_status')
+      .select('plan_type, agency_id, subscription_status, is_test_client')
       .eq('id', clientId)
       .single();
 
     if (clientError || !client) {
       return { allowed: false, reason: 'Client not found' };
     }
+
+    // Test clients are a sandbox: calendar is always available so agencies can
+    // explore the full feature set regardless of plan gating.
+    if (client.is_test_client) return { allowed: true };
 
     const { data: agency, error: agencyError } = await supabase
       .from('agencies')

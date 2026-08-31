@@ -152,7 +152,7 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
         vapi_phone_id: vapiPhoneId,
         status: 'active',
         subscription_status: 'active',
-        plan_type: 'starter',
+        plan_type: 'growth', // top plan so the test client shows the full feature set
         is_test_client: true,
         monthly_call_limit: TEST_CLIENT_CALL_LIMIT,
         calls_this_month: 0,
