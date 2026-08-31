@@ -79,15 +79,21 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
 
     const testBusinessName = `${agency.name} - Test Business`;
     const agencyCountry = (agency.country || 'US').toUpperCase();
-    const agencyCity = 'Atlanta'; // Default city for phone provisioning
-    const agencyState = 'GA';     // Default state
+    const agencyPhone = agency.phone ? formatPhoneE164(agency.phone, agencyCountry) : null;
+    // Base the test client's number on the agency's OWN area code (from their phone),
+    // not a hardcoded city. That hardcoded 'Atlanta' is why every test client used to
+    // get a 404 number regardless of where the agency actually is. Empty city so
+    // provisionLocalPhone keys off the phone's area code first; only fall back to a
+    // region if the agency has no phone on file at all.
+    const agencyCity = '';
+    const agencyState = agencyPhone ? '' : 'GA';
 
     // Step 1: Create VAPI assistant (general industry)
     const assistant = await createIndustryAssistant(
       testBusinessName,
       'home_services', // default test client industry
       null,            // no knowledge base
-      agency.phone ? formatPhoneE164(agency.phone, agencyCountry) : null,
+      agencyPhone,
       null,            // no client ID yet
       agencyId
     );
@@ -103,7 +109,7 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
         agencyState,
         assistant.id,
         testBusinessName,
-        agency.phone || ''
+        agencyPhone || ''
       );
       phoneNumber = phoneData.number;
       vapiPhoneId = phoneData.id;
