@@ -90,6 +90,7 @@
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { supabase, getAgencyById, getClientByEmail } = require('../lib/supabase');
+const { timezoneFromPhone } = require('../lib/area-code-timezone');
 const { 
   createIndustryAssistant, 
   provisionLocalPhone,
@@ -1057,6 +1058,7 @@ async function handleClientSignup(req, res) {
       phone_area_code: phoneResult.number.length >= 5 ? phoneResult.number.substring(2, 5) : null,
       owner_name: ownerName,
       owner_phone: formattedOwnerPhone,
+      timezone: timezoneFromPhone(formattedOwnerPhone) || timezoneFromPhone(phoneResult.number) || null,
       email: email.toLowerCase(),
       industry: industry,
       vapi_assistant_id: assistant.id,
@@ -1504,6 +1506,7 @@ async function handleAgencyAddClient(req, res) {
       phone_area_code: phoneResult.number.length >= 5 ? phoneResult.number.substring(2, 5) : null,
       owner_name: ownerName,
       owner_phone: formattedOwnerPhone,
+      timezone: timezoneFromPhone(formattedOwnerPhone) || timezoneFromPhone(phoneResult.number) || null,
       email: email.toLowerCase(),
       industry: industry,
       vapi_assistant_id: assistant.id,

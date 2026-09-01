@@ -136,13 +136,14 @@ router.get('/:id', async (req, res) => {
 router.put('/:id/settings', requirePermissionIfAuthed('settings'), async (req, res) => {
   try {
     const { id } = req.params;
-    const { email, owner_phone, business_name, hipaa_mode, onboarding_completed } = req.body;
+    const { email, owner_phone, business_name, hipaa_mode, onboarding_completed, timezone } = req.body;
     const updates = {};
     if (email) updates.email = email;
     if (owner_phone) updates.owner_phone = owner_phone;
     if (business_name !== undefined && business_name.trim()) updates.business_name = business_name.trim();
     if (hipaa_mode !== undefined) updates.hipaa_mode = hipaa_mode === true;
     if (onboarding_completed !== undefined) updates.onboarding_completed = onboarding_completed === true;
+    if (typeof timezone === 'string' && timezone.trim()) updates.timezone = timezone.trim();
     const { data, error } = await supabase.from('clients').update(updates).eq('id', id).select().single();
     if (error) return res.status(400).json({ error: error.message });
     res.json({ success: true, client: data });
