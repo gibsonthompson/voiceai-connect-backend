@@ -11,6 +11,7 @@ const {
   createIndustryAssistant, 
   provisionLocalPhone,
 } = require('../lib/vapi');
+const { timezoneFromPhone } = require('../lib/area-code-timezone');
 const { formatPhoneE164 } = require('../lib/notifications');
 
 // Max minutes for test clients (prevents abuse)
@@ -145,6 +146,16 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
         phone_number: phoneNumber,
         owner_name: agency.name,
         owner_phone: agency.phone || null,
+        timezone: timezoneFromPhone(agency.phone) || null,
+        business_hours: {
+          monday: { open: '9:00 AM', close: '5:00 PM', closed: false },
+          tuesday: { open: '9:00 AM', close: '5:00 PM', closed: false },
+          wednesday: { open: '9:00 AM', close: '5:00 PM', closed: false },
+          thursday: { open: '9:00 AM', close: '5:00 PM', closed: false },
+          friday: { open: '9:00 AM', close: '5:00 PM', closed: false },
+          saturday: { open: '9:00 AM', close: '5:00 PM', closed: true },
+          sunday: { open: '9:00 AM', close: '5:00 PM', closed: true },
+        },
         email: agency.email,
         industry: 'home_services',
         vapi_assistant_id: assistant.id,

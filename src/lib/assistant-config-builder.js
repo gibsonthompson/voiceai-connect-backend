@@ -409,6 +409,22 @@ async function buildStaffBlock(clientId) {
 // ============================================================================
 // BUSINESS HOURS CHECK
 // ============================================================================
+// Parse a time string to minutes since midnight. Handles 12-hour ("9:00 AM",
+// "5:30 PM") and 24-hour ("09:00", "17:30") formats. Returns null if unparseable.
+function parseTimeToMinutes(t) {
+  if (!t || typeof t !== 'string') return null;
+  const m = t.trim().match(/^(\d{1,2}):(\d{2})\s*([AaPp][Mm])?$/);
+  if (!m) return null;
+  let hr = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  if (isNaN(hr) || isNaN(min) || min > 59) return null;
+  const ampm = (m[3] || '').toUpperCase();
+  if (ampm === 'PM' && hr !== 12) hr += 12;
+  else if (ampm === 'AM' && hr === 12) hr = 0;
+  if (hr > 23) return null;
+  return hr * 60 + min;
+}
+
 function checkBusinessHours(client) {
   const businessHours = client.business_hours;
   if (!businessHours || typeof businessHours !== 'object') {
@@ -427,17 +443,26 @@ function checkBusinessHours(client) {
   const dayKey = dayNames[now.getDay()];
   const daySchedule = businessHours[dayKey];
 
-  if (!daySchedule || !daySchedule.open || !daySchedule.close) {
-    return { isOpen: false, daySchedule: null, currentTime: now };
+  // A day explicitly marked closed, or with no hours, means after-hours.
+  if (!daySchedule || daySchedule.closed || !daySchedule.open || !daySchedule.close) {
+    return { isOpen: false, daySchedule: daySchedule || null, currentTime: now };
   }
 
-  const [openHr, openMin] = daySchedule.open.split(':').map(Number);
-  const [closeHr, closeMin] = daySchedule.close.split(':').map(Number);
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
-  const openMinutes = openHr * 60 + openMin;
-  const closeMinutes = closeHr * 60 + closeMin;
+  // Hours are saved in 12-hour form ("9:00 AM"); parse robustly (also 24-hour).
+  const openMinutes = parseTimeToMinutes(daySchedule.open);
+  const closeMinutes = parseTimeToMinutes(daySchedule.close);
+  // If the stored times can't be parsed, fail OPEN rather than trapping the
+  // business in a permanent "closed" state.
+  if (openMinutes == null || closeMinutes == null) {
+    return { isOpen: true, daySchedule, currentTime: now };
+  }
 
-  const isOpen = currentMinutes >= openMinutes && currentMinutes < closeMinutes;
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  // Handles same-day ranges (9:00-17:00) and overnight ranges that wrap past
+  // midnight (e.g. 18:00-02:00 for 24/7 emergency lines).
+  const isOpen = closeMinutes > openMinutes
+    ? (currentMinutes >= openMinutes && currentMinutes < closeMinutes)
+    : (currentMinutes >= openMinutes || currentMinutes < closeMinutes);
   return { isOpen, daySchedule, currentTime: now };
 }
 
@@ -513,7 +538,7 @@ function buildAfterHoursBlock(client, toolConfig) {
     for (let offset = 1; offset <= 7; offset++) {
       const checkIdx = (todayIdx + offset) % 7;
       const sched = client.business_hours[dayNames[checkIdx]];
-      if (sched?.open) {
+      if (sched?.open && !sched.closed) {
         const dayLabel = offset === 1 ? 'tomorrow' : dayNames[checkIdx].charAt(0).toUpperCase() + dayNames[checkIdx].slice(1);
         nextOpenInfo = `We open again ${dayLabel} at ${sched.open}.`;
         break;
