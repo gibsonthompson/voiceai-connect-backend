@@ -425,27 +425,51 @@ function parseTimeToMinutes(t) {
   return hr * 60 + min;
 }
 
+// Normalize a timezone to something Intl accepts: valid IANA/Etc names pass
+// through; common offset forms ("GMT+2","UTC+2","+02:00","GMT-5") map to the
+// matching Etc/GMT zone; only as a last resort fall back to America/New_York.
+function normalizeTimezone(tz) {
+  const DEFAULT = 'America/New_York';
+  if (!tz || typeof tz !== 'string') return DEFAULT;
+  const trimmed = tz.trim();
+  const valid = (z) => { try { new Intl.DateTimeFormat('en-US', { timeZone: z }); return true; } catch { return false; } };
+  if (valid(trimmed)) return trimmed;
+  const m = trimmed.match(/^(?:GMT|UTC)?\s*([+-])(\d{1,2})(?::?(\d{2}))?$/i);
+  if (m) {
+    // Etc/GMT signs are inverted: Etc/GMT-2 is UTC+2.
+    const etc = `Etc/GMT${m[1] === '-' ? '+' : '-'}${parseInt(m[2], 10)}`;
+    if (valid(etc)) return etc;
+  }
+  return DEFAULT;
+}
+
+// Current weekday + hour + minute in a timezone, via Intl.formatToParts (the
+// reliable way; new Date(toLocaleString(...)) throws on bad input and drifts).
+function nowInTimezone(tz) {
+  const timezone = normalizeTimezone(tz);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone, hour12: false, weekday: 'long', hour: '2-digit', minute: '2-digit',
+  }).formatToParts(new Date());
+  const get = (t) => (parts.find((p) => p.type === t) || {}).value;
+  let hour = parseInt(get('hour'), 10);
+  if (hour === 24 || isNaN(hour)) hour = 0;
+  const minute = parseInt(get('minute'), 10) || 0;
+  const weekday = (get('weekday') || '').toLowerCase();
+  return { timezone, weekday, hour, minute };
+}
+
 function checkBusinessHours(client) {
   const businessHours = client.business_hours;
   if (!businessHours || typeof businessHours !== 'object') {
     return { isOpen: true, daySchedule: null, currentTime: null };
   }
 
-  const timezone = client.timezone || 'America/New_York';
-  let now;
-  try {
-    now = new Date(new Date().toLocaleString('en-US', { timeZone: timezone }));
-  } catch {
-    now = new Date();
-  }
-
-  const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-  const dayKey = dayNames[now.getDay()];
-  const daySchedule = businessHours[dayKey];
+  const { weekday, hour, minute } = nowInTimezone(client.timezone);
+  const daySchedule = businessHours[weekday];
 
   // A day explicitly marked closed, or with no hours, means after-hours.
   if (!daySchedule || daySchedule.closed || !daySchedule.open || !daySchedule.close) {
-    return { isOpen: false, daySchedule: daySchedule || null, currentTime: now };
+    return { isOpen: false, daySchedule: daySchedule || null, currentTime: null };
   }
 
   // Hours are saved in 12-hour form ("9:00 AM"); parse robustly (also 24-hour).
@@ -454,16 +478,16 @@ function checkBusinessHours(client) {
   // If the stored times can't be parsed, fail OPEN rather than trapping the
   // business in a permanent "closed" state.
   if (openMinutes == null || closeMinutes == null) {
-    return { isOpen: true, daySchedule, currentTime: now };
+    return { isOpen: true, daySchedule, currentTime: null };
   }
 
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const currentMinutes = hour * 60 + minute;
   // Handles same-day ranges (9:00-17:00) and overnight ranges that wrap past
   // midnight (e.g. 18:00-02:00 for 24/7 emergency lines).
   const isOpen = closeMinutes > openMinutes
     ? (currentMinutes >= openMinutes && currentMinutes < closeMinutes)
     : (currentMinutes >= openMinutes || currentMinutes < closeMinutes);
-  return { isOpen, daySchedule, currentTime: now };
+  return { isOpen, daySchedule, currentTime: null };
 }
 
 // ============================================================================
@@ -526,14 +550,8 @@ function buildAfterHoursBlock(client, toolConfig) {
   let nextOpenInfo = '';
   if (client.business_hours) {
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-    const timezone = client.timezone || 'America/New_York';
-    let now;
-    try {
-      now = new Date(new Date().toLocaleString('en-US', { timeZone: timezone }));
-    } catch {
-      now = new Date();
-    }
-    const todayIdx = now.getDay();
+    const { weekday } = nowInTimezone(client.timezone);
+    const todayIdx = Math.max(0, dayNames.indexOf(weekday));
 
     for (let offset = 1; offset <= 7; offset++) {
       const checkIdx = (todayIdx + offset) % 7;
@@ -546,17 +564,13 @@ function buildAfterHoursBlock(client, toolConfig) {
     }
   }
 
-  return `\n\n# After-Hours Mode
-The business is currently CLOSED.
+  return `\n\n# Availability Note
+You are a 24/7 receptionist. Help this caller fully: answer their questions, take their details, book if they want an appointment, and assist them exactly as you would at any other time. Do NOT tell the caller the business is "closed" or "closed right now."
 
-Your behavior changes:
-- Greet the caller warmly, then let them know: "${afterHoursMessage}"
-${nextOpenInfo ? `- If they ask when you're open: "${nextOpenInfo}"` : ''}
-- Collect their name and phone number so the team can call them back.
-- If it sounds urgent, collect their info and let them know someone will reach out first thing.
-- Do NOT transfer calls — the office is closed, nobody will answer.
-- Do NOT offer to book appointments or check availability.
-- Keep it short and helpful. Take their message and wrap up.`;
+A couple of things are simply different at this hour:
+- No one is available for a live transfer right now, so rather than transferring, capture what the caller needs and let them know the team will follow up.
+- Only bring up the business hours if the caller asks, or if it genuinely helps set expectations on when they will hear back.${nextOpenInfo ? ` For example: "${nextOpenInfo}"` : ''}
+- Always get their name and a good callback number. If it sounds urgent, reassure them the team will reach out as soon as possible.`;
 }
 
 // ============================================================================
@@ -653,7 +667,7 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
 
   if (hipaaMode) {
     if (isAfterHours && toolConfig.businessHoursRouting) {
-      return `Hi, thanks for calling ${businessName}. We're currently closed, but I can help you leave a message or get you scheduled. How can I help?`;
+      return `Hi, thanks for calling ${businessName}. How can I help you today?`;
     }
     return `Hello, you've reached ${businessName}. How can I help you today?`;
   }
@@ -662,9 +676,9 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
 
   if (isAfterHours && toolConfig.businessHoursRouting) {
     if (knownName) {
-      return `Hi ${knownName}, thanks for calling ${businessName}. We're currently closed, but I can help you leave a message. This call may be recorded.`;
+      return `Hi ${knownName}, thanks for calling ${businessName}. How can I help you today? This call may be recorded.`;
     }
-    return `Hi, thanks for calling ${businessName}. We're currently closed, but I can help you leave a message. This call may be recorded.`;
+    return `Hi, thanks for calling ${businessName}. How can I help you today? This call may be recorded.`;
   }
 
   // Custom greeting is the spoken opener for everyone when set (new AND
