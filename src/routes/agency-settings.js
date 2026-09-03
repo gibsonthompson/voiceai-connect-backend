@@ -194,6 +194,9 @@ function publicAgencyShape(agency) {
     // so the signup widget and marketing site can show it before checkout. The
     // charge itself is added server-side by stripe-connect at checkout.
     setup_fee_cents: agency.setup_fee_cents ?? null,
+    setup_fee_starter_cents: agency.setup_fee_starter_cents ?? null,
+    setup_fee_pro_cents: agency.setup_fee_pro_cents ?? null,
+    setup_fee_growth_cents: agency.setup_fee_growth_cents ?? null,
 
     // Limits
     limit_starter: agency.limit_starter,
@@ -497,6 +500,9 @@ async function getAgencySettings(req, res) {
         // Loaded by the Pricing tab. Charged on the client's first paid invoice
         // by stripe-connect's buildSetupFeeLineItem.
         setup_fee_cents: agency.setup_fee_cents ?? null,
+        setup_fee_starter_cents: agency.setup_fee_starter_cents ?? null,
+        setup_fee_pro_cents: agency.setup_fee_pro_cents ?? null,
+        setup_fee_growth_cents: agency.setup_fee_growth_cents ?? null,
 
         limit_starter: agency.limit_starter,
         limit_pro: agency.limit_pro,
@@ -634,6 +640,8 @@ async function updateAgencySettings(req, res) {
       'price_starter', 'price_pro', 'price_growth',
       // One-time client setup fee (cents). Range-validated below. NULL/0 = none.
       'setup_fee_cents',
+      // Per-plan one-time setup fees (cents). Range-validated below. NULL = none.
+      'setup_fee_starter_cents', 'setup_fee_pro_cents', 'setup_fee_growth_cents',
       'limit_starter', 'limit_pro', 'limit_growth',
       // Client per-minute billing: the agency-wide overage rate (cents/min)
       // and the per-plan included-minute allotments. Written via the normal
@@ -883,6 +891,21 @@ async function updateAgencySettings(req, res) {
         }
         sanitizedUpdates.setup_fee_cents = cents;
       }
+    }
+
+    // Per-plan setup fees: same shape/range as the legacy global fee.
+    for (const feeField of ['setup_fee_starter_cents', 'setup_fee_pro_cents', 'setup_fee_growth_cents']) {
+      if (sanitizedUpdates[feeField] === undefined) continue;
+      const raw = sanitizedUpdates[feeField];
+      if (raw === null || raw === '') { sanitizedUpdates[feeField] = null; continue; }
+      const cents = Number(raw);
+      if (!Number.isInteger(cents) || cents < 0) {
+        return res.status(400).json({ error: `${feeField} must be an integer of 0 or greater (in cents)` });
+      }
+      if (cents > 1000000) {
+        return res.status(400).json({ error: `${feeField} cannot exceed 1000000 (10,000.00)` });
+      }
+      sanitizedUpdates[feeField] = cents;
     }
 
     for (const field of ['included_minutes_starter', 'included_minutes_pro', 'included_minutes_growth']) {

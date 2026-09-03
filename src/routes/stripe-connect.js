@@ -186,7 +186,16 @@ function isSupportedConnectCountry(countryCode) {
 // a Stripe setup fee (a manual agency collects any setup fee on its own invoice).
 // ============================================================================
 async function buildSetupFeeLineItem(agency, plan) {
-  const feeCents = Number(agency.setup_fee_cents);
+  // Per-plan fee wins; fall back to the legacy global setup_fee_cents so an
+  // agency that set a fee before per-plan existed keeps charging it until it
+  // migrates its plans in Settings. NULL per-plan value => use the fallback.
+  const perPlan = {
+    starter: agency.setup_fee_starter_cents,
+    pro: agency.setup_fee_pro_cents,
+    growth: agency.setup_fee_growth_cents,
+  };
+  const raw = (perPlan[plan] != null) ? perPlan[plan] : agency.setup_fee_cents;
+  const feeCents = Number(raw);
   if (!(feeCents > 0)) return null;
 
   const acct = agency.stripe_account_id;
