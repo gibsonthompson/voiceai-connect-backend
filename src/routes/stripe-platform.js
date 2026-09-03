@@ -57,6 +57,14 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 //            metered prices, so the line item must omit it entirely.
 // ============================================================================
 const PLATFORM_PLANS = {
+  free: {
+    name: 'Free',
+    price: 0, // $0/mo platform fee; billed per-client ($29.99) + per-minute only
+    platformPrice: process.env.STRIPE_PRICE_FREE_PLATFORM, // a $0/mo recurring price
+    clientPrice: process.env.STRIPE_PRICE_FREE_CLIENT,
+    minutePrice: process.env.STRIPE_PRICE_FREE_MINUTE,
+    clientLimit: -1, // unlimited
+  },
   pro: {
     name: 'Pro',
     price: 9900, // $99/mo flat
@@ -405,7 +413,7 @@ async function createAgencyCheckout(req, res) {
       return res.status(404).json({ error: 'Agency not found' });
     }
 
-    const noTrial = skipTrial === true || skipTrial === 'true';
+    const noTrial = skipTrial === true || skipTrial === 'true' || plan === 'free';
     console.log(`🛒 Creating ${plan} checkout for: ${agency.email}${noTrial ? ' (no trial, immediate charge)' : ''}`);
 
     // Defense against duplicate subscriptions. If the agency already has an
