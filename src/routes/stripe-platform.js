@@ -683,6 +683,7 @@ async function handleAgencyCheckoutCompleted(session) {
       .update({
         status: 'active',
         subscription_status: 'active',
+        usage_billing_enabled: true,  // turn on per-minute + per-client usage billing at activation
         plan_type: plan,
         stripe_subscription_id: session.subscription,
         trial_ends_at: null,
@@ -1020,6 +1021,7 @@ async function handleAgencyPaymentSucceeded(invoice) {
     .from('agencies')
     .update({
       subscription_status: 'active',
+      usage_billing_enabled: true,  // turn on per-minute + per-client usage billing at activation
       status: 'active',
     })
     .eq('id', agency.id);
