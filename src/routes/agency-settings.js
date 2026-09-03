@@ -93,6 +93,7 @@
 const dns = require('dns').promises;
 const jwt = require('jsonwebtoken');
 const { supabase, getAgencyBySlug, getAgencyByDomain, getAgencyById } = require('../lib/supabase');
+const { getAgencyPlans, generatePlanKey } = require('../lib/plans');
 // Reprice sweep for client per-minute billing. Stripe prices are immutable, so
 // a rate/included-minutes change only reaches EXISTING clients if their metered
 // item is re-pointed to a fresh price. updateAgencySettings fires this in the
@@ -184,6 +185,9 @@ function publicAgencyShape(agency) {
     // Plan type (for feature gating)
     plan_type: agency.plan_type,
     subscription_status: agency.subscription_status,
+
+    // Plans as data (resolved: array if present, else synthesized from columns)
+    plans: getAgencyPlans(agency),
 
     // Pricing (for client signup + marketing website)
     price_starter: agency.price_starter,
@@ -491,6 +495,9 @@ async function getAgencySettings(req, res) {
         marketing_domain: agency.marketing_domain,
         domain_verified: agency.domain_verified,
         
+        // Plans as data (resolved)
+        plans: getAgencyPlans(agency),
+
         // Pricing
         price_starter: agency.price_starter,
         price_pro: agency.price_pro,
@@ -642,6 +649,8 @@ async function updateAgencySettings(req, res) {
       'setup_fee_cents',
       // Per-plan one-time setup fees (cents). Range-validated below. NULL = none.
       'setup_fee_starter_cents', 'setup_fee_pro_cents', 'setup_fee_growth_cents',
+      // Path B: plans as data. Validated + removal-guarded below.
+      'plans',
       'limit_starter', 'limit_pro', 'limit_growth',
       // Client per-minute billing: the agency-wide overage rate (cents/min)
       // and the per-plan included-minute allotments. Written via the normal
@@ -906,6 +915,93 @@ async function updateAgencySettings(req, res) {
         return res.status(400).json({ error: `${feeField} cannot exceed 1000000 (10,000.00)` });
       }
       sanitizedUpdates[feeField] = cents;
+    }
+
+    // ── Plans array (Path B): validate keys, fields, and guard deletions ──────
+    if (sanitizedUpdates.plans !== undefined) {
+      const incoming = sanitizedUpdates.plans;
+      if (!Array.isArray(incoming) || incoming.length === 0) {
+        return res.status(400).json({ error: 'plans must be a non-empty array' });
+      }
+      if (incoming.length > 12) {
+        return res.status(400).json({ error: 'A maximum of 12 plans is supported' });
+      }
+
+      // Current plans (via lib, legacy-column fallback) = the keys that already
+      // exist, so we can preserve them and detect removals.
+      const { data: currentAgency } = await supabase
+        .from('agencies')
+        .select('plans, price_starter, price_pro, price_growth, limit_starter, limit_pro, limit_growth, plan_starter_name, plan_pro_name, plan_growth_name, plan_starter_description, plan_pro_description, plan_growth_description, setup_fee_cents, setup_fee_starter_cents, setup_fee_pro_cents, setup_fee_growth_cents, included_minutes_starter, included_minutes_pro, included_minutes_growth, plan_features')
+        .eq('id', agencyId)
+        .single();
+      const existingKeys = new Set(getAgencyPlans(currentAgency || {}).map((p) => p.key));
+
+      const seen = new Set();
+      const normalized = [];
+      for (let i = 0; i < incoming.length; i++) {
+        const p = incoming[i] || {};
+
+        // Key: preserve a provided/existing one; generate a stable one for a new
+        // plan. Keys are immutable once set (billing + client.plan_type key off it).
+        let key = (typeof p.key === 'string' && p.key.trim()) ? p.key.trim() : '';
+        if (!key) key = generatePlanKey(p.name, [...seen, ...existingKeys]);
+        if (seen.has(key)) return res.status(400).json({ error: `Duplicate plan key: ${key}` });
+        seen.add(key);
+
+        const name = (typeof p.name === 'string' && p.name.trim()) ? p.name.trim().slice(0, 60) : '';
+        if (!name) return res.status(400).json({ error: `Plan "${key}" needs a name` });
+
+        let price_cents = null;
+        if (p.price_cents !== null && p.price_cents !== undefined && p.price_cents !== '') {
+          price_cents = Number(p.price_cents);
+          if (!Number.isInteger(price_cents) || price_cents < 0 || price_cents > 100000000) {
+            return res.status(400).json({ error: `Plan "${name}" has an invalid price` });
+          }
+        }
+
+        let call_limit = Number(p.call_limit);
+        if (!Number.isInteger(call_limit) || call_limit < -1) call_limit = 50; // -1 = unlimited
+
+        let setup_fee_cents = null;
+        if (p.setup_fee_cents !== null && p.setup_fee_cents !== undefined && p.setup_fee_cents !== '') {
+          setup_fee_cents = Number(p.setup_fee_cents);
+          if (!Number.isInteger(setup_fee_cents) || setup_fee_cents < 0 || setup_fee_cents > 1000000) {
+            return res.status(400).json({ error: `Plan "${name}" has an invalid setup fee` });
+          }
+        }
+
+        let included_minutes = Number(p.included_minutes);
+        if (!Number.isInteger(included_minutes) || included_minutes < 0) included_minutes = 0;
+
+        const description = typeof p.description === 'string' ? p.description.trim().slice(0, 200) : '';
+        const features = (p.features && typeof p.features === 'object' && !Array.isArray(p.features)) ? p.features : {};
+        const visible = p.visible !== false;
+
+        normalized.push({ key, name, price_cents, call_limit, description, setup_fee_cents, included_minutes, features, visible, order: i });
+      }
+
+      // Removal guard: a plan can only be dropped if no active client is on it,
+      // otherwise those clients' plan_type would reference a plan that no longer
+      // exists and their billing lookups (getPlan) would return null.
+      const removedKeys = [...existingKeys].filter((k) => !seen.has(k));
+      if (removedKeys.length > 0) {
+        const { data: onRemoved } = await supabase
+          .from('clients')
+          .select('id')
+          .eq('agency_id', agencyId)
+          .in('plan_type', removedKeys)
+          .not('subscription_status', 'in', '(canceled,trial_expired)');
+        if (onRemoved && onRemoved.length > 0) {
+          return res.status(409).json({
+            error: 'plan_in_use',
+            message: 'A plan you removed still has active clients. Move them to another plan before deleting it.',
+            removed_keys: removedKeys,
+            client_count: onRemoved.length,
+          });
+        }
+      }
+
+      sanitizedUpdates.plans = normalized;
     }
 
     for (const field of ['included_minutes_starter', 'included_minutes_pro', 'included_minutes_growth']) {

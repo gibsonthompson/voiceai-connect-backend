@@ -90,6 +90,7 @@
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { supabase, getAgencyById, getClientByEmail } = require('../lib/supabase');
+const { getPlan, getAgencyPlans, getVisiblePlans } = require('../lib/plans');
 const { timezoneFromPhone } = require('../lib/area-code-timezone');
 const { 
   createIndustryAssistant, 
@@ -179,7 +180,8 @@ function resolveVoiceRouting(source, agency) {
 // bundle before this flag existed still provisions texting for its clients.
 // ============================================================================
 function planFeatureEnabled(agency, planType, key) {
-  const pf = agency && agency.plan_features && agency.plan_features[planType];
+  const plan = getPlan(agency, planType);
+  const pf = plan && plan.features;
   if (!pf) return true;
   return pf[key] !== false;
 }
@@ -856,14 +858,23 @@ async function handleClientSignup(req, res) {
     // (including missing) falls back to 'starter'. Matches the pattern in
     // handleAgencyAddClient (which already worked correctly).
     // ────────────────────────────────────────────────────────────────────
-    const planType = VALID_CLIENT_PLANS.includes(req.body.planType) ? req.body.planType : 'starter';
-    if (req.body.planType && !VALID_CLIENT_PLANS.includes(req.body.planType)) {
-      console.warn(`⚠️ Invalid planType "${req.body.planType}" from signup request, defaulting to starter`);
-    }
+    const requestedPlanKey = req.body.planType;
 
     const agency = await getAgencyById(agencyId);
     if (!agency) {
       return res.status(404).json({ error: 'Agency not found' });
+    }
+
+    // Resolve the plan against THIS agency's plans (Path B). Honor a valid
+    // requested key; otherwise default to the first VISIBLE plan (then the first
+    // plan of any kind). Never hardcode 'starter', which an agency may have
+    // removed or renamed.
+    const _agencyPlans = getAgencyPlans(agency);
+    const _requested = _agencyPlans.find((p) => p.key === requestedPlanKey);
+    const _defaultPlan = getVisiblePlans(agency)[0] || _agencyPlans[0];
+    const planType = _requested ? _requested.key : (_defaultPlan ? _defaultPlan.key : 'starter');
+    if (requestedPlanKey && !_requested) {
+      console.warn(`⚠️ Invalid planType "${requestedPlanKey}" from signup, defaulting to ${planType}`);
     }
 
     if (agency.status !== 'active' && agency.status !== 'trial') {

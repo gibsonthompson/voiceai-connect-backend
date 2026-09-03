@@ -119,6 +119,7 @@ const { enableAssistant, disableAssistant, disablePhoneNumber, enablePhoneNumber
 const { releaseBYOTNumber } = require('./byot');
 const { getSmsTemplate } = require('../lib/sms-templates');
 const { updateClientBillingQuantity } = require('../lib/usage-tracker');
+const { getPlan, validPlanKeys } = require('../lib/plans');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
@@ -189,12 +190,8 @@ async function buildSetupFeeLineItem(agency, plan) {
   // Per-plan fee wins; fall back to the legacy global setup_fee_cents so an
   // agency that set a fee before per-plan existed keeps charging it until it
   // migrates its plans in Settings. NULL per-plan value => use the fallback.
-  const perPlan = {
-    starter: agency.setup_fee_starter_cents,
-    pro: agency.setup_fee_pro_cents,
-    growth: agency.setup_fee_growth_cents,
-  };
-  const raw = (perPlan[plan] != null) ? perPlan[plan] : agency.setup_fee_cents;
+  const planDef = getPlan(agency, plan);
+  const raw = (planDef && planDef.setup_fee_cents != null) ? planDef.setup_fee_cents : agency.setup_fee_cents;
   const feeCents = Number(raw);
   if (!(feeCents > 0)) return null;
 
@@ -304,12 +301,8 @@ async function ensureConnectMinuteMeter(agency) {
 // Included minutes for a plan (free allotment before overage). 0 = pure
 // per-minute, no free tier. Falls back to 0 for unknown plans.
 function includedMinutesForPlan(agency, plan) {
-  const map = {
-    starter: agency.included_minutes_starter || 0,
-    pro: agency.included_minutes_pro || 0,
-    growth: agency.included_minutes_growth || 0,
-  };
-  return map[plan] || 0;
+  const p = getPlan(agency, plan);
+  return p ? (p.included_minutes || 0) : 0;
 }
 
 // Build a metered price on the connected account for this plan's minutes.
@@ -328,7 +321,7 @@ async function createConnectMinutePrice(agency, plan) {
   const included = includedMinutesForPlan(agency, plan);
 
   const product = await stripe.products.create({
-    name: `Voice Minutes - ${plan.charAt(0).toUpperCase() + plan.slice(1)}`,
+    name: `Voice Minutes - ${getPlan(agency, plan)?.name || plan}`,
     metadata: { plan, kind: 'voice_minutes' },
   }, { stripeAccount: acct });
 
@@ -1194,18 +1187,10 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     throw new Error('Agency Stripe Connect not configured');
   }
 
-  const priceAmounts = {
-    starter: agency.price_starter || 9900,
-    pro: agency.price_pro || 14900,
-    growth: agency.price_growth || 29900,
-  };
-  const callLimits = {
-    starter: agency.limit_starter || 50,
-    pro: agency.limit_pro || 150,
-    growth: agency.limit_growth || 500,
-  };
-  const priceAmount = priceAmounts[plan];
-  if (!priceAmount) throw new Error(`Invalid plan: ${plan}`);
+  const planDef = getPlan(agency, plan);
+  if (!planDef || planDef.price_cents == null) throw new Error(`Invalid plan: ${plan}`);
+  const priceAmount = planDef.price_cents;
+  const callLimit = planDef.call_limit;
 
   const currency = getCurrencyForCountry(agency.country || 'US');
 
@@ -1227,7 +1212,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
 
   // Create product + price on connected account (per-client pricing matches createClientCheckout)
   const product = await stripe.products.create({
-    name: `AI Receptionist - ${plan.charAt(0).toUpperCase() + plan.slice(1)}`,
+    name: `AI Receptionist - ${planDef.name}`,
     metadata: { client_id: client.id, plan },
   }, { stripeAccount: agency.stripe_account_id });
 
@@ -1276,7 +1261,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
       client_id: client.id,
       agency_id: agency.id,
       plan,
-      call_limit: callLimits[plan].toString(),
+      call_limit: callLimit.toString(),
       type: 'trial_signup', // distinguishes from upgrade-mode checkouts
     },
     subscription_data: {
@@ -1357,10 +1342,10 @@ async function createClientCheckout(req, res) {
 
     console.log('Creating client checkout for:', client.email, 'via agency:', agency.name);
 
-    const priceAmounts = { starter: agency.price_starter || 9900, pro: agency.price_pro || 14900, growth: agency.price_growth || 29900 };
-    const callLimits = { starter: agency.limit_starter || 50, pro: agency.limit_pro || 150, growth: agency.limit_growth || 500 };
-    const priceAmount = priceAmounts[plan];
-    if (!priceAmount) return res.status(400).json({ error: 'Invalid plan' });
+    const planDef = getPlan(agency, plan);
+    if (!planDef || planDef.price_cents == null) return res.status(400).json({ error: 'Invalid plan' });
+    const priceAmount = planDef.price_cents;
+    const callLimit = planDef.call_limit;
 
     const currency = getCurrencyForCountry(agency.country || 'US');
 
@@ -1377,7 +1362,7 @@ async function createClientCheckout(req, res) {
     }
 
     const product = await stripe.products.create({
-      name: `AI Receptionist - ${plan.charAt(0).toUpperCase() + plan.slice(1)}`,
+      name: `AI Receptionist - ${planDef.name}`,
       metadata: { client_id, plan }
     }, { stripeAccount: agency.stripe_account_id });
 
@@ -1407,7 +1392,7 @@ async function createClientCheckout(req, res) {
       line_items: upgradeLineItems,
       success_url: `${agencyUrl}/client/dashboard?upgrade=success`,
       cancel_url: `${agencyUrl}/client/upgrade-required?canceled=true`,
-      metadata: { client_id, agency_id: agency.id, plan, call_limit: callLimits[plan].toString(), type: 'client_subscription' },
+      metadata: { client_id, agency_id: agency.id, plan, call_limit: callLimit.toString(), type: 'client_subscription' },
       subscription_data: { metadata: { client_id, agency_id: agency.id, plan } }
     }, { stripeAccount: agency.stripe_account_id });
 
@@ -1505,11 +1490,6 @@ async function changeClientPlan(req, res) {
       return res.status(400).json({ error: 'Missing required fields', required: ['client_id', 'plan'] });
     }
 
-    const VALID_PLANS = ['starter', 'pro', 'growth'];
-    if (!VALID_PLANS.includes(plan)) {
-      return res.status(400).json({ error: 'Invalid plan', valid_plans: VALID_PLANS });
-    }
-
     // Auth: this endpoint mutates a live subscription and can charge a prorated
     // difference, so require a valid token whose owner is allowed to act on this
     // client. Allowed: super_admin, the client itself (clientId match), or the
@@ -1534,6 +1514,11 @@ async function changeClientPlan(req, res) {
     const agency = client.agencies;
     if (!agency) return res.status(404).json({ error: 'Agency not found' });
 
+    // Validate the target plan against THIS agency's plans (replaces the old
+    // hardcoded VALID_PLANS). planDef carries price + limit for both branches.
+    const planDef = getPlan(agency, plan);
+    if (!planDef) return res.status(400).json({ error: 'Invalid plan', valid_plans: validPlanKeys(agency) });
+
     // ── Manual-billing client: change plan WITHOUT touching Stripe ──────────
     // A manual client has no Stripe Connect subscription, and its agency may not
     // use Connect at all, so the normal path (which requires charges enabled and
@@ -1551,8 +1536,7 @@ async function changeClientPlan(req, res) {
         return res.status(403).json({ error: 'Forbidden', message: 'Only your provider can change this plan.' });
       }
 
-      const callLimits = { starter: agency.limit_starter || 50, pro: agency.limit_pro || 150, growth: agency.limit_growth || 500 };
-      let limit = callLimits[plan];
+      let limit = planDef.call_limit;
 
       // Optional explicit cap override. Integer >= -1 (-1 = unlimited). Anything
       // else is rejected so a bad value cannot silently mis-set the cap.
@@ -1634,15 +1618,13 @@ async function changeClientPlan(req, res) {
     }
 
     // Target price + call limit (same defaults as createClientCheckout).
-    const priceAmounts = { starter: agency.price_starter || 9900, pro: agency.price_pro || 14900, growth: agency.price_growth || 29900 };
-    const callLimits = { starter: agency.limit_starter || 50, pro: agency.limit_pro || 150, growth: agency.limit_growth || 500 };
-    const priceAmount = priceAmounts[plan];
-    const callLimit = callLimits[plan];
+    const priceAmount = planDef.price_cents;
+    const callLimit = planDef.call_limit;
     const currency = getCurrencyForCountry(agency.country || 'US');
 
     // Fresh product + price for the target plan on the connected account.
     const product = await stripe.products.create({
-      name: `AI Receptionist - ${plan.charAt(0).toUpperCase() + plan.slice(1)}`,
+      name: `AI Receptionist - ${planDef.name}`,
       metadata: { client_id, plan },
     }, { stripeAccount: agency.stripe_account_id });
 
