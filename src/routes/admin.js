@@ -1687,16 +1687,21 @@ router.get('/byot-number-check', requireAdmin, async (req, res) => {
       });
     }
 
-    // 2) Released — is the exact number re-buyable right now?
+    // 2) Released — is the EXACT number re-buyable right now? Twilio's available-
+    // number search matches on Contains (a pattern), not an exact PhoneNumber
+    // param, so we search by the number's digits and then require an exact match.
+    const digits = number.replace(/[^\d]/g, '');
     const avail = await fetch(
-      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/AvailablePhoneNumbers/GB/Local.json?PhoneNumber=${encodeURIComponent(number)}`,
+      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/AvailablePhoneNumbers/GB/Local.json?Contains=${encodeURIComponent(digits)}`,
       { headers: H }
     );
-    let reBuyable = null, availableSample = null;
+    let reBuyable = null, availableSample = null, matchType = null;
     if (avail.ok) {
       const list = (await avail.json()).available_phone_numbers || [];
-      reBuyable = list.length > 0;
-      availableSample = list[0] || null;
+      const exact = list.find(n => (n.phone_number || '').replace(/[^\d]/g, '') === digits);
+      reBuyable = !!exact;                       // true ONLY if the exact number is free
+      availableSample = exact || list[0] || null; // exact if found, else a near match
+      matchType = exact ? 'exact' : (list.length ? 'partial_only' : 'none');
     } else {
       availableSample = { httpStatus: avail.status, text: (await avail.text()).slice(0, 200) };
     }
@@ -1706,6 +1711,7 @@ router.get('/byot-number-check', requireAdmin, async (req, res) => {
       agency: agency.name,
       held: false,
       reBuyable,
+      matchType,
       availableSample,
       regulatory: { bundle: agency.twilio_bundle_sid || null, address: agency.twilio_address_sid || null },
       verdict: reBuyable
@@ -1761,40 +1767,43 @@ router.post('/byot-number-rebuy', requireAdmin, async (req, res) => {
     if (agency.twilio_bundle_sid) buyParams.BundleSid = agency.twilio_bundle_sid;
     if (agency.twilio_address_sid) buyParams.AddressSid = agency.twilio_address_sid;
 
-    const buyRes = await fetch(
-      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers.json`,
-      {
-        method: 'POST',
-        headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams(buyParams).toString(),
-      }
-    );
-    const body = await buyRes.json().catch(() => ({}));
-    if (!buyRes.ok) {
-      return res.status(502).json({
-        error: 'Twilio purchase failed',
-        httpStatus: buyRes.status,
-        detail: body.message || body,
-        twilioCode: body.code || null,
-        sentParams: Object.keys(buyParams),
-        hint: body.code === 21649 ? 'Regulatory bundle/address required — confirm twilio_bundle_sid + twilio_address_sid are set on the agency.' : undefined,
-      });
-    }
-
-    // Secured. Claim the number back on the client row so a signup can't reclaim
-    // it via stale-number-recovery. Routing still needs step 2 (VAPI import).
-    await supabase
-      .from('clients')
-      .update({ phone_number: number, vapi_phone_number: number, updated_at: new Date().toISOString() })
-      .eq('id', clientId);
-
-    return res.json({
+    // Respond immediately, then run the (slow, GB-regulated) purchase server-side.
+    // The platform gateway 504s a long HTTP request, but the Node process keeps
+    // running after we respond, so the buy completes in the background and logs
+    // its result. Poll /byot-number-check until held:true.
+    res.json({
       ok: true,
-      secured: true,
-      number: body.phone_number,
-      twilioSid: body.sid,
-      note: 'Number RE-SECURED on Wexl Twilio and claimed on Searchvista. It will NOT ring the AI until step 2 (VAPI import + assistant + relink). But it can no longer be taken by anyone else — the emergency is over.',
+      started: true,
+      number,
+      note: 'Purchase started server-side (GB buys are slow). Poll /byot-number-check every ~15s until held:true — expect up to ~60s. If it stays false after ~2 min, check the backend runtime logs for a "REBUY" line for the exact Twilio error.',
     });
+
+    (async () => {
+      try {
+        const buyRes = await fetch(
+          `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers.json`,
+          {
+            method: 'POST',
+            headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams(buyParams).toString(),
+          }
+        );
+        const body = await buyRes.json().catch(() => ({}));
+        if (!buyRes.ok) {
+          console.error(`🚨 REBUY FAILED for ${number}: HTTP ${buyRes.status} code=${body.code || '?'} msg=${body.message || JSON.stringify(body).slice(0, 200)} (sent ${Object.keys(buyParams).join(',')})`);
+          return;
+        }
+        console.log(`✅ REBUY SUCCESS: ${body.phone_number} secured on ${agency.name} Twilio (SID ${body.sid})`);
+        const { error: upErr } = await supabase
+          .from('clients')
+          .update({ phone_number: number, vapi_phone_number: number, updated_at: new Date().toISOString() })
+          .eq('id', clientId);
+        if (upErr) console.error(`🚨 REBUY: number bought but client row update failed for ${clientId}: ${upErr.message}`);
+        else console.log(`✅ REBUY: claimed ${number} on client ${clientId}`);
+      } catch (e) {
+        console.error(`🚨 REBUY THREW for ${number}:`, e.message);
+      }
+    })();
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
