@@ -178,7 +178,6 @@ async function getUserByEmailForRoles(email, roles) {
     .select('*, agencies(*), clients(*)')
     .eq('email', email.toLowerCase())
     .in('role', roles)
-    .order('created_at', { ascending: true })
     .limit(1);
   if (error || !data || data.length === 0) return null;
   return data[0];
