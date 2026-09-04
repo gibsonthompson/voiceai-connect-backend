@@ -459,7 +459,7 @@ app.post('/api/agency/:agencyId/ping', async (req, res) => {
 });
 
 app.get('/api/agency/by-host', getAgencyByHost);
-// Embed-widget Path A: iframe loads myvoiceaiconnect.com/get-started?agency=UUID
+// Embed-widget Path A: iframe loads myvoiceaiconnect.com/signup?agency=UUID
 // and looks the agency up by ID since there's no host-based context to derive.
 app.get('/api/agency/by-id', getAgencyByIdPublic);
 // Dashboard bootstrap, but ALSO called with no token by app/onboarding/page.tsx
