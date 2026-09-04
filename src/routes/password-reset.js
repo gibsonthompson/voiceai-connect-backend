@@ -27,7 +27,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
-const { supabase, getUserByEmail } = require('../lib/supabase');
+const { supabase, getUsersByEmail } = require('../lib/supabase');
 const { sendEmail } = require('../lib/notifications');
 const { sendAndLogSMS } = require('../lib/sms-logger');
 const { getSmsTemplate } = require('../lib/sms-templates');
@@ -44,6 +44,39 @@ function maskEmail(email) {
   if (!domain) return '***';
   const shown = user ? user[0] : '';
   return `${shown}***@${domain}`;
+}
+
+// Normalize a phone to comparable digits: strip formatting, drop a US country code.
+function phoneDigits(raw) {
+  const d = String(raw || '').replace(/\D/g, '');
+  return (d.length === 11 && d.startsWith('1')) ? d.slice(1) : d;
+}
+
+// Find a client user by the owner phone entered on the client reset page.
+// Prefilter by the last 4 digits (contiguous regardless of formatting), then
+// exact-match on normalized digits so "(555) 123-4567" and "+15551234567" match.
+async function findClientUserByPhone(rawPhone) {
+  const digits = phoneDigits(rawPhone);
+  if (digits.length < 7) return null;
+  const last4 = digits.slice(-4);
+  const { data: candidates } = await supabase
+    .from('clients')
+    .select('id, owner_phone, agency_id')
+    .not('owner_phone', 'is', null)
+    .ilike('owner_phone', `%${last4}`);
+  const client = (candidates || []).find(
+    (c) => phoneDigits(c.owner_phone).slice(-10) === digits.slice(-10)
+  );
+  if (!client) return null;
+  const { data: users } = await supabase
+    .from('users')
+    .select('id, email, client_id, role')
+    .eq('client_id', client.id)
+    .eq('role', 'client')
+    .limit(1);
+  const user = users && users[0];
+  if (!user) return null;
+  return { user, client };
 }
 
 // Build the agency password-reset email body (the shared layout wraps it).
@@ -67,50 +100,69 @@ function buildResetEmailHtml(code) {
 // ============================================================================
 router.post('/forgot-password', async (req, res) => {
   try {
-    const { email } = req.body;
-    if (!email) {
-      return res.status(400).json({ error: 'Email is required' });
-    }
+    const scope = req.body.scope === 'client' ? 'client' : req.body.scope === 'agency' ? 'agency' : null;
 
-    const normalizedEmail = email.toLowerCase().trim();
-    const user = await getUserByEmail(normalizedEmail);
-
-    // Neutral response used whenever we will not (or cannot) send, so the caller
-    // cannot tell whether the account exists.
-    const neutral = () => res.json({
-      success: true,
-      message: 'If an account exists with this email, a verification code has been sent.',
-    });
-
-    if (!user) {
-      await antiEnumDelay();
-      return neutral();
-    }
-
-    // Resolve the delivery channel by user type.
+    let user = null;
     let userType = 'client';
     let phone = null;
     let clientAgencyId = null;
+    let recordEmail = null; // stored on the token row for reference/audit
 
-    if (user.agency_id && ['agency_owner', 'agency_staff', 'super_admin'].includes(user.role)) {
-      userType = 'agency';
-      // Agency reset goes to EMAIL. No phone needed.
-    } else if (user.client_id && user.role === 'client') {
+    if (scope === 'client') {
+      // CLIENT: identify by PHONE. The client reset page collects a phone number
+      // because the code is texted (white-label). Asking a client for their email
+      // and then texting them made no sense.
+      const rawPhone = req.body.phone;
+      const neutral = () => res.json({
+        success: true,
+        message: 'If an account exists with this number, a verification code has been sent.',
+      });
+      if (!rawPhone) return res.status(400).json({ error: 'Phone number is required' });
+      const found = await findClientUserByPhone(rawPhone);
+      if (!found || !found.client.owner_phone) {
+        await antiEnumDelay();
+        return neutral();
+      }
+      user = found.user;
       userType = 'client';
-      const { data: client } = await supabase
-        .from('clients').select('owner_phone, agency_id').eq('id', user.client_id).single();
-      phone = client?.owner_phone;
-      clientAgencyId = client?.agency_id || null;
+      phone = found.client.owner_phone;
+      clientAgencyId = found.client.agency_id || null;
+      recordEmail = found.user.email || null;
     } else {
-      // Unknown role shape. Treat as client and require a phone.
-      userType = 'client';
-    }
-
-    // Clients still reset by SMS (white-label). No phone -> neutral, no send.
-    if (userType === 'client' && !phone) {
-      console.log(`⚠️ No phone on file for client reset: ${normalizedEmail} (role: ${user.role})`);
-      await antiEnumDelay();
-      return neutral();
+      // AGENCY (or unscoped): identify by EMAIL; the code is emailed.
+      const { email } = req.body;
+      const neutral = () => res.json({
+        success: true,
+        message: 'If an account exists with this email, a verification code has been sent.',
+      });
+      if (!email) return res.status(400).json({ error: 'Email is required' });
+      const normalizedEmail = email.toLowerCase().trim();
+      recordEmail = normalizedEmail;
+      // Scope-safe: an email may have BOTH an agency and a client account. Never
+      // .single() here, that throws on a shared email.
+      const _candidates = await getUsersByEmail(normalizedEmail);
+      user = scope === 'agency'
+        ? (_candidates.find((u) => ['agency_owner', 'agency_staff', 'super_admin'].includes(u.role)) || null)
+        : (_candidates[0] || null);
+      if (!user) {
+        await antiEnumDelay();
+        return neutral();
+      }
+      if (user.agency_id && ['agency_owner', 'agency_staff', 'super_admin'].includes(user.role)) {
+        userType = 'agency';
+      } else if (user.client_id && user.role === 'client') {
+        // Legacy: an email-scoped request that resolves to a client still texts
+        // the client's owner_phone (white-label).
+        userType = 'client';
+        const { data: client } = await supabase
+          .from('clients').select('owner_phone, agency_id').eq('id', user.client_id).single();
+        phone = client?.owner_phone;
+        clientAgencyId = client?.agency_id || null;
+        if (!phone) { await antiEnumDelay(); return neutral(); }
+      } else {
+        userType = 'client';
+        if (!phone) { await antiEnumDelay(); return neutral(); }
+      }
     }
 
     // Generate + store the code (hashed) alongside the reset token.
@@ -132,7 +184,7 @@ router.post('/forgot-password', async (req, res) => {
       .from('password_reset_tokens')
       .insert({
         user_id: user.id,
-        email: normalizedEmail,
+        email: recordEmail,
         token: resetToken,
         expires_at: expiresAt.toISOString(),
         used: false,
@@ -153,13 +205,13 @@ router.post('/forgot-password', async (req, res) => {
     if (userType === 'agency') {
       const emailResult = await sendEmail({
         from: `${BRAND_NAME} <support@myvoiceaiconnect.com>`,
-        to: normalizedEmail,
+        to: recordEmail,
         subject: 'Your VoiceAI Connect password reset code',
         html: buildResetEmailHtml(code),
       });
 
       if (!emailResult || emailResult.success !== true) {
-        console.error('❌ Failed to send reset email to:', normalizedEmail);
+        console.error('❌ Failed to send reset email to:', recordEmail);
         await supabase
           .from('password_reset_tokens')
           .update({ used: true })
@@ -168,11 +220,11 @@ router.post('/forgot-password', async (req, res) => {
         return res.status(500).json({ error: 'Failed to send verification code. Please try again.' });
       }
 
-      console.log(`✅ Password reset code emailed to ${maskEmail(normalizedEmail)}`);
+      console.log(`✅ Password reset code emailed to ${maskEmail(recordEmail)}`);
       return res.json({
         success: true,
         message: 'Verification code sent to your email',
-        maskedEmail: maskEmail(normalizedEmail),
+        maskedEmail: maskEmail(recordEmail),
         resetToken,
         userType,
       });
@@ -180,15 +232,11 @@ router.post('/forgot-password', async (req, res) => {
 
     // ---- CLIENT: deliver the code by SMS (white-label safe) ------------------
     // Route through sendAndLogSMS WITH the client's agency, so a non-US BYOT
-    // agency sends the code from its OWN Twilio. The raw US Telnyx number does
-    // not deliver to UK/international handsets, which locked out those clients.
-    // US clients still fall through to platform Telnyx inside sendAndLogSMS.
+    // agency sends the code from its OWN Twilio. US clients fall through to
+    // platform Telnyx inside sendAndLogSMS.
     const templateMsg = await getSmsTemplate('password_reset_code', { code });
     const smsMessage = templateMsg || `Your verification code is: ${code}\n\nThis code expires in 15 minutes. Do not share it with anyone.`;
 
-    // sendAndLogSMS returns a boolean (true = sent), handles its own errors, and
-    // logs every attempt to sms_log. It routes to the agency's own Twilio for a
-    // non-US BYOT agency and to platform Telnyx otherwise.
     let smsSent = false;
     try {
       smsSent = (await sendAndLogSMS({
@@ -216,7 +264,7 @@ router.post('/forgot-password', async (req, res) => {
 
     const lastFour = phone.replace(/\D/g, '').slice(-4);
     const masked = `(***) ***-${lastFour}`;
-    console.log(`✅ Password reset code SMS sent to ${masked} for ${normalizedEmail}`);
+    console.log(`✅ Password reset code SMS sent to ${masked}`);
 
     return res.json({
       success: true,
@@ -236,9 +284,9 @@ router.post('/forgot-password', async (req, res) => {
 // ============================================================================
 router.post('/reset-password', async (req, res) => {
   try {
-    const { email, code, password, resetToken } = req.body;
+    const { code, password, resetToken } = req.body;
 
-    if (!email || !code || !password || !resetToken) {
+    if (!code || !password || !resetToken) {
       return res.status(400).json({ error: 'All fields are required' });
     }
 
@@ -246,13 +294,15 @@ router.post('/reset-password', async (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 8 characters' });
     }
 
-    const normalizedEmail = email.toLowerCase().trim();
-    const codeHash = crypto.createHash('sha256').update(code.trim()).digest('hex');
+    const codeHash = crypto.createHash('sha256').update(String(code).trim()).digest('hex');
 
+    // Look up the request by its reset token (unique per request) rather than the
+    // identifier, so this serves both the agency (email) and client (phone) flows
+    // without knowing which was used. token column = `${resetToken}|${codeHash}`.
     const { data: tokenRecord, error: tokenError } = await supabase
       .from('password_reset_tokens')
       .select('*')
-      .eq('email', normalizedEmail)
+      .like('token', `${resetToken}|%`)
       .eq('used', false)
       .order('created_at', { ascending: false })
       .limit(1)
@@ -292,7 +342,7 @@ router.post('/reset-password', async (req, res) => {
 
     await supabase.from('password_reset_tokens').update({ used: true }).eq('id', tokenRecord.id);
 
-    console.log(`✅ Password reset successful for: ${normalizedEmail}`);
+    console.log(`✅ Password reset successful for user: ${tokenRecord.user_id}`);
 
     res.json({
       success: true,
