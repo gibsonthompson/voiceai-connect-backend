@@ -1717,4 +1717,87 @@ router.get('/byot-number-check', requireAdmin, async (req, res) => {
   }
 });
 
+// ============================================================================
+// TEMPORARY (recovery step 1): re-buy Searchvista's EXACT number back onto
+// Wexl's Twilio before anyone else takes it. Confirm-gated so it can't fire by
+// accident. This SECURES the number; it does NOT restore call routing yet
+// (that's step 2: VAPI import + assistant + full relink).
+// POST /api/admin/byot-number-rebuy?confirm=yes
+// ============================================================================
+router.post('/byot-number-rebuy', requireAdmin, async (req, res) => {
+  try {
+    if (req.query.confirm !== 'yes') {
+      return res.status(400).json({ error: 'Refusing to purchase without ?confirm=yes' });
+    }
+    const { decrypt } = require('../lib/encryption');
+    const number = req.query.number || '+441156470941';
+    const agencyId = req.query.agencyId || '0c7ea945-18b5-44f5-b81f-dc1714e80965';
+    const clientId = req.query.clientId || '21f0ba3a-c386-456a-88d5-83c6bee73212';
+
+    const { data: agency, error: aErr } = await supabase
+      .from('agencies')
+      .select('id, name, twilio_account_sid, twilio_api_key_encrypted, twilio_api_secret_encrypted, twilio_bundle_sid, twilio_address_sid')
+      .eq('id', agencyId)
+      .single();
+    if (aErr || !agency) return res.status(404).json({ error: 'Agency not found', detail: aErr?.message });
+    if (!agency.twilio_account_sid || !agency.twilio_api_key_encrypted) {
+      return res.status(400).json({ error: 'Agency has no Twilio credentials on file' });
+    }
+
+    let apiKey, apiSecret;
+    try {
+      apiKey = decrypt(agency.twilio_api_key_encrypted);
+      apiSecret = decrypt(agency.twilio_api_secret_encrypted);
+    } catch (e) {
+      return res.status(500).json({ error: 'Failed to decrypt Twilio credentials', detail: e.message });
+    }
+
+    const accountSid = agency.twilio_account_sid;
+    const auth = Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
+
+    // GB purchases require the approved regulatory bundle + validated address to
+    // be referenced on the buy (a validated address merely existing is not enough).
+    const buyParams = { PhoneNumber: number, FriendlyName: 'Searchvista Ltd - AI Receptionist (recovered)' };
+    if (agency.twilio_bundle_sid) buyParams.BundleSid = agency.twilio_bundle_sid;
+    if (agency.twilio_address_sid) buyParams.AddressSid = agency.twilio_address_sid;
+
+    const buyRes = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers.json`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(buyParams).toString(),
+      }
+    );
+    const body = await buyRes.json().catch(() => ({}));
+    if (!buyRes.ok) {
+      return res.status(502).json({
+        error: 'Twilio purchase failed',
+        httpStatus: buyRes.status,
+        detail: body.message || body,
+        twilioCode: body.code || null,
+        sentParams: Object.keys(buyParams),
+        hint: body.code === 21649 ? 'Regulatory bundle/address required — confirm twilio_bundle_sid + twilio_address_sid are set on the agency.' : undefined,
+      });
+    }
+
+    // Secured. Claim the number back on the client row so a signup can't reclaim
+    // it via stale-number-recovery. Routing still needs step 2 (VAPI import).
+    await supabase
+      .from('clients')
+      .update({ phone_number: number, vapi_phone_number: number, updated_at: new Date().toISOString() })
+      .eq('id', clientId);
+
+    return res.json({
+      ok: true,
+      secured: true,
+      number: body.phone_number,
+      twilioSid: body.sid,
+      note: 'Number RE-SECURED on Wexl Twilio and claimed on Searchvista. It will NOT ring the AI until step 2 (VAPI import + assistant + relink). But it can no longer be taken by anyone else — the emergency is over.',
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
