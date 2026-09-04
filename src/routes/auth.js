@@ -47,7 +47,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const { supabase, getUserByEmail, getUserById } = require('../lib/supabase');
+const { supabase, getUserByEmail, getUserById, getUserByEmailForRoles } = require('../lib/supabase');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const JWT_EXPIRES_IN = '30d';
@@ -75,9 +75,9 @@ async function agencyLogin(req, res) {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
 
-    const user = await getUserByEmail(email.toLowerCase());
+    const user = await getUserByEmailForRoles(email.toLowerCase(), ['agency_owner', 'agency_staff', 'super_admin']);
     if (!user) return res.status(401).json({ error: 'Invalid email or password' });
-    if (!user.agency_id || !['agency_owner', 'agency_staff', 'super_admin'].includes(user.role)) return res.status(401).json({ error: 'Invalid credentials for agency login' });
+    if (!user.agency_id && user.role !== 'super_admin') return res.status(401).json({ error: 'Invalid credentials for agency login' });
     if (!user.password_hash) return res.status(401).json({ error: 'Password not set', message: 'Please set your password using the link in your welcome email' });
 
     const validPassword = await bcrypt.compare(password, user.password_hash);
@@ -140,9 +140,9 @@ async function clientLogin(req, res) {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
 
-    const user = await getUserByEmail(email.toLowerCase());
+    const user = await getUserByEmailForRoles(email.toLowerCase(), ['client', 'client_staff']);
     if (!user) return res.status(401).json({ error: 'Invalid email or password' });
-    if (!user.client_id || !['client', 'client_staff'].includes(user.role)) return res.status(401).json({ error: 'Invalid credentials for client login' });
+    if (!user.client_id) return res.status(401).json({ error: 'Invalid credentials for client login' });
     if (!user.password_hash) return res.status(401).json({ error: 'Password not set', message: 'Please set your password using the link in your welcome email' });
 
     const validPassword = await bcrypt.compare(password, user.password_hash);
@@ -226,7 +226,7 @@ async function recoverAccountSetup(req, res) {
     }
 
     const normalizedEmail = String(email).toLowerCase().trim();
-    const user = await getUserByEmail(normalizedEmail);
+    const user = await getUserByEmailForRoles(normalizedEmail, scope === 'client' ? ['client', 'client_staff'] : ['agency_owner', 'agency_staff', 'super_admin']);
 
     // No such user. Do not reveal that. Present the same shape as "already set".
     if (!user) {

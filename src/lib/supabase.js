@@ -167,6 +167,23 @@ async function getUserByEmail(email) {
   return data;
 }
 
+// Look up the users row for an email whose role is in `roles`. One email can
+// legitimately hold BOTH an agency and a client account (each its own row): an
+// agency owner logging into a real client they run. Each login passes the roles
+// it accepts, so it finds ITS row instead of colliding. Uses limit(1), not
+// .single(), so a shared email never errors into a false "no user".
+async function getUserByEmailForRoles(email, roles) {
+  const { data, error } = await supabase
+    .from('users')
+    .select('*, agencies(*), clients(*)')
+    .eq('email', email.toLowerCase())
+    .in('role', roles)
+    .order('created_at', { ascending: true })
+    .limit(1);
+  if (error || !data || data.length === 0) return null;
+  return data[0];
+}
+
 async function getUserById(userId) {
   const { data, error } = await supabase
     .from('users')
@@ -199,5 +216,6 @@ module.exports = {
   getClientByStripeConnectedCustomerId,
   // User
   getUserByEmail,
+  getUserByEmailForRoles,
   getUserById
 };
