@@ -1243,6 +1243,96 @@ app.delete('/api/agency/:agencyId/clients/:clientId', requireAgencyAccess('setti
   }
 });
 
+// ============================================================================
+// CSV EXPORT: clients + calls. The agency clients page calls these and expects
+// a CSV blob back with Content-Disposition so the browser downloads it. Both
+// gate on requireAgencyAccess('settings') (owner or a staff member with the
+// settings permission), matching the delete-client route above.
+// ============================================================================
+function toCsv(columns, rows) {
+  const esc = (v) => {
+    if (v === null || v === undefined) return '';
+    const s = String(v);
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const header = columns.join(',');
+  const lines = (rows || []).map((r) => columns.map((c) => esc(r[c])).join(','));
+  return [header, ...lines].join('\r\n') + '\r\n';
+}
+
+// GET /api/export/agency/:agencyId/clients -> CSV of the agency's clients
+app.get('/api/export/agency/:agencyId/clients', requireAgencyAccess('settings'), async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const cols = ['business_name', 'owner_name', 'email', 'owner_phone', 'industry', 'plan_type', 'subscription_status', 'status', 'vapi_phone_number', 'calls_this_month', 'monthly_call_limit', 'trial_ends_at', 'created_at'];
+    const { data: clients, error } = await supabase
+      .from('clients')
+      .select(cols.join(', '))
+      .eq('agency_id', agencyId)
+      .order('created_at', { ascending: false });
+    if (error) { console.error('❌ Export clients query failed:', error.message); return res.status(500).json({ error: 'Failed to export clients' }); }
+
+    const csv = toCsv(cols, clients || []);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="clients-export.csv"');
+    return res.send(csv);
+  } catch (e) {
+    console.error('❌ Export clients error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/export/agency/:agencyId/calls?from=&to= -> CSV of calls across the
+// agency's clients, optionally within a date range (YYYY-MM-DD, inclusive).
+// Column names verified against the calls table: customer_name, customer_phone,
+// duration_seconds, call_status, ai_summary.
+app.get('/api/export/agency/:agencyId/calls', requireAgencyAccess('settings'), async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const { from, to } = req.query;
+
+    const { data: clients } = await supabase.from('clients').select('id, business_name').eq('agency_id', agencyId);
+    const nameById = Object.fromEntries((clients || []).map((c) => [c.id, c.business_name]));
+    const clientIds = (clients || []).map((c) => c.id);
+
+    const cols = ['created_at', 'client', 'caller_name', 'caller_phone', 'duration_seconds', 'status', 'summary'];
+    if (clientIds.length === 0) {
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="agency-calls-export.csv"');
+      return res.send(toCsv(cols, []));
+    }
+
+    let q = supabase
+      .from('calls')
+      .select('created_at, client_id, customer_name, customer_phone, duration_seconds, call_status, ai_summary')
+      .in('client_id', clientIds)
+      .order('created_at', { ascending: false })
+      .limit(20000);
+    if (from) q = q.gte('created_at', String(from));
+    if (to) q = q.lte('created_at', `${String(to)}T23:59:59.999Z`);
+    const { data: calls, error } = await q;
+    if (error) { console.error('❌ Export calls query failed:', error.message); return res.status(500).json({ error: 'Failed to export calls' }); }
+
+    const rows = (calls || []).map((c) => ({
+      created_at: c.created_at,
+      client: nameById[c.client_id] || '',
+      caller_name: c.customer_name || '',
+      caller_phone: c.customer_phone || '',
+      duration_seconds: c.duration_seconds ?? '',
+      status: c.call_status || '',
+      summary: c.ai_summary || '',
+    }));
+
+    const csv = toCsv(cols, rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="agency-calls-export.csv"');
+    return res.send(csv);
+  } catch (e) {
+    console.error('❌ Export calls error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 
 
 app.get('/api/agency/:agencyId/analytics', async (req, res) => {
