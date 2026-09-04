@@ -1631,4 +1631,90 @@ router.post('/migrate-phones-dynamic', requireAdmin, async (req, res) => {
   }
 });
 
+// ============================================================================
+// TEMPORARY (remove after Searchvista is restored): read-only BYOT number check.
+// GET /api/admin/byot-number-check?number=+441156470941&agencyId=<uuid>
+// Uses the agency's stored (encrypted) Twilio creds to report whether the number
+// is still on their Twilio (only unlinked from VAPI) or was released (and if the
+// exact number is re-buyable right now). Makes NO changes/purchases/releases.
+// ============================================================================
+router.get('/byot-number-check', requireAdmin, async (req, res) => {
+  try {
+    const { decrypt } = require('../lib/encryption');
+    const number = req.query.number || '+441156470941';
+    const agencyId = req.query.agencyId || '0c7ea945-18b5-44f5-b81f-dc1714e80965';
+
+    const { data: agency, error: aErr } = await supabase
+      .from('agencies')
+      .select('id, name, twilio_account_sid, twilio_api_key_encrypted, twilio_api_secret_encrypted, twilio_bundle_sid, twilio_address_sid')
+      .eq('id', agencyId)
+      .single();
+    if (aErr || !agency) return res.status(404).json({ error: 'Agency not found', detail: aErr?.message });
+    if (!agency.twilio_account_sid || !agency.twilio_api_key_encrypted) {
+      return res.status(400).json({ error: 'Agency has no Twilio credentials on file' });
+    }
+
+    let apiKey, apiSecret;
+    try {
+      apiKey = decrypt(agency.twilio_api_key_encrypted);
+      apiSecret = decrypt(agency.twilio_api_secret_encrypted);
+    } catch (e) {
+      return res.status(500).json({ error: 'Failed to decrypt Twilio credentials', detail: e.message });
+    }
+
+    const accountSid = agency.twilio_account_sid;
+    const H = { Authorization: `Basic ${Buffer.from(`${apiKey}:${apiSecret}`).toString('base64')}` };
+
+    // 1) Currently held on the account?
+    const lookup = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers.json?PhoneNumber=${encodeURIComponent(number)}`,
+      { headers: H }
+    );
+    if (!lookup.ok) {
+      return res.status(502).json({ error: `Twilio lookup HTTP ${lookup.status}`, body: (await lookup.text()).slice(0, 300) });
+    }
+    const held = ((await lookup.json()).incoming_phone_numbers || [])[0];
+
+    if (held && held.sid) {
+      return res.json({
+        number,
+        agency: agency.name,
+        held: true,
+        twilioSid: held.sid,
+        voiceUrl: held.voice_url || null,
+        smsUrl: held.sms_url || null,
+        verdict: 'STILL_ON_ACCOUNT — the number never left Twilio, only got unlinked from VAPI. Re-import to VAPI + relink Searchvista. No re-purchase needed.',
+      });
+    }
+
+    // 2) Released — is the exact number re-buyable right now?
+    const avail = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/AvailablePhoneNumbers/GB/Local.json?PhoneNumber=${encodeURIComponent(number)}`,
+      { headers: H }
+    );
+    let reBuyable = null, availableSample = null;
+    if (avail.ok) {
+      const list = (await avail.json()).available_phone_numbers || [];
+      reBuyable = list.length > 0;
+      availableSample = list[0] || null;
+    } else {
+      availableSample = { httpStatus: avail.status, text: (await avail.text()).slice(0, 200) };
+    }
+
+    return res.json({
+      number,
+      agency: agency.name,
+      held: false,
+      reBuyable,
+      availableSample,
+      regulatory: { bundle: agency.twilio_bundle_sid || null, address: agency.twilio_address_sid || null },
+      verdict: reBuyable
+        ? 'RELEASED, but the exact number is AVAILABLE to re-buy right now. Re-purchase fast, then import to VAPI + relink.'
+        : 'RELEASED and NOT currently available to re-buy. Poll this exact number; it may reappear after a Twilio cooldown, or be gone.',
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;

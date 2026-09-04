@@ -347,13 +347,16 @@ router.post('/:agencyId/leads/import', async (req, res) => {
         return;
       }
 
-      // Clean estimated_value (handle $, commas)
+      // Clean estimated_value (handle $, commas, "/mo" suffixes). Stored as
+      // whole dollars, same as the manual-create path (parseInt, no x100). The
+      // old `< 1000 ? x100` heuristic inflated small values 100x (a $500 lead
+      // became 50000 => reads as $50,000) and disagreed with manual-created leads.
       let estimatedValue = null;
       if (mapped.estimated_value) {
         const cleaned = mapped.estimated_value.replace(/[$,\s]/g, '');
         const parsed = parseFloat(cleaned);
-        if (!isNaN(parsed)) {
-          estimatedValue = parsed < 1000 ? Math.round(parsed * 100) : Math.round(parsed);
+        if (!isNaN(parsed) && parsed >= 0) {
+          estimatedValue = Math.round(parsed);
         }
       }
 
