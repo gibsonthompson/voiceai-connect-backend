@@ -2441,6 +2441,7 @@ module.exports = {
   handleConnectStripeWebhook,
   expireTrials,
   reconcileClientSubscriptions, // self-heal DB rows vs real Stripe status
+  releaseClientResources,       // teardown (number + VAPI) — reused by client delete
   // Client-facing per-minute billing (agency charges its client per minute)
   minutePassThroughActive,      // resolver: is per-minute billing live for this agency
   ensureConnectMinuteMeter,     // create/reuse the voice_minutes meter on the connected account

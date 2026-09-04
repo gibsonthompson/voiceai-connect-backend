@@ -277,6 +277,7 @@ const {
   handleConnectStripeWebhook,
   expireTrials,
   reconcileClientSubscriptions,
+  releaseClientResources,
   setMinutePassThrough
 } = require('./routes/stripe-connect');
 
@@ -1160,6 +1161,85 @@ app.post('/api/agency/:agencyId/clients/:clientId/reset-password', async (req, r
   } catch (error) {
     console.error('Error resetting client password:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// DELETE /api/agency/:agencyId/clients/:clientId
+// Agency owner deletes one of THEIR clients. Tears down the number + VAPI
+// resources FIRST (reusing releaseClientResources so a number can never leak or
+// a VAPI assistant be orphaned), then removes child rows, the login users, and
+// the client. requireAgencyAccess confirms the caller owns the agency; the
+// agency_id check confirms the client belongs to it. Irreversible.
+// ============================================================================
+app.delete('/api/agency/:agencyId/clients/:clientId', requireAgencyAccess('settings'), async (req, res) => {
+  try {
+    const { agencyId, clientId } = req.params;
+
+    const { data: client, error } = await supabase
+      .from('clients')
+      .select('*, agencies!clients_agency_id_fkey(*)')
+      .eq('id', clientId)
+      .single();
+    if (error || !client) return res.status(404).json({ error: 'Client not found' });
+    if (client.agency_id !== agencyId) {
+      return res.status(403).json({ error: 'This client does not belong to your agency' });
+    }
+
+    // 0. Cancel the client's Stripe subscription on the agency's CONNECTED account
+    //    so their card stops being charged. A bare delete would orphan a live
+    //    subscription (no row left to manage it, and reconcile can't fix a row
+    //    that no longer exists). Best-effort; resource_missing = already gone.
+    if (client.stripe_connected_subscription_id && client.agencies?.stripe_account_id) {
+      try {
+        const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+        await stripe.subscriptions.cancel(client.stripe_connected_subscription_id, { stripeAccount: client.agencies.stripe_account_id });
+        console.log(`✅ Canceled client subscription ${client.stripe_connected_subscription_id} for deleted client ${clientId}`);
+      } catch (subErr) {
+        if (subErr.code !== 'resource_missing') {
+          console.error(`⚠️ Failed to cancel client subscription on delete (${clientId}): ${subErr.message}`);
+        }
+      }
+    }
+
+    // 1. Release provisioned resources (number: platform Telnyx + BYOT Twilio;
+    //    VAPI phone object, assistant, query tool). Idempotent + best-effort so a
+    //    release hiccup doesn't leave the row half-deleted.
+    try {
+      await releaseClientResources(client);
+    } catch (relErr) {
+      console.error(`⚠️ Resource release during delete failed for ${clientId} (continuing to delete row):`, relErr.message);
+    }
+
+    // 2. Remove child rows that FK to the client, then the login users.
+    try { await supabase.from('calls').delete().eq('client_id', clientId); } catch (e) { console.warn('⚠️ calls delete during client delete:', e.message); }
+    await supabase.from('users').delete().eq('client_id', clientId);
+
+    // 3. Delete the client row.
+    const { error: delErr } = await supabase.from('clients').delete().eq('id', clientId);
+    if (delErr) {
+      console.error('❌ Client row delete failed:', delErr.message);
+      return res.status(500).json({
+        error: 'Failed to delete client',
+        detail: delErr.message,
+        hint: 'A related table may still reference this client (foreign key). Note the constraint name for support.',
+      });
+    }
+
+    // 4. Recalculate the agency's per-client billing so a deleted client stops
+    //    counting (best-effort; reconcile also corrects it later).
+    try {
+      const { updateClientBillingQuantity } = require('./lib/usage-tracker');
+      await updateClientBillingQuantity(agencyId);
+    } catch (e) {
+      console.warn('⚠️ Billing quantity update after client delete failed:', e.message);
+    }
+
+    console.log(`🗑️ Client deleted by agency ${agencyId}: ${client.business_name} (${clientId})`);
+    res.json({ success: true, deleted: clientId, business_name: client.business_name });
+  } catch (e) {
+    console.error('❌ Delete client error:', e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
