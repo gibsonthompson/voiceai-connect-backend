@@ -969,78 +969,80 @@ async function handleClientSignup(req, res) {
     }
 
     // ============================================
-    // STEP 1: CREATE KNOWLEDGE BASE (if website)
+    // STEPS 1-3: KNOWLEDGE BASE, ASSISTANT, PHONE
+    // ────────────────────────────────────────────
+    // DEFERRED for card-required signups. A client who has NOT paid must never
+    // be handed a live, publishable number: the abandoned-checkout sweep reclaims
+    // a pending_payment number after 24h, which strands a client who published it
+    // and then took longer than a day to pay (the Searchvista incident). For
+    // card-required signups we create the row with NO number/assistant and
+    // provision at checkout.session.completed instead (handleClientCheckoutCompleted
+    // -> ensureProvisionedOnReactivate -> provisionClient). No-card trials and
+    // manual clients are unchanged: they provision immediately here.
     // ============================================
     let knowledgeBaseData = null;
-    if (websiteUrl && websiteUrl.trim().length > 0) {
-      console.log('🌐 Creating knowledge base from website...');
-      try {
-        knowledgeBaseData = await createKnowledgeBaseFromWebsite(websiteUrl, businessName);
-        if (knowledgeBaseData) {
-          console.log(`✅ Knowledge base ready: ${knowledgeBaseData.knowledgeBaseId}`);
+    let assistant = null;
+    let queryToolId = null;
+    let templateKB = null;
+    let phoneResult = null;
+
+    if (!willRequireCard) {
+      // STEP 1: knowledge base (if website)
+      if (websiteUrl && websiteUrl.trim().length > 0) {
+        console.log('🌐 Creating knowledge base from website...');
+        try {
+          knowledgeBaseData = await createKnowledgeBaseFromWebsite(websiteUrl, businessName);
+          if (knowledgeBaseData) console.log(`✅ Knowledge base ready: ${knowledgeBaseData.knowledgeBaseId}`);
+        } catch (kbError) {
+          console.error('⚠️ Knowledge base error (non-blocking):', kbError.message);
         }
-      } catch (kbError) {
-        console.error('⚠️ Knowledge base error (non-blocking):', kbError.message);
       }
-    }
 
-    // ============================================
-    // STEP 2: CREATE VAPI ASSISTANT
-    // ============================================
-    console.log(`🤖 Creating VAPI assistant for: ${industry}`);
-    
-    const assistant = await createIndustryAssistant(
-      businessName,
-      industry,
-      knowledgeBaseData,
-      formattedOwnerPhone,
-      null,     // clientId (not created yet)
-      agencyId  // Pass agencyId for template override lookup
-    );
-    
-    createdAssistantId = assistant.id;
-    console.log(`✅ Assistant created: ${assistant.id}`);
-
-    // Extract query tool ID for dynamic config builder
-    const queryToolId = await extractQueryToolId(assistant.id);
-    createdQueryToolId = queryToolId;
-    if (queryToolId) console.log(`🔧 Query tool ID extracted: ${queryToolId}`);
-
-    const templateKB = assistant._templateKnowledgeBase || null;
-    if (templateKB) {
-      console.log(`📚 Agency template KB will be inherited by new client`);
-    }
-
-    // ============================================
-    // STEP 3: PROVISION PHONE NUMBER (unified)
-    // This can fail (Telnyx 402 insufficient funds, no numbers available, etc.)
-    // If it fails, we must clean up the VAPI resources created in steps 1-2.
-    // ============================================
-    let phoneResult;
-    try {
-      phoneResult = await provisionPhoneForClient(agency, {
-        businessCity,
-        businessState,
+      // STEP 2: VAPI assistant
+      console.log(`🤖 Creating VAPI assistant for: ${industry}`);
+      assistant = await createIndustryAssistant(
         businessName,
-        phone
-      }, assistant.id, voiceRouting, planType);
-    } catch (phoneError) {
-      // Phone provisioning failed, clean up VAPI resources
-      await cleanupVapiResources(createdAssistantId, createdQueryToolId, businessName);
-      createdAssistantId = null;
-      createdQueryToolId = null;
+        industry,
+        knowledgeBaseData,
+        formattedOwnerPhone,
+        null,     // clientId (not created yet)
+        agencyId  // Pass agencyId for template override lookup
+      );
+      createdAssistantId = assistant.id;
+      console.log(`✅ Assistant created: ${assistant.id}`);
 
-      console.error('❌ Phone provisioning failed:', phoneError.message);
-      return res.status(503).json({
-        error: 'Provisioning failed',
-        message: getFriendlyProvisioningError(phoneError),
-      });
+      queryToolId = await extractQueryToolId(assistant.id);
+      createdQueryToolId = queryToolId;
+      if (queryToolId) console.log(`🔧 Query tool ID extracted: ${queryToolId}`);
+
+      templateKB = assistant._templateKnowledgeBase || null;
+      if (templateKB) console.log(`📚 Agency template KB will be inherited by new client`);
+
+      // STEP 3: provision phone number
+      try {
+        phoneResult = await provisionPhoneForClient(agency, {
+          businessCity,
+          businessState,
+          businessName,
+          phone
+        }, assistant.id, voiceRouting, planType);
+      } catch (phoneError) {
+        await cleanupVapiResources(createdAssistantId, createdQueryToolId, businessName);
+        createdAssistantId = null;
+        createdQueryToolId = null;
+        console.error('❌ Phone provisioning failed:', phoneError.message);
+        return res.status(503).json({
+          error: 'Provisioning failed',
+          message: getFriendlyProvisioningError(phoneError),
+        });
+      }
+      console.log(`✅ Phone provisioned (${phoneResult.provisioningMethod}): ${phoneResult.number}`);
+
+      // Enable two-way SMS on the provisioned number (non-blocking)
+      try { await enableSMSForNumber(phoneResult.number); } catch (e) { console.warn('⚠️ SMS enable failed:', e.message); }
+    } else {
+      console.log(`💳 Card-required signup for ${businessName} — deferring number + assistant until checkout completes (no publishable number before payment).`);
     }
-    
-    console.log(`✅ Phone provisioned (${phoneResult.provisioningMethod}): ${phoneResult.number}`);
-
-    // Enable two-way SMS on the provisioned number (non-blocking)
-    try { await enableSMSForNumber(phoneResult.number); } catch (e) { console.warn('⚠️ SMS enable failed:', e.message); }
 
     // ============================================
     // STEP 4: CREATE CLIENT RECORD
@@ -1065,17 +1067,17 @@ async function handleClientSignup(req, res) {
       business_city: businessCity,
       business_state: businessState,
       country: clientCountry,
-      phone_number: phoneResult.number,
-      phone_area_code: phoneResult.number.length >= 5 ? phoneResult.number.substring(2, 5) : null,
+      phone_number: phoneResult?.number || null,
+      phone_area_code: (phoneResult?.number && phoneResult.number.length >= 5) ? phoneResult.number.substring(2, 5) : null,
       owner_name: ownerName,
       owner_phone: formattedOwnerPhone,
-      timezone: timezoneFromPhone(formattedOwnerPhone) || timezoneFromPhone(phoneResult.number) || null,
+      timezone: timezoneFromPhone(formattedOwnerPhone) || (phoneResult?.number ? timezoneFromPhone(phoneResult.number) : null) || null,
       email: email.toLowerCase(),
       industry: industry,
-      vapi_assistant_id: assistant.id,
-      vapi_phone_number: phoneResult.number,
-      vapi_phone_id: phoneResult.vapiPhoneId || null,
-      vapi_query_tool_id: queryToolId,
+      vapi_assistant_id: assistant?.id || null,
+      vapi_phone_number: phoneResult?.number || null,
+      vapi_phone_id: phoneResult?.vapiPhoneId || null,
+      vapi_query_tool_id: queryToolId || null,
       knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
       knowledge_base_data: templateKB,
       subscription_status: manualBilling ? 'manual' : 'trial',
@@ -1087,8 +1089,8 @@ async function handleClientSignup(req, res) {
       monthly_call_limit: callLimit,
       calls_this_month: 0,
       business_website: websiteUrl || null,
-      provisioning_method: phoneResult.provisioningMethod || 'platform',
-      voice_routing: phoneResult.voiceRouting || 'vapi_direct',
+      provisioning_method: phoneResult?.provisioningMethod || 'platform',
+      voice_routing: phoneResult?.voiceRouting || voiceRouting || 'vapi_direct',
       // Inherit nav defaults from agency so new clients match agency's preferred nav style
       nav_bg: agency.default_client_nav_bg || null,
       nav_text: agency.default_client_nav_text || null,
@@ -1102,11 +1104,11 @@ async function handleClientSignup(req, res) {
         // The number Telnyx sold us is claimed by a live row. Release what we
         // just bought so we don't leak it, then fail cleanly.
         console.error('❌ Live phone_number conflict, releasing the number we just purchased');
-        try { await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release of conflicted number failed:', e.message); }
+        try { if (phoneResult) await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release of conflicted number failed:', e.message); }
         // BYOT: the number was bought on the agency's OWN Twilio, so the
         // release above cannot free it. Release it from the agency's Twilio
         // too. Only for byot-provisioned numbers; never throws.
-        if (phoneResult.provisioningMethod === 'byot') {
+        if (phoneResult && phoneResult.provisioningMethod === 'byot') {
           try { await releaseBYOTNumber(agency, phoneResult.number); } catch (e) { console.warn('⚠️ BYOT release of conflicted number failed:', e.message); }
         }
         await cleanupVapiResources(createdAssistantId, createdQueryToolId, 'phone-collision');
@@ -1121,10 +1123,10 @@ async function handleClientSignup(req, res) {
       console.error('❌ Database error:', clientError);
       // The number was already purchased; release it so a failed insert does
       // not leak a billable Telnyx number.
-      try { await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release after insert failure failed:', e.message); }
+      try { if (phoneResult) await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release after insert failure failed:', e.message); }
       // BYOT: also release from the agency's own Twilio (see note above);
       // only for byot-provisioned numbers, never throws.
-      if (phoneResult.provisioningMethod === 'byot') {
+      if (phoneResult && phoneResult.provisioningMethod === 'byot') {
         try { await releaseBYOTNumber(agency, phoneResult.number); } catch (e) { console.warn('⚠️ BYOT release after insert failure failed:', e.message); }
       }
       throw clientError;
@@ -1239,6 +1241,15 @@ async function handleClientSignup(req, res) {
         // can troubleshoot Stripe Connect from logs.
         console.error('❌ Failed to create trial checkout, falling back to no-card trial:', checkoutErr.message);
         cardRequiredCheckoutUrl = null;
+        // This signup was deferred (no number, because a card was required). The
+        // fallback turns it into a no-card trial, so it now needs provisioning.
+        // provisionClient buys the number, builds the assistant, links the row and
+        // sends the welcome SMS, so the immediate welcome SMS below is skipped for
+        // this path (it is guarded on phoneResult, which stays null here).
+        if (!phoneResult) {
+          try { await provisionClient(newClient.id); }
+          catch (provErr) { console.error('❌ Fallback provisioning failed for deferred client:', provErr.message); }
+        }
       }
     }
 
@@ -1261,7 +1272,7 @@ async function handleClientSignup(req, res) {
     // ============================================
     if (cardRequiredCheckoutUrl) {
       console.log('📱 Welcome SMS deferred (card-required pending_payment); webhook will send after activation');
-    } else if (formattedOwnerPhone && formattedOwnerPhone !== 'undefined') {
+    } else if (formattedOwnerPhone && formattedOwnerPhone !== 'undefined' && phoneResult) {
       console.log('📱 Sending welcome SMS...');
       await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneResult.number, agency);
     } else {
@@ -1550,11 +1561,11 @@ async function handleAgencyAddClient(req, res) {
         // The number Telnyx sold us is claimed by a live row. Release what we
         // just bought so we don't leak it, then fail cleanly.
         console.error('❌ Live phone_number conflict, releasing the number we just purchased');
-        try { await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release of conflicted number failed:', e.message); }
+        try { if (phoneResult) await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release of conflicted number failed:', e.message); }
         // BYOT: the number was bought on the agency's OWN Twilio, so the
         // release above cannot free it. Release it from the agency's Twilio
         // too. Only for byot-provisioned numbers; never throws.
-        if (phoneResult.provisioningMethod === 'byot') {
+        if (phoneResult && phoneResult.provisioningMethod === 'byot') {
           try { await releaseBYOTNumber(agency, phoneResult.number); } catch (e) { console.warn('⚠️ BYOT release of conflicted number failed:', e.message); }
         }
         await cleanupVapiResources(createdAssistantId, createdQueryToolId, 'phone-collision');
@@ -1569,10 +1580,10 @@ async function handleAgencyAddClient(req, res) {
       console.error('❌ Database error:', clientError);
       // The number was already purchased; release it so a failed insert does
       // not leak a billable Telnyx number.
-      try { await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release after insert failure failed:', e.message); }
+      try { if (phoneResult) await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release after insert failure failed:', e.message); }
       // BYOT: also release from the agency's own Twilio (see note above);
       // only for byot-provisioned numbers, never throws.
-      if (phoneResult.provisioningMethod === 'byot') {
+      if (phoneResult && phoneResult.provisioningMethod === 'byot') {
         try { await releaseBYOTNumber(agency, phoneResult.number); } catch (e) { console.warn('⚠️ BYOT release after insert failure failed:', e.message); }
       }
       throw clientError;
@@ -1693,7 +1704,29 @@ async function provisionClient(clientId) {
       console.log('✅ Client already provisioned');
       return client;
     }
-    
+
+    // ── Atomic claim: prevent concurrent double-provisioning ──────────────
+    // Two webhook deliveries (or a webhook + a reactivation) can call this at the
+    // same instant, and the already-provisioned check above is not atomic, so both
+    // could proceed and buy TWO numbers. Win an exclusive claim by moving
+    // provisioning_started_at from NULL (or a stale lock older than 10 min, so a
+    // crashed run self-heals) to now, ONLY while still unprovisioned. If we don't
+    // win the update, someone else is provisioning this client right now: skip.
+    const staleBefore = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const { data: claimed, error: claimErr } = await supabase
+      .from('clients')
+      .update({ provisioning_started_at: new Date().toISOString() })
+      .eq('id', clientId)
+      .is('vapi_phone_number', null)
+      .or(`provisioning_started_at.is.null,provisioning_started_at.lt.${staleBefore}`)
+      .select('id');
+    if (claimErr) console.error('⚠️ provisionClient claim update failed:', claimErr.message);
+    if (!claimed || claimed.length === 0) {
+      console.log(`⏭️ provisionClient: ${clientId} is already being provisioned (claim not won); skipping to avoid a double-buy`);
+      return client;
+    }
+    console.log(`🔒 provisionClient: claimed ${clientId} for provisioning`);
+
     const agency = client.agencies;
 
     // Routing was chosen at signup and stored on the client row; honor it here
@@ -1812,6 +1845,10 @@ async function provisionClient(clientId) {
     if (createdAssistantId) {
       await cleanupVapiResources(createdAssistantId, createdQueryToolId, 'provision-catch');
     }
+    // Release the provisioning claim so a legitimate retry can re-provision. On
+    // success the vapi_phone_number guard already blocks any re-claim, so we only
+    // need to clear it here on failure.
+    try { await supabase.from('clients').update({ provisioning_started_at: null }).eq('id', clientId); } catch {}
     console.error('❌ Provisioning error:', error);
     throw error;
   }

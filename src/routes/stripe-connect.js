@@ -119,7 +119,6 @@ const { enableAssistant, disableAssistant, disablePhoneNumber, enablePhoneNumber
 const { releaseBYOTNumber } = require('./byot');
 const { getSmsTemplate } = require('../lib/sms-templates');
 const { updateClientBillingQuantity } = require('../lib/usage-tracker');
-const { getPlan, validPlanKeys } = require('../lib/plans');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
@@ -187,12 +186,7 @@ function isSupportedConnectCountry(countryCode) {
 // a Stripe setup fee (a manual agency collects any setup fee on its own invoice).
 // ============================================================================
 async function buildSetupFeeLineItem(agency, plan) {
-  // Per-plan fee wins; fall back to the legacy global setup_fee_cents so an
-  // agency that set a fee before per-plan existed keeps charging it until it
-  // migrates its plans in Settings. NULL per-plan value => use the fallback.
-  const planDef = getPlan(agency, plan);
-  const raw = (planDef && planDef.setup_fee_cents != null) ? planDef.setup_fee_cents : agency.setup_fee_cents;
-  const feeCents = Number(raw);
+  const feeCents = Number(agency.setup_fee_cents);
   if (!(feeCents > 0)) return null;
 
   const acct = agency.stripe_account_id;
@@ -301,8 +295,12 @@ async function ensureConnectMinuteMeter(agency) {
 // Included minutes for a plan (free allotment before overage). 0 = pure
 // per-minute, no free tier. Falls back to 0 for unknown plans.
 function includedMinutesForPlan(agency, plan) {
-  const p = getPlan(agency, plan);
-  return p ? (p.included_minutes || 0) : 0;
+  const map = {
+    starter: agency.included_minutes_starter || 0,
+    pro: agency.included_minutes_pro || 0,
+    growth: agency.included_minutes_growth || 0,
+  };
+  return map[plan] || 0;
 }
 
 // Build a metered price on the connected account for this plan's minutes.
@@ -321,7 +319,7 @@ async function createConnectMinutePrice(agency, plan) {
   const included = includedMinutesForPlan(agency, plan);
 
   const product = await stripe.products.create({
-    name: `Voice Minutes - ${getPlan(agency, plan)?.name || plan}`,
+    name: `Voice Minutes - ${plan.charAt(0).toUpperCase() + plan.slice(1)}`,
     metadata: { plan, kind: 'voice_minutes' },
   }, { stripeAccount: acct });
 
@@ -1187,10 +1185,18 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     throw new Error('Agency Stripe Connect not configured');
   }
 
-  const planDef = getPlan(agency, plan);
-  if (!planDef || planDef.price_cents == null) throw new Error(`Invalid plan: ${plan}`);
-  const priceAmount = planDef.price_cents;
-  const callLimit = planDef.call_limit;
+  const priceAmounts = {
+    starter: agency.price_starter || 9900,
+    pro: agency.price_pro || 14900,
+    growth: agency.price_growth || 29900,
+  };
+  const callLimits = {
+    starter: agency.limit_starter || 50,
+    pro: agency.limit_pro || 150,
+    growth: agency.limit_growth || 500,
+  };
+  const priceAmount = priceAmounts[plan];
+  if (!priceAmount) throw new Error(`Invalid plan: ${plan}`);
 
   const currency = getCurrencyForCountry(agency.country || 'US');
 
@@ -1212,7 +1218,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
 
   // Create product + price on connected account (per-client pricing matches createClientCheckout)
   const product = await stripe.products.create({
-    name: `AI Receptionist - ${planDef.name}`,
+    name: `AI Receptionist - ${plan.charAt(0).toUpperCase() + plan.slice(1)}`,
     metadata: { client_id: client.id, plan },
   }, { stripeAccount: agency.stripe_account_id });
 
@@ -1261,7 +1267,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
       client_id: client.id,
       agency_id: agency.id,
       plan,
-      call_limit: callLimit.toString(),
+      call_limit: callLimits[plan].toString(),
       type: 'trial_signup', // distinguishes from upgrade-mode checkouts
     },
     subscription_data: {
@@ -1342,10 +1348,10 @@ async function createClientCheckout(req, res) {
 
     console.log('Creating client checkout for:', client.email, 'via agency:', agency.name);
 
-    const planDef = getPlan(agency, plan);
-    if (!planDef || planDef.price_cents == null) return res.status(400).json({ error: 'Invalid plan' });
-    const priceAmount = planDef.price_cents;
-    const callLimit = planDef.call_limit;
+    const priceAmounts = { starter: agency.price_starter || 9900, pro: agency.price_pro || 14900, growth: agency.price_growth || 29900 };
+    const callLimits = { starter: agency.limit_starter || 50, pro: agency.limit_pro || 150, growth: agency.limit_growth || 500 };
+    const priceAmount = priceAmounts[plan];
+    if (!priceAmount) return res.status(400).json({ error: 'Invalid plan' });
 
     const currency = getCurrencyForCountry(agency.country || 'US');
 
@@ -1362,7 +1368,7 @@ async function createClientCheckout(req, res) {
     }
 
     const product = await stripe.products.create({
-      name: `AI Receptionist - ${planDef.name}`,
+      name: `AI Receptionist - ${plan.charAt(0).toUpperCase() + plan.slice(1)}`,
       metadata: { client_id, plan }
     }, { stripeAccount: agency.stripe_account_id });
 
@@ -1392,7 +1398,7 @@ async function createClientCheckout(req, res) {
       line_items: upgradeLineItems,
       success_url: `${agencyUrl}/client/dashboard?upgrade=success`,
       cancel_url: `${agencyUrl}/client/upgrade-required?canceled=true`,
-      metadata: { client_id, agency_id: agency.id, plan, call_limit: callLimit.toString(), type: 'client_subscription' },
+      metadata: { client_id, agency_id: agency.id, plan, call_limit: callLimits[plan].toString(), type: 'client_subscription' },
       subscription_data: { metadata: { client_id, agency_id: agency.id, plan } }
     }, { stripeAccount: agency.stripe_account_id });
 
@@ -1490,6 +1496,11 @@ async function changeClientPlan(req, res) {
       return res.status(400).json({ error: 'Missing required fields', required: ['client_id', 'plan'] });
     }
 
+    const VALID_PLANS = ['starter', 'pro', 'growth'];
+    if (!VALID_PLANS.includes(plan)) {
+      return res.status(400).json({ error: 'Invalid plan', valid_plans: VALID_PLANS });
+    }
+
     // Auth: this endpoint mutates a live subscription and can charge a prorated
     // difference, so require a valid token whose owner is allowed to act on this
     // client. Allowed: super_admin, the client itself (clientId match), or the
@@ -1514,11 +1525,6 @@ async function changeClientPlan(req, res) {
     const agency = client.agencies;
     if (!agency) return res.status(404).json({ error: 'Agency not found' });
 
-    // Validate the target plan against THIS agency's plans (replaces the old
-    // hardcoded VALID_PLANS). planDef carries price + limit for both branches.
-    const planDef = getPlan(agency, plan);
-    if (!planDef) return res.status(400).json({ error: 'Invalid plan', valid_plans: validPlanKeys(agency) });
-
     // ── Manual-billing client: change plan WITHOUT touching Stripe ──────────
     // A manual client has no Stripe Connect subscription, and its agency may not
     // use Connect at all, so the normal path (which requires charges enabled and
@@ -1536,7 +1542,8 @@ async function changeClientPlan(req, res) {
         return res.status(403).json({ error: 'Forbidden', message: 'Only your provider can change this plan.' });
       }
 
-      let limit = planDef.call_limit;
+      const callLimits = { starter: agency.limit_starter || 50, pro: agency.limit_pro || 150, growth: agency.limit_growth || 500 };
+      let limit = callLimits[plan];
 
       // Optional explicit cap override. Integer >= -1 (-1 = unlimited). Anything
       // else is rejected so a bad value cannot silently mis-set the cap.
@@ -1618,13 +1625,15 @@ async function changeClientPlan(req, res) {
     }
 
     // Target price + call limit (same defaults as createClientCheckout).
-    const priceAmount = planDef.price_cents;
-    const callLimit = planDef.call_limit;
+    const priceAmounts = { starter: agency.price_starter || 9900, pro: agency.price_pro || 14900, growth: agency.price_growth || 29900 };
+    const callLimits = { starter: agency.limit_starter || 50, pro: agency.limit_pro || 150, growth: agency.limit_growth || 500 };
+    const priceAmount = priceAmounts[plan];
+    const callLimit = callLimits[plan];
     const currency = getCurrencyForCountry(agency.country || 'US');
 
     // Fresh product + price for the target plan on the connected account.
     const product = await stripe.products.create({
-      name: `AI Receptionist - ${planDef.name}`,
+      name: `AI Receptionist - ${plan.charAt(0).toUpperCase() + plan.slice(1)}`,
       metadata: { client_id, plan },
     }, { stripeAccount: agency.stripe_account_id });
 
@@ -2032,9 +2041,25 @@ async function reconcileClientSubscriptions({ dryRun = false } = {}) {
     }
 
     const stripeStatus = missing ? 'missing' : sub.status;
-    const isTerminal = missing || TERMINAL_SUB_STATUSES.includes(stripeStatus);
 
-    // DB says alive, Stripe says dead -> cancel + release.
+    // MISSING (resource_missing) is AMBIGUOUS and must never trigger a release.
+    // It usually means a stale subscription id or a changed connected account,
+    // not a real cancel — and releasing a paying client's number is irreversible
+    // external harm (it's on their Google Business, signage, socials, website).
+    // A genuine cancel arrives as a RETRIEVED 'canceled'/'incomplete_expired'
+    // status (Stripe keeps canceled subs retrievable), handled by the terminal
+    // branch below. So on missing we do NOTHING destructive: skip and flag loudly
+    // for manual review. This is the guard that a wrongful teardown lacked.
+    if (missing) {
+      console.error(`🚨 Reconcile: subscription ${client.stripe_connected_subscription_id} NOT FOUND on account ${acct} for paying client ${client.business_name} (${client.id}). NOT releasing — manual review needed (likely stale sub id or wrong connected account).`);
+      results.push({ client_id: client.id, business_name: client.business_name, db_status: client.subscription_status, stripe_status: 'missing', action: 'skipped_missing_needs_review' });
+      skipped++;
+      continue;
+    }
+
+    const isTerminal = TERMINAL_SUB_STATUSES.includes(stripeStatus);
+
+    // DB says alive, Stripe says dead (a status we actually retrieved) -> cancel + release.
     if (isTerminal) {
       if (dryRun) {
         results.push({ client_id: client.id, business_name: client.business_name, db_status: client.subscription_status, stripe_status: stripeStatus, action: 'would_cancel_and_release' });
@@ -2218,16 +2243,9 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
   // Update agency per-client billing
   try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
 
-  // Re-enable VAPI resources (idempotent if they were never disabled)
-  if (client.vapi_phone_id) {
-    try { await enablePhoneNumber(client.vapi_phone_id); console.log('✅ VAPI phone number enabled:', client.vapi_phone_id); }
-    catch (phoneError) { console.error('❌ Failed to enable VAPI phone number:', phoneError.message); }
-  }
-
-  if (client.vapi_assistant_id) {
-    try { await enableAssistant(client.vapi_assistant_id); console.log('✅ VAPI assistant enabled:', client.vapi_assistant_id); }
-    catch (vapiError) { console.error('⚠️ Failed to enable VAPI assistant (non-critical):', vapiError.message); }
-  }
+  // Re-enable OR re-provision: if the number was released while the client was
+  // inactive, restore it here so a reactivation never leaves them numberless.
+  await ensureProvisionedOnReactivate(client, 'checkout.completed');
 
   // Record payment if Stripe collected money on this session (not for trial signups, amount_total=0)
   if (session.amount_total > 0) {
@@ -2259,6 +2277,30 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
   await sendClientSubscriptionActivatedSMS(client, agency, plan);
 }
 
+// Reactivation must never leave a client active with no number. If they still
+// hold their number, re-enable it (idempotent). If it was RELEASED while they
+// were inactive (e.g. a teardown fired during an SCA-delayed checkout — the bug
+// that stranded Searchvista active with a null number), re-provision to restore
+// it instead of silently enabling nothing. provisionClient short-circuits if the
+// client is already provisioned, so a retried webhook won't double-buy in the
+// common sequential case; it runs fire-and-forget so the webhook stays fast.
+async function ensureProvisionedOnReactivate(client, context) {
+  if (client.vapi_phone_number && client.vapi_phone_id) {
+    try { await enablePhoneNumber(client.vapi_phone_id); } catch (e) { console.error('Failed to enable phone:', e.message); }
+    if (client.vapi_assistant_id) { try { await enableAssistant(client.vapi_assistant_id); } catch (e) { console.error('Failed to enable assistant:', e.message); } }
+    return;
+  }
+  console.error(`🚨 Reactivating ${client.business_name} (${client.id}) with NO provisioned number [${context}] — re-provisioning to restore it.`);
+  try {
+    const { provisionClient } = require('./client-signup');
+    provisionClient(client.id)
+      .then(() => console.log(`✅ Reactivation re-provision done for ${client.id}`))
+      .catch((e) => console.error(`🚨 Reactivation re-provision FAILED for ${client.id}:`, e.message));
+  } catch (e) {
+    console.error(`🚨 Could not start reactivation re-provision for ${client.id}:`, e.message);
+  }
+}
+
 async function handleClientSubscriptionUpdated(subscription, stripeAccountId) {
   console.log('Client subscription updated:', subscription.id, '| status:', subscription.status);
 
@@ -2280,8 +2322,7 @@ async function handleClientSubscriptionUpdated(subscription, stripeAccountId) {
 
   if (status === 'active') {
     clientStatus = 'active';
-    if (client.vapi_phone_id) { await enablePhoneNumber(client.vapi_phone_id).catch(err => console.error('Failed to enable phone:', err.message)); }
-    if (client.vapi_assistant_id) { await enableAssistant(client.vapi_assistant_id); }
+    await ensureProvisionedOnReactivate(client, `subscription.updated=${status}`);
   } else if (status === 'unpaid') {
     // Retries exhausted but not canceled. Stop service, but DISABLE rather than
     // release, so the client can recover the same number by paying. A true
