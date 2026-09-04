@@ -7,6 +7,7 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { updateAssistantCalendar } = require('../lib/calendar-tools');
+const { getPlan } = require('../lib/plans');
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CALENDAR_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CALENDAR_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
@@ -41,7 +42,7 @@ async function checkPlanAccess(clientId) {
 
     const { data: agency, error: agencyError } = await supabase
       .from('agencies')
-      .select('calendar_enabled_plans')
+      .select('plans, price_starter, price_pro, price_growth, limit_starter, limit_pro, limit_growth, plan_starter_name, plan_pro_name, plan_growth_name, calendar_enabled_plans')
       .eq('id', client.agency_id)
       .single();
 
@@ -49,12 +50,21 @@ async function checkPlanAccess(clientId) {
       return { allowed: false, reason: 'Agency not found' };
     }
 
-    // Agency's configured list of client plans that include calendar
-    // Default to pro + growth if agency hasn't configured it yet
-    const enabledPlans = agency.calendar_enabled_plans || ['pro', 'growth'];
-
     const clientPlan = client.plan_type || 'starter';
 
+    // Path B source of truth: the client's own plan definition carries a
+    // google_calendar feature flag. If that plan grants calendar, allow — no
+    // separate list to keep in sync. getPlan resolves against the dynamic plans
+    // array (with legacy-column fallback baked in).
+    const planDef = getPlan(agency, clientPlan);
+    if (planDef && planDef.features && planDef.features.google_calendar) {
+      return { allowed: true };
+    }
+
+    // Legacy fallback: the calendar_enabled_plans column, for agencies that set
+    // calendar access the old way and haven't turned the feature on per-plan.
+    // Kept permissive so nothing that worked before this change stops working.
+    const enabledPlans = agency.calendar_enabled_plans || ['pro', 'growth'];
     if (enabledPlans.includes(clientPlan)) {
       return { allowed: true };
     }

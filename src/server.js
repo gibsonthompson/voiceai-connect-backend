@@ -1304,6 +1304,7 @@ app.use('/api/agency', require('./routes/agency-support-requests'));
 app.use('/api/help', helpRoutes);
 app.use('/api/yt', ytContentRoutes);
 app.use('/api/agency', leadRoutes);
+app.use('/api/leads', require('./routes/leads-import'));
 app.use('/api/agency', activityRoutes);
 app.use('/api/agency', outreachRoutes);
 app.use('/api/leads', leadScraperRoutes);

@@ -1114,17 +1114,25 @@ async function updateAgencySettings(req, res) {
       }
     }
     
-    // Validate calendar_enabled_plans if provided
+    // Sanitize calendar_enabled_plans if provided. In Path B each plan's own
+    // google_calendar feature is the real gate (see gca.js checkPlanAccess), so
+    // this column is only a legacy cache. Validate the shape, then keep only
+    // names that are real plan keys for THIS agency and silently drop the rest.
+    // A stale entry (a plan later renamed, hidden, or removed) must never block
+    // an unrelated settings save the way the old hardcoded allow-list did.
     if (sanitizedUpdates.calendar_enabled_plans !== undefined) {
       const cep = sanitizedUpdates.calendar_enabled_plans;
       if (!Array.isArray(cep)) {
         return res.status(400).json({ error: 'calendar_enabled_plans must be an array' });
       }
-      const validPlans = ['starter', 'pro', 'growth'];
-      const allValid = cep.every(plan => validPlans.includes(plan));
-      if (!allValid) {
-        return res.status(400).json({ error: 'calendar_enabled_plans contains invalid plan names' });
-      }
+      const { data: cepAgency } = await supabase
+        .from('agencies')
+        .select('plans, price_starter, price_pro, price_growth, limit_starter, limit_pro, limit_growth, plan_starter_name, plan_pro_name, plan_growth_name')
+        .eq('id', agencyId)
+        .single();
+      const validKeys = new Set(getAgencyPlans(cepAgency || {}).map((p) => p.key));
+      sanitizedUpdates.calendar_enabled_plans = cep
+        .filter((plan) => typeof plan === 'string' && validKeys.has(plan));
     }
 
     // Validate marketing_template if provided
