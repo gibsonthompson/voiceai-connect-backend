@@ -1855,6 +1855,56 @@ async function provisionClient(clientId) {
 }
 
 // ============================================================================
+// RECONCILE: re-provision "stranded" clients — a live/paying client that somehow
+// has no number. The main case is a reactivation whose background provisionClient
+// threw: the webhook already returned 2xx so Stripe won't retry, and nothing else
+// re-attempts. A live client must never sit numberless, so this sweep catches it.
+// Safe on a cron: provisionClient's atomic claim skips any client currently being
+// provisioned, and pending_payment clients (intentionally unprovisioned until they
+// pay) are excluded. dryRun reports without changing anything.
+// ============================================================================
+async function reprovisionStrandedClients({ dryRun = false, limit = 25 } = {}) {
+  console.log(`🩹 Reprovision stranded clients (dryRun=${dryRun})`);
+  const staleBefore = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  const { data: rows, error } = await supabase
+    .from('clients')
+    .select('id, business_name, subscription_status, status, provisioning_started_at')
+    .eq('status', 'active')
+    .is('vapi_phone_number', null)
+    .in('subscription_status', ['active', 'trial', 'trialing', 'manual'])
+    .or(`provisioning_started_at.is.null,provisioning_started_at.lt.${staleBefore}`)
+    .limit(limit);
+
+  if (error) {
+    console.error('❌ reprovisionStrandedClients query failed:', error.message);
+    return { success: false, error: error.message };
+  }
+
+  const stranded = rows || [];
+  console.log(`🩹 ${stranded.length} stranded (active, no number) client(s) found`);
+
+  const results = [];
+  let fixed = 0, failed = 0;
+  for (const c of stranded) {
+    if (dryRun) {
+      results.push({ client_id: c.id, business_name: c.business_name, subscription_status: c.subscription_status, action: 'would_reprovision' });
+      continue;
+    }
+    try {
+      await provisionClient(c.id);
+      results.push({ client_id: c.id, business_name: c.business_name, action: 'reprovisioned' });
+      fixed++;
+    } catch (e) {
+      console.error(`🚨 Stranded re-provision failed for ${c.id} (${c.business_name}):`, e.message);
+      results.push({ client_id: c.id, business_name: c.business_name, action: 'failed', error: e.message });
+      failed++;
+    }
+  }
+
+  return { success: true, dryRun, found: stranded.length, fixed, failed, results };
+}
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 module.exports = {
@@ -1862,4 +1912,5 @@ module.exports = {
   provisionClient,
   handleAgencyAddClient,
   signupRateLimiter,
+  reprovisionStrandedClients,
 };

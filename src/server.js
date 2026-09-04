@@ -211,7 +211,7 @@ try {
   });
 }
 
-const { handleClientSignup, provisionClient, handleAgencyAddClient, signupRateLimiter } = require('./routes/client-signup');
+const { handleClientSignup, provisionClient, handleAgencyAddClient, signupRateLimiter, reprovisionStrandedClients } = require('./routes/client-signup');
 const clientRoutes = require('./routes/client');
 const clientContactsRoutes = require('./routes/client-contacts');
 const clientPromptRoutes = require('./routes/client-prompt');
@@ -1304,7 +1304,6 @@ app.use('/api/agency', require('./routes/agency-support-requests'));
 app.use('/api/help', helpRoutes);
 app.use('/api/yt', ytContentRoutes);
 app.use('/api/agency', leadRoutes);
-app.use('/api/leads', require('./routes/leads-import'));
 app.use('/api/agency', activityRoutes);
 app.use('/api/agency', outreachRoutes);
 app.use('/api/leads', leadScraperRoutes);
@@ -1546,6 +1545,24 @@ app.post('/api/cron/reconcile-subscriptions', async (req, res) => {
   } catch (error) {
     console.error('Reconcile cron error:', error);
     res.status(500).json({ error: 'Failed to run subscription reconciliation' });
+  }
+});
+
+// Heal any live/paying client that ended up with no number (e.g. a reactivation
+// whose background provision threw). provisionClient's atomic claim makes this
+// safe to run alongside live provisioning.
+app.post('/api/cron/reprovision-stranded', async (req, res) => {
+  const cronSecret = req.headers['x-cron-secret'];
+  if (process.env.CRON_SECRET && cronSecret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const dryRun = req.query.dryRun === 'true' || req.body?.dryRun === true;
+    const result = await reprovisionStrandedClients({ dryRun });
+    res.json(result);
+  } catch (error) {
+    console.error('Reprovision-stranded cron error:', error);
+    res.status(500).json({ error: 'Failed to run stranded re-provision' });
   }
 });
 
