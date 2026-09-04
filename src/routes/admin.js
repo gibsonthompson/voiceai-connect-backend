@@ -1809,4 +1809,107 @@ router.post('/byot-number-rebuy', requireAdmin, async (req, res) => {
   }
 });
 
+// ============================================================================
+// TEMPORARY (recovery): give Searchvista a NEW number end-to-end. Calls the
+// existing provisionClient() (creates KB + assistant, buys a fresh number on the
+// agency's Twilio, links the row). Runs server-side so the slow flow can't 504.
+// POST /api/admin/reprovision-client?clientId=<uuid>&confirm=yes
+// ============================================================================
+router.post('/reprovision-client', requireAdmin, async (req, res) => {
+  try {
+    if (req.query.confirm !== 'yes') {
+      return res.status(400).json({ error: 'Refusing to re-provision without ?confirm=yes' });
+    }
+    const clientId = req.query.clientId || '21f0ba3a-c386-456a-88d5-83c6bee73212';
+    const { provisionClient } = require('./client-signup');
+
+    res.json({
+      ok: true,
+      started: true,
+      clientId,
+      note: 'Re-provisioning started server-side: creates a fresh assistant + buys a NEW number on the agency Twilio + links the row. Slow (~30-90s). Poll the client row until phone_number/vapi_phone_number are set. A failure logs as "REPROVISION FAILED".',
+    });
+
+    (async () => {
+      try {
+        await provisionClient(clientId);
+        // provisionClient sets vapi_phone_number but leaves phone_number null.
+        // Stamp it to match so the row is fully consistent and holds the
+        // uniqueness/reclaim key. Only when still null (never overwrite).
+        const { data: row } = await supabase
+          .from('clients')
+          .select('vapi_phone_number, phone_number')
+          .eq('id', clientId)
+          .single();
+        if (row && row.vapi_phone_number && !row.phone_number) {
+          await supabase.from('clients').update({ phone_number: row.vapi_phone_number }).eq('id', clientId);
+          console.log(`✅ REPROVISION: stamped phone_number=${row.vapi_phone_number} on ${clientId}`);
+        }
+        console.log(`✅ REPROVISION done for ${clientId}: number=${row?.vapi_phone_number || '(check row)'}`);
+      } catch (e) {
+        console.error(`🚨 REPROVISION FAILED for ${clientId}:`, e.message);
+      }
+    })();
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============================================================================
+// TEMPORARY (root cause): pull the DEFINITIVE Stripe timeline for Searchvista's
+// subscription on the agency's connected account. Shows the billing lifecycle
+// (trial dates, cancel/ended timestamps, status) + recent events, so we can see
+// exactly what drove the teardown instead of guessing. Read-only.
+// GET /api/admin/searchvista-stripe-diag
+// ============================================================================
+router.get('/searchvista-stripe-diag', requireAdmin, async (req, res) => {
+  try {
+    const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+    const subId = req.query.sub || 'sub_1U7yaSCXvUEb2jOIQ1lLqbIu';
+    const acct = req.query.acct || 'acct_1U5LfUCXvUEb2jOI';
+    const iso = (t) => (t ? new Date(t * 1000).toISOString() : null);
+
+    let sub = null, subError = null;
+    try {
+      sub = await stripe.subscriptions.retrieve(subId, { stripeAccount: acct });
+    } catch (e) {
+      subError = { code: e.code, message: e.message };
+    }
+
+    let events = [];
+    try {
+      const ev = await stripe.events.list({ limit: 60 }, { stripeAccount: acct });
+      events = (ev.data || [])
+        .filter((e) => {
+          try { return JSON.stringify(e.data?.object || {}).includes(subId); } catch { return false; }
+        })
+        .map((e) => ({ type: e.type, at: iso(e.created), objStatus: e.data?.object?.status || null }));
+    } catch (e) {
+      events = [{ error: e.message }];
+    }
+
+    res.json({
+      subId,
+      acct,
+      subError,
+      subscription: sub ? {
+        status: sub.status,
+        created: iso(sub.created),
+        trial_start: iso(sub.trial_start),
+        trial_end: iso(sub.trial_end),
+        current_period_start: iso(sub.current_period_start),
+        current_period_end: iso(sub.current_period_end),
+        canceled_at: iso(sub.canceled_at),
+        cancel_at: iso(sub.cancel_at),
+        ended_at: iso(sub.ended_at),
+        cancel_at_period_end: sub.cancel_at_period_end,
+        latest_invoice_status: sub.latest_invoice?.status || null,
+      } : null,
+      events,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
