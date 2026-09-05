@@ -1033,6 +1033,37 @@ async function handleAgencyPaymentSucceeded(invoice) {
       status: 'active',
     })
     .eq('id', agency.id);
+
+  // Referral commission: 40% recurring. Fires on every real (non-$0) agency
+  // invoice, so it pays out on the first charge AND every renewal.
+  // processReferralCommission is a no-op when the agency wasn't referred, and
+  // dedupes on stripe_invoice_id so a duplicate/retried webhook can't double-pay.
+  // referred_by is fetched explicitly here rather than assuming the shared
+  // getAgencyByStripeCustomerId helper selects it. Lazy require avoids any
+  // load-order/circular-dependency issue, and the whole block is non-blocking:
+  // a referral hiccup must never fail the payment webhook. THIS CALL is what was
+  // missing, without it referral_commissions was never written and every
+  // referrer's balance stayed $0.
+  try {
+    let referredBy = agency.referred_by;
+    if (referredBy === undefined) {
+      const { data: full } = await supabase
+        .from('agencies')
+        .select('referred_by')
+        .eq('id', agency.id)
+        .single();
+      referredBy = full?.referred_by || null;
+    }
+    if (referredBy) {
+      const { processReferralCommission } = require('./referrals');
+      const result = await processReferralCommission(invoice, { ...agency, referred_by: referredBy });
+      if (result?.processed) {
+        console.log(`💰 Referral commission recorded (invoice ${invoice.id}): $${(result.commission / 100).toFixed(2)} to ${result.referrerName}`);
+      }
+    }
+  } catch (refErr) {
+    console.error('Referral commission processing failed (non-blocking):', refErr.message);
+  }
 }
 
 async function handleAgencyPaymentFailed(invoice) {

@@ -139,7 +139,30 @@ router.put('/:agencyId/referrals/code', async (req, res) => {
       return res.status(409).json({ error: 'This referral code is already taken' });
     }
 
-    // Update
+    // Capture the OLD code before changing it. Attribution is stored on each
+    // referred agency as referred_by = <referrer's code>. If we change the code
+    // without re-pointing those rows, processReferralCommission can no longer
+    // match the referrer (referral_code != referred_by) and every existing
+    // referral's commission silently fails "referrer not found". So the rename
+    // MUST cascade to keep prior referrals earning.
+    const { data: current } = await supabase
+      .from('agencies')
+      .select('referral_code')
+      .eq('id', agencyId)
+      .single();
+    const oldCode = current?.referral_code || null;
+
+    // No-op rename: nothing to change or cascade.
+    if (oldCode === sanitizedCode) {
+      const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
+      return res.json({
+        success: true,
+        referralCode: sanitizedCode,
+        referralLink: `https://${platformDomain}/signup?ref=${sanitizedCode}`,
+      });
+    }
+
+    // Update the agency's own code
     const { error: updateError } = await supabase
       .from('agencies')
       .update({ referral_code: sanitizedCode })
@@ -148,6 +171,20 @@ router.put('/:agencyId/referrals/code', async (req, res) => {
     if (updateError) {
       console.error('Error updating referral code:', updateError);
       return res.status(500).json({ error: 'Failed to update referral code' });
+    }
+
+    // Cascade: re-point every existing referral from the old code to the new one
+    // so their attribution and future commissions survive the rename. Logged
+    // loudly on failure (the code already changed, so a failure here can orphan
+    // referrals until reconciled), but not fatal to the response.
+    if (oldCode) {
+      const { error: cascadeError } = await supabase
+        .from('agencies')
+        .update({ referred_by: sanitizedCode })
+        .eq('referred_by', oldCode);
+      if (cascadeError) {
+        console.error(`⚠️ Referral code ${oldCode} -> ${sanitizedCode} changed, but re-pointing existing referrals failed:`, cascadeError.message);
+      }
     }
 
     const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
