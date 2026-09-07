@@ -612,7 +612,7 @@ router.post('/api/voice/send-sms', async (req, res) => {
     }
 
     const { data: client } = clientId
-      ? await supabase.from('clients').select('agency_id, tool_config').eq('id', clientId).single()
+      ? await supabase.from('clients').select('agency_id, tool_config, vapi_phone_number').eq('id', clientId).single()
       : { data: null };
 
     // Resolve a saved-text key to its EXACT configured value, so links and
@@ -644,6 +644,12 @@ router.post('/api/voice/send-sms', async (req, res) => {
     const sent = await sendAndLogSMS({
       phone: callerNumber,
       message: text,
+      // Send FROM the client's own AI-receptionist number so the caller sees the
+      // number they just dialed, not an unfamiliar platform number. That number
+      // is already provisioned on the messaging profile (assignNumberForSMS at
+      // signup), so no extra registration is needed. Falls back to the platform
+      // sender when the client couldn't be resolved.
+      from: (client && client.vapi_phone_number) || null,
       agencyId: (client && client.agency_id) || null,
       recipientType: 'caller',
       messageType: 'ai_call_sms',

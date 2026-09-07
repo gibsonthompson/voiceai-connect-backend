@@ -85,7 +85,7 @@ function parseSender(fromString) {
 // ============================================================================
 // SMS VIA TELNYX (low-level transport, kept for sms-logger.js to import)
 // ============================================================================
-async function sendTelnyxSMS(toPhone, message) {
+async function sendTelnyxSMS(toPhone, message, fromNumber = null) {
   try {
     if (!process.env.TELNYX_API_KEY) { console.log('⚠️ TELNYX_API_KEY not configured'); return false; }
     // Normalize the destination to clean E.164 by DIGIT COUNT, ignoring whatever
@@ -103,12 +103,27 @@ async function sendTelnyxSMS(toPhone, message) {
     else if (digits.length === 11 && digits.startsWith('1')) formattedPhone = `+${digits}`;
     else if (digits.length >= 11 && digits.length <= 15) formattedPhone = `+${digits}`;
     if (!formattedPhone) { console.log(`⚠️ Invalid phone (need 10-15 digits): ${toPhone}`); return false; }
-    console.log('📱 Sending SMS via Telnyx to:', formattedPhone);
+
+    // Resolve the SENDER. When a caller-supplied fromNumber is given (e.g. the
+    // client's own AI-receptionist number, so the caller sees the number they
+    // just dialed instead of an unfamiliar platform number), normalize it the
+    // same way and use it. It sends on the same messaging profile, so it must be
+    // a number already provisioned on that profile. Falls back to the platform
+    // number when not supplied.
+    let fromResolved = process.env.TELNYX_SMS_FROM_NUMBER || '+15054317109';
+    if (fromNumber) {
+      const fd = String(fromNumber).replace(/\D/g, '');
+      if (fd.length === 10) fromResolved = `+1${fd}`;
+      else if (fd.length === 11 && fd.startsWith('1')) fromResolved = `+${fd}`;
+      else if (fd.length >= 11 && fd.length <= 15) fromResolved = `+${fd}`;
+    }
+
+    console.log(`📱 Sending SMS via Telnyx from ${fromResolved} to:`, formattedPhone);
     const response = await fetch('https://api.telnyx.com/v2/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.TELNYX_API_KEY}` },
       body: JSON.stringify({
-        from: process.env.TELNYX_SMS_FROM_NUMBER || '+15054317109',
+        from: fromResolved,
         to: formattedPhone, text: message,
         messaging_profile_id: process.env.TELNYX_MESSAGING_PROFILE_ID
       })

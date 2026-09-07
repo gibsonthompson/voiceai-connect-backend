@@ -31,7 +31,7 @@ const {
  * Send an SMS via Telnyx and log it to the sms_log table.
  * Returns true if SMS was sent successfully, false otherwise.
  */
-async function sendAndLogSMS({ phone, message, agencyId, recipientType, messageType, metadata }) {
+async function sendAndLogSMS({ phone, message, agencyId, recipientType, messageType, metadata, from = null }) {
   // ── Early bail: phone must be a non-empty string ────────────────────
   // Catches callers passing undefined (e.g. wrong param name like "to" instead
   // of "phone") before we hit formatPhoneE164 and log a noisy warning.
@@ -114,11 +114,11 @@ async function sendAndLogSMS({ phone, message, agencyId, recipientType, messageT
     try {
       // sendTelnyxSMS returns true/false — we can't get the message ID from current implementation
       // If you update sendTelnyxSMS to return the response, we can capture the ID
-      sent = await sendTelnyxSMS(formattedPhone, message);
+      sent = await sendTelnyxSMS(formattedPhone, message, from);
     } catch (err) {
       console.error(`❌ SMS Logger: Telnyx send failed for ${messageType}:`, err.message);
     }
-    sendMeta = { ...sendMeta, sms_provider: 'platform_telnyx' };
+    sendMeta = { ...sendMeta, sms_provider: 'platform_telnyx', sms_from: from || null };
   }
 
   // Log regardless of outcome

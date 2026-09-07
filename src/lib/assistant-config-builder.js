@@ -623,7 +623,7 @@ function buildSmsBlock(toolConfig, isAfterHours) {
     }
   }
   if (instructions) block += `\n\nAdditional guidance: ${instructions}`;
-  block += `\n\nFor anything else, call send_sms with a short custom message. After sending, tell the caller you have just texted it. If unsure a text is wanted, offer first ("want me to text you that?").`;
+  block += `\n\nFor anything else, call send_sms with a friendly, complete message rather than a bare link or single word. Greet the caller, say what you are sending, and include the business name, for example "Hi! Here's the booking link you asked for from [business name]: <link>. See you soon!" instead of just the link on its own. Keep it to a couple of short, natural lines. After sending, tell the caller you have just texted it. If unsure a text is wanted, offer first ("want me to text you that?").`;
   return block;
 }
 
@@ -878,6 +878,12 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
   if (toolConfig.callerRecognition && callerContext && !hipaaMode) {
     systemPrompt += buildCallerContextBlock(callerContext);
   }
+
+  // Anti-fabrication guard (applies to every prompt path). Without this the
+  // model invents plausible details it doesn't have — the classic "123 Main St"
+  // address — which is worse than admitting it doesn't know.
+  systemPrompt += `\n\n# Never make things up
+Only state facts you actually have from this business's information. Never invent or guess an address, phone number, price, hours, staff name, or any other detail. If a caller asks for something you do not have, say so plainly and offer to connect them with the team or take a message, for example "I don't have that in front of me, but I can have someone follow up." Never read out a placeholder or example value as if it were real.`;
 
   return systemPrompt;
 }
