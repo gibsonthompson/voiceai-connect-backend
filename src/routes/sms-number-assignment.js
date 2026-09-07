@@ -50,7 +50,33 @@ router.post('/assign-sms-numbers', async (req, res) => {
     const results = [];
     for (const c of clients || []) {
       if (dryRun) {
-        results.push({ client: c.business_name, number: c.vapi_phone_number, dryRun: true });
+        // Read-only diagnosis: look the number up on Telnyx and report whether
+        // it's on the account and already on OUR messaging profile. No writes.
+        let onTelnyx = false, assignedToOurProfile = false, currentProfile = null;
+        try {
+          if (process.env.TELNYX_API_KEY && c.vapi_phone_number) {
+            const lr = await fetch(
+              `https://api.telnyx.com/v2/phone_numbers?filter[phone_number]=${encodeURIComponent(c.vapi_phone_number)}`,
+              { headers: { Authorization: `Bearer ${process.env.TELNYX_API_KEY}` } }
+            );
+            if (lr.ok) {
+              const rec = ((await lr.json()).data || [])[0];
+              if (rec) {
+                onTelnyx = true;
+                currentProfile = rec.messaging_profile_id || null;
+                assignedToOurProfile = currentProfile === process.env.TELNYX_MESSAGING_PROFILE_ID;
+              }
+            }
+          }
+        } catch (e) { /* leave as unknown */ }
+        results.push({
+          client: c.business_name,
+          number: c.vapi_phone_number,
+          onTelnyx,
+          assignedToOurProfile,
+          status: !onTelnyx ? 'NOT_ON_TELNYX' : assignedToOurProfile ? 'OK' : 'NEEDS_ASSIGNMENT',
+        });
+        await new Promise((rz) => setTimeout(rz, 120));
         continue;
       }
       let r = { profileAssigned: false, campaignAssigned: false };
@@ -73,11 +99,22 @@ router.post('/assign-sms-numbers', async (req, res) => {
       await new Promise((rz) => setTimeout(rz, 150));
     }
 
+    let summary;
+    if (dryRun) {
+      summary = {
+        total: results.length,
+        ok: results.filter((x) => x.status === 'OK').length,
+        needsAssignment: results.filter((x) => x.status === 'NEEDS_ASSIGNMENT').length,
+        notOnTelnyx: results.filter((x) => x.status === 'NOT_ON_TELNYX').length,
+      };
+      console.log(`📇 assign-sms-numbers DRY RUN: ${summary.ok} ok, ${summary.needsAssignment} need assignment, ${summary.notOnTelnyx} not on Telnyx (of ${summary.total})`);
+      return res.json({ ...summary, dryRun: true, results });
+    }
+
     const assigned = results.filter((x) => x.profileAssigned).length;
     const notOnTelnyx = results.filter((x) => x.onTelnyx === false).length;
-
     console.log(`📇 assign-sms-numbers: ${assigned}/${results.length} assigned to profile${notOnTelnyx ? `, ${notOnTelnyx} not on Telnyx (VAPI-native)` : ''}`);
-    res.json({ total: results.length, assigned, notOnTelnyx, dryRun, results });
+    res.json({ total: results.length, assigned, notOnTelnyx, dryRun: false, results });
   } catch (e) {
     console.error('❌ assign-sms-numbers error:', e.message);
     res.status(500).json({ error: e.message });
