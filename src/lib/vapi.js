@@ -2893,7 +2893,12 @@ async function assignNumberForSMS(e164) {
 
     // 2. Assign the number to the platform messaging profile (prerequisite for
     //    campaign assignment and for inbound webhook routing).
-    const patchRes = await fetch(`https://api.telnyx.com/v2/phone_numbers/${record.id}`, {
+    //    Telnyx sets a number's messaging profile on the /messaging SUB-RESOURCE.
+    //    The general PATCH /v2/phone_numbers/{id} (voice/tags settings) does NOT
+    //    update messaging_profile_id — using it silently no-ops, which is why
+    //    numbers ended up campaign-assigned but never on the profile (still 40305
+    //    on send). Correct endpoint: PATCH /v2/phone_numbers/{id}/messaging.
+    const patchRes = await fetch(`https://api.telnyx.com/v2/phone_numbers/${record.id}/messaging`, {
       method: 'PATCH',
       headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ messaging_profile_id: TELNYX_MESSAGING_PROFILE_ID })
