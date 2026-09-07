@@ -40,6 +40,7 @@ const crypto = require('crypto');
 const router = express.Router();
 
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
+const { getPhoneNumberFromVapi } = require('../lib/vapi');
 const { sendAndLogSMS } = require('../lib/sms-logger');
 const {
   callAction,
@@ -580,16 +581,39 @@ router.post('/api/voice/send-sms', async (req, res) => {
   }
 
   try {
+    // Resolve the caller's number + owning client for BOTH routing modes.
+    // telnyx_cc calls carry a call_sessions row (the real caller sits on the
+    // Telnyx leg, invisible to VAPI). vapi_direct calls (the default for every
+    // client) have NO session, so fall back to the VAPI tool-call payload:
+    // call.customer.number IS the real caller there, and the call's VAPI number
+    // maps to the client. Both sources are server-side, never model-supplied,
+    // so the "only ever text the person on the call" guarantee still holds.
     const session = await getSessionByVapiCallId(vapiCallId);
-    if (!session || !session.caller_number) {
+
+    let callerNumber = (session && session.caller_number) || msg.call?.customer?.number || null;
+    let clientId = (session && session.client_id) || null;
+
+    // vapi_direct has no session: resolve the client from the VAPI number on the
+    // call (used for smsPresets + agency routing).
+    if (!clientId) {
+      let vapiNumber = msg.call?.phoneNumber?.number || msg.phoneNumber?.number || null;
+      const phoneNumberId = msg.call?.phoneNumberId || msg.phoneNumber?.id || null;
+      if (!vapiNumber && phoneNumberId) {
+        try { vapiNumber = await getPhoneNumberFromVapi(phoneNumberId); } catch (_) { /* non-fatal */ }
+      }
+      if (vapiNumber) {
+        const c = await getClientByVapiPhoneNumber(vapiNumber);
+        if (c) clientId = c.id;
+      }
+    }
+
+    if (!callerNumber) {
       return reply('I could not send that text right now. Apologize and offer to read the information out loud instead.');
     }
 
-    const { data: client } = await supabase
-      .from('clients')
-      .select('agency_id, tool_config')
-      .eq('id', session.client_id)
-      .single();
+    const { data: client } = clientId
+      ? await supabase.from('clients').select('agency_id, tool_config').eq('id', clientId).single()
+      : { data: null };
 
     // Resolve a saved-text key to its EXACT configured value, so links and
     // addresses are never reworded by the model.
@@ -618,12 +642,12 @@ router.post('/api/voice/send-sms', async (req, res) => {
     }
 
     const sent = await sendAndLogSMS({
-      phone: session.caller_number,
+      phone: callerNumber,
       message: text,
       agencyId: (client && client.agency_id) || null,
       recipientType: 'caller',
       messageType: 'ai_call_sms',
-      metadata: { source: 'ai_receptionist', vapi_call_id: vapiCallId, client_id: session.client_id, saved_text: savedKey || null },
+      metadata: { source: 'ai_receptionist', vapi_call_id: vapiCallId, client_id: clientId || null, saved_text: savedKey || null },
     });
 
     if (sent) {
