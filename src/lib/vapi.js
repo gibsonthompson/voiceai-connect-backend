@@ -2864,17 +2864,30 @@ async function assignNumberForSMS(e164) {
 
   try {
     // 1. Find the Telnyx phone-number resource id for this E.164.
-    const lookupRes = await fetch(
-      `https://api.telnyx.com/v2/phone_numbers?filter[phone_number]=${encodeURIComponent(number)}`,
-      { headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}` } }
-    );
-    if (!lookupRes.ok) {
-      console.warn(`⚠️ assignNumberForSMS lookup failed for ${number}: HTTP ${lookupRes.status}`);
-      return result;
+    //    A JUST-ORDERED number does not appear in /v2/phone_numbers immediately —
+    //    the Telnyx order completes asynchronously — so a single lookup right
+    //    after provisioning often misses it. That was the bug: the miss returned
+    //    early with no retry, leaving the number able to receive calls (order
+    //    eventually finishes) but never attached to the messaging profile, so it
+    //    could not send SMS. Retry with backoff until it shows up.
+    let record = null;
+    const delays = [0, 2000, 4000, 8000]; // up to ~14s across 4 attempts
+    for (let i = 0; i < delays.length; i++) {
+      if (delays[i]) await new Promise((r) => setTimeout(r, delays[i]));
+      const lookupRes = await fetch(
+        `https://api.telnyx.com/v2/phone_numbers?filter[phone_number]=${encodeURIComponent(number)}`,
+        { headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}` } }
+      );
+      if (!lookupRes.ok) {
+        console.warn(`⚠️ assignNumberForSMS lookup HTTP ${lookupRes.status} for ${number} (attempt ${i + 1}/${delays.length})`);
+        continue;
+      }
+      record = ((await lookupRes.json()).data || [])[0] || null;
+      if (record) break;
+      if (i < delays.length - 1) console.log(`   ⏳ ${number} not in Telnyx phone_numbers yet, retrying (attempt ${i + 1}/${delays.length})`);
     }
-    const record = ((await lookupRes.json()).data || [])[0];
     if (!record) {
-      console.warn(`⚠️ assignNumberForSMS: ${number} not found on Telnyx account, cannot assign for SMS`);
+      console.warn(`⚠️ assignNumberForSMS: ${number} still not in Telnyx phone_numbers after ${delays.length} tries; NOT assigned to messaging profile. Run the assign-sms-numbers backfill once it has finished ordering.`);
       return result;
     }
 
