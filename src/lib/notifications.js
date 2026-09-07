@@ -244,7 +244,10 @@ async function sendCallNotificationSMS(client, agency, callData) {
   let smsMessage = `🔔 New Call - ${client.business_name}\nCustomer: ${customerName}\nPhone: ${customerPhone}\n`;
   if (urgency === 'high' || urgency === 'emergency') smsMessage += `⚠️ Urgency: HIGH\n`;
   smsMessage += `Summary: ${summary}\nPowered by ${brandName}`;
-  return _logSMS({ phone: client.owner_phone, message: smsMessage, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_call_notification', metadata: { clientName: client.business_name, customerName, urgency } });
+  // From the client's own AI-receptionist number (white-label + recognizable
+  // to the owner), not the platform 505 number. The number is provisioned on the
+  // messaging profile well before any call, so it's registered by call-time.
+  return _logSMS({ phone: client.owner_phone, message: smsMessage, from: client.vapi_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_call_notification', metadata: { clientName: client.business_name, customerName, urgency } });
 }
 
 async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency) {
@@ -257,7 +260,7 @@ async function sendClientTrialExpiredSMS(client, agency) {
   const brandName = agency?.name || 'AI Receptionist';
   let upgradeUrl = agency?.marketing_domain && agency?.domain_verified ? `${agency.marketing_domain}/client/upgrade` : agency?.slug ? `${agency.slug}.myvoiceaiconnect.com/client/upgrade` : `myvoiceaiconnect.com/client/upgrade`;
   const message = `⚠️ ${brandName} Trial Ended\n\nHi ${client.owner_name || client.business_name}, your 7-day trial has ended.\n\nYour AI receptionist is no longer answering calls.\n\nReactivate now: ${upgradeUrl}`;
-  return _logSMS({ phone: client.owner_phone, message, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_trial_expired', metadata: { clientName: client.business_name } });
+  return _logSMS({ phone: client.owner_phone, message, from: client.vapi_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_trial_expired', metadata: { clientName: client.business_name } });
 }
 
 async function sendClientPaymentFailedSMS(client, agency) {

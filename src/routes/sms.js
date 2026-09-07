@@ -233,6 +233,7 @@ async function notifyOwnerOfInboundSMS(client, callerPhone, messageContent) {
     await sendAndLogSMS({
       phone: client.owner_phone,
       message: `💬 New text from ${formatted}:\n"${preview}"\n\nReply from your dashboard.`,
+      from: client.vapi_phone_number || null,
       agencyId: client.agency_id,
       recipientType: 'client_owner',
       messageType: 'client_inbound_sms_notify',
