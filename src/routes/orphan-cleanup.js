@@ -17,7 +17,7 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
-const { releaseAgencyClientNumbers } = require('./stripe-platform');
+const { releaseAgencyClientNumbers, releaseAgencyDemoNumber } = require('./stripe-platform');
 
 router.post('/cleanup-orphan-clients', async (req, res) => {
   const cronSecret = req.headers['x-cron-secret'];
@@ -28,16 +28,19 @@ router.post('/cleanup-orphan-clients', async (req, res) => {
   try {
     const dryRun = req.query.dryRun === 'true' || req.body?.dryRun === true;
 
-    // 1. Agencies that are suspended or canceled.
+    // 1. Agencies that are suspended or canceled (also grab their demo number).
     const { data: deadAgencies, error: aErr } = await supabase
       .from('agencies')
-      .select('id, name, status, subscription_status')
+      .select('id, name, status, subscription_status, demo_phone_number, demo_vapi_phone_id')
       .or('status.eq.suspended,status.eq.canceled,subscription_status.eq.canceled,subscription_status.eq.cancelled');
     if (aErr) return res.status(500).json({ error: aErr.message });
 
     const deadById = Object.fromEntries((deadAgencies || []).map((a) => [a.id, a.name]));
     const deadIds = Object.keys(deadById);
-    if (deadIds.length === 0) return res.json({ orphans: 0, message: 'No suspended/canceled agencies found' });
+    if (deadIds.length === 0) return res.json({ orphanClients: 0, demoLeaks: 0, message: 'No suspended/canceled agencies found' });
+
+    // Agencies still holding a demo number (leaking).
+    const demoLeaks = (deadAgencies || []).filter((a) => a.demo_phone_number || a.demo_vapi_phone_id);
 
     // 2. Clients still ACTIVE and still holding a number under those agencies.
     const { data: orphans, error: cErr } = await supabase
@@ -48,34 +51,40 @@ router.post('/cleanup-orphan-clients', async (req, res) => {
       .not('vapi_phone_number', 'is', null);
     if (cErr) return res.status(500).json({ error: cErr.message });
 
-    const details = (orphans || []).map((o) => ({
-      client: o.business_name,
-      number: o.vapi_phone_number,
-      agency: deadById[o.agency_id] || o.agency_id,
-      agency_id: o.agency_id,
+    const clientDetails = (orphans || []).map((o) => ({
+      client: o.business_name, number: o.vapi_phone_number, agency: deadById[o.agency_id] || o.agency_id, agency_id: o.agency_id,
     }));
     const affectedAgencies = [...new Set((orphans || []).map((o) => o.agency_id))];
 
     if (dryRun) {
-      return res.json({ orphans: details.length, affectedAgencies: affectedAgencies.length, dryRun: true, details });
+      return res.json({
+        orphanClients: clientDetails.length,
+        demoLeaks: demoLeaks.length,
+        affectedAgencies: affectedAgencies.length,
+        dryRun: true,
+        clientDetails,
+        demoDetails: demoLeaks.map((a) => ({ agency: a.name, demo_number: a.demo_phone_number })),
+      });
     }
 
-    // 3. Tear down, one agency at a time. releaseAgencyClientNumbers handles
-    //    every number-holding client under the agency (idempotent for any
-    //    already torn down).
-    let cleaned = 0;
+    // 3. Tear down orphaned client numbers, one agency at a time.
+    let cleanedClients = 0;
     for (const agencyId of affectedAgencies) {
-      try {
-        await releaseAgencyClientNumbers(agencyId);
-        cleaned++;
-      } catch (e) {
-        console.error(`cleanup-orphan-clients: agency ${agencyId} failed:`, e.message);
-      }
+      try { await releaseAgencyClientNumbers(agencyId); cleanedClients++; }
+      catch (e) { console.error(`cleanup: client release for ${agencyId} failed:`, e.message); }
       await new Promise((rz) => setTimeout(rz, 200));
     }
 
-    console.log(`🧹 cleanup-orphan-clients: ${details.length} orphan client(s) across ${affectedAgencies.length} agencies torn down`);
-    res.json({ orphans: details.length, cleanedAgencies: cleaned, dryRun: false, details });
+    // 4. Release leaking demo numbers for every dead agency.
+    let cleanedDemos = 0;
+    for (const a of demoLeaks) {
+      try { await releaseAgencyDemoNumber(a.id); cleanedDemos++; }
+      catch (e) { console.error(`cleanup: demo release for ${a.id} failed:`, e.message); }
+      await new Promise((rz) => setTimeout(rz, 200));
+    }
+
+    console.log(`🧹 cleanup: ${clientDetails.length} orphan client(s), ${cleanedDemos} demo number(s) released`);
+    res.json({ orphanClients: clientDetails.length, cleanedClientAgencies: cleanedClients, demoLeaks: demoLeaks.length, cleanedDemos, dryRun: false, clientDetails });
   } catch (e) {
     console.error('cleanup-orphan-clients error:', e.message);
     res.status(500).json({ error: e.message });

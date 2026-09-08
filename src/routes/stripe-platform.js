@@ -370,6 +370,39 @@ async function releaseAgencyClientNumbers(agencyId) {
 }
 
 // ============================================================================
+// RELEASE THE AGENCY'S OWN DEMO NUMBER + ASSISTANT
+// ----------------------------------------------------------------------------
+// The app cancel (/api/agency/cancel) releases the agency demo number, but the
+// Stripe-driven teardown paths (subscription.deleted AND updated->canceled) did
+// not — so a lapsed agency's demo number kept renting on Telnyx/VAPI forever.
+// Idempotent: no-ops once the demo fields are already null.
+// ============================================================================
+async function releaseAgencyDemoNumber(agencyId) {
+  if (!agencyId) return;
+  const { data: agency } = await supabase
+    .from('agencies')
+    .select('id, name, demo_vapi_phone_id, demo_phone_number, demo_assistant_id')
+    .eq('id', agencyId)
+    .single();
+  if (!agency || (!agency.demo_vapi_phone_id && !agency.demo_phone_number)) return;
+
+  try {
+    const release = await fullyReleaseNumber(agency.demo_vapi_phone_id, agency.demo_phone_number);
+    console.log(`📞 Agency ${agency.name} demo released: VAPI=${release.vapiDeleted} Telnyx=${release.telnyxReleased}`);
+    if (!release.telnyxReleased) console.error(`   ⚠️ Telnyx demo NOT released for ${agency.name} (${agency.demo_phone_number})`);
+  } catch (e) {
+    console.error(`⚠️ Demo release failed for agency ${agencyId}:`, e.message);
+  }
+  if (agency.demo_assistant_id) {
+    try { await disableAssistant(agency.demo_assistant_id); } catch {}
+  }
+  await supabase
+    .from('agencies')
+    .update({ demo_phone_number: null, demo_vapi_phone_id: null, demo_assistant_id: null, updated_at: new Date().toISOString() })
+    .eq('id', agencyId);
+}
+
+// ============================================================================
 // CREATE CHECKOUT SESSION (Agency subscribes to platform)
 // ----------------------------------------------------------------------------
 // skipTrial (body, optional): when true, no free trial is granted. Stripe
@@ -871,7 +904,7 @@ async function handleAgencySubscriptionUpdated(subscription) {
   // releaseAgencyClientNumbers is itself idempotent as a second safety net.
   if (agencyStatus === 'suspended' && agency.status !== 'suspended') {
     console.log(`🧹 Agency ${agency.id} suspended via subscription.updated (${status}); cascading client number release`);
-    try { await releaseAgencyClientNumbers(agency.id); }
+    try { await releaseAgencyClientNumbers(agency.id); await releaseAgencyDemoNumber(agency.id); }
     catch (cascadeErr) { console.error(`   ❌ Cascade release failed for ${agency.id}:`, cascadeErr.message); }
   }
 
@@ -931,6 +964,7 @@ async function handleAgencySubscriptionDeleted(subscription) {
   // the agency is suspended but all of its clients' Telnyx numbers keep
   // renting monthly forever. See releaseAgencyClientNumbers for the tradeoff.
   await releaseAgencyClientNumbers(agency.id);
+  await releaseAgencyDemoNumber(agency.id);
 
   // Capture cancellation details. Both paths land here eventually:
   //   1. In-app cancel: cancelAgencySubscription already inserted a row keyed
@@ -1302,6 +1336,7 @@ module.exports = {
   canAgencyAddClient,
   reconcileAgencyTeamSeats,
   releaseAgencyClientNumbers,
+  releaseAgencyDemoNumber,
   CANCELLATION_REASON_LABELS,
   PLATFORM_PLANS,
   PLATFORM_PRICES,
