@@ -145,7 +145,7 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
         country: agencyCountry,
         phone_number: phoneNumber,
         owner_name: agency.name,
-        owner_phone: agency.phone || null,
+        owner_phone: agencyPhone || agency.phone || '+10000000000',
         timezone: timezoneFromPhone(agency.phone) || null,
         business_hours: {
           monday: { open: '9:00 AM', close: '5:00 PM', closed: false },
