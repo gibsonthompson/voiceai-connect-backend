@@ -250,6 +250,7 @@ const bookingRoutes = require('./routes/booking');
 const staffMembersRoutes = require('./routes/staff-members');
 const clientServicesRoutes = require('./routes/client-services');
 const cleanupOrphanedTestClients = require('./routes/cleanup-orphaned-test-clients');
+const expireTestClients = require('./routes/expire-test-clients');   // ← ADD THIS LINE
 // VAPI Webhook (multi-tenant aware)
 const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 
@@ -1765,6 +1766,7 @@ app.use('/api/cron', activationSmsRoutes);
 app.use('/api/cron', onboardingEmailRoutes);
 
 app.use('/api/cron', cleanupOrphanedTestClients);
+app.use('/api/cron', expireTestClients); 
 
 // Abandoned card-required checkout sweep: releases the number and deletes the
 // VAPI assistant for pending_payment clients that never completed Stripe

@@ -10,6 +10,7 @@ const { supabase, getAgencyById } = require('../lib/supabase');
 const { 
   createIndustryAssistant, 
   provisionLocalPhone,
+  fullyReleaseNumber,
 } = require('../lib/vapi');
 const { timezoneFromPhone } = require('../lib/area-code-timezone');
 const { formatPhoneE164 } = require('../lib/notifications');
@@ -231,6 +232,114 @@ router.get('/:agencyId/test-client', async (req, res) => {
   } catch (error) {
     console.error('Error fetching test client:', error);
     res.status(500).json({ error: 'Failed to fetch test client' });
+  }
+});
+
+// ============================================================================
+// DELETE /api/agency/:agencyId/test-client
+// Full teardown of an agency's test client so a fresh one can be provisioned.
+// Releases the phone number (VAPI object + Telnyx rental → STOPS the monthly
+// bill), deletes the VAPI assistant, clears agency.test_client_id, and removes
+// the client row. Deleting the row alone would orphan the Telnyx number (keeps
+// billing), so this endpoint exists to do it correctly in one shot.
+// Only ever touches is_test_client rows; never the agency demo number and never
+// a real client.
+// ============================================================================
+router.delete('/:agencyId/test-client', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const agency = await getAgencyById(agencyId);
+    if (!agency) return res.status(404).json({ error: 'Agency not found' });
+
+    // Find the test client: prefer the pointer, fall back to a scan so a
+    // mispointed or duplicate test client still gets cleaned up.
+    const cols = 'id, business_name, vapi_phone_id, vapi_phone_number, vapi_assistant_id';
+    let testClient = null;
+    if (agency.test_client_id) {
+      const { data } = await supabase
+        .from('clients').select(cols)
+        .eq('id', agency.test_client_id)
+        .eq('is_test_client', true)
+        .maybeSingle();
+      testClient = data || null;
+    }
+    if (!testClient) {
+      const { data } = await supabase
+        .from('clients').select(cols)
+        .eq('agency_id', agencyId)
+        .eq('is_test_client', true)
+        .limit(1)
+        .maybeSingle();
+      testClient = data || null;
+    }
+
+    if (!testClient) {
+      // Nothing to remove; just make sure the pointer is clear so re-provision works.
+      if (agency.test_client_id) {
+        await supabase.from('agencies').update({ test_client_id: null }).eq('id', agencyId);
+      }
+      return res.json({ success: true, message: 'No test client to remove', released: null });
+    }
+
+    // 1) Release the phone number (VAPI phone object + Telnyx rental).
+    let release = { vapiDeleted: false, telnyxReleased: false };
+    if (testClient.vapi_phone_id || testClient.vapi_phone_number) {
+      try {
+        release = await fullyReleaseNumber(testClient.vapi_phone_id, testClient.vapi_phone_number);
+        console.log(`📞 Test client release ${testClient.business_name}: VAPI=${release.vapiDeleted} Telnyx=${release.telnyxReleased}`);
+        if (!release.telnyxReleased && testClient.vapi_phone_number) {
+          console.error(`⚠️ Telnyx NOT released for test client ${testClient.business_name} (${testClient.vapi_phone_number}); reconcile-telnyx sweep is the backstop`);
+        }
+      } catch (relErr) {
+        console.error('❌ Test client number release failed:', relErr.message);
+      }
+    }
+
+    // 2) Delete the VAPI assistant.
+    if (testClient.vapi_assistant_id && process.env.VAPI_API_KEY) {
+      try {
+        const asstRes = await fetch(`https://api.vapi.ai/assistant/${testClient.vapi_assistant_id}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${process.env.VAPI_API_KEY}` },
+        });
+        if (asstRes.ok || asstRes.status === 404) {
+          console.log('✅ Test client VAPI assistant deleted:', testClient.vapi_assistant_id);
+        } else {
+          console.warn(`⚠️ VAPI assistant delete returned ${asstRes.status} for ${testClient.vapi_assistant_id}`);
+        }
+      } catch (asstErr) {
+        console.error('❌ VAPI assistant delete error:', asstErr.message);
+      }
+    }
+
+    // 3) Clear the agency pointer FIRST so the row delete never trips an FK.
+    await supabase.from('agencies').update({ test_client_id: null }).eq('id', agencyId);
+
+    // 4) Delete the test client row (guarded to is_test_client so a real client
+    //    can never be removed through this path).
+    const { error: delErr } = await supabase
+      .from('clients').delete()
+      .eq('id', testClient.id)
+      .eq('is_test_client', true);
+    if (delErr) {
+      console.error('❌ Test client row delete failed:', delErr.message);
+      return res.status(500).json({ error: 'Failed to delete test client row', released: release });
+    }
+
+    console.log(`🧹 Test client reset for ${agency.name}: ${testClient.business_name} removed`);
+    return res.json({
+      success: true,
+      message: 'Test client removed. Provision a fresh one whenever you are ready.',
+      released: {
+        number: testClient.vapi_phone_number || null,
+        vapiDeleted: release.vapiDeleted,
+        telnyxReleased: release.telnyxReleased,
+        billingStopped: release.telnyxReleased,
+      },
+    });
+  } catch (error) {
+    console.error('❌ Test client reset error:', error);
+    return res.status(500).json({ error: error.message || 'Reset failed' });
   }
 });
 
