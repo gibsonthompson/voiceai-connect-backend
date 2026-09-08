@@ -599,6 +599,85 @@ async function reconcileTelnyxAccount({ dryRun = true } = {}) {
 }
 
 // ============================================================================
+// VAPI-SIDE RECONCILE — same carrier-truth guarantee for VAPI-native numbers.
+// ----------------------------------------------------------------------------
+// reconcileTelnyxAccount catches numbers on the Telnyx account; it cannot see
+// VAPI-native numbers (bought straight through VAPI), which VAPI bills for
+// separately. This lists every number on the VAPI account and deletes any not
+// owned by a live client, live agency demo, or platform number — using the
+// EXACT same buildLiveAllowlist + abort-if-empty safety. DRY-RUN by default.
+// ============================================================================
+async function listAllVapiNumbers() {
+  if (!VAPI_API_KEY) throw new Error('VAPI_API_KEY not set');
+  const res = await fetch('https://api.vapi.ai/phone-number?limit=1000', {
+    headers: { Authorization: `Bearer ${VAPI_API_KEY}` },
+  });
+  if (!res.ok) throw new Error(`VAPI list phone-numbers HTTP ${res.status}`);
+  const data = await res.json();
+  const arr = Array.isArray(data) ? data : (data.results || data.data || []);
+  const out = [];
+  for (const n of arr) {
+    const e164 = normalizeE164(n.number);
+    if (e164) out.push({ e164, id: n.id });
+  }
+  return out;
+}
+
+async function reconcileVapiNumbers({ dryRun = true } = {}) {
+  if (!VAPI_API_KEY) return { ok: false, error: 'VAPI_API_KEY not set' };
+
+  // Build the protect list FIRST. If it fails or is empty, delete nothing.
+  let allow;
+  try {
+    allow = await buildLiveAllowlist();
+  } catch (e) {
+    return { ok: false, error: `aborted, allowlist build failed: ${e.message}` };
+  }
+  if (allow.size === 0) {
+    return { ok: false, error: 'aborted, allowlist came back empty (safety guard)' };
+  }
+
+  let all;
+  try {
+    all = await listAllVapiNumbers();
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+
+  const orphans = all.filter((n) => n.e164 && !allow.has(n.e164));
+
+  if (dryRun) {
+    return {
+      ok: true,
+      dryRun: true,
+      totalOnVapi: all.length,
+      protected: all.length - orphans.length,
+      orphanCount: orphans.length,
+      orphans: orphans.map((o) => o.e164),
+    };
+  }
+
+  const deleted = [];
+  const failed = [];
+  for (const o of orphans) {
+    const ok = await deleteVapiResource('phone-number', o.id);
+    if (ok) deleted.push(o.e164);
+    else failed.push(o.e164);
+    await sleep(150);
+  }
+
+  return {
+    ok: true,
+    dryRun: false,
+    totalOnVapi: all.length,
+    deleted: deleted.length,
+    deletedNumbers: deleted,
+    failed: failed.length,
+    failedNumbers: failed,
+  };
+}
+
+// ============================================================================
 // ROUTES  (mount under /api/cron)
 // ----------------------------------------------------------------------------
 // All are DRY-RUN unless called with ?apply=true (or { "apply": true } body),
@@ -637,6 +716,19 @@ router.post('/reconcile-telnyx', cronGuard, async (req, res) => {
   }
 });
 
+// VAPI-side carrier-truth reconcile (VAPI-native numbers). Dry-run unless ?apply=true.
+//   POST /api/cron/reconcile-vapi              (dry-run, reports orphans)
+//   POST /api/cron/reconcile-vapi?apply=true   (delete orphaned VAPI numbers)
+router.post('/reconcile-vapi', cronGuard, async (req, res) => {
+  try {
+    const result = await reconcileVapiNumbers({ dryRun: !wantsApply(req) });
+    res.json(result);
+  } catch (e) {
+    console.error('reconcile-vapi error:', e.message);
+    res.status(500).json({ ok: false, error: 'Reconcile failed' });
+  }
+});
+
 // Low-value sweep. Dead-agency test clients + demos are ALWAYS in scope; free
 // agencies are added only with ?free=true. Dry-run unless ?apply=true.
 //   POST /api/cron/sweep-low-value                        (dry-run, dead only)
@@ -659,4 +751,5 @@ module.exports.releaseAgencyDemo = releaseAgencyDemo;
 module.exports.nullClientTelephony = nullClientTelephony;
 module.exports.backfillDeadClientNumbers = backfillDeadClientNumbers;
 module.exports.reconcileTelnyxAccount = reconcileTelnyxAccount;
+module.exports.reconcileVapiNumbers = reconcileVapiNumbers;
 module.exports.sweepLowValueNumbers = sweepLowValueNumbers;
