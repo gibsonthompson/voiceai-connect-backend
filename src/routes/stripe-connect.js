@@ -186,8 +186,26 @@ function isSupportedConnectCountry(countryCode) {
 // only: a manual-billing client never reaches these builders, so it never gets
 // a Stripe setup fee (a manual agency collects any setup fee on its own invoice).
 // ============================================================================
-async function buildSetupFeeLineItem(agency, plan) {
-  const feeCents = Number(agency.setup_fee_cents);
+// ── PER-CLIENT CUSTOM PRICING (white-glove overrides) ──────────────────────
+// When a client is on custom pricing (pricing_mode = 'custom'), these values
+// override the plan/agency pricing for THAT client only. Returns null for every
+// normal plan client, so the existing plan billing paths are byte-for-byte
+// unchanged (no regression risk for existing clients). Amounts in cents.
+function customPricing(client) {
+  if (!client || client.pricing_mode !== 'custom') return null;
+  const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
+  return {
+    baseCents: num(client.custom_price_cents),
+    setupCents: num(client.custom_setup_fee_cents),
+    includedMinutes: num(client.custom_included_minutes),
+    minuteRateCents: num(client.custom_minute_rate_cents),
+    callLimit: num(client.custom_call_limit),
+  };
+}
+
+async function buildSetupFeeLineItem(agency, plan, client) {
+  const cp = customPricing(client);
+  const feeCents = cp && cp.setupCents !== null ? cp.setupCents : Number(agency.setup_fee_cents);
   if (!(feeCents > 0)) return null;
 
   const acct = agency.stripe_account_id;
@@ -311,13 +329,14 @@ function includedMinutesForPlan(agency, plan) {
 // passed as unit_amount_decimal (a string of cents). All minutes are reported
 // to the meter and Stripe zero-rates the allotment, so there is no app-side
 // allotment math.
-async function createConnectMinutePrice(agency, plan) {
+async function createConnectMinutePrice(agency, plan, client) {
   const acct = agency.stripe_account_id;
   const meterId = await ensureConnectMinuteMeter(agency);
   const currency = getCurrencyForCountry(agency.country || 'US');
-  const rateCents = Number(agency.client_minute_rate_cents);
+  const cp = customPricing(client);
+  const rateCents = cp && cp.minuteRateCents !== null ? cp.minuteRateCents : Number(agency.client_minute_rate_cents);
   if (!(rateCents > 0)) throw new Error('client_minute_rate_cents must be greater than 0 to bill minutes');
-  const included = includedMinutesForPlan(agency, plan);
+  const included = cp && cp.includedMinutes !== null ? cp.includedMinutes : includedMinutesForPlan(agency, plan);
 
   const product = await stripe.products.create({
     name: `Voice Minutes - ${plan.charAt(0).toUpperCase() + plan.slice(1)}`,
@@ -373,7 +392,7 @@ async function ensureClientMinuteItem(client, agency) {
   }
   if (findMeteredItem(sub)) return { attached: false, reason: 'already_attached' };
 
-  const price = await createConnectMinutePrice(agency, client.plan_type || 'starter');
+  const price = await createConnectMinutePrice(agency, client.plan_type || 'starter', client);
   await stripe.subscriptionItems.create(
     { subscription: sub.id, price: price.id }, // metered items reject quantity
     { stripeAccount: acct }
@@ -456,7 +475,7 @@ async function repriceMinuteItemsForAgency(agencyId) {
       }
       if (!['active', 'trialing', 'past_due'].includes(sub.status)) { skipped++; continue; }
 
-      const price = await createConnectMinutePrice(agency, c.plan_type || 'starter');
+      const price = await createConnectMinutePrice(agency, c.plan_type || 'starter', c);
       const meterItem = findMeteredItem(sub);
       if (meterItem) {
         await stripe.subscriptionItems.update(
@@ -1196,7 +1215,8 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     pro: agency.limit_pro || 150,
     growth: agency.limit_growth || 500,
   };
-  const priceAmount = priceAmounts[plan];
+  const cpTrial = customPricing(client);
+  const priceAmount = cpTrial && cpTrial.baseCents > 0 ? cpTrial.baseCents : priceAmounts[plan];
   if (!priceAmount) throw new Error(`Invalid plan: ${plan}`);
 
   const currency = getCurrencyForCountry(agency.country || 'US');
@@ -1246,7 +1266,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
   // event in usage-tracker is gated on the client not being in trial.
   const lineItems = [{ price: price.id, quantity: 1 }];
   if (minutePassThroughActive(agency)) {
-    const minutePrice = await createConnectMinutePrice(agency, plan);
+    const minutePrice = await createConnectMinutePrice(agency, plan, client);
     lineItems.push({ price: minutePrice.id }); // metered, no quantity
   }
 
@@ -1254,7 +1274,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
   // Checkout bills on the FIRST invoice only, which for a trialing subscription
   // is the invoice generated at trial end, so the fee lands with the first
   // month and never during the free trial.
-  const setupFeeItem = await buildSetupFeeLineItem(agency, plan);
+  const setupFeeItem = await buildSetupFeeLineItem(agency, plan, client);
   if (setupFeeItem) lineItems.push(setupFeeItem);
 
   const session = await stripe.checkout.sessions.create({
@@ -1351,7 +1371,8 @@ async function createClientCheckout(req, res) {
 
     const priceAmounts = { starter: agency.price_starter || 9900, pro: agency.price_pro || 14900, growth: agency.price_growth || 29900 };
     const callLimits = { starter: agency.limit_starter || 50, pro: agency.limit_pro || 150, growth: agency.limit_growth || 500 };
-    const priceAmount = priceAmounts[plan];
+    const cpChk = customPricing(client);
+    const priceAmount = cpChk && cpChk.baseCents > 0 ? cpChk.baseCents : priceAmounts[plan];
     if (!priceAmount) return res.status(400).json({ error: 'Invalid plan' });
 
     const currency = getCurrencyForCountry(agency.country || 'US');
@@ -1385,13 +1406,13 @@ async function createClientCheckout(req, res) {
     // Flat base item, plus the metered minute item when pass-through is active.
     const upgradeLineItems = [{ price: price.id, quantity: 1 }];
     if (minutePassThroughActive(agency)) {
-      const minutePrice = await createConnectMinutePrice(agency, plan);
+      const minutePrice = await createConnectMinutePrice(agency, plan, client);
       upgradeLineItems.push({ price: minutePrice.id }); // metered, no quantity
     }
 
     // One-time setup fee (when set). No trial on this flow, so the one-time
     // line item is billed immediately on the first invoice at checkout.
-    const setupFeeItem = await buildSetupFeeLineItem(agency, plan);
+    const setupFeeItem = await buildSetupFeeLineItem(agency, plan, client);
     if (setupFeeItem) upgradeLineItems.push(setupFeeItem);
 
     const session = await stripe.checkout.sessions.create({
@@ -1629,7 +1650,8 @@ async function changeClientPlan(req, res) {
 
     // Target price + call limit come from the resolved plan (targetPlan), so any
     // plan key (legacy or custom) is priced correctly, not just starter/pro/growth.
-    const priceAmount = Number.isInteger(targetPlan.price_cents) ? targetPlan.price_cents : 0;
+    const cpPlan = customPricing(client);
+    const priceAmount = cpPlan && cpPlan.baseCents > 0 ? cpPlan.baseCents : (Number.isInteger(targetPlan.price_cents) ? targetPlan.price_cents : 0);
     const callLimit = Number.isInteger(targetPlan.call_limit) ? targetPlan.call_limit : 50;
     const currency = getCurrencyForCountry(agency.country || 'US');
 
@@ -1653,7 +1675,7 @@ async function changeClientPlan(req, res) {
     // usage already reported.
     const itemsUpdate = [{ id: flatItem.id, price: price.id }];
     if (minutePassThroughActive(agency)) {
-      const minutePrice = await createConnectMinutePrice(agency, plan);
+      const minutePrice = await createConnectMinutePrice(agency, plan, client);
       if (meterItem) {
         itemsUpdate.push({ id: meterItem.id, price: minutePrice.id });
       } else {
@@ -1779,6 +1801,63 @@ async function cancelClientSubscription(req, res) {
   } catch (error) {
     console.error('\u274c Cancel subscription error:', error);
     res.status(500).json({ error: 'Failed to cancel subscription' });
+  }
+}
+
+// ── SET / CLEAR PER-CLIENT CUSTOM PRICING (white-glove) ────────────────────
+// Agency (or admin) sets bespoke pricing for one client, or reverts to plan.
+// Saves the fields; the billing paths (checkout / trial / change-plan / the
+// setup + minute builders) already read them via customPricing(). For a NEW
+// client this takes effect at their first checkout. Repricing an already-active
+// subscription in place is intentionally a separate follow-up.
+async function setClientCustomPricing(req, res) {
+  try {
+    const { client_id, mode, price_cents, setup_fee_cents, included_minutes, minute_rate_cents, call_limit } = req.body;
+    if (!client_id) return res.status(400).json({ error: 'Missing client_id' });
+
+    const decoded = decodeToken(req);
+    if (!decoded) return res.status(401).json({ error: 'Authentication required' });
+
+    const { data: client, error: clientError } = await supabase
+      .from('clients').select('*, agencies!clients_agency_id_fkey(*)').eq('id', client_id).single();
+    if (clientError || !client) return res.status(404).json({ error: 'Client not found' });
+
+    const isSuperAdmin = decoded.role === 'super_admin';
+    const isManagingAgency = decoded.agencyId && decoded.agencyId === client.agency_id;
+    // Custom pricing is an agency/admin action only, never the client themselves.
+    if (!isSuperAdmin && !isManagingAgency) return res.status(403).json({ error: 'Forbidden' });
+
+    if (mode === 'plan') {
+      await supabase.from('clients').update({ pricing_mode: 'plan' }).eq('id', client.id);
+      return res.json({ success: true, mode: 'plan' });
+    }
+    if (mode !== 'custom') return res.status(400).json({ error: "mode must be 'plan' or 'custom'" });
+
+    const opt = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
+    const base = Number(price_cents);
+    if (!(base > 0)) return res.status(400).json({ error: 'Monthly price (price_cents) must be greater than 0' });
+    const setup = opt(setup_fee_cents);
+    const included = opt(included_minutes) === null ? null : Math.max(0, Math.round(Number(included_minutes)));
+    const rate = opt(minute_rate_cents);
+    const limit = opt(call_limit) === null ? null : Math.round(Number(call_limit));
+
+    const update = {
+      pricing_mode: 'custom',
+      custom_price_cents: Math.round(base),
+      custom_setup_fee_cents: setup === null ? null : Math.round(setup),
+      custom_included_minutes: included,
+      custom_minute_rate_cents: rate,
+      custom_call_limit: limit,
+    };
+    // Apply the custom call cap to the live gate immediately when provided.
+    if (limit !== null) update.monthly_call_limit = limit;
+
+    await supabase.from('clients').update(update).eq('id', client.id);
+    return res.json({ success: true, mode: 'custom', hasActiveSub: !!client.stripe_connected_subscription_id });
+
+  } catch (e) {
+    console.error('\u274c Set custom pricing error:', e);
+    res.status(500).json({ error: 'Failed to set custom pricing' });
   }
 }
 
@@ -2526,6 +2605,7 @@ module.exports = {
   createClientPortal,
   changeClientPlan,             // in-app plan change for active subscriptions
   cancelClientSubscription,     // agency/client/admin cancel (period-end default)
+  setClientCustomPricing,       // white-glove per-client custom pricing
   syncConnectBranding,          // push agency logo + colors to their Connect account
   syncConnectBrandingHandler,   // express handler for an explicit resync
   handleConnectStripeWebhook,

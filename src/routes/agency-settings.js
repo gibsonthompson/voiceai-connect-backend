@@ -185,6 +185,7 @@ function publicAgencyShape(agency) {
     // Plan type (for feature gating)
     plan_type: agency.plan_type,
     subscription_status: agency.subscription_status,
+    marketing_site_enabled: agency.marketing_site_enabled !== false,
 
     // Plans as data (resolved: array if present, else synthesized from columns)
     plans: getAgencyPlans(agency),
@@ -678,6 +679,7 @@ async function updateAgencySettings(req, res) {
       'website_subheadline',
       'marketing_config',
       'marketing_template',
+      'marketing_site_enabled',
       // Custom marketing nav links (agency-defined external header/footer links)
       'custom_nav_links',
       // Theme settings

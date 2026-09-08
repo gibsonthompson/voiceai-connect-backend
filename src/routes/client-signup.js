@@ -1366,6 +1366,8 @@ async function handleAgencyAddClient(req, res) {
       businessCountry,
       websiteUrl: rawWebsiteUrl,
       planType = 'starter',
+      pricingMode = 'plan',
+      customPricing = null,
       tempPassword
     } = req.body;
 
@@ -1391,6 +1393,19 @@ async function handleAgencyAddClient(req, res) {
     // Validate planType the same way handleClientSignup does. Default 'starter'
     // already comes from destructuring; this rejects any out-of-set string.
     const resolvedPlanType = VALID_CLIENT_PLANS.includes(planType) ? planType : 'starter';
+
+    // Per-client custom (white-glove) pricing captured at creation, so the very
+    // first checkout bills the bespoke amounts (no two-step, no plan-price window).
+    const wantsCustom = pricingMode === 'custom' && customPricing && Number(customPricing.priceCents) > 0;
+    const optNum = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
+    const customFields = wantsCustom ? {
+      pricing_mode: 'custom',
+      custom_price_cents: Math.round(Number(customPricing.priceCents)),
+      custom_setup_fee_cents: optNum(customPricing.setupFeeCents) === null ? null : Math.round(Number(customPricing.setupFeeCents)),
+      custom_included_minutes: optNum(customPricing.includedMinutes) === null ? null : Math.max(0, Math.round(Number(customPricing.includedMinutes))),
+      custom_minute_rate_cents: optNum(customPricing.minuteRateCents),
+      custom_call_limit: optNum(customPricing.callLimit) === null ? null : Math.round(Number(customPricing.callLimit)),
+    } : { pricing_mode: 'plan' };
     if (planType !== resolvedPlanType) {
       console.warn(`⚠️ Invalid planType "${planType}" from agency add-client, defaulting to starter`);
     }
@@ -1543,7 +1558,8 @@ async function handleAgencyAddClient(req, res) {
       billing_mode: manualBilling ? 'manual' : 'connect',
       usage_resets_at: manualBilling ? manualUsageResetAt() : null,
       plan_type: resolvedPlanType,
-      monthly_call_limit: callLimit,
+      monthly_call_limit: (wantsCustom && customFields.custom_call_limit != null) ? customFields.custom_call_limit : callLimit,
+      ...customFields,
       calls_this_month: 0,
       business_website: websiteUrl || null,
       provisioning_method: phoneResult.provisioningMethod || 'platform',

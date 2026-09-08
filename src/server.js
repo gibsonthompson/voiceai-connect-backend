@@ -274,6 +274,7 @@ const {
   createClientPortal,
   changeClientPlan,
   cancelClientSubscription,
+  setClientCustomPricing,
   syncConnectBrandingHandler,
   handleConnectStripeWebhook,
   expireTrials,
@@ -1507,6 +1508,7 @@ app.post('/api/client/portal', createClientPortal);
 // managing agency) inside the handler.
 app.post('/api/client/change-plan', changeClientPlan);
 app.post('/api/client/cancel-subscription', cancelClientSubscription);
+app.post('/api/client/set-custom-pricing', setClientCustomPricing);
 app.use('/api/client', clientRoutes);
 app.use('/api/client', require('./routes/call-mode'));
 app.use('/api/client', clientContactsRoutes);
