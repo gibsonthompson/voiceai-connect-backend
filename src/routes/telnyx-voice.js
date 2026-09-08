@@ -612,7 +612,7 @@ router.post('/api/voice/send-sms', async (req, res) => {
     }
 
     const { data: client } = clientId
-      ? await supabase.from('clients').select('agency_id, tool_config, vapi_phone_number').eq('id', clientId).single()
+      ? await supabase.from('clients').select('agency_id, tool_config, vapi_phone_number, business_name').eq('id', clientId).single()
       : { data: null };
 
     // Resolve a saved-text key to its EXACT configured value, so links and
@@ -620,7 +620,26 @@ router.post('/api/voice/send-sms', async (req, res) => {
     if (savedKey) {
       const preset = client && client.tool_config && client.tool_config.smsPresets && client.tool_config.smsPresets[savedKey];
       if (preset && preset.enabled && (preset.value || '').toString().trim()) {
-        text = preset.value.toString().trim();
+        const value = preset.value.toString().trim();
+        // Presets are usually a bare link/address. Sending that raw reads as
+        // cold and spammy. Wrap it in a short, warm, branded message — but keep
+        // the value character-for-character (it's dropped in verbatim, not
+        // reworded), so links never break. If the client already wrote a full
+        // message as the value (has sentence punctuation or is long), leave it.
+        const looksBare = value.length <= 90 && !/[.!?]\s/.test(value) && !/\n/.test(value);
+        if (looksBare && client.business_name) {
+          const biz = client.business_name;
+          const lead = {
+            website: `Thanks for calling ${biz}! Here's our website so you can take a look:`,
+            address: `Thanks for calling ${biz}! Here's where to find us:`,
+            payment: `Here's your secure payment link from ${biz}:`,
+            review: `It was great talking with you! If you have a moment, we'd really appreciate a quick review for ${biz}:`,
+          }[savedKey] || `Thanks for calling ${biz}! Here's what you asked for:`;
+          const closer = savedKey === 'review' ? 'Thank you!' : 'Let us know if there\'s anything else we can help with!';
+          text = `${lead}\n${value}\n\n${closer}`;
+        } else {
+          text = value;
+        }
       } else if (!text) {
         return reply('That saved text is not set up, so nothing was sent. Read the information out loud instead.');
       }
