@@ -314,12 +314,30 @@ async function updateClientBillingQuantity(agencyId) {
       return { updated: true, billableCount };
     }
 
-    // ── CASE 2: Client price item MISSING → add it to subscription ──
+    // ── CASE 2: No stored item id → the per-client item may STILL exist on the
+    //    subscription (created earlier but its id was never recorded, e.g. added
+    //    at checkout, or a prior save failed). Blindly creating then fails with
+    //    "a new item with Price X can't be added, an existing item already uses
+    //    it." So retrieve the subscription, adopt any item already on this price,
+    //    and only create when the price is genuinely absent.
     const clientPriceId = getClientPriceId(agency.plan_type);
 
     if (!clientPriceId) {
       console.warn(`⚠️ No client price configured for plan ${agency.plan_type}, per-client billing skipped`);
       return { updated: false, reason: `No client price for plan ${agency.plan_type}` };
+    }
+
+    const sub = await stripe.subscriptions.retrieve(agency.stripe_subscription_id);
+    const existingItem = (sub.items?.data || []).find((it) => it.price && it.price.id === clientPriceId);
+
+    if (existingItem) {
+      await stripe.subscriptionItems.update(existingItem.id, { quantity: billableCount });
+      await supabase
+        .from('agencies')
+        .update({ stripe_client_meter_item_id: existingItem.id, billable_clients_count: billableCount })
+        .eq('id', agencyId);
+      console.log(`📊 Adopted existing per-client item ${existingItem.id} | ${billableCount} billable clients (id was unrecorded)`);
+      return { updated: true, billableCount, clientItemAdopted: true };
     }
 
     console.log(`📊 Adding per-client price item to subscription for agency ${agencyId.slice(0, 8)}...`);
