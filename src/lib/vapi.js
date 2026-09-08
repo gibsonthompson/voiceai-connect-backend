@@ -3125,29 +3125,74 @@ async function provisionPhoneNumber(areaCode, options = {}) {
   }
 
   // ── Step 1: Search Telnyx for available numbers ───────────────────
-  const searchUrl = `https://api.telnyx.com/v2/available_phone_numbers?filter[country_code]=US&filter[national_destination_code]=${areaCode}&filter[features][]=sms&filter[features][]=voice&filter[limit]=1`;
-
-  const searchRes = await fetch(searchUrl, {
-    headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}` }
-  });
-
-  if (!searchRes.ok) {
-    const errText = await searchRes.text().catch(() => '');
-    const statusCode = searchRes.status;
-    const error = new Error(`[HTTP ${statusCode}] Telnyx number search failed for area code ${areaCode}: ${errText.slice(0, 200)}`);
-    error.statusCode = statusCode;
-    if ([402, 403, 429].includes(statusCode)) error.isAccountLevel = true;
-    throw error;
+  // Two passes. First we ask strictly for numbers that do BOTH sms + voice,
+  // since we text call summaries and want SMS on the line. If that comes back
+  // empty (thin inventory in this area code, Telnyx error 10031 "No numbers
+  // found for the given filters"), we retry with best_effort=true so Telnyx
+  // returns whatever it has instead of hard-failing, then prefer a result that
+  // still supports both features.
+  async function searchTelnyx(bestEffort) {
+    const params = [
+      'filter[country_code]=US',
+      `filter[national_destination_code]=${areaCode}`,
+      'filter[features][]=sms',
+      'filter[features][]=voice',
+      'filter[limit]=25',
+    ];
+    if (bestEffort) params.push('filter[best_effort]=true');
+    const url = `https://api.telnyx.com/v2/available_phone_numbers?${params.join('&')}`;
+    const res = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}` }
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      const statusCode = res.status;
+      const err = new Error(`[HTTP ${statusCode}] Telnyx number search failed for area code ${areaCode}: ${errText.slice(0, 200)}`);
+      err.statusCode = statusCode;
+      // A 400 "no numbers found" is a soft empty, not a hard failure: let the
+      // caller fall through to the best_effort retry instead of aborting.
+      err.softEmpty = statusCode === 400 && /no numbers found/i.test(errText);
+      if ([402, 403, 429].includes(statusCode)) err.isAccountLevel = true;
+      throw err;
+    }
+    const json = await res.json();
+    return json.data || [];
   }
 
-  const searchData = await searchRes.json();
-  const available = searchData.data || [];
+  let available = [];
+  try {
+    available = await searchTelnyx(false);
+  } catch (e) {
+    // Account-level problems (billing/permissions/rate limit) are real failures.
+    // A hard non-400 error is also real. A soft empty falls through to retry.
+    if (e.isAccountLevel || (!e.softEmpty && e.statusCode !== 400)) throw e;
+    console.warn(`   ⚠️  Strict sms+voice search empty for ${areaCode}; retrying with best_effort`);
+  }
+
+  if (available.length === 0) {
+    // Relaxed retry: Telnyx returns numbers even when they don't match every
+    // filter, so we may get voice-only numbers back here.
+    available = await searchTelnyx(true);
+  }
 
   if (available.length === 0) {
     throw new Error(`No numbers available in area code ${areaCode}`);
   }
 
-  const selectedNumber = available[0].phone_number; // E.164 format
+  // features come back as [{ name: 'sms' }, { name: 'voice' }]. Prefer a number
+  // that still does both; fall back to the first available number otherwise.
+  const featureNames = (n) => (n.features || [])
+    .map((f) => (typeof f === 'string' ? f : (f && f.name)))
+    .filter(Boolean);
+  const hasBoth = (n) => {
+    const feats = featureNames(n);
+    return feats.includes('sms') && feats.includes('voice');
+  };
+  const preferred = available.find(hasBoth) || available[0];
+  const selectedNumber = preferred.phone_number; // E.164 format
+  if (!hasBoth(preferred)) {
+    console.warn(`   ⚠️  ${selectedNumber} may not support SMS (best_effort fallback); voice will still work`);
+  }
   console.log(`   📱 Found available number: ${selectedNumber} (area code: ${areaCode})`);
 
   // ── Step 2: Order the number from Telnyx ──────────────────────────
