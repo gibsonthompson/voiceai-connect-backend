@@ -273,6 +273,7 @@ const {
   createClientCheckout,
   createClientPortal,
   changeClientPlan,
+  cancelClientSubscription,
   syncConnectBrandingHandler,
   handleConnectStripeWebhook,
   expireTrials,
@@ -1505,6 +1506,7 @@ app.post('/api/client/portal', createClientPortal);
 // its own bearer-token ownership check (super_admin, the client itself, or the
 // managing agency) inside the handler.
 app.post('/api/client/change-plan', changeClientPlan);
+app.post('/api/client/cancel-subscription', cancelClientSubscription);
 app.use('/api/client', clientRoutes);
 app.use('/api/client', require('./routes/call-mode'));
 app.use('/api/client', clientContactsRoutes);

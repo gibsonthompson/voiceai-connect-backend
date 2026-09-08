@@ -1695,6 +1695,93 @@ async function changeClientPlan(req, res) {
   }
 }
 
+// ── CANCEL A CLIENT SUBSCRIPTION ───────────────────────────────────────────
+// The managing agency, the client itself, or an admin cancels a client's
+// subscription. Default is cancel-at-period-end: the client keeps the service
+// they already paid for until the period ends, then Stripe's
+// subscription.deleted webhook runs the shared teardown (cancelClientAndRelease).
+// immediate=true (agency/admin only) ends it now. resume=true un-schedules a
+// pending period-end cancel. A manual client has no Stripe subscription, so
+// cancel = tear down now.
+async function cancelClientSubscription(req, res) {
+  try {
+    const { client_id, immediate, resume } = req.body;
+    if (!client_id) return res.status(400).json({ error: 'Missing required field', required: ['client_id'] });
+
+    const decoded = decodeToken(req);
+    if (!decoded) return res.status(401).json({ error: 'Authentication required' });
+
+    const { data: client, error: clientError } = await supabase
+      .from('clients').select('*, agencies!clients_agency_id_fkey(*)').eq('id', client_id).single();
+    if (clientError || !client) return res.status(404).json({ error: 'Client not found' });
+
+    const isSuperAdmin = decoded.role === 'super_admin';
+    const isOwnClient = decoded.clientId && decoded.clientId === client.id;
+    const isManagingAgency = decoded.agencyId && decoded.agencyId === client.agency_id;
+    if (!isSuperAdmin && !isOwnClient && !isManagingAgency) return res.status(403).json({ error: 'Forbidden' });
+
+    const agency = client.agencies;
+    if (!agency) return res.status(404).json({ error: 'Agency not found' });
+
+    // Immediate teardown is agency/admin only. A client cancelling their own plan
+    // does so at period end (they keep what they paid for), so they can never
+    // instantly wipe out paid service by mistake.
+    const wantImmediate = immediate === true && (isManagingAgency || isSuperAdmin);
+
+    // ── Manual client: no Stripe subscription. Cancel = tear down now. ──
+    if (client.billing_mode === 'manual' || !client.stripe_connected_subscription_id) {
+      const result = await cancelClientAndRelease(client, isOwnClient ? 'client self-cancel (manual)' : 'agency/admin cancel (manual)');
+      if (!result || !result.ok) return res.status(500).json({ error: 'Failed to cancel client' });
+      return res.json({ success: true, canceled: true, immediate: true, manual: true });
+    }
+
+    if (!agency.stripe_account_id) {
+      return res.status(400).json({ error: 'Agency Stripe account not configured' });
+    }
+
+    // ── Resume: undo a scheduled period-end cancellation. ──
+    if (resume === true) {
+      await stripe.subscriptions.update(
+        client.stripe_connected_subscription_id,
+        { cancel_at_period_end: false },
+        { stripeAccount: agency.stripe_account_id }
+      );
+      console.log(`\u21a9\ufe0f  Cancel un-scheduled for client ${client.id}`);
+      return res.json({ success: true, resumed: true });
+    }
+
+    // ── Immediate: cancel now (subscription.deleted webhook runs teardown). ──
+    if (wantImmediate) {
+      try {
+        await stripe.subscriptions.cancel(
+          client.stripe_connected_subscription_id,
+          { stripeAccount: agency.stripe_account_id }
+        );
+      } catch (e) {
+        if (e.code !== 'resource_missing') throw e; // already gone in Stripe
+      }
+      // Belt-and-suspenders local teardown (the webhook also handles it).
+      await cancelClientAndRelease(client, 'immediate cancel');
+      console.log(`\ud83d\uded1 Client ${client.id} canceled immediately`);
+      return res.json({ success: true, canceled: true, immediate: true });
+    }
+
+    // ── Default: cancel at period end. Client keeps service until it ends. ──
+    const sub = await stripe.subscriptions.update(
+      client.stripe_connected_subscription_id,
+      { cancel_at_period_end: true },
+      { stripeAccount: agency.stripe_account_id }
+    );
+    const cancelsAt = sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString() : null;
+    console.log(`\ud83d\uddd3\ufe0f  Client ${client.id} scheduled to cancel at period end (${cancelsAt})`);
+    return res.json({ success: true, scheduled: true, cancels_at: cancelsAt });
+
+  } catch (error) {
+    console.error('\u274c Cancel subscription error:', error);
+    res.status(500).json({ error: 'Failed to cancel subscription' });
+  }
+}
+
 // ============================================================================
 // EXPIRE TRIALS (DB-only trials)
 // ----------------------------------------------------------------------------
@@ -2438,6 +2525,7 @@ module.exports = {
   createTrialCheckoutForSignup, // called from routes/client-signup.js
   createClientPortal,
   changeClientPlan,             // in-app plan change for active subscriptions
+  cancelClientSubscription,     // agency/client/admin cancel (period-end default)
   syncConnectBranding,          // push agency logo + colors to their Connect account
   syncConnectBrandingHandler,   // express handler for an explicit resync
   handleConnectStripeWebhook,
