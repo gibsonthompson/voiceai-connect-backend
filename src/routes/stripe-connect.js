@@ -119,6 +119,7 @@ const { enableAssistant, disableAssistant, disablePhoneNumber, enablePhoneNumber
 const { releaseBYOTNumber } = require('./byot');
 const { getSmsTemplate } = require('../lib/sms-templates');
 const { updateClientBillingQuantity } = require('../lib/usage-tracker');
+const { getPlan, getAgencyPlans } = require('../lib/plans');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
@@ -1496,11 +1497,6 @@ async function changeClientPlan(req, res) {
       return res.status(400).json({ error: 'Missing required fields', required: ['client_id', 'plan'] });
     }
 
-    const VALID_PLANS = ['starter', 'pro', 'growth'];
-    if (!VALID_PLANS.includes(plan)) {
-      return res.status(400).json({ error: 'Invalid plan', valid_plans: VALID_PLANS });
-    }
-
     // Auth: this endpoint mutates a live subscription and can charge a prorated
     // difference, so require a valid token whose owner is allowed to act on this
     // client. Allowed: super_admin, the client itself (clientId match), or the
@@ -1525,6 +1521,14 @@ async function changeClientPlan(req, res) {
     const agency = client.agencies;
     if (!agency) return res.status(404).json({ error: 'Agency not found' });
 
+    // Validate + resolve the target plan against THIS agency's actual plans
+    // (legacy starter/pro/growth OR custom Path B keys), not a hardcoded list,
+    // so custom-keyed plans work and price/limit come from the real plan.
+    const targetPlan = getPlan(agency, plan);
+    if (!targetPlan) {
+      return res.status(400).json({ error: 'Invalid plan', valid_plans: getAgencyPlans(agency).map((p) => p.key) });
+    }
+
     // ── Manual-billing client: change plan WITHOUT touching Stripe ──────────
     // A manual client has no Stripe Connect subscription, and its agency may not
     // use Connect at all, so the normal path (which requires charges enabled and
@@ -1542,8 +1546,7 @@ async function changeClientPlan(req, res) {
         return res.status(403).json({ error: 'Forbidden', message: 'Only your provider can change this plan.' });
       }
 
-      const callLimits = { starter: agency.limit_starter || 50, pro: agency.limit_pro || 150, growth: agency.limit_growth || 500 };
-      let limit = callLimits[plan];
+      let limit = Number.isInteger(targetPlan.call_limit) ? targetPlan.call_limit : 50;
 
       // Optional explicit cap override. Integer >= -1 (-1 = unlimited). Anything
       // else is rejected so a bad value cannot silently mis-set the cap.
@@ -1624,11 +1627,10 @@ async function changeClientPlan(req, res) {
       return res.status(400).json({ error: 'Subscription has no billable item to change' });
     }
 
-    // Target price + call limit (same defaults as createClientCheckout).
-    const priceAmounts = { starter: agency.price_starter || 9900, pro: agency.price_pro || 14900, growth: agency.price_growth || 29900 };
-    const callLimits = { starter: agency.limit_starter || 50, pro: agency.limit_pro || 150, growth: agency.limit_growth || 500 };
-    const priceAmount = priceAmounts[plan];
-    const callLimit = callLimits[plan];
+    // Target price + call limit come from the resolved plan (targetPlan), so any
+    // plan key (legacy or custom) is priced correctly, not just starter/pro/growth.
+    const priceAmount = Number.isInteger(targetPlan.price_cents) ? targetPlan.price_cents : 0;
+    const callLimit = Number.isInteger(targetPlan.call_limit) ? targetPlan.call_limit : 50;
     const currency = getCurrencyForCountry(agency.country || 'US');
 
     // Fresh product + price for the target plan on the connected account.
