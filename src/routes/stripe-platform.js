@@ -861,6 +861,20 @@ async function handleAgencySubscriptionUpdated(subscription) {
     .update(updates)
     .eq('id', agency.id);
 
+  // Cascade the client teardown when THIS update suspends the agency
+  // (canceled / unpaid / paused all map to 'suspended' above). Previously only
+  // the subscription.DELETED handler released client numbers, but Stripe ends
+  // most subscriptions via a subscription.UPDATED -> canceled/unpaid event
+  // (cancel-at-period-end, dunning lapse), so agencies that lapsed that way left
+  // every client active with a live, still-billing number. Guard on a real
+  // transition INTO suspended so an update while already suspended is a no-op;
+  // releaseAgencyClientNumbers is itself idempotent as a second safety net.
+  if (agencyStatus === 'suspended' && agency.status !== 'suspended') {
+    console.log(`🧹 Agency ${agency.id} suspended via subscription.updated (${status}); cascading client number release`);
+    try { await releaseAgencyClientNumbers(agency.id); }
+    catch (cascadeErr) { console.error(`   ❌ Cascade release failed for ${agency.id}:`, cascadeErr.message); }
+  }
+
   if (planChanged) {
     await syncPerClientSubscriptionItem(agency.id, detectedPlan, subscription.id);
     // Downgrade enforcement: if the new plan's cap is lower than the current
