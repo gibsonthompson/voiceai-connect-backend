@@ -41,7 +41,7 @@ const { supabase } = require('../lib/supabase');
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // Gibson's phone number for escalation
-const SUPPORT_PHONE = process.env.SUPPORT_PHONE_NUMBER || '';
+const SUPPORT_PHONE = process.env.SUPPORT_PHONE_NUMBER || process.env.PLATFORM_OWNER_PHONE || '+16783161454';
 // Platform notification number for sending
 const PLATFORM_NUMBER = process.env.TELNYX_SMS_FROM_NUMBER || process.env.TELNYX_PHONE_NUMBER || process.env.PLATFORM_PHONE_NUMBER || '';
 

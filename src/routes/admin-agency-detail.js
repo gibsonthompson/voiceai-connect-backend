@@ -154,9 +154,41 @@ router.get('/agencies/:agencyId/expanded', requireAdmin, async (req, res) => {
       onboarding_completed_at: agency.onboarding_completed_at || null,
     };
 
+    // ── Support & Feedback (what this agency has sent in) ───────────────
+    // Surfaces this agency's own help-widget escalations and product feedback
+    // in the admin detail panel, so the owner can see and act on what an agency
+    // reported without digging through the global queues.
+    let supportRequests = [];
+    try {
+      const { data: sr } = await supabase
+        .from('support_requests')
+        .select('id, message, user_type, display_name, user_email, status, source, created_at')
+        .eq('agency_id', agencyId)
+        .order('created_at', { ascending: false })
+        .limit(15);
+      supportRequests = sr || [];
+    } catch (e) {
+      // support_requests table might not exist yet
+    }
+
+    let feedback = [];
+    try {
+      const { data: fb } = await supabase
+        .from('agency_feedback')
+        .select('id, message, created_at')
+        .eq('agency_id', agencyId)
+        .order('created_at', { ascending: false })
+        .limit(15);
+      feedback = fb || [];
+    } catch (e) {
+      // agency_feedback table might not exist yet
+    }
+
     // ── Response ────────────────────────────────────────────────────────
     res.json({
       clients: clientList,
+      support_requests: supportRequests,
+      feedback,
       billable_client_count: billableClients.length,
       sms_history: smsHistory,
       checklist: {
