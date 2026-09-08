@@ -103,24 +103,31 @@ function generateSlug(name) {
 }
 
 async function ensureUniqueSlug(baseSlug, excludeAgencyId = null) {
-  let slug = baseSlug;
+  // The insert writes this same value to BOTH `slug` and `referral_code`, and
+  // each column has its own unique index. The old version only checked `slug`,
+  // so a value that was free as a slug but already taken as a referral_code
+  // slipped through to the insert, threw a 23505, and got mislabeled to the
+  // user as "email already exists". Check both columns here so the value we
+  // return is genuinely free for the insert.
+  const safeBase = (baseSlug && baseSlug.trim()) ? baseSlug.trim() : 'agency';
+  let slug = safeBase;
   let counter = 1;
 
   while (true) {
     let query = supabase
       .from('agencies')
       .select('id')
-      .eq('slug', slug);
+      .or(`slug.eq.${slug},referral_code.eq.${slug}`);
 
     if (excludeAgencyId) {
       query = query.neq('id', excludeAgencyId);
     }
 
-    const { data } = await query.single();
+    const { data } = await query.limit(1).maybeSingle();
 
     if (!data) break;
 
-    slug = `${baseSlug}-${counter}`;
+    slug = `${safeBase}-${counter}`;
     counter++;
   }
 
@@ -469,11 +476,26 @@ async function handleAgencySignup(req, res) {
       // pre-check above and hit the DB unique index (raw email, or the new
       // normalized_email index). Surface it as a clean 409, not a 500.
       if (agencyError.code === '23505') {
-        console.warn('Duplicate agency insert blocked by DB constraint:', agencyError.message);
-        return res.status(409).json({
-          error: 'Account already exists',
-          message: 'An agency with this email already exists. Please log in.'
-        });
+        // Figure out WHICH column actually collided so we stop telling people
+        // "email already exists" when it was really the slug, referral_code, or
+        // phone. Postgres names the offending index in message/details.
+        const dupInfo = `${agencyError.message || ''} ${agencyError.details || ''}`.toLowerCase();
+        console.warn('Duplicate agency insert blocked by DB constraint:', agencyError.message, agencyError.details);
+        let dupError = 'account_exists';
+        let dupMessage = 'An account with these details already exists. Please log in, or contact support.';
+        if (dupInfo.includes('email')) {
+          dupError = 'email_exists';
+          dupMessage = 'An agency with this email already exists. Please log in.';
+        } else if (dupInfo.includes('phone')) {
+          dupError = 'phone_exists';
+          dupMessage = 'An account with this phone number already exists. Please log in, or contact support.';
+        } else if (dupInfo.includes('slug') || dupInfo.includes('referral')) {
+          // Should be prevented by ensureUniqueSlug now; if one ever races
+          // through, say so honestly instead of blaming the email.
+          dupError = 'slug_exists';
+          dupMessage = 'That workspace name is taken. Please try a different name, or contact support if it keeps happening.';
+        }
+        return res.status(409).json({ error: dupError, message: dupMessage });
       }
       console.error('❌ Agency creation error:', agencyError);
       throw agencyError;
