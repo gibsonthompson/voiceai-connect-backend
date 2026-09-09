@@ -136,10 +136,11 @@ router.get('/:id', async (req, res) => {
 router.put('/:id/settings', requirePermissionIfAuthed('settings'), async (req, res) => {
   try {
     const { id } = req.params;
-    const { email, owner_phone, business_name, hipaa_mode, onboarding_completed, timezone } = req.body;
+    const { email, owner_phone, owner_name, business_name, hipaa_mode, onboarding_completed, timezone } = req.body;
     const updates = {};
     if (email) updates.email = email;
     if (owner_phone) updates.owner_phone = owner_phone;
+    if (typeof owner_name === 'string' && owner_name.trim()) updates.owner_name = owner_name.trim();
     if (business_name !== undefined && business_name.trim()) updates.business_name = business_name.trim();
     if (hipaa_mode !== undefined) updates.hipaa_mode = hipaa_mode === true;
     if (onboarding_completed !== undefined) updates.onboarding_completed = onboarding_completed === true;
