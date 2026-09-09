@@ -310,6 +310,17 @@ router.post('/:agencyId/domain', async (req, res) => {
       return res.status(400).json({ error: 'Domain is already in use by another agency' });
     }
 
+    // Capture the agency's CURRENT domain before we overwrite it, so we can
+    // detach it from Vercel after saving. Changing domains previously left the
+    // old one attached to the Vercel project, where it kept serving/redirecting,
+    // which is why a freshly verified new domain still showed the original.
+    const { data: prevRow } = await supabase
+      .from('agencies')
+      .select('marketing_domain')
+      .eq('id', agencyId)
+      .maybeSingle();
+    const previousDomain = prevRow?.marketing_domain || null;
+
     // ── Detect apex vs subdomain ──────────────────────────────────────
     const apex = isApexDomain(normalizedDomain);
     const subPrefix = !apex ? getSubdomainPrefix(normalizedDomain) : null;
@@ -390,6 +401,22 @@ router.post('/:agencyId/domain', async (req, res) => {
 
     if (dbError) return res.status(500).json({ error: 'Failed to save domain: ' + dbError.message });
     if (!agency) return res.status(404).json({ error: 'Agency not found' });
+
+    // Detach the previous domain from Vercel if it actually changed, so the old
+    // domain stops resolving/redirecting. Non-fatal: the DB already points at the
+    // new domain, and a leftover Vercel domain is swept-safe to retry later.
+    if (previousDomain && previousDomain !== normalizedDomain && VERCEL_TOKEN && VERCEL_PROJECT_ID) {
+      console.log(`   🧹 Removing previous domain from Vercel: ${previousDomain}`);
+      try {
+        await vercelRequest('DELETE', `/v9/projects/${VERCEL_PROJECT_ID}/domains/${previousDomain}`);
+        console.log(`   ✅ Previous domain removed from Vercel: ${previousDomain}`);
+      } catch (err) {
+        console.log(`   ⚠️ Could not remove previous domain ${previousDomain} (non-fatal):`, err.message);
+      }
+      // Old www variant (only existed for apex domains); 404 is fine.
+      try { await vercelRequest('DELETE', `/v9/projects/${VERCEL_PROJECT_ID}/domains/www.${previousDomain}`); }
+      catch (err) { /* www may not have existed; ignore */ }
+    }
 
     const needsVerification = verificationRecords.length > 0;
     console.log(`   ✅ Domain configured: ${normalizedDomain}${needsVerification ? ' (TXT verification required)' : ''}`);
@@ -642,12 +669,29 @@ router.delete('/:agencyId/domain', async (req, res) => {
     const apex = isApexDomain(domain);
     console.log(`   Removing domain: ${domain} (${apex ? 'apex' : 'subdomain'})`);
 
+    let vercelRemoved = true;
     if (VERCEL_TOKEN && VERCEL_PROJECT_ID) {
       // Always remove the primary domain
-      try { await vercelRequest('DELETE', `/v9/projects/${VERCEL_PROJECT_ID}/domains/${domain}`); console.log(`   ✅ Primary domain removed from Vercel`); } catch (err) { console.log(`   ⚠️ Could not remove primary:`, err.message); }
+      try {
+        await vercelRequest('DELETE', `/v9/projects/${VERCEL_PROJECT_ID}/domains/${domain}`);
+        console.log(`   ✅ Primary domain removed from Vercel`);
+      } catch (err) {
+        // Loud on purpose: a silent failure here is exactly what leaves the old
+        // domain attached and still serving. The DB is still cleared below
+        // (honoring the user's intent) and the reconcile-vercel-domains sweep is
+        // the backstop that detaches it later.
+        vercelRemoved = false;
+        console.error(`   ❌ Vercel did NOT remove primary domain ${domain} — reconcile sweep will retry:`, err.message);
+      }
       // Only remove www for apex domains
       if (apex) {
-        try { await vercelRequest('DELETE', `/v9/projects/${VERCEL_PROJECT_ID}/domains/www.${domain}`); console.log(`   ✅ WWW removed from Vercel`); } catch (err) { console.log(`   ⚠️ Could not remove www:`, err.message); }
+        try {
+          await vercelRequest('DELETE', `/v9/projects/${VERCEL_PROJECT_ID}/domains/www.${domain}`);
+          console.log(`   ✅ WWW removed from Vercel`);
+        } catch (err) {
+          vercelRemoved = false;
+          console.error(`   ❌ Vercel did NOT remove www.${domain} — reconcile sweep will retry:`, err.message);
+        }
       }
     }
 
@@ -658,8 +702,8 @@ router.delete('/:agencyId/domain', async (req, res) => {
 
     if (dbError) return res.status(500).json({ error: 'Failed to remove domain' });
 
-    console.log(`   ✅ Domain removed: ${domain}`);
-    res.json({ success: true, removed_domain: domain });
+    console.log(`   ✅ Domain removed: ${domain}${vercelRemoved ? '' : ' (Vercel detach FAILED — reconcile sweep will retry)'}`);
+    res.json({ success: true, removed_domain: domain, vercel_removed: vercelRemoved });
 
   } catch (error) {
     console.error(`   ❌ Error:`, error);
