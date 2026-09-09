@@ -7,7 +7,6 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { updateAssistantCalendar } = require('../lib/calendar-tools');
-const { getPlan } = require('../lib/plans');
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CALENDAR_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CALENDAR_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
@@ -19,60 +18,24 @@ const REDIRECT_URI = `${BACKEND_URL}/api/auth/google-calendar/callback`;
 
 // ============================================================================
 // PLAN GATING
-// Checks if the client's plan_type is in the agency's calendar_enabled_plans.
-// Each agency controls which of their client tiers get calendar access.
-// Default: ['pro', 'growth'] — starter is the upsell.
-// Agency configures this in their settings dashboard.
+// Google Calendar is a CORE feature now, included on every plan. This used to
+// gate on the plan's google_calendar feature flag / calendar_enabled_plans, but
+// the AI books for any client that connects a calendar, so the gate only created
+// a mismatch with the marketing (which lists calendar as core). Every client may
+// connect now; we only verify the client exists.
 // ============================================================================
 async function checkPlanAccess(clientId) {
   try {
     const { data: client, error: clientError } = await supabase
       .from('clients')
-      .select('plan_type, agency_id, subscription_status, is_test_client')
+      .select('id')
       .eq('id', clientId)
       .single();
 
     if (clientError || !client) {
       return { allowed: false, reason: 'Client not found' };
     }
-
-    // Test clients are a sandbox: calendar is always available so agencies can
-    // explore the full feature set regardless of plan gating.
-    if (client.is_test_client) return { allowed: true };
-
-    const { data: agency, error: agencyError } = await supabase
-      .from('agencies')
-      .select('plans, price_starter, price_pro, price_growth, limit_starter, limit_pro, limit_growth, plan_starter_name, plan_pro_name, plan_growth_name, calendar_enabled_plans')
-      .eq('id', client.agency_id)
-      .single();
-
-    if (agencyError || !agency) {
-      return { allowed: false, reason: 'Agency not found' };
-    }
-
-    const clientPlan = client.plan_type || 'starter';
-
-    // Path B source of truth: the client's own plan definition carries a
-    // google_calendar feature flag. If that plan grants calendar, allow — no
-    // separate list to keep in sync. getPlan resolves against the dynamic plans
-    // array (with legacy-column fallback baked in).
-    const planDef = getPlan(agency, clientPlan);
-    if (planDef && planDef.features && planDef.features.google_calendar) {
-      return { allowed: true };
-    }
-
-    // Legacy fallback: the calendar_enabled_plans column, for agencies that set
-    // calendar access the old way and haven't turned the feature on per-plan.
-    // Kept permissive so nothing that worked before this change stops working.
-    const enabledPlans = agency.calendar_enabled_plans || ['pro', 'growth'];
-    if (enabledPlans.includes(clientPlan)) {
-      return { allowed: true };
-    }
-
-    return {
-      allowed: false,
-      reason: 'Calendar integration is not included in your current plan. Please contact your provider about upgrading.'
-    };
+    return { allowed: true };
   } catch (err) {
     console.error('❌ Plan check error:', err);
     return { allowed: false, reason: 'Failed to check plan access' };

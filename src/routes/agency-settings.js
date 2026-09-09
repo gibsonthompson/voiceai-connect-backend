@@ -412,6 +412,7 @@ async function getAgencySettings(req, res) {
           onboarding_step: agency.onboarding_step,
           client_header_mode: agency.client_header_mode || 'agency_name',
           allow_client_branding: agency.allow_client_branding || false,
+          custom_features: Array.isArray(agency.custom_features) ? agency.custom_features : [],
           calendar_enabled_plans: agency.calendar_enabled_plans || ['pro', 'growth'],
           timezone: agency.timezone,
           country: agency.country || 'US',
@@ -491,6 +492,7 @@ async function getAgencySettings(req, res) {
         // Client dashboard settings
         client_header_mode: agency.client_header_mode || 'agency_name',
         allow_client_branding: agency.allow_client_branding || false,
+          custom_features: Array.isArray(agency.custom_features) ? agency.custom_features : [],
         
         // Domain
         marketing_domain: agency.marketing_domain,
@@ -710,7 +712,9 @@ async function updateAgencySettings(req, res) {
       // OG / Social meta
       'og_title',
       'og_description',
-      'og_image_url'
+      'og_image_url',
+      // Agency-defined custom plan feature bullets [{ key, label }]
+      'custom_features'
     ];
     
     const sanitizedUpdates = {};
@@ -718,6 +722,26 @@ async function updateAgencySettings(req, res) {
       if (updates[key] !== undefined) {
         sanitizedUpdates[key] = updates[key];
       }
+    }
+
+    // ── Custom plan features (agency-defined feature bullets) ────────────
+    // Editable list shown on the pricing/marketing tiles. Validate shape, cap
+    // count and length, dedupe keys, and drop anything malformed so bad input
+    // can't reach the renderer. Stored as JSONB [{ key, label }].
+    if (sanitizedUpdates.custom_features !== undefined) {
+      const raw = Array.isArray(sanitizedUpdates.custom_features) ? sanitizedUpdates.custom_features : [];
+      const seen = new Set();
+      const clean = [];
+      for (const f of raw) {
+        if (!f || typeof f !== 'object') continue;
+        const key = typeof f.key === 'string' ? f.key.trim().slice(0, 60) : '';
+        const label = typeof f.label === 'string' ? f.label.trim().slice(0, 80) : '';
+        if (!key || !label || seen.has(key)) continue;
+        seen.add(key);
+        clean.push({ key, label });
+        if (clean.length >= 15) break;
+      }
+      sanitizedUpdates.custom_features = clean;
     }
 
     // ── Slug (white-label subdomain) ─────────────────────────────────────
