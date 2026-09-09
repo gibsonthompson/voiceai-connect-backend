@@ -312,14 +312,14 @@ async function ensureConnectMinuteMeter(agency) {
 }
 
 // Included minutes for a plan (free allotment before overage). 0 = pure
-// per-minute, no free tier. Falls back to 0 for unknown plans.
+// per-minute, no free tier. Resolves through getPlan so the per-plan minutes set
+// in the pricing editor (Path B plans array) drive billing; getPlan already
+// falls back to the legacy included_minutes_<key> columns for the three legacy
+// tiers, so pre-migration agencies keep working.
 function includedMinutesForPlan(agency, plan) {
-  const map = {
-    starter: agency.included_minutes_starter || 0,
-    pro: agency.included_minutes_pro || 0,
-    growth: agency.included_minutes_growth || 0,
-  };
-  return map[plan] || 0;
+  const def = getPlan(agency, plan);
+  const mins = def && def.included_minutes;
+  return Number.isFinite(Number(mins)) ? Number(mins) : 0;
 }
 
 // Build a metered price on the connected account for this plan's minutes.
