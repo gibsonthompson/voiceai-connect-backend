@@ -21,6 +21,7 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { supabase } = require('../lib/supabase');
+const { getPlan } = require('../lib/plans');
 
 let sendSms;
 function getSendSms() {
@@ -142,21 +143,24 @@ async function checkTeamLimit(entityType, entityId) {
     // explore dashboard users regardless of plan gating.
     let maxAllowed = client?.is_test_client ? -1 : client?.max_team_members;
 
-    // 2. If no per-client override, check agency's per-plan-tier config
+    // 2. If no per-client override, read the client's plan definition. getPlan
+    //    resolves the Path B plans array (what the pricing editor writes) and
+    //    falls back to the legacy plan_features columns, so the per-plan team
+    //    seats set in the editor actually drive the limit.
     if (maxAllowed === null || maxAllowed === undefined) {
       if (client?.agency_id) {
         const { data: agency } = await supabase
           .from('agencies')
-          .select('max_team_members_client, plan_features')
+          .select('*')
           .eq('id', client.agency_id)
           .single();
 
-        // Check plan_features for per-plan team_members count
-        const planFeatures = agency?.plan_features;
         const clientPlan = client?.plan_type || 'starter';
-        const planTeamLimit = planFeatures?.[clientPlan]?.team_members;
+        const planDef = agency ? getPlan(agency, clientPlan) : null;
+        const planTeamLimit = planDef && planDef.features ? planDef.features.team_members : undefined;
 
-        if (typeof planTeamLimit === 'number' && planTeamLimit >= 0) {
+        if (typeof planTeamLimit === 'number' && planTeamLimit >= -1) {
+          // -1 = unlimited, 0 = owner only, N = N extra seats.
           maxAllowed = planTeamLimit;
         } else {
           // 3. Fall back to global agency default
