@@ -89,7 +89,7 @@ require('dns').setDefaultResultOrder('ipv4first');
 const express = require('express');
 const cors = require('cors');
 const { supabase } = require('./lib/supabase');
-const { fullyReleaseNumber } = require('./lib/vapi');
+const { fullyReleaseNumber, INDUSTRY_MAPPING, INDUSTRY_CONFIGS } = require('./lib/vapi');
 const { releaseBYOTNumber } = require('./routes/byot');
 // Number cleanup: canonical per-client teardown (used by the agency-cancel
 // cascade below) plus the backfill + Telnyx-reconcile cron routes mounted
@@ -1020,11 +1020,56 @@ app.put('/api/agency/:agencyId/clients/:clientId/industry', async (req, res) => 
     const { agencyId, clientId } = req.params;
     const { industry } = req.body;
     if (!industry) return res.status(400).json({ error: 'industry required' });
-    const { data: client } = await supabase.from('clients').select('id').eq('id', clientId).eq('agency_id', agencyId).single();
+    const { data: client } = await supabase
+      .from('clients')
+      .select('id, is_test_client, vapi_assistant_id, business_name')
+      .eq('id', clientId)
+      .eq('agency_id', agencyId)
+      .single();
     if (!client) return res.status(404).json({ error: 'Client not found' });
-    await supabase.from('clients').update({ industry, updated_at: new Date().toISOString() }).eq('id', clientId);
-    console.log('✅ Industry updated for client ' + clientId + ': ' + industry);
-    res.json({ success: true, industry });
+
+    // Industry is LOCKED after creation for live clients. Switching it would
+    // regenerate the entire receptionist persona under an already-provisioned
+    // number, which we don't want on a paying client. Only test clients (used
+    // for demos) may change industry.
+    if (!client.is_test_client) {
+      return res.status(403).json({ error: 'Industry is locked after creation and can only be changed on a test client.' });
+    }
+
+    // Regenerate the prompt from the NEW industry so the change actually takes
+    // effect (mirrors the Reset Prompt flow). Without this, the cached
+    // system_prompt would keep serving the old industry's persona.
+    const industryKey = INDUSTRY_MAPPING[industry] || 'professional_services';
+    const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
+    const newPrompt = config.systemPrompt(client.business_name);
+
+    // Push to the VAPI assistant (covers static-mode phones); the cached
+    // system_prompt update below covers dynamic per-call builds and the UI.
+    if (client.vapi_assistant_id && process.env.VAPI_API_KEY) {
+      try {
+        const getRes = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
+          headers: { 'Authorization': `Bearer ${process.env.VAPI_API_KEY}` },
+        });
+        if (getRes.ok) {
+          const current = await getRes.json();
+          const updatedModel = { ...current.model, messages: [{ role: 'system', content: newPrompt }] };
+          await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, {
+            method: 'PATCH',
+            headers: { 'Authorization': `Bearer ${process.env.VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: updatedModel }),
+          });
+        }
+      } catch (vapiErr) {
+        console.error('Industry change: VAPI prompt push failed (non-fatal):', vapiErr.message);
+      }
+    }
+
+    await supabase
+      .from('clients')
+      .update({ industry, system_prompt: newPrompt, updated_at: new Date().toISOString() })
+      .eq('id', clientId);
+    console.log('✅ Industry updated for TEST client ' + clientId + ': ' + industry + ' (prompt regenerated)');
+    res.json({ success: true, industry, system_prompt: newPrompt });
   } catch (error) {
     console.error('Error updating industry:', error);
     res.status(500).json({ error: 'Server error' });
