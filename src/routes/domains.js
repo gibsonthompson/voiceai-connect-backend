@@ -159,6 +159,30 @@ async function vercelRequest(method, endpoint, body = null) {
 }
 
 // ============================================================================
+// HELPER: Delete a domain from the Vercel project, with retries.
+// A silent failure here is what used to leave an old domain attached and still
+// serving after a change. We retry transient errors before giving up. A 404
+// means the domain is already gone, which counts as success. Returns true only
+// when the domain is confirmed off the project.
+// ============================================================================
+async function deleteVercelDomainWithRetry(domainName, attempts = 3) {
+  const backoff = [400, 1200, 3000];
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await vercelRequest('DELETE', `/v9/projects/${VERCEL_PROJECT_ID}/domains/${domainName}`);
+      return true;
+    } catch (err) {
+      if (err.status === 404) return true; // already removed
+      const last = i === attempts - 1;
+      console.error(`   ⚠️ Vercel delete failed for ${domainName} (attempt ${i + 1}/${attempts})${last ? ' — giving up' : ', retrying'}:`, err.message);
+      if (last) return false;
+      await new Promise((r) => setTimeout(r, backoff[i] || 3000));
+    }
+  }
+  return false;
+}
+
+// ============================================================================
 // HELPER: Extract verification records from Vercel response
 // ============================================================================
 function extractVerificationRecords(data) {
@@ -671,26 +695,21 @@ router.delete('/:agencyId/domain', async (req, res) => {
 
     let vercelRemoved = true;
     if (VERCEL_TOKEN && VERCEL_PROJECT_ID) {
-      // Always remove the primary domain
-      try {
-        await vercelRequest('DELETE', `/v9/projects/${VERCEL_PROJECT_ID}/domains/${domain}`);
+      // Remove the primary domain, retrying transient Vercel failures so a blip
+      // doesn't leave the old domain attached and still serving.
+      if (await deleteVercelDomainWithRetry(domain)) {
         console.log(`   ✅ Primary domain removed from Vercel`);
-      } catch (err) {
-        // Loud on purpose: a silent failure here is exactly what leaves the old
-        // domain attached and still serving. The DB is still cleared below
-        // (honoring the user's intent) and the reconcile-vercel-domains sweep is
-        // the backstop that detaches it later.
+      } else {
         vercelRemoved = false;
-        console.error(`   ❌ Vercel did NOT remove primary domain ${domain} — reconcile sweep will retry:`, err.message);
+        console.error(`   ❌ Vercel did NOT remove primary domain ${domain} after retries`);
       }
       // Only remove www for apex domains
       if (apex) {
-        try {
-          await vercelRequest('DELETE', `/v9/projects/${VERCEL_PROJECT_ID}/domains/www.${domain}`);
+        if (await deleteVercelDomainWithRetry(`www.${domain}`)) {
           console.log(`   ✅ WWW removed from Vercel`);
-        } catch (err) {
+        } else {
           vercelRemoved = false;
-          console.error(`   ❌ Vercel did NOT remove www.${domain} — reconcile sweep will retry:`, err.message);
+          console.error(`   ❌ Vercel did NOT remove www.${domain} after retries`);
         }
       }
     }
