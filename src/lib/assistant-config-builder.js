@@ -1125,7 +1125,7 @@ function enforceAgencyPlanFeatures(toolConfig, client, agency) {
     spam_detection: 'spamDetection',
     call_transfer: 'transferCall',
     transfer_fallback: 'transferFallbackToMessage',
-    after_hours_mode: 'businessHoursRouting',
+    business_hours: 'businessHoursRouting',
   };
 
   const enforced = { ...toolConfig };
