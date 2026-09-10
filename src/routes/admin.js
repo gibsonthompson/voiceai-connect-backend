@@ -198,10 +198,23 @@ router.get('/agencies', requireAdmin, async (req, res) => {
     });
 
     // Merge the rollup counts onto each fetched agency row.
+    // Owner login email (users.email) can differ from agencies.email, so attach
+    // it, otherwise the admin can't find an agency by the email they log in with.
+    const _agencyIds = (agencies || []).map(a => a.id);
+    const _ownerEmails = {};
+    if (_agencyIds.length) {
+      const { data: _owners } = await supabase
+        .from('users')
+        .select('agency_id, email')
+        .in('agency_id', _agencyIds)
+        .eq('role', 'agency_owner');
+      for (const u of (_owners || [])) { if (u.agency_id && u.email) _ownerEmails[u.agency_id] = u.email; }
+    }
     const enriched = (agencies || []).map(a => {
       const r = rollup[a.id] || {};
       return {
         ...a,
+        login_email: _ownerEmails[a.id] || null,
         client_count: r.client_count || 0,
         call_count: r.call_count || 0,
         lead_count: r.lead_count || 0,
