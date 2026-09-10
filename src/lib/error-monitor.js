@@ -105,37 +105,22 @@ async function alertError(context, error, metadata = {}) {
 
   try {
     const errorMsg = error?.message || String(error);
-    const stack = error?.stack?.split('\n').slice(1, 3).join('\n') || '';
+    const stack = error?.stack?.split('\n').slice(1, 6).join('\n') || '';
 
-    const lines = [];
-    lines.push(`🚨 Backend Error`);
-    lines.push(`━━━━━━━━━━━━━━━━━━`);
-    lines.push(`📍 ${context}`);
-    lines.push(`❌ ${errorMsg.slice(0, 200)}`);
-
-    if (stack) {
-      const cleanStack = stack.replace(/\s+at\s+/g, '→ ').trim().slice(0, 150);
-      lines.push(`📋 ${cleanStack}`);
-    }
-
-    // Add metadata
-    const metaKeys = Object.keys(metadata);
-    if (metaKeys.length > 0) {
-      lines.push(`━━━━━━━━━━━━━━━━━━`);
-      for (const key of metaKeys.slice(0, 4)) {
-        const val = String(metadata[key]).slice(0, 60);
-        lines.push(`${key}: ${val}`);
-      }
-    }
-
-    lines.push(`━━━━━━━━━━━━━━━━━━`);
-    lines.push(`${new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true })} ET`);
-
-    await sendTelnyxSMS(PLATFORM_OWNER_PHONE, lines.join('\n'));
-    console.log(`   📱 Error alert SMS sent for: ${context}`);
+    // Store to the DB for the admin Support tab (Backend Errors) instead of SMS.
+    // The rate-limit / dedup above still applies.
+    const { supabase } = require('./supabase');
+    await supabase.from('error_reports').insert({
+      context: String(context).slice(0, 300),
+      message: errorMsg.slice(0, 1000),
+      stack: stack.slice(0, 2000),
+      metadata: (metadata && typeof metadata === 'object') ? metadata : {},
+      signature,
+    });
+    console.log(`   🗒️  Error recorded to error_reports: ${context}`);
     return true;
-  } catch (smsErr) {
-    console.error(`   ❌ Error alert SMS failed:`, smsErr.message);
+  } catch (dbErr) {
+    console.error(`   ❌ Error report insert failed:`, dbErr?.message || dbErr);
     return false;
   }
 }

@@ -1631,4 +1631,33 @@ router.post('/migrate-phones-dynamic', requireAdmin, async (req, res) => {
   }
 });
 
+// ============================================================================
+// BACKEND ERROR REPORTS (admin Support tab -> Backend Errors)
+// alertError() writes rows to error_reports instead of SMS; these expose them.
+// ============================================================================
+router.get('/error-reports', requireAdmin, async (req, res) => {
+  try {
+    const showResolved = req.query.resolved === 'true';
+    let q = supabase.from('error_reports').select('*').order('created_at', { ascending: false }).limit(300);
+    if (!showResolved) q = q.eq('resolved', false);
+    const { data, error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+    const { count } = await supabase.from('error_reports').select('id', { count: 'exact', head: true }).eq('resolved', false);
+    res.json({ reports: data || [], unresolved: count || 0 });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.patch('/error-reports/:id/resolve', requireAdmin, async (req, res) => {
+  try {
+    const resolved = req.body?.resolved !== false;
+    const { error } = await supabase.from('error_reports').update({ resolved }).eq('id', req.params.id);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, resolved });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
