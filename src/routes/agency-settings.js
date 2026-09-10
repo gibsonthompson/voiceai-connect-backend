@@ -714,7 +714,9 @@ async function updateAgencySettings(req, res) {
       'og_description',
       'og_image_url',
       // Agency-defined custom plan feature bullets [{ key, label }]
-      'custom_features'
+      'custom_features',
+      // Agency's self-billing method (record only, for a possible future integration)
+      'billing_method'
     ];
     
     const sanitizedUpdates = {};
