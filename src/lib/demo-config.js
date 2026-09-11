@@ -33,12 +33,23 @@ const DEMO_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL';
 // Applied to ALL demo calls. Previously bare { provider, voiceId } only.
 // See: https://docs.vapi.ai/voice-fallback-plan for VAPI ElevenLabs schema
 const DEMO_VOICE_SETTINGS = {
-  model: 'eleven_flash_v2',       // Low-latency model, best for phone calls
+  model: 'eleven_flash_v2_5',     // Low-latency real-time model, best for phone calls
   stability: 0.5,                    // Natural variation without erratic swings
   similarityBoost: 0.75,             // Clear without over-enunciation
   style: 0.0,                        // ElevenLabs recommends 0 to avoid artifacts
   speed: 0.9,                        // Slightly slower — natural phone pacing
   optimizeStreamingLatency: 2,       // Default balance of quality vs speed
+};
+
+// Smart endpointing so demo calls don't eat VAPI's ~1.5s default turn wait.
+// 'vapi' (not 'livekit') because DEMO_TRANSCRIBER runs language:'multi'.
+const DEMO_SPEAKING_PLANS = {
+  startSpeakingPlan: {
+    waitSeconds: 0.4,
+    smartEndpointingPlan: { provider: 'vapi' },
+    transcriptionEndpointingPlan: { onPunctuationSeconds: 0.2, onNoPunctuationSeconds: 1.0, onNumberSeconds: 0.4 },
+  },
+  stopSpeakingPlan: { numWords: 2, voiceSeconds: 0.2, backoffSeconds: 1.0 },
 };
 
 // ── Industry demo numbers (backward compat — all use V3 now) ──────────────
@@ -489,6 +500,7 @@ function buildIndustryDemoConfig(industryKey, agency) {
       tools: getDemoTools(),
     },
     voice: { provider: '11labs', voiceId, ...DEMO_VOICE_SETTINGS },
+    ...DEMO_SPEAKING_PLANS,
     firstMessage,
     recordingEnabled: true,
     analysisPlan: DEMO_ANALYSIS_PLAN,
@@ -519,6 +531,7 @@ function buildDemoDynamicConfig(agency) {
       tools: getDemoTools(),
     },
     voice: { provider: '11labs', voiceId: DEMO_VOICE_ID, ...DEMO_VOICE_SETTINGS },
+    ...DEMO_SPEAKING_PLANS,
     firstMessage: getDemoFirstMessageV3(agencyName),
     recordingEnabled: true,
     analysisPlan: DEMO_ANALYSIS_PLAN,

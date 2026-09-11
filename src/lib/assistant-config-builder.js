@@ -1301,7 +1301,28 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
       ...(toolIds.length > 0 && { toolIds }),
       ...(tools.length > 0 && { tools }),
     },
-    voice: { provider: '11labs', voiceId },
+    // Real-time TTS model (~75ms first audio). Without an explicit model, VAPI
+    // falls back to a slower ElevenLabs default; flash v2.5 is the live-call model.
+    voice: { provider: '11labs', model: 'eleven_flash_v2_5', voiceId },
+    // Latency: smart endpointing. VAPI's default no-punctuation wait is ~1.5s per
+    // turn; this replaces it. Provider 'vapi' (NOT 'livekit') because the transcriber
+    // runs language:'multi' and LiveKit smart endpointing is English-only.
+    startSpeakingPlan: {
+      waitSeconds: 0.4,
+      smartEndpointingPlan: { provider: 'vapi' },
+      transcriptionEndpointingPlan: {
+        onPunctuationSeconds: 0.2,
+        onNoPunctuationSeconds: 1.0,
+        onNumberSeconds: 0.4,
+      },
+    },
+    // Barge-in: let the caller interrupt quickly, but not so eagerly that
+    // background noise cuts the assistant off.
+    stopSpeakingPlan: {
+      numWords: 2,
+      voiceSeconds: 0.2,
+      backoffSeconds: 1.0,
+    },
     firstMessage,
     recordingEnabled: hipaaMode ? false : true,
     serverMessages: ['end-of-call-report', 'transcript', 'status-update'],

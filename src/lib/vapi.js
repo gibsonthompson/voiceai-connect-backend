@@ -2465,6 +2465,7 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
 
     const assistantConfig = {
       name: sanitizeAssistantName(businessName),
+      transcriber: { provider: 'deepgram', model: 'nova-2', language: 'multi' },
       model: {
         provider: 'openai',
         model: modelId,
@@ -2473,7 +2474,13 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
         ...(queryToolId && { toolIds: [queryToolId] }),
         ...(tools.length > 0 && { tools })
       },
-      voice: { provider: '11labs', voiceId },
+      voice: { provider: '11labs', model: 'eleven_flash_v2_5', voiceId },
+      startSpeakingPlan: {
+        waitSeconds: 0.4,
+        smartEndpointingPlan: { provider: 'vapi' },
+        transcriptionEndpointingPlan: { onPunctuationSeconds: 0.2, onNoPunctuationSeconds: 1.0, onNumberSeconds: 0.4 },
+      },
+      stopSpeakingPlan: { numWords: 2, voiceSeconds: 0.2, backoffSeconds: 1.0 },
       firstMessage,
       recordingEnabled: true,
       serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
@@ -2565,6 +2572,7 @@ async function createDemoAssistant(agencyName) {
 
     const assistantConfig = {
       name: `${agencyName.slice(0, 25)} Demo Assistant`,
+      transcriber: { provider: 'deepgram', model: 'nova-2', language: 'multi' },
       model: {
         provider: 'openai',
         model: 'gpt-4o-mini',
@@ -2573,8 +2581,15 @@ async function createDemoAssistant(agencyName) {
       },
       voice: {
         provider: '11labs',
+        model: 'eleven_flash_v2_5',
         voiceId: VOICES.sarah
       },
+      startSpeakingPlan: {
+        waitSeconds: 0.4,
+        smartEndpointingPlan: { provider: 'vapi' },
+        transcriptionEndpointingPlan: { onPunctuationSeconds: 0.2, onNoPunctuationSeconds: 1.0, onNumberSeconds: 0.4 },
+      },
+      stopSpeakingPlan: { numWords: 2, voiceSeconds: 0.2, backoffSeconds: 1.0 },
       firstMessage: getDemoFirstMessage(agencyName),
       recordingEnabled: true,
       serverMessages: ['end-of-call-report'],
