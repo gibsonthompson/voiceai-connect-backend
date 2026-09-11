@@ -9,20 +9,19 @@ const DEFAULT_TEMPLATES = [
   // ==================== EMAIL TEMPLATES ====================
   {
     name: 'Initial Outreach',
-    description: 'First contact with a new lead - friendly, value-focused',
+    description: 'First cold email. Leads with the missed-call problem and a hear-it-yourself demo instead of asking for a meeting.',
     type: 'email',
-    subject: 'Quick question about {lead_business_name}',
+    subject: 'calls slipping past {lead_business_name}?',
     body: `Hi {lead_contact_first_name},
 
-I came across {lead_business_name} and noticed you're doing great work in the {lead_industry} space.
+{personalized_line}
 
-Quick question - how are you currently handling after-hours calls and missed calls during busy periods?
+Quick reason I'm reaching out: most {lead_industry} shops lose calls they never even see. Someone rings while you're on a job or after you've closed, hits voicemail, and just dials the next name on the list.
 
-I work with {lead_industry} businesses to make sure they never miss a lead. Our AI receptionist answers every call 24/7, books appointments, and sounds completely natural - callers can't tell the difference.
+I set up an AI receptionist that catches those. It answers 24/7, sounds like a real person, and books the job straight onto your calendar.
 
-Would you be open to a quick 10-minute call to see if it might be a fit?
+Easiest way to judge it is to hear it. {demo_cta}
 
-Best,
 {agency_owner_name}
 {agency_name}
 {agency_phone}`,
@@ -34,20 +33,16 @@ Best,
   },
   {
     name: 'Follow-up #1 - Value Add',
-    description: 'First follow-up - share a specific benefit or testimonial',
+    description: 'First follow-up. One concrete scenario plus the hear-it CTA. Short.',
     type: 'email',
-    subject: 'Following up - {lead_business_name}',
+    subject: 're: {lead_business_name}',
     body: `Hi {lead_contact_first_name},
 
-I wanted to follow up on my note about AI receptionists for {lead_business_name}.
+Following up on my note, and I'll keep it to one thought.
 
-Here's what one of our {lead_industry} clients told us last month:
+Think about the last call {lead_business_name} missed after hours. If the AI receptionist had picked up, taken the details, and booked it, that's a job you keep instead of hand to a competitor. Now do that every night and every weekend.
 
-"We were missing about 30% of our calls. Now we capture every single one, and the AI books appointments directly into our calendar. It paid for itself in the first week."
-
-I'd love to show you how it works - takes about 10 minutes and there's zero obligation.
-
-Would tomorrow or Thursday work for a quick call?
+Fastest way to see it is to hear it. {demo_cta}
 
 {agency_owner_name}
 {agency_name}`,
@@ -59,22 +54,16 @@ Would tomorrow or Thursday work for a quick call?
   },
   {
     name: 'Follow-up #2 - Social Proof',
-    description: 'Second follow-up - ROI focused with statistics',
+    description: 'Second follow-up. Reframes the math honestly instead of quoting invented stats.',
     type: 'email',
-    subject: 'Real numbers from {lead_industry} businesses',
+    subject: 'the math on missed calls',
     body: `Hi {lead_contact_first_name},
 
-I know you're busy running {lead_business_name}, so I'll keep this short.
+I know you're busy running {lead_business_name}, so, short version.
 
-Here's what we're seeing with {lead_industry} businesses using our AI receptionist:
+You don't need a fancy statistic to see this one. If the AI catches even one job a week you'd otherwise have missed, it has already paid for itself several times over, and it's catching a lot more than one. Nights, weekends, lunch rushes, the calls that never even make it to voicemail.
 
-- 40% increase in booked appointments
-- Zero missed calls (even at 2am)
-- Average ROI of 5x in the first 90 days
-
-If you're curious, I can show you exactly how it works in under 10 minutes. No pressure, no long sales pitch.
-
-Just reply "interested" and I'll send over a few time options.
+{demo_cta}
 
 {agency_owner_name}
 {agency_phone}`,
@@ -86,18 +75,16 @@ Just reply "interested" and I'll send over a few time options.
   },
   {
     name: 'Follow-up #3 - Direct Ask',
-    description: 'Third follow-up - more direct approach',
+    description: 'Third follow-up. A clean yes/no so you stop chasing dead leads.',
     type: 'email',
-    subject: 'One more thing - {lead_business_name}',
+    subject: 'worth a look, or not?',
     body: `Hi {lead_contact_first_name},
 
-I've reached out a couple times about helping {lead_business_name} capture more calls and book more appointments.
+I've sent a couple of notes about catching more of {lead_business_name}'s calls, so I'll just ask it straight:
 
-I don't want to keep filling up your inbox, so I'll ask directly:
+Is this worth a look, or should I close it out for now?
 
-Is this something you'd like to explore, or should I check back in a few months?
-
-Either way is totally fine - just let me know and I'll adjust accordingly.
+Either answer is genuinely fine. A quick "yes" or "not now" and I'll take it from there.
 
 {agency_owner_name}
 {agency_name}`,
@@ -109,20 +96,16 @@ Either way is totally fine - just let me know and I'll adjust accordingly.
   },
   {
     name: 'Break-up Email',
-    description: 'Final attempt - creates urgency through scarcity',
+    description: 'Final email in the sequence. Low-key, leaves the door open, no fake scarcity.',
     type: 'email',
-    subject: 'Closing your file - {lead_business_name}',
+    subject: 'closing this out',
     body: `Hi {lead_contact_first_name},
 
-I've tried to connect a few times about AI receptionists for {lead_business_name}, but I haven't heard back.
+Haven't heard back, so I'll get out of your inbox.
 
-No worries at all - I know timing is everything.
+If the day comes where you're tired of missed calls turning into lost jobs, just reply to this and I'll get {lead_business_name} an AI receptionist set up fast. It'll be here whenever you want it.
 
-I'm going to close out my notes on this for now. If you ever want to explore how to capture more calls and book more appointments on autopilot, just reply to this email and I'll be here.
-
-Wishing you and {lead_business_name} continued success.
-
-Best,
+All the best,
 {agency_owner_name}
 {agency_name}`,
     is_default: false,
@@ -133,20 +116,15 @@ Best,
   },
   {
     name: 'Referral Introduction',
-    description: 'When you get a warm referral from an existing client',
+    description: 'Warm referral intro. Leads with the referrer, then offers the hear-it demo. Replace [Referrer] before sending.',
     type: 'email',
-    subject: '{lead_contact_first_name} - [Referrer Name] suggested I reach out',
+    subject: '{lead_contact_first_name}, [Referrer] pointed me your way',
     body: `Hi {lead_contact_first_name},
 
-[Referrer Name] mentioned you might be interested in learning about AI receptionists for {lead_business_name}.
+[Referrer] figured {lead_business_name} might want what I set up for them: an AI receptionist that answers every call, day or night, and books jobs straight to the calendar. It's been catching calls they used to lose.
 
-We've been helping them capture more calls and book appointments automatically - they thought it might be valuable for you too.
+Happy to show you the same. {demo_cta}
 
-The short version: our AI answers your calls 24/7, handles common questions, and books appointments directly into your calendar. Callers think they're talking to a real person.
-
-Would you have 10 minutes this week to see how it works?
-
-Best,
 {agency_owner_name}
 {agency_name}
 {agency_phone}`,
@@ -158,23 +136,20 @@ Best,
   },
   {
     name: 'Post-Demo Follow-up',
-    description: 'After showing a demo - move toward close',
+    description: 'After they have heard the demo. Short recap plus a one-click signup link.',
     type: 'email',
-    subject: 'Next steps for {lead_business_name}',
+    subject: 'getting {lead_business_name} set up',
     body: `Hi {lead_contact_first_name},
 
-Great chatting with you today about {lead_business_name}!
+Good talking today. Quick recap of what {lead_business_name} gets:
 
-As promised, here's a quick recap:
+- A receptionist that answers 24/7 and never drops a caller to voicemail
+- Books appointments and takes messages on its own
+- Live in about a day, with a 7-day free trial so there's no risk
 
-- Your AI receptionist will answer calls 24/7
-- It'll handle FAQs, book appointments, and take messages
-- Setup takes about 24-48 hours
-- You can try it risk-free for 7 days
+When you're ready, here's the link: {signup_link}. I'll personally make sure it's dialed in for you.
 
-Ready to get started? Just reply "let's do it" and I'll send over the signup link.
-
-Or if you have any questions, I'm happy to jump on another quick call.
+Any questions, just reply.
 
 {agency_owner_name}
 {agency_phone}`,
@@ -186,18 +161,14 @@ Or if you have any questions, I'm happy to jump on another quick call.
   },
   {
     name: 'Re-engagement - Past Lead',
-    description: 'Reaching back out to cold leads after some time',
+    description: 'Re-engaging an old lead. Short, references the gap, offers the live demo.',
     type: 'email',
-    subject: 'Still missing calls at {lead_business_name}?',
+    subject: 'still missing calls at {lead_business_name}?',
     body: `Hi {lead_contact_first_name},
 
-We chatted a while back about AI receptionists for {lead_business_name}, but the timing wasn't right.
+We talked a while back about missed calls at {lead_business_name} and the timing wasn't right. No problem, just checking whether it still is.
 
-A lot has changed since then - our AI is even smarter, setup is faster, and we're seeing incredible results with {lead_industry} businesses.
-
-If missed calls or after-hours inquiries are still a pain point, I'd love to show you what's new.
-
-Worth a quick 10-minute call?
+The AI receptionist is better than when we last spoke, and it takes about a day to go live. If calls are still slipping through, hear it for yourself. {demo_cta}
 
 {agency_owner_name}
 {agency_name}`,
@@ -211,10 +182,10 @@ Worth a quick 10-minute call?
   // ==================== SMS TEMPLATES ====================
   {
     name: 'SMS - Initial Outreach',
-    description: 'First SMS contact - short and direct',
+    description: 'First SMS. Short, human, ends with the hear-it offer.',
     type: 'sms',
     subject: null,
-    body: `Hi {lead_contact_first_name}, this is {agency_owner_name} from {agency_name}. I help {lead_industry} businesses like {lead_business_name} never miss a call with AI receptionists. Worth a quick chat? Let me know!`,
+    body: `Hi {lead_contact_first_name}, {agency_owner_name} here from {agency_name}. I set up AI receptionists that catch the calls {lead_business_name} misses after hours and on the job. {demo_cta}`,
     is_default: false,
     is_follow_up: false,
     sequence_name: 'sms_sequence',
@@ -223,10 +194,10 @@ Worth a quick 10-minute call?
   },
   {
     name: 'SMS - Follow-up',
-    description: 'SMS follow-up after no response',
+    description: 'SMS follow-up after no response. One line, one ask.',
     type: 'sms',
     subject: null,
-    body: `Hi {lead_contact_first_name}, following up on my message about AI receptionists for {lead_business_name}. Our clients see 40% more booked appointments. Quick call this week? - {agency_owner_name}`,
+    body: `Hi {lead_contact_first_name}, following up on the AI receptionist for {lead_business_name}. {demo_cta} - {agency_owner_name}`,
     is_default: false,
     is_follow_up: true,
     sequence_name: 'sms_sequence',
@@ -235,10 +206,10 @@ Worth a quick 10-minute call?
   },
   {
     name: 'SMS - After Voicemail',
-    description: 'Send after leaving a voicemail',
+    description: 'Send right after leaving a voicemail.',
     type: 'sms',
     subject: null,
-    body: `Hi {lead_contact_first_name}, just left you a voicemail about AI receptionists for {lead_business_name}. Happy to answer any questions via text if that's easier! - {agency_owner_name}`,
+    body: `Hi {lead_contact_first_name}, just left you a voicemail about catching more of {lead_business_name}'s calls. Text is easier if you prefer, happy to answer anything here. - {agency_owner_name}`,
     is_default: false,
     is_follow_up: false,
     sequence_name: null,
@@ -247,10 +218,10 @@ Worth a quick 10-minute call?
   },
   {
     name: 'SMS - Demo Reminder',
-    description: 'Remind about scheduled demo call',
+    description: 'Reminder before a scheduled demo. Set [TIME] before sending.',
     type: 'sms',
     subject: null,
-    body: `Hi {lead_contact_first_name}! Just a reminder about our call today at [TIME]. Looking forward to showing you how AI receptionists can help {lead_business_name}. Talk soon! - {agency_owner_name}`,
+    body: `Hi {lead_contact_first_name}! Reminder about our chat today at [TIME]. I'll show you exactly how the AI would answer for {lead_business_name}. Talk soon! - {agency_owner_name}`,
     is_default: false,
     is_follow_up: false,
     sequence_name: null,
@@ -259,10 +230,10 @@ Worth a quick 10-minute call?
   },
   {
     name: 'SMS - Quick Question',
-    description: 'Casual check-in to start a conversation',
+    description: 'Casual one-liner to start a conversation.',
     type: 'sms',
     subject: null,
-    body: `Hey {lead_contact_first_name}, quick question - how many calls does {lead_business_name} miss per week? Just curious if our AI receptionist could help. - {agency_owner_name}`,
+    body: `Hey {lead_contact_first_name}, honest question, how many calls a week does {lead_business_name} miss when you're on a job or closed for the day? Might be an easy fix. - {agency_owner_name}`,
     is_default: false,
     is_follow_up: false,
     sequence_name: null,
@@ -273,54 +244,48 @@ Worth a quick 10-minute call?
   // ==================== CALL SCRIPT TEMPLATES ====================
   {
     name: 'Intro / Discovery Call',
-    description: 'First cold call to a new lead — build rapport, qualify need, and set next step',
+    description: 'First cold call. Build rapport, find the missed-call pain, then let them hear the AI live.',
     type: 'call_script',
     subject: 'Cold Call - Intro & Discovery',
-    body: `[OPENING — keep it warm, 10 seconds max]
+    body: `[OPENING, warm, 10 seconds]
 
-Hey {lead_contact_first_name}, this is {agency_caller_name} with {agency_name}. How's your day going?
+Hey {lead_contact_first_name}, it's {agency_caller_name} with {agency_name}. Caught you at an okay time?
 
-[PAUSE — let them respond, match their energy]
+[PAUSE, match their energy]
 
-Awesome. I'll be super quick — I know you're busy running {lead_business_name}.
+I'll be quick, I know you're busy running {lead_business_name}.
 
 [REASON FOR CALL]
 
-I work with {lead_industry} businesses in your area, and we help them stop missing calls and start booking more jobs automatically using an AI receptionist.
+I work with {lead_industry} businesses around here and set them up so they stop losing calls when nobody can get to the phone. Mind if I ask you a couple quick questions to see if it's even worth your time?
 
-I'm not sure if it's a fit for you, but I figured it was worth a quick conversation. Can I ask you a couple questions?
+[IF YES, DISCOVERY]
 
-[IF YES — DISCOVERY QUESTIONS]
+- When you're on a job or closed, what happens to a call that comes in right now?
+- Rough guess, how many a week go to voicemail?
+- When someone hits your voicemail, do they leave a message, or just call the next shop?
 
-→ How are you handling calls right now when you're on a job or after hours?
-→ Roughly how many calls a week do you think go to voicemail?
-→ What happens when you miss a call — do most people leave a message or just call someone else?
+[LISTEN, take notes, reflect it back]
 
-[LISTEN — take notes, reflect back what they say]
+[VALUE, keep it tight]
 
-[TRANSITION TO VALUE]
+That's the exact gap we close. I set up an AI receptionist that answers 24/7, sounds like a real person, and books the job straight onto your calendar. The part people don't expect is how normal it sounds.
 
-That's exactly what we hear from a lot of {lead_industry} businesses. Here's what we do differently — our AI answers your phone 24/7, sounds like a real receptionist, handles FAQs, and books appointments right into your calendar. Callers genuinely can't tell the difference.
+[THE ASK, let them hear it, don't sell it]
 
-[GAUGE INTEREST]
+Honestly the fastest way to get it is to hear it. Can I text you our demo line right now? It's {agency_demo_number}, call it whenever and it'll answer like it's picking up for {lead_business_name}. Then you'll know in about 60 seconds whether it's any good.
 
-Would you be open to seeing a quick demo? Takes about 10 minutes and I can show you exactly how it'd work for {lead_business_name}.
+[IF YES]
 
-[IF YES — BOOK THE DEMO]
-
-Perfect! Would [suggest 2 specific times] work? I'll send you a calendar invite right after we hang up.
+Perfect, sending it to {lead_phone} now. Give it a call today and I'll follow up tomorrow to hear what you thought.
 
 [IF NOT NOW]
 
-Totally understand. Would it be cool if I followed up in a couple weeks? Things get busy — I just don't want you to miss out if timing gets better.
+No problem. Want me to check back in a couple weeks? Things get busy, I just don't want you missing out if the timing gets better.
 
 [IF NOT INTERESTED]
 
-No problem at all, {lead_contact_first_name}. If anything changes down the road, you've got my number. Have a great rest of your day!
-
-[CLOSE — always confirm next step]
-
-Awesome, I'll send that calendar invite to {lead_email} right now. Looking forward to showing you how it works. Talk soon!`,
+All good, {lead_contact_first_name}. You've got my number if anything changes. Have a good one.`,
     is_default: false,
     is_follow_up: false,
     sequence_name: null,
@@ -329,46 +294,42 @@ Awesome, I'll send that calendar invite to {lead_email} right now. Looking forwa
   },
   {
     name: 'Follow-Up Call',
-    description: 'Second call after initial outreach — reference previous touchpoint and re-engage',
+    description: 'Second call after the first touch. Reference it, reconnect with the pain, then let them hear it.',
     type: 'call_script',
     subject: 'Follow-Up Call',
-    body: `[OPENING — reference the previous contact]
+    body: `[OPENING, reference the last touch]
 
-Hey {lead_contact_first_name}, this is {agency_caller_name} from {agency_name}. We connected briefly a little while back — I'd sent you some info about AI receptionists for {lead_business_name}. Ring a bell?
+Hey {lead_contact_first_name}, it's {agency_caller_name} from {agency_name}. We crossed paths a little while back, I'd reached out about missed calls at {lead_business_name}. Ring a bell?
 
 [IF THEY REMEMBER]
 
-Great! I just wanted to circle back and see if you had any questions or if the timing might be better now.
+Great. I just wanted to see if the timing's any better now, or if you had questions I can knock out.
 
-[IF THEY DON'T REMEMBER]
+[IF THEY DON'T]
 
-No worries at all! Quick refresher — I help {lead_industry} businesses like yours stop missing calls. We set up an AI receptionist that answers 24/7, books appointments, and handles FAQs. Sounds like a real person.
+No worries, quick refresher: I set up an AI receptionist for {lead_industry} businesses that answers 24/7, books jobs, and sounds like a real person, so calls stop slipping through.
 
-[RECONNECT WITH THEIR PAIN POINT]
+[RECONNECT WITH THE PAIN]
 
-Last time we talked, you mentioned [reference any notes from previous call, or use:] that missed calls were an issue, especially during busy periods. Is that still the case?
+Last time, the thing that stood out was missed calls when you're on a job or after hours. Still happening?
 
-[LISTEN — let them talk]
+[LISTEN]
 
-[VALUE REMINDER]
+[THE ASK, hear it, not book it]
 
-Yeah, that's super common. Our clients in {lead_industry} are typically seeing about 40% more booked appointments once the AI is handling their calls. And it pays for itself pretty fast.
-
-[ASK FOR THE MEETING]
-
-Would you have 10 minutes this week to see a quick demo? I promise it's painless — no long pitch, just a walkthrough of how it'd work for {lead_business_name} specifically.
+Let me just put it in your hands. I'll text you our demo line right now, {agency_demo_number}, call it whenever and it'll answer like it's picking up for {lead_business_name}. Takes a minute and you'll know if it's for real.
 
 [IF YES]
 
-Awesome! How about [suggest 2 times]? I'll shoot you a calendar invite right away.
+Sending it to {lead_phone} now. Try it today and I'll check in tomorrow.
 
 [IF NOT YET]
 
-Totally hear you. Mind if I check back in [suggest timeframe]? I don't want to bug you, but I also don't want you to miss out when the timing's right.
+Totally fair. Mind if I check back in a couple weeks? I don't want to pester you, just don't want you missing out when it's the right time.
 
 [IF NO]
 
-No pressure at all. If anything changes, you know where to find me. Have a great one, {lead_contact_first_name}!`,
+No pressure at all. You know where I am if anything changes. Take care, {lead_contact_first_name}.`,
     is_default: false,
     is_follow_up: true,
     sequence_name: null,
@@ -377,56 +338,48 @@ No pressure at all. If anything changes, you know where to find me. Have a great
   },
   {
     name: 'Demo Close Call',
-    description: 'Post-demo call to handle objections and close the deal',
+    description: 'After they have heard the AI. Check reaction, handle the common objections, and start the free trial.',
     type: 'call_script',
     subject: 'Demo Close Call',
-    body: `[OPENING — warm, reference the demo]
+    body: `[OPENING, reference the demo]
 
-Hey {lead_contact_first_name}! It's {agency_caller_name} from {agency_name}. Thanks again for checking out the demo the other day. How's everything going?
+Hey {lead_contact_first_name}! It's {agency_caller_name} from {agency_name}. You got a chance to call the number and hear it, right? What'd you think?
 
-[PAUSE — let them respond]
+[LISTEN, their answer tells you where they are]
 
-[CHECK TEMPERATURE]
+[IF POSITIVE]
 
-I wanted to follow up and see what you thought. Did anything stand out or surprise you about how the AI receptionist works?
+Yeah, that's the reaction most people have, it just sounds normal. So here's what I'd do: get {lead_business_name} set up this week. It's live in about a day, and you get a 7-day free trial, so there's no risk in trying it.
 
-[LISTEN — their response tells you where they are]
+[COMMON OBJECTIONS]
 
-[IF POSITIVE RESPONSE]
+- "It's too pricey."
+  Fair. Flip it around though, what's one missed job worth to you? If it catches even one a week you'd have lost, it's paid for itself many times over. Starter is {agency_starter_price}.
 
-That's awesome to hear. Yeah, [reflect back what they liked]. That's exactly what our {lead_industry} clients love about it.
+- "I need to think about it."
+  Of course. What's the piece you're weighing? [Listen.] Makes sense, would it help if I [address that specific thing]?
 
-So here's what I'm thinking — we could get {lead_business_name} set up this week. Takes about 24-48 hours, and you get a 7-day free trial to make sure it's a perfect fit. Zero risk.
+- "Not sure my customers want to talk to a bot."
+  That's the number one worry, and the number one thing that flips people. It sounds like a real person, and if a caller ever wants a human it transfers them on the spot.
 
-[IF THEY HAVE CONCERNS — HANDLE OBJECTIONS]
-
-→ "It's too expensive"
-I totally get that. Here's how I think about it though — how much is a missed call worth? If even one extra job per week comes through that you would've missed, the AI pays for itself multiple times over. Our starter plan is just {agency_starter_price} per month.
-
-→ "I need to think about it"
-Of course. What specifically are you weighing? [Listen] That makes sense. Would it help if I could [address their specific concern]?
-
-→ "I'm not sure my customers will like talking to AI"
-That's the #1 concern everyone has, and it's the #1 thing that surprises them. Our AI sounds completely natural — callers genuinely don't know the difference. And if they ever want a real person, it can transfer them instantly.
-
-→ "I already have a receptionist / answering service"
-That's great! A lot of our clients use us alongside their existing setup. The AI handles overflow, after-hours, and weekends so your team never misses a beat. Think of it as backup that works 24/7.
+- "I already have someone answering."
+  Great, this doesn't replace them. It catches the overflow, the after-hours, and the weekends so nothing slips when your person is busy or gone.
 
 [CLOSE]
 
-Here's what I'd recommend — let's get you started with the free trial this week. You'll see real results within days, and if it's not for you, you cancel with zero hassle. Sound fair?
+Here's my honest recommendation: start the free trial this week. You'll see real calls handled within days, and if it's not for you, you cancel, no hassle. Fair enough?
 
 [IF YES]
 
-Amazing! I'll send you the signup link right now to {lead_email}. Setup is quick and I'll personally make sure everything's dialed in for {lead_business_name}.
+Love it. Sending the signup link to {lead_email} now. I'll personally make sure everything's dialed in for {lead_business_name}.
 
-[IF NEEDS MORE TIME]
+[IF THEY NEED TIME]
 
-Totally fine. I'll follow up [specific day] and we can go from there. In the meantime, feel free to text me if any questions come up — {agency_phone}.
+No problem. I'll follow up [specific day]. Anything comes up before then, just text me at {agency_phone}.
 
-[CLOSE — always end with clear next step]
+[CLOSE, always confirm the next step]
 
-Thanks {lead_contact_first_name}, really excited to get this going for you. Talk soon!`,
+Thanks {lead_contact_first_name}, excited to get this going for you. Talk soon.`,
     is_default: false,
     is_follow_up: false,
     sequence_name: null,

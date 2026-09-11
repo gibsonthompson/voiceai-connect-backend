@@ -32,6 +32,8 @@ const TEMPLATE_VARIABLES = {
     { key: '{agency_starter_price}', label: 'Starter Price', description: 'Starter plan monthly price' },
     { key: '{agency_pro_price}', label: 'Pro Price', description: 'Pro plan monthly price' },
     { key: '{agency_growth_price}', label: 'Growth Price', description: 'Growth plan monthly price' },
+    { key: '{agency_demo_number}', label: 'Demo Number', description: 'Your AI demo line, prospects call it to hear the receptionist live' },
+    { key: '{demo_cta}', label: 'Demo Call-to-Action', description: 'Smart CTA, inserts your demo number if set, otherwise a reply prompt' },
   ],
   dynamic: [
     { key: '{today_date}', label: 'Today\'s Date', description: 'Current date' },
@@ -407,6 +409,8 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
       return '$' + (cents / 100).toFixed(0);
     };
 
+    const leadBiz = lead?.business_name || 'your business';
+
     const replacements = {
       // Lead variables
       '{lead_business_name}': lead?.business_name || '[Business Name]',
@@ -429,6 +433,10 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
       '{agency_starter_price}': formatPrice(agency?.price_starter) + '/mo',
       '{agency_pro_price}': formatPrice(agency?.price_pro) + '/mo',
       '{agency_growth_price}': formatPrice(agency?.price_growth) + '/mo',
+      '{agency_demo_number}': agency?.demo_phone_number || '[your demo line]',
+      '{demo_cta}': agency?.demo_phone_number
+        ? `Give it a call: ${agency.demo_phone_number}. It'll answer like it's picking up for ${leadBiz}.`
+        : `Reply and I'll send you a number to call, you'll hear it answer like it's picking up for ${leadBiz}.`,
       
       // Dynamic variables
       '{today_date}': new Date().toLocaleDateString('en-US', { 
