@@ -2735,6 +2735,16 @@ async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
       throw updateError;
     }
 
+    // Enable SMS on the demo number (messaging profile + 10DLC campaign), the
+    // same step client numbers get, so the demo can text the caller FROM the
+    // number they called. Non-blocking: a failure still leaves a working line.
+    try {
+      const smsAssign = await assignNumberForSMS(phoneData.number);
+      console.log(`📱 Demo number SMS assignment: profile=${smsAssign.profileAssigned} campaign=${smsAssign.campaignAssigned}`);
+    } catch (smsErr) {
+      console.warn('⚠️ Demo number SMS assignment failed (non-blocking):', smsErr.message);
+    }
+
     console.log(`🎉 Demo provisioning complete for ${agencyName}: ${phoneData.number}`);
     return {
       phoneNumber: phoneData.number,

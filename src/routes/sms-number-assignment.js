@@ -13,7 +13,7 @@
 //
 // Numbers that are NOT on the Telnyx account (VAPI-native numbers that were
 // never bought through Telnyx) can't be assigned and are reported as
-// `onTelnyx: false` — for those, sending from the client number is impossible
+// `onTelnyx: false` - for those, sending from the client number is impossible
 // and the platform-number fallback is the only option.
 //
 // Mount:  app.use('/api/admin', require('./routes/sms-number-assignment'));
@@ -117,6 +117,84 @@ router.post('/assign-sms-numbers', async (req, res) => {
     res.json({ total: results.length, assigned, notOnTelnyx, dryRun: false, results });
   } catch (e) {
     console.error('❌ assign-sms-numbers error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============================================================================
+// DEMO NUMBER SMS BACKFILL
+// Same as the client backfill above, but for agency DEMO numbers, so a demo
+// call can text the caller FROM the number they actually called. Idempotent.
+//   POST /api/admin/assign-demo-sms-numbers                -> all agencies
+//   POST /api/admin/assign-demo-sms-numbers { agencyId }   -> one agency
+//   POST /api/admin/assign-demo-sms-numbers?dryRun=true    -> report only
+// ============================================================================
+router.post('/assign-demo-sms-numbers', async (req, res) => {
+  const cronSecret = req.headers['x-cron-secret'];
+  if (process.env.CRON_SECRET && cronSecret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const agencyId = req.body?.agencyId || req.query?.agencyId || null;
+    const dryRun = req.query?.dryRun === 'true' || req.body?.dryRun === true;
+
+    let q = supabase.from('agencies').select('id, name, demo_phone_number').not('demo_phone_number', 'is', null);
+    if (agencyId) q = q.eq('id', agencyId);
+    const { data: agencies, error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+
+    const results = [];
+    for (const a of agencies || []) {
+      if (dryRun) {
+        let onTelnyx = false, assignedToOurProfile = false;
+        try {
+          if (process.env.TELNYX_API_KEY && a.demo_phone_number) {
+            const lr = await fetch(
+              `https://api.telnyx.com/v2/phone_numbers?filter[phone_number]=${encodeURIComponent(a.demo_phone_number)}`,
+              { headers: { Authorization: `Bearer ${process.env.TELNYX_API_KEY}` } }
+            );
+            if (lr.ok) {
+              const rec = ((await lr.json()).data || [])[0];
+              if (rec) { onTelnyx = true; assignedToOurProfile = rec.messaging_profile_id === process.env.TELNYX_MESSAGING_PROFILE_ID; }
+            }
+          }
+        } catch (e) { /* unknown */ }
+        results.push({
+          agency: a.name, number: a.demo_phone_number, onTelnyx, assignedToOurProfile,
+          status: !onTelnyx ? 'NOT_ON_TELNYX' : assignedToOurProfile ? 'OK' : 'NEEDS_ASSIGNMENT',
+        });
+        await new Promise((rz) => setTimeout(rz, 120));
+        continue;
+      }
+      let r = { profileAssigned: false, campaignAssigned: false };
+      try { r = await assignNumberForSMS(a.demo_phone_number); }
+      catch (e) { r = { profileAssigned: false, campaignAssigned: false, error: e.message }; }
+      results.push({
+        agency: a.name, number: a.demo_phone_number,
+        onTelnyx: r.profileAssigned || !!r.campaignAssigned,
+        profileAssigned: r.profileAssigned, campaignAssigned: r.campaignAssigned,
+        ...(r.error ? { error: r.error } : {}),
+      });
+      await new Promise((rz) => setTimeout(rz, 150));
+    }
+
+    if (dryRun) {
+      const summary = {
+        total: results.length,
+        ok: results.filter((x) => x.status === 'OK').length,
+        needsAssignment: results.filter((x) => x.status === 'NEEDS_ASSIGNMENT').length,
+        notOnTelnyx: results.filter((x) => x.status === 'NOT_ON_TELNYX').length,
+      };
+      console.log(`📇 assign-demo-sms-numbers DRY RUN: ${summary.ok} ok, ${summary.needsAssignment} need assignment, ${summary.notOnTelnyx} not on Telnyx (of ${summary.total})`);
+      return res.json({ ...summary, dryRun: true, results });
+    }
+
+    const assigned = results.filter((x) => x.profileAssigned).length;
+    const notOnTelnyx = results.filter((x) => x.onTelnyx === false).length;
+    console.log(`📇 assign-demo-sms-numbers: ${assigned}/${results.length} assigned to profile${notOnTelnyx ? `, ${notOnTelnyx} not on Telnyx` : ''}`);
+    res.json({ total: results.length, assigned, notOnTelnyx, dryRun: false, results });
+  } catch (e) {
+    console.error('❌ assign-demo-sms-numbers error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });

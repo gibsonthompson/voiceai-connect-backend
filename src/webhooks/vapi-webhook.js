@@ -423,6 +423,7 @@ async function handleDemoCall(agency, message, industryKey = null) {
           message: lines.join('\n'),
           agencyId: agency.id,
           recipientType: 'prospect',
+          from: agency.demo_phone_number || undefined,
           messageType: 'demo_followup_industry',
           metadata: { industryKey, businessName, businessType },
         });
@@ -434,6 +435,7 @@ async function handleDemoCall(agency, message, industryKey = null) {
           message: agency.demo_followup_sms_override,
           agencyId: agency.id,
           recipientType: 'prospect',
+          from: agency.demo_phone_number || undefined,
           messageType: 'demo_followup_custom',
           metadata: { businessName, businessType, custom: true },
         });
@@ -474,6 +476,7 @@ async function handleDemoCall(agency, message, industryKey = null) {
           message: lines.join('\n'),
           agencyId: agency.id,
           recipientType: 'prospect',
+          from: agency.demo_phone_number || undefined,
           messageType: 'demo_followup',
           metadata: { businessName, businessType, serviceDiscussed },
         });
@@ -675,6 +678,7 @@ async function handleDemoToolCall(req, res, message) {
       message: smsContent,
       agencyId: agency.id,
       recipientType: 'prospect',
+      from: agency.demo_phone_number || undefined,
       messageType: 'demo_sample_summary',
       metadata: { businessName: cleanBusinessName, businessType: args.business_type || null },
     });
