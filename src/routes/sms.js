@@ -533,6 +533,64 @@ module.exports = router;
 // Telnyx sends webhooks for inbound messages to the messaging profile URL
 // NOT gated - this is Telnyx calling in, no user token involved.
 // ============================================================================
+// ============================================================================
+// PLATFORM-NUMBER REPLIES (agency owners replying to activation/engagement SMS)
+// These come in on the platform SMS number, not a client number, so the client
+// router above never matches them. Capture here: log inbound + notify the owner.
+// ============================================================================
+const PLATFORM_SMS_NUMBER = normalizePhone(process.env.TELNYX_SMS_FROM_NUMBER || '+15054317109');
+const PLATFORM_OWNER_PHONE = process.env.PLATFORM_OWNER_PHONE || '+16783161454';
+
+function isPlatformSmsNumber(phone) {
+  const n = normalizePhone(phone);
+  return !!n && !!PLATFORM_SMS_NUMBER && n === PLATFORM_SMS_NUMBER;
+}
+
+// Match an agency by its owner phone (the number activation SMS are sent to).
+async function findAgencyByOwnerPhone(phone) {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return null;
+  const { data } = await supabase
+    .from('agencies').select('id, name, phone').eq('phone', normalized).limit(1).maybeSingle();
+  if (data) return data;
+  const without1 = normalized.startsWith('+1') ? normalized.slice(2) : normalized;
+  const { data: d2 } = await supabase
+    .from('agencies').select('id, name, phone').like('phone', `%${without1}`).limit(1).maybeSingle();
+  return d2 || null;
+}
+
+// Store the reply in sms_log (tagged inbound) and forward it to the platform
+// owner so a reply is never lost, even before anyone opens the admin inbox.
+async function handleAgencyReplyToPlatform(fromPhone, text) {
+  const from = normalizePhone(fromPhone);
+  const agency = await findAgencyByOwnerPhone(from);
+  try {
+    await supabase.from('sms_log').insert({
+      agency_id: agency?.id || null,
+      recipient_phone: agency?.phone || from,
+      recipient_type: 'agency_owner',
+      message_type: 'agency_reply_inbound',
+      message_body: text,
+      delivery_status: 'received',
+      metadata: { direction: 'inbound', from },
+    });
+  } catch (err) {
+    console.warn('Failed to log inbound agency reply:', err.message);
+  }
+  const who = agency ? `${agency.name} (${from})` : `Unknown sender ${from}`;
+  try {
+    await sendAndLogSMS({
+      phone: PLATFORM_OWNER_PHONE,
+      message: `Reply from ${who}:\n${text}`,
+      recipientType: 'admin',
+      messageType: 'agency_reply_forward',
+      from: PLATFORM_SMS_NUMBER,
+    });
+  } catch (err) {
+    console.warn('Failed to forward agency reply to owner:', err.message);
+  }
+}
+
 module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(req, res) {
   try {
     const { raw, body } = getRawAndBody(req);
@@ -598,6 +656,13 @@ module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(re
     }
 
     console.log(`Inbound SMS: ${callerPhone} -> ${clientPhone}: "${messageText.substring(0, 50)}..."`);
+
+    // Reply to the PLATFORM number (activation/engagement SMS to agency owners).
+    // Not a client conversation: capture for the admin inbox and ping the owner.
+    if (isPlatformSmsNumber(clientPhone)) {
+      await handleAgencyReplyToPlatform(callerPhone, messageText);
+      return res.status(200).json({ received: true, platformReply: true });
+    }
 
     // Find which client owns this phone number
     const client = await findClientByPhone(clientPhone);

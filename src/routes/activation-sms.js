@@ -1,12 +1,12 @@
 // ============================================================================
-// ACTIVATION SMS — Post-Onboarding Engagement Sequence
+// ACTIVATION SMS - Post-Onboarding Engagement Sequence
 //
 // 9-step conditional drip for agencies that COMPLETED onboarding and are
 // now in the dashboard. Each step fires only if the agency hasn't already
-// done the action — completed steps are skipped silently.
+// done the action - completed steps are skipped silently.
 //
 // CREATED: 2026-05-09
-// UPDATED: 2026-05-14 — Fixed phone formatting for international agencies,
+// UPDATED: 2026-05-14 - Fixed phone formatting for international agencies,
 //          added E.164 validation, advance step on permanent send failures
 // ============================================================================
 
@@ -156,42 +156,39 @@ async function getStepMessage(step, agency, urls) {
       const demoPhone = agency.demo_phone_number || null;
       const msg = await getSmsTemplate('activation_sms_1', { name, demo_phone: demoPhone, dashboard_url: urls.dashboardUrl });
       if (msg) return msg;
-      if (demoPhone) {
-        return `Welcome to VoiceAI Connect, ${name}! Your agency is live. 🎉\n\nYou have a demo AI receptionist ready — call it now to hear what your prospects will experience:\n📞 ${demoPhone}\n\nThis is YOUR sales tool. Share this number with anyone considering AI for their business.\n\n${urls.dashboardUrl}`;
-      } else {
-        return `Welcome to VoiceAI Connect, ${name}! Your agency is live. 🎉\n\nHead to your dashboard to explore your test client, set up your branding, and start landing clients.\n\n${urls.dashboardUrl}`;
-      }
+      if (demoPhone) return `${name}, it's Gibson, founder of VoiceAI Connect. You're live! Call your demo AI and hear what you're selling: ${demoPhone}. What industry are you going after first?`;
+      return `${name}, it's Gibson, founder of VoiceAI Connect. You're live! Your test client in the dashboard is a real working AI receptionist. What industry are you going after first?`;
     }
     case 2: {
       const needsLogo = !agency.logo_url;
       const needsColors = !(agency.primary_color && agency.primary_color !== '#10b981');
       const msg = await getSmsTemplate('activation_sms_2', { name, settings_url: urls.settingsUrl });
       if (msg) return msg;
-      if (needsLogo && needsColors) return `Quick win for ${name} 🎨\n\nUpload your logo and set your brand colors — takes 30 seconds. Everything your clients see will be YOUR brand, not ours.\n\n${urls.settingsUrl}?tab=profile`;
-      if (needsLogo) return `${name}, your brand colors look great — now add your logo to complete the look. Your clients will see YOUR brand everywhere.\n\n${urls.settingsUrl}?tab=profile`;
-      return `${name}, you've got your logo uploaded — now set your brand colors to match your agency's identity. Takes 10 seconds.\n\n${urls.settingsUrl}?tab=profile`;
+      if (needsLogo && needsColors) return `${name}, quick 30-sec win: add your logo and brand colors in Settings so clients see your brand, not ours. Want a hand picking colors that fit?`;
+      if (needsLogo) return `${name}, your colors look good. Add your logo in Settings to finish the look. Need a hand?`;
+      return `${name}, your logo's up. Set your brand colors in Settings to match your agency, 10 seconds.`;
     }
     case 3: {
       const msg = await getSmsTemplate('activation_sms_3', { name, clients_url: urls.clientsUrl });
-      return msg || `${name}, your dashboard has a test client with a live AI receptionist and a real phone number.\n\n1. Call the test number to hear the AI in action\n2. Log in as the test client from your Clients page to see their dashboard\n\nThis is exactly what your clients will experience.\n\n${urls.clientsUrl}`;
+      return msg || `${name}, there's a test client in your dashboard with a live AI and a real number. Call it, does it sound like a real person to you? Curious what you think.`;
     }
     case 4: {
       const stripeStarted = !!agency.stripe_account_id;
       const msg = await getSmsTemplate('activation_sms_4', { name, settings_url: urls.settingsUrl });
       if (msg) return msg;
-      if (stripeStarted) return `${name}, looks like you started connecting Stripe but it's not finished yet. Until it's complete, clients who sign up won't be able to pay you.\n\nFinish setup (takes 2 min):\n${urls.settingsUrl}?tab=payments`;
-      return `${name}, one important step: connect Stripe so you can collect payments from your clients.\n\nWithout it, clients who sign up can't pay you. Takes 2 minutes:\n${urls.settingsUrl}?tab=payments`;
+      if (stripeStarted) return `${name}, you started Stripe but didn't finish, so clients can't pay you yet. 2-min wrap-up in Settings, under Payments. Want me to walk you through it?`;
+      return `${name}, connect Stripe in Settings, under Payments, so you can actually get paid. 2 min. Without it, a client who signs up can't pay you. Stuck on anything?`;
     }
     case 5: {
       const msg = await getSmsTemplate('activation_sms_5', { name, signup_url: urls.signupUrl });
-      return msg || `${name}, your client signup page is live:\n${urls.signupUrl}\n\nShare it in your outreach, add it to your website, or DM it directly to a prospect.\n\nEvery business that signs up gets their own AI receptionist — and pays YOU monthly.`;
+      return msg || `${name}, your client signup page is ready. Grab the link in your dashboard and send it to one business this week. Who's first on your list?`;
     }
     case 6: {
       const stripeStarted6 = !!agency.stripe_account_id;
       const msg = await getSmsTemplate('activation_sms_6', { name, settings_url: urls.settingsUrl });
       if (msg) return msg;
-      if (stripeStarted6) return `Hey ${name}, your Stripe Connect setup still isn't complete — which means clients can't pay you yet.\n\nIt usually takes 2 minutes to finish. Don't leave money on the table:\n${urls.settingsUrl}?tab=payments`;
-      return `Hey ${name}, heads up — your agency still isn't set up to accept payments.\n\nClients who try to subscribe won't be able to pay you.\n\nConnect Stripe now (2 min):\n${urls.settingsUrl}?tab=payments`;
+      if (stripeStarted6) return `${name}, your Stripe setup's still unfinished, so clients can't pay you yet. 2 min to wrap up in Settings, under Payments. Stuck?`;
+      return `${name}, heads up, your agency still can't accept payments, so a client who signs up can't pay you. 2-min fix in Settings, under Payments. Need a hand?`;
     }
     case 7: {
       const stats7 = await getAgencyStats(agency.id);
@@ -205,27 +202,27 @@ async function getStepMessage(step, agency, urls) {
       const done = 5 - missing.length;
       if (missing.length === 0) {
         const msg = await getSmsTemplate('activation_sms_7_complete', { name, signup_url: urls.signupUrl });
-        return msg || `${name}, your agency is fully set up! 💪\n\n✅ Logo\n✅ Brand Colors\n✅ Pricing\n✅ Stripe\n✅ First Client\n\nTime to scale. Share your signup link with more prospects:\n${urls.signupUrl}`;
+        return msg || `${name}, you're fully set up: logo, colors, pricing, Stripe, first client. Now it's a numbers game. How many prospects can you reach this week?`;
       } else {
-        const checklist = missing.map(m => `• ${m}`).join('\n');
+        const checklist = missing.map(m => `- ${m}`).join('\n');
         const msg = await getSmsTemplate('activation_sms_7_progress', { name, checklist, done, total: 5, login_url: urls.loginUrl });
-        return msg || `${name}, you're ${done}/5 on your setup checklist. Here's what's left:\n\n${checklist}\n\nLog in: ${urls.loginUrl}`;
+        return msg || `${name}, you're ${done}/5 set up. Still left:\n${checklist}\nWhich one's tripping you up? Reply and I'll help.`;
       }
     }
     case 8: {
       const msg = await getSmsTemplate('activation_sms_8', { name, settings_url: urls.settingsUrl });
-      return msg || `${name}, you're on the Free plan — which means your clients see VoiceAI Connect branding instead of yours.\n\nUpgrade to Pro ($99/mo) to get full white-label, your own marketing website, and custom domain. Your clients will never know we exist.\n\n${urls.settingsUrl}?tab=billing`;
+      return msg || `${name}, on the Free plan your clients still see our name. Pro ($99/mo) makes it fully yours: your site, your domain, your brand. Worth it once you've landed a client. Questions?`;
     }
     case 9: {
       const msg = await getSmsTemplate('activation_sms_9', { name, signup_url: urls.signupUrl });
-      return msg || `${name}, your AI receptionist platform is built and waiting.\n\nAgencies that land their first client in the first two weeks are far more likely to build real recurring revenue.\n\nYour signup page:\n${urls.signupUrl}\n\nNeed help with outreach? Reply to this text.`;
+      return msg || `${name}, everything's built, you just need client #1. Agencies who land one in the first two weeks are the ones who stick. Want the outreach approach that's working right now? Reply YES.`;
     }
     default: return null;
   }
 }
 
 // ============================================================================
-// CRON ENDPOINT — POST /api/cron/activation-sms
+// CRON ENDPOINT - POST /api/cron/activation-sms
 // ============================================================================
 router.post('/activation-sms', async (req, res) => {
   const cronSecret = req.headers['x-cron-secret'];
@@ -273,7 +270,7 @@ router.post('/activation-sms', async (req, res) => {
 
       // Validate before attempting send
       if (!formattedPhone || !isValidE164(formattedPhone)) {
-        console.log(`⚠️ Invalid phone for ${agency.name}: ${agency.phone} → ${formattedPhone} (country: ${agency.country || 'US'}) — marking complete`);
+        console.log(`⚠️ Invalid phone for ${agency.name}: ${agency.phone} → ${formattedPhone} (country: ${agency.country || 'US'}) - marking complete`);
         await supabase.from('agencies').update({
           activation_sms_step: 9,
           activation_sms_last_sent_at: new Date().toISOString(),
@@ -313,7 +310,7 @@ router.post('/activation-sms', async (req, res) => {
           activation_sms_last_sent_at: new Date().toISOString(),
         }).eq('id', agency.id);
         results.push({ agency: agency.name, step, status: 'failed_advanced' });
-        console.log(`❌ Failed activation step ${step} for ${agency.name} — advancing step`);
+        console.log(`❌ Failed activation step ${step} for ${agency.name} - advancing step`);
       }
     }
 

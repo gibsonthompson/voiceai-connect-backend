@@ -1728,6 +1728,7 @@ app.use('/api/admin', require('./routes/sms-number-assignment'));
 app.use('/api/admin', require('./routes/admin-impersonate'));
 app.use('/api/admin', smsLogRoutes);
 app.use('/api/admin', smsTemplatesAdminRoutes);
+app.use('/api/admin', require('./routes/platform-inbox')); // agency SMS reply inbox
 app.use('/api/admin', emailTemplatesAdminRoutes);
 app.use('/api/admin', errorReportRoutes);
 app.use('/api/admin', require('./routes/admin-expenses'));
@@ -1807,7 +1808,9 @@ app.use('/api/cron', abandonedCartRoutes);
 
 
 // Agency onboarding engagement SMS (called by cron-job.org every hour)
-app.use('/api/cron', agencyOnboardingSmsRoutes);
+// DISABLED: legacy onboarding SMS. Superseded by activationSmsRoutes below;
+// running both double-texted agencies. Re-enable only if you retire activation-sms.
+// app.use('/api/cron', agencyOnboardingSmsRoutes);
 app.use('/api/cron', activationSmsRoutes);
 app.use('/api/cron', onboardingEmailRoutes);
 
