@@ -189,6 +189,10 @@ function publicAgencyShape(agency) {
 
     // Plans as data (resolved: array if present, else synthesized from columns)
     plans: getAgencyPlans(agency),
+    // Custom feature bullets + built-in feature renames/removals, so the
+    // marketing site can render them (publicAgencyShape feeds getAgencyByHost).
+    custom_features: Array.isArray(agency.custom_features) ? agency.custom_features : [],
+    feature_overrides: (agency.feature_overrides && typeof agency.feature_overrides === 'object') ? agency.feature_overrides : {},
 
     // Pricing (for client signup + marketing website)
     price_starter: agency.price_starter,
