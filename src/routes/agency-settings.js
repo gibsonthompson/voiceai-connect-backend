@@ -413,6 +413,7 @@ async function getAgencySettings(req, res) {
           client_header_mode: agency.client_header_mode || 'agency_name',
           allow_client_branding: agency.allow_client_branding || false,
           custom_features: Array.isArray(agency.custom_features) ? agency.custom_features : [],
+          feature_overrides: (agency.feature_overrides && typeof agency.feature_overrides === 'object') ? agency.feature_overrides : {},
           calendar_enabled_plans: agency.calendar_enabled_plans || ['pro', 'growth'],
           timezone: agency.timezone,
           country: agency.country || 'US',
@@ -493,6 +494,7 @@ async function getAgencySettings(req, res) {
         client_header_mode: agency.client_header_mode || 'agency_name',
         allow_client_branding: agency.allow_client_branding || false,
           custom_features: Array.isArray(agency.custom_features) ? agency.custom_features : [],
+          feature_overrides: (agency.feature_overrides && typeof agency.feature_overrides === 'object') ? agency.feature_overrides : {},
         
         // Domain
         marketing_domain: agency.marketing_domain,
@@ -715,6 +717,8 @@ async function updateAgencySettings(req, res) {
       'og_image_url',
       // Agency-defined custom plan feature bullets [{ key, label }]
       'custom_features',
+      // Agency renames/removals of built-in feature rows { [key]: { label?, hidden? } }
+      'feature_overrides',
       // Agency's self-billing method (record only, for a possible future integration)
       'billing_method'
     ];
@@ -744,6 +748,21 @@ async function updateAgencySettings(req, res) {
         if (clean.length >= 15) break;
       }
       sanitizedUpdates.custom_features = clean;
+    }
+
+    // feature_overrides: { [builtinKey]: { label?, hidden? } }. Drop anything
+    // malformed so bad input can't reach the renderer. Stored as JSONB.
+    if (sanitizedUpdates.feature_overrides !== undefined) {
+      const rawOv = (sanitizedUpdates.feature_overrides && typeof sanitizedUpdates.feature_overrides === 'object' && !Array.isArray(sanitizedUpdates.feature_overrides)) ? sanitizedUpdates.feature_overrides : {};
+      const cleanOv = {};
+      for (const [k, v] of Object.entries(rawOv)) {
+        if (!v || typeof v !== 'object') continue;
+        const entry = {};
+        if (typeof v.label === 'string' && v.label.trim()) entry.label = v.label.trim().slice(0, 80);
+        if (v.hidden === true) entry.hidden = true;
+        if (Object.keys(entry).length > 0) cleanOv[String(k).slice(0, 60)] = entry;
+      }
+      sanitizedUpdates.feature_overrides = cleanOv;
     }
 
     // ── Slug (white-label subdomain) ─────────────────────────────────────
