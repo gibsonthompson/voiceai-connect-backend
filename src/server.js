@@ -212,7 +212,7 @@ try {
   });
 }
 
-const { handleClientSignup, provisionClient, handleAgencyAddClient, signupRateLimiter, reprovisionStrandedClients } = require('./routes/client-signup');
+const { handleClientSignup, provisionClient, handleAgencyAddClient, getClientProvisioningStatus, signupRateLimiter, reprovisionStrandedClients } = require('./routes/client-signup');
 const clientRoutes = require('./routes/client');
 const clientContactsRoutes = require('./routes/client-contacts');
 const clientPromptRoutes = require('./routes/client-prompt');
@@ -909,6 +909,7 @@ app.get('/api/agency/:agencyId/clients', async (req, res) => {
 });
 
 app.post('/api/agency/:agencyId/clients/add', handleAgencyAddClient);
+app.get('/api/agency/:agencyId/clients/provisioning-status/:jobId', getClientProvisioningStatus);
 
 app.use('/api/agency', clientPromptRoutes);
 app.use('/api/agency', clientKnowledgeBaseRoutes);

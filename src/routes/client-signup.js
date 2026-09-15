@@ -1344,6 +1344,73 @@ async function handleClientSignup(req, res) {
 // This path never had a Stripe checkout step (it is always no-card), so the
 // only change here is the status/billing fields on the inserted row.
 // ============================================================================
+// ============================================================================
+// ASYNC CLIENT PROVISIONING (agency add-client)
+// ----------------------------------------------------------------------------
+// Provisioning (knowledge base + VAPI assistant + Telnyx number + Stripe) makes
+// slow external calls that could exceed the request timeout. When that happened
+// the connection died and the frontend showed a misleading "Network error"
+// while resources were left orphaned. So the handler answers immediately with a
+// job id and finishes provisioning in the background, recording the outcome on
+// client_provisioning_jobs for the client to poll. The provisioning logic
+// itself is unchanged: a job-writing response shim (makeJobRes) captures
+// whatever res.status().json() the existing code would have sent.
+// ============================================================================
+async function createClientProvisioningJob(id, agencyId) {
+  try {
+    await supabase.from('client_provisioning_jobs').insert({ id, agency_id: agencyId, status: 'provisioning' });
+  } catch (e) { console.warn('\u26a0\ufe0f Could not create provisioning job:', e.message); }
+}
+
+function finishClientProvisioningJob(id, code, body) {
+  const ok = code >= 200 && code < 300 && body && body.client;
+  const patch = ok
+    ? { status: 'done', result: body }
+    : { status: 'error', result: { error: (body && (body.message || body.error)) || 'Provisioning failed. Please try again.' } };
+  supabase.from('client_provisioning_jobs').update(patch).eq('id', id)
+    .then(() => {}, (e) => console.warn('\u26a0\ufe0f Could not update provisioning job:', e && e.message));
+}
+
+// Stands in for Express res after the 202 is sent, so the existing provisioning
+// code records its outcome on the job instead of answering an already-answered
+// request. It accepts the same res.status().json() calls the code already makes.
+function makeJobRes(jobId) {
+  const shim = {
+    _code: 200,
+    headersSent: true,
+    status(code) { shim._code = code; return shim; },
+    json(body) { finishClientProvisioningJob(jobId, shim._code, body); return shim; },
+    send(body) { finishClientProvisioningJob(jobId, shim._code, body); return shim; },
+    set() { return shim; },
+    setHeader() { return shim; },
+    end() { return shim; },
+  };
+  return shim;
+}
+
+async function getClientProvisioningStatus(req, res) {
+  try {
+    const { jobId } = req.params;
+    const { data } = await supabase
+      .from('client_provisioning_jobs')
+      .select('status, result, created_at')
+      .eq('id', jobId)
+      .single();
+    // No row yet just means the background write has not landed; keep polling.
+    if (!data) return res.json({ status: 'provisioning' });
+    // Stale guard: a job stuck 'provisioning' well past the max provisioning time
+    // (e.g. the server restarted mid-provision, or an upstream hung with no
+    // timeout) is reported as failed rather than spinning forever.
+    if (data.status === 'provisioning' && data.created_at && (Date.now() - new Date(data.created_at).getTime()) > 6 * 60 * 1000) {
+      return res.json({ status: 'error', result: { error: 'Provisioning did not finish in time. Check your Clients list, and if the client is not there, try again.' } });
+    }
+    res.json({ status: data.status, result: data.result || null });
+  } catch (e) {
+    console.error('Client provisioning status error:', e);
+    res.status(500).json({ status: 'error', result: { error: 'Could not check provisioning status' } });
+  }
+}
+
 async function handleAgencyAddClient(req, res) {
   // Track created resources for rollback on failure
   let createdAssistantId = null;
@@ -1458,6 +1525,16 @@ async function handleAgencyAddClient(req, res) {
 
     const salt = await bcrypt.genSalt(10);
     const tempPasswordHash = await bcrypt.hash(tempPassword, salt);
+
+    // Everything above is fast validation; everything below makes the slow
+    // external calls. Answer now with a job id, then swap res for a job-writing
+    // shim so the (unchanged) provisioning below runs in the background and its
+    // result is recorded for the client to poll, instead of timing out the
+    // request and surfacing a false "Network error".
+    const provisioningJobId = `cj_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    await createClientProvisioningJob(provisioningJobId, agencyId);
+    res.status(202).json({ jobId: provisioningJobId, status: 'provisioning' });
+    res = makeJobRes(provisioningJobId);
 
     // === STEP 1: Knowledge Base ===
     let knowledgeBaseData = null;
@@ -1927,6 +2004,7 @@ module.exports = {
   handleClientSignup,
   provisionClient,
   handleAgencyAddClient,
+  getClientProvisioningStatus,
   signupRateLimiter,
   reprovisionStrandedClients,
 };
