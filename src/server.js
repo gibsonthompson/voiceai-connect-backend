@@ -196,6 +196,7 @@ app.use((req, res, next) => {
 const { handleAgencySignup, handleAgencyOnboarding } = require('./routes/agency-signup');
 const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySettings, verifyAgencyDomain } = require('./routes/agency-settings');
 const demoPhoneRoutes = require('./routes/demo-phone');
+const customIndustriesRoutes = require('./routes/custom-industries');
 const referralRoutes = require('./routes/referrals');
 
 let domainRoutes;
@@ -1513,6 +1514,7 @@ app.get('/api/domain-test', (req, res) => {
 // ============================================================================
 setupProcessErrorHandlers();
 app.use('/api/agency', demoPhoneRoutes);
+app.use('/api/agency', customIndustriesRoutes);
 app.use('/api/agency', testClientRoutes);
 app.use('/api/agency', agencyTemplatesRoutes);
 app.use('/api/agency', aiPlaygroundRoutes);

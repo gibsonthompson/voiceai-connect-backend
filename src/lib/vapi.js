@@ -2310,10 +2310,13 @@ async function createQueryTool(fileId, businessName) {
 // CREATE INDUSTRY KNOWLEDGE BASE
 // FIXED: knownLength for large Buffer uploads (prevents "Unexpected end of form")
 // ============================================================================
-async function createIndustryKnowledgeBase(businessName, industryKey, websiteKnowledgeBase = null) {
+async function createIndustryKnowledgeBase(businessName, industryKey, websiteKnowledgeBase = null, customIndustryDoc = null) {
   try {
-    const kbGenerator = INDUSTRY_KNOWLEDGE_BASES[industryKey] || INDUSTRY_KNOWLEDGE_BASES['professional_services'];
-    const industryDoc = kbGenerator(businessName);
+    // Agency-defined custom industry: use its stored KB with the business name
+    // on top; otherwise generate from the built-in industry template.
+    const industryDoc = customIndustryDoc
+      ? `# ${businessName} (AI Receptionist Knowledge Base)\n\n${customIndustryDoc}`
+      : (INDUSTRY_KNOWLEDGE_BASES[industryKey] || INDUSTRY_KNOWLEDGE_BASES['professional_services'])(businessName);
 
     let fullContent = industryDoc;
 
@@ -2363,7 +2366,22 @@ async function createIndustryKnowledgeBase(businessName, industryKey, websiteKno
 // ============================================================================
 async function createIndustryAssistant(businessName, industry, knowledgeBaseData = null, ownerPhone = null, clientId = null, agencyId = null) {
   try {
-    const industryKey = INDUSTRY_MAPPING[industry] || 'professional_services';
+    // If the client's industry is one the agency defined themselves (Scale
+    // feature), use its stored knowledge base. Custom keys never match
+    // INDUSTRY_MAPPING, so without this they would silently fall back to the
+    // generic professional_services KB.
+    let customIndustryDoc = null;
+    if (agencyId && industry && supabase) {
+      try {
+        const { data: ag } = await supabase.from('agencies').select('custom_industries').eq('id', agencyId).single();
+        const ci = Array.isArray(ag?.custom_industries) ? ag.custom_industries.find((c) => c && c.key === industry) : null;
+        if (ci && ci.knowledge_base) customIndustryDoc = ci.knowledge_base;
+      } catch (e) { console.warn('⚠️ custom industry lookup failed:', e.message); }
+    }
+    const industryKey = customIndustryDoc ? 'professional_services' : (INDUSTRY_MAPPING[industry] || 'professional_services');
+    // Custom industries save their editor template under their own key, so look
+    // that up (not the professional_services base we use for the scaffolding).
+    const templateKey = customIndustryDoc ? industry : industryKey;
     const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
 
     console.log(`🎯 Creating ${industryKey} assistant for ${businessName}`);
@@ -2371,7 +2389,7 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
 
     let customTemplate = null;
     if (agencyId) {
-      customTemplate = await getAgencyTemplate(agencyId, industryKey);
+      customTemplate = await getAgencyTemplate(agencyId, templateKey);
     }
 
     let systemPrompt, firstMessage, voiceId, temperature, modelId;
@@ -2421,10 +2439,10 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
 
     if (!finalKnowledgeBase) {
       console.log(`📚 Creating industry-only knowledge base (no website provided)`);
-      finalKnowledgeBase = await createIndustryKnowledgeBase(businessName, industryKey);
+      finalKnowledgeBase = await createIndustryKnowledgeBase(businessName, industryKey, null, customIndustryDoc);
     } else {
       console.log(`📚 Creating combined knowledge base (industry doc + website content)`);
-      finalKnowledgeBase = await createIndustryKnowledgeBase(businessName, industryKey, finalKnowledgeBase);
+      finalKnowledgeBase = await createIndustryKnowledgeBase(businessName, industryKey, finalKnowledgeBase, customIndustryDoc);
     }
 
     if (!finalKnowledgeBase || !finalKnowledgeBase.fileId) {

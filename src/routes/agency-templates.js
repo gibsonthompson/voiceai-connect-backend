@@ -136,6 +136,12 @@ const INDUSTRY_CONFIG = {
     description: 'Maintenance, cleanups, design and installs, free estimates',
     icon: 'Trees',
   },
+  septic: {
+    key: 'septic',
+    label: 'Septic & Well',
+    description: 'Septic pumping, drain fields, well pumps, water systems',
+    icon: 'Droplets',
+  },
 };
 
 // ============================================================================
@@ -1567,7 +1573,28 @@ router.get('/:agencyId/ai-templates/industries', requireEnterprisePlan, async (r
       isActive: templateMap[config.key]?.isActive ?? true,
       updatedAt: templateMap[config.key]?.updatedAt || null,
     }));
-    
+
+    // Append the agency's own custom industries (Scale feature). They live on
+    // the agency row and render alongside the built-ins in the AI Lab.
+    try {
+      const { data: ag } = await supabase.from('agencies').select('custom_industries').eq('id', agencyId).single();
+      const custom = Array.isArray(ag?.custom_industries) ? ag.custom_industries : [];
+      for (const ci of custom) {
+        if (!ci || !ci.key) continue;
+        industries.push({
+          frontendKey: ci.key,
+          backendKey: ci.key,
+          label: ci.label,
+          description: ci.description || '',
+          icon: 'Sparkles',
+          isCustom: true,
+          hasCustomTemplate: !!templateMap[ci.key],
+          isActive: templateMap[ci.key]?.isActive ?? true,
+          updatedAt: templateMap[ci.key]?.updatedAt || ci.created_at || null,
+        });
+      }
+    } catch (e) { console.warn('custom industries merge failed:', e.message); }
+
     res.json({ industries });
   } catch (error) {
     console.error('Error fetching industries:', error);
@@ -1589,15 +1616,33 @@ router.get('/:agencyId/ai-templates/voices', requireEnterprisePlan, (req, res) =
 // ============================================================================
 // GET /api/agency/:agencyId/ai-templates/:industry
 // ============================================================================
+// Resolve an industry key for the template editor. Built-in keys come from
+// INDUSTRY_CONFIG; agency-defined custom industries (Scale feature) come from
+// the agency row, synthesized to the same shape so the SAME editor works for
+// both. Returns null for an unknown key.
+async function resolveIndustryConfig(agencyId, industry) {
+  if (INDUSTRY_CONFIG[industry]) {
+    return { config: INDUSTRY_CONFIG[industry], backendKey: INDUSTRY_CONFIG[industry].key, isCustom: false };
+  }
+  try {
+    const { data: ag } = await supabase.from('agencies').select('custom_industries').eq('id', agencyId).single();
+    const ci = Array.isArray(ag && ag.custom_industries) ? ag.custom_industries.find((c) => c && c.key === industry) : null;
+    if (ci) {
+      return { config: { key: ci.key, label: ci.label, description: ci.description || '', icon: 'Sparkles' }, backendKey: ci.key, isCustom: true };
+    }
+  } catch (e) { console.warn('resolveIndustryConfig failed:', e.message); }
+  return null;
+}
+
 router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (req, res) => {
   const { agencyId, industry } = req.params;
   
-  const industryConfig = INDUSTRY_CONFIG[industry];
-  if (!industryConfig) {
+  const resolved = await resolveIndustryConfig(agencyId, industry);
+  if (!resolved) {
     return res.status(400).json({ error: 'Invalid industry' });
   }
-  
-  const backendKey = industryConfig.key;
+  const industryConfig = resolved.config;
+  const backendKey = resolved.backendKey;
   
   try {
     const { data: customTemplate, error } = await supabase
@@ -1659,12 +1704,12 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
   const { agencyId, industry } = req.params;
   const { system_prompt, first_message, voice_id, temperature, is_active, model, knowledge_base_data } = req.body;
   
-  const industryConfig = INDUSTRY_CONFIG[industry];
-  if (!industryConfig) {
+  const resolved = await resolveIndustryConfig(agencyId, industry);
+  if (!resolved) {
     return res.status(400).json({ error: 'Invalid industry' });
   }
-  
-  const backendKey = industryConfig.key;
+  const industryConfig = resolved.config;
+  const backendKey = resolved.backendKey;
   
   if (voice_id && !ELEVENLABS_VOICES.find(v => v.id === voice_id)) {
     return res.status(400).json({ error: 'Invalid voice_id' });
@@ -1719,12 +1764,12 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
 router.delete('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (req, res) => {
   const { agencyId, industry } = req.params;
   
-  const industryConfig = INDUSTRY_CONFIG[industry];
-  if (!industryConfig) {
+  const resolved = await resolveIndustryConfig(agencyId, industry);
+  if (!resolved) {
     return res.status(400).json({ error: 'Invalid industry' });
   }
-  
-  const backendKey = industryConfig.key;
+  const industryConfig = resolved.config;
+  const backendKey = resolved.backendKey;
   
   try {
     const { error } = await supabase
