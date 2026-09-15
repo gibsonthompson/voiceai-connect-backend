@@ -506,6 +506,10 @@ async function getAgencySettings(req, res) {
         
         // Plans as data (resolved)
         plans: getAgencyPlans(agency),
+        // True once the agency saved custom plans (raw column populated). The
+        // setup checklist can't use the resolved plans above (always non-empty),
+        // so it reads this to know pricing was actually configured.
+        pricing_configured: !!(Array.isArray(agency.plans) && agency.plans.length > 0),
 
         // Pricing
         price_starter: agency.price_starter,
