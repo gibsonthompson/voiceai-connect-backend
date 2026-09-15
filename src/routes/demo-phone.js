@@ -61,6 +61,21 @@ const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 // ============================================================================
 const _demoJobs = new Map();
 const _DEMO_JOB_TTL = 10 * 60 * 1000;
+// Durable provisioning state lives on the agency row (demo_provisioning jsonb),
+// so the status poll reports the truth even when it lands on a different
+// instance than the one running the job, after a restart, or during a slow
+// provision that outlives the in-memory entry. Success is still signalled by
+// demo_phone_number; this only carries 'provisioning' and 'error'. TTL is
+// generous because a real provision was seen taking ~3.5 min during a Telnyx
+// slowdown, so we must not declare a slow-but-live job stale too early.
+const _DEMO_PROVISION_TTL = 8 * 60 * 1000;
+async function setDemoProvisioning(agencyId, value) {
+  try {
+    await supabase.from('agencies').update({ demo_provisioning: value }).eq('id', agencyId);
+  } catch (e) {
+    console.warn('⚠️ Could not persist demo_provisioning status:', e.message);
+  }
+}
 
 // ============================================================================
 // HELPER: Check if agency has access (paid or trial)
@@ -309,7 +324,7 @@ async function runDemoProvisioning({ agency, country, finalAreaCode }) {
     let result;
     if (country === 'US') {
       result = await provisionAgencyDemo(agencyId, agency.name, finalAreaCode);
-      // provisionAgencyDemo swallows its real error and returns null on failure.
+      // provisionAgencyDemo now throws the real error; this stays as a guard.
       if (!result || !result.phoneNumber) {
         throw new Error('Failed to create demo phone. Please try again or contact support.');
       }
@@ -317,12 +332,14 @@ async function runDemoProvisioning({ agency, country, finalAreaCode }) {
       result = await provisionAgencyDemoBYOT(agency);
     }
     _demoJobs.set(agencyId, { status: 'done', error: null, startedAt: Date.now() });
+    await setDemoProvisioning(agencyId, null); // success is carried by demo_phone_number
     console.log(`🎉 [demo async] Demo phone created for ${agency.name}: ${result.phoneNumber}`);
   } catch (err) {
     const message = country === 'US'
       ? (err.message || 'Failed to create demo phone. Please try again.')
       : friendlyDemoProvisioningError(err, country);
     _demoJobs.set(agencyId, { status: 'error', error: message, startedAt: Date.now() });
+    await setDemoProvisioning(agencyId, { status: 'error', error: message, startedAt: Date.now() });
     console.error(`❌ [demo async] Provisioning failed for ${agency.name}:`, err.message);
   }
 }
@@ -420,6 +437,7 @@ router.post('/:agencyId/demo-phone', async (req, res) => {
     //    purchase, VAPI import) then runs in the background so the request
     //    can never be cut by a gateway timeout mid-provision.
     _demoJobs.set(agencyId, { status: 'provisioning', error: null, startedAt: Date.now() });
+    await setDemoProvisioning(agencyId, { status: 'provisioning', startedAt: Date.now() });
 
     console.log(`📞 Starting ${country} demo provisioning for ${agency.name}${country === 'US' ? ` (area code ${finalAreaCode})` : ' via agency Twilio (BYOT)'}`);
 
@@ -453,15 +471,26 @@ router.get('/:agencyId/demo-phone/status', async (req, res) => {
 
     const { data: agency } = await supabase
       .from('agencies')
-      .select('demo_phone_number')
+      .select('demo_phone_number, demo_provisioning')
       .eq('id', agencyId)
       .single();
 
     if (agency && agency.demo_phone_number) {
       _demoJobs.delete(agencyId);
+      if (agency.demo_provisioning) setDemoProvisioning(agencyId, null); // best-effort cleanup
       return res.json({ status: 'done', demo_phone_number: agency.demo_phone_number });
     }
 
+    // Durable state first: it survives restarts, multi-instance, and slow jobs.
+    const dp = agency && agency.demo_provisioning;
+    if (dp && dp.status === 'error') {
+      return res.json({ status: 'error', message: dp.error || 'Demo provisioning failed. Please try again.' });
+    }
+    if (dp && dp.status === 'provisioning' && (Date.now() - (dp.startedAt || 0)) < _DEMO_PROVISION_TTL) {
+      return res.json({ status: 'provisioning' });
+    }
+
+    // In-memory fallback (same-instance fast path before the DB write lands).
     const job = _demoJobs.get(agencyId);
     if (job && job.status === 'error') {
       return res.json({ status: 'error', message: job.error });

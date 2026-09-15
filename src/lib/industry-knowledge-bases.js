@@ -2159,6 +2159,149 @@ A: It depends on your grass type and region, the team can recommend the right ti
 - **Retaining wall**: a wall that holds back soil and manages grade
 - **Grading**: shaping the ground for drainage and a level surface
 - **Perennial / annual**: plants that return each year versus those that last one season`,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // SEPTIC & WELL / WATER SYSTEMS
+  // ══════════════════════════════════════════════════════════════════════════
+  septic: (businessName) => `# ${businessName} (AI Receptionist Knowledge Base)
+
+## Company Overview
+${businessName} is a septic and well/water systems company serving homes and businesses that are not on city sewer or city water. We pump and clean septic tanks, inspect and repair septic systems, service and replace drain fields, and diagnose, repair, and replace well pumps, pressure tanks, and related water-system equipment. Many of the properties we serve run on both a septic system and a private well, so a single visit often covers both. We offer 24/7 emergency service for backups and no-water situations, and free estimates on larger jobs like drain field or tank replacement.
+
+## Common Services
+
+### Septic Services
+- Septic tank pumping and cleaning (recommended every 3 to 5 years)
+- Septic inspections (routine and real-estate / point-of-sale, including dye and camera inspections)
+- Baffle, lid, riser, and pipe repair or replacement
+- Effluent filter cleaning and replacement
+- Effluent / lift pump repair and replacement (pump-up and aerobic systems)
+- Drain field / leach field diagnosis, repair, jetting, and replacement
+- Distribution box (D-box) inspection and repair
+- Septic tank repair and full tank replacement
+- Sewage backup and emergency response
+- New septic system installation and permitting
+
+### Well & Water System Services
+- No-water and low-pressure diagnosis and repair
+- Well pump repair and replacement (submersible and jet pumps)
+- Pressure tank service and replacement
+- Pressure switch, check valve, and foot valve repair or replacement
+- Control box and capacitor replacement
+- Well screen / sediment and sputtering-water issues
+- Water quality testing and treatment (sediment, iron, softeners)
+- Well inspection (routine and real-estate)
+
+## Common Call Reasons and What to Ask
+Use these to size up urgency and capture what the technician needs. Always get name, callback number, and service address first.
+
+### "Sewage is backing up into the house" / toilets or drains overflowing
+- Treat as an EMERGENCY, especially if waste is reaching living space.
+- Ask: Which drains or fixtures? Is it coming up into the house or just slow? How long? Roughly when was the tank last pumped? Do you know where the tank and lid are?
+- Safe stopgap for the caller: stop running water and avoid flushing until a tech arrives; keep people and pets away from any standing sewage.
+- Capture: system type if known, last pump-out date, symptoms, whether it is one fixture or the whole house.
+
+### Standing water, wet spongy ground, or odor over the tank or drain field
+- Urgent. Can signal a full tank or a failing drain field.
+- Ask: Where is the wet area, near the tank or out over the field? Any smell? Has it rained recently? When was it last pumped?
+
+### Slow drains throughout the house, gurgling, or sewage smell
+- Usually a full or stressed tank when it is every drain (not just one fixture).
+- Ask: Is it one drain or all of them? Any gurgling when you flush? When was the last pump-out?
+- If it is a single fixture only, it may be a plumbing clog rather than the tank; note that for the tech.
+
+### "It's time to pump" / routine pump-out / overdue
+- Routine. Schedule the pumping visit.
+- Ask: Do you know the tank size and location? When was it last pumped? Any current symptoms (slow drains, odor)?
+
+### Buying or selling a home / need a septic (or well) inspection
+- Schedule; ask about any closing or deadline date so we can prioritize.
+- Ask: Is there a closing date? Is this a full point-of-sale/real-estate inspection or a basic check? Septic, well, or both?
+
+### "I have no water at all" (well)
+- Treat as an EMERGENCY. A home with no water needs same-day help.
+- Ask: Is there no water anywhere, or just some fixtures? Have you checked the breaker for the well pump, is it tripped? Any recent power outage or storm? Can you hear the pump running?
+- SAFETY: if the breaker keeps tripping, tell the caller not to keep resetting it. A repeatedly tripping breaker can be an electrical or motor fault and is a fire risk. Leave it off and wait for the tech.
+
+### Low water pressure / weak flow
+- Ask: Is it every fixture or just one? Is the water sputtering or spitting air? Is it dirty or sandy? Roughly what does the pressure gauge read (normal is about 40 to 60 PSI)?
+- One fixture usually means a local plumbing issue; whole-house low pressure points to the pump, pressure tank, or pressure switch.
+
+### Sputtering / spitting faucets, air in the lines
+- Ask: All fixtures? Any sulfur or rotten-egg smell with it? Recent drought or unusually heavy use?
+- SAFETY: a strong sulfur/gas smell can indicate a gas pocket; treat as urgent, advise ventilation, and note it for the tech.
+
+### Dirty, sandy, or discolored water
+- Schedule. Ask when it started, whether it is all water or hot only, and whether there is a filter or softener on the system.
+
+### Pump runs constantly or clicks on and off rapidly (short-cycling)
+- Usually a pressure tank, pressure switch, or check valve issue. Schedule and note the symptom; short-cycling can burn out a pump, so do not let it sit.
+
+## Urgency Guidelines
+
+### Emergency (respond ASAP, offer soonest / after-hours)
+- Sewage backing up into the home or overflowing fixtures
+- No water at all to an occupied home
+- Sewage surfacing in the yard near the house or reaching living space
+- Well pump breaker repeatedly tripping (electrical/fire risk) with no water
+- Strong sewer gas or sulfur/gas smell inside the home
+
+### Urgent (same-day or next-day)
+- Standing water or strong odor over the tank or drain field
+- Every drain slow with gurgling and odor (tank likely full)
+- Whole-house low water pressure or a short-cycling pump
+- Partial water loss to part of the home
+
+### Routine (schedule within 1 to 7 days)
+- Routine or overdue septic pump-out with no active symptoms
+- Septic or well inspections (prioritize any real-estate closing date)
+- Water testing, filter service, and maintenance
+- Dirty/sandy water without loss of supply
+- Estimates for drain field or tank replacement
+
+## Pricing
+Estimates on larger jobs like drain field, tank, or pump replacement are typically free. Routine services such as pumping have standard pricing the team can confirm. Never quote a firm price on the phone; capture the details and let the technician or written estimate confirm the number.
+
+## Seasonal Considerations
+
+### Spring
+- Heavy rain and snowmelt saturate the ground, so drain fields cannot absorb and backups spike. Standing water over the field is common.
+
+### Summer
+- Drought drops the water table, so wells can run dry or sputter air. High usage from guests, irrigation, and pools stresses both septic tanks and pumps.
+
+### Fall
+- Best time for a pre-winter pump-out and inspection, getting ahead of freezing and holiday load.
+
+### Winter
+- Freezing is the main risk: exposed well heads, pressure tanks, and septic lines in unheated crawlspaces or outbuildings can freeze. Snow hides tank and well access. Holiday guests overload tanks.
+
+## Industry Terminology
+- Septic tank: buried tank where solids settle (sludge) and grease floats (scum); liquid (effluent) flows out to the drain field
+- Drain field / leach field: buried pipes that disperse effluent into the soil; the most expensive part to replace
+- Baffle: T-shaped fitting at the tank inlet/outlet that keeps scum and sludge from reaching the drain field
+- Effluent filter: filter at the tank outlet that catches solids; cleaned/replaced periodically
+- Distribution box (D-box): splits effluent evenly among the drain field lines
+- Riser: access pipe that brings the tank lid up to ground level
+- Sludge / scum / effluent: settled solids / floating grease / clarified liquid
+- Greywater: wastewater from sinks, showers, and laundry
+- Title 5 / point-of-sale inspection: a required septic inspection in some states for real-estate sales
+- Aerobic / mound / conventional system: septic system types; some use a lift or effluent pump
+- Submersible pump: pump down inside the well; Jet pump: pump above ground in a well house or basement
+- Pressure tank: stores water and holds pressure with an air bladder
+- Pressure switch: turns the pump on and off to hold pressure (commonly a 40/60 PSI setting)
+- Check valve / foot valve: one-way valves that keep the system primed and hold pressure
+- Control box / capacitor: electrical parts that run a submersible pump (a bad capacitor is a very common failure)
+- Well casing / well screen: the well's liner and the screen that keeps sediment out
+- Water table: the underground water level the well draws from; drops in drought
+- Short-cycling: the pump switching on and off too rapidly, which can burn it out
+- Waterlogged tank: a pressure tank that has lost its air charge, causing short-cycling
+
+## Call Handling Notes
+- For any emergency, get name, callback number, and address first, then confirm the soonest availability and reassure the caller help is on the way.
+- Many customers do not know their system details ("I don't speak septic"). Don't push; capture what they do know and let the technician sort out the rest.
+- A property on both a well and a septic system is common. If unsure which system a symptom points to, capture the symptom plainly and let the tech decide.
+- Never diagnose or quote a firm price. Gather symptoms, urgency, and access details, and book the visit.`,
 };
 
 module.exports = { INDUSTRY_KNOWLEDGE_BASES };

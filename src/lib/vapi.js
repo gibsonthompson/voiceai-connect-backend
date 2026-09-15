@@ -38,6 +38,31 @@
 const fetch = require('node-fetch');
 const FormData = require('form-data');
 
+// Guards outbound provisioning calls (Telnyx orders, VAPI imports) against an
+// upstream that HANGS instead of erroring. node-fetch honors AbortSignal, so a
+// stuck request is aborted after timeoutMs and rejected as a normal error the
+// caller fails over on. This is what stops one degraded Telnyx order from
+// stalling the whole demo provision (the +1470 order hung ~2 min before 500ing).
+// 90s is deliberately generous: a *successful* order was observed taking 62s
+// during a Telnyx slowdown, so a tighter timeout would abort slow-but-valid
+// orders. It only ever fires on a true hang; the durable status handles slow.
+async function fetchWithTimeout(url, options = {}, timeoutMs = 90000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err && (err.name === 'AbortError' || err.type === 'aborted')) {
+      const e = new Error(`Upstream request to ${new URL(url).host} timed out after ${Math.round(timeoutMs / 1000)}s`);
+      e.isTimeout = true;
+      throw e;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 let supabase;
 try {
   const supabaseModule = require('./supabase');
@@ -136,6 +161,17 @@ const INDUSTRY_MAPPING = {
   'landscaping': 'landscaping',
   'lawn_care': 'landscaping',
   'lawn': 'landscaping',
+
+  'Septic & Well': 'septic',
+  'Septic and Well': 'septic',
+  'Septic & Well / Water Systems': 'septic',
+  'septic': 'septic',
+  'septic_well': 'septic',
+  'septic_tank': 'septic',
+  'well': 'septic',
+  'well_water': 'septic',
+  'well_pump': 'septic',
+  'water_systems': 'septic',
 
   'general': 'professional_services',
   'other': 'professional_services'
@@ -2738,12 +2774,9 @@ async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
     // Enable SMS on the demo number (messaging profile + 10DLC campaign), the
     // same step client numbers get, so the demo can text the caller FROM the
     // number they called. Non-blocking: a failure still leaves a working line.
-    try {
-      const smsAssign = await assignNumberForSMS(phoneData.number);
-      console.log(`📱 Demo number SMS assignment: profile=${smsAssign.profileAssigned} campaign=${smsAssign.campaignAssigned}`);
-    } catch (smsErr) {
-      console.warn('⚠️ Demo number SMS assignment failed (non-blocking):', smsErr.message);
-    }
+    // SMS (messaging profile + 10DLC) is already assigned inside
+    // provisionPhoneNumber when the number is imported, so it is NOT repeated
+    // here (the duplicate call was assigning the same number twice).
 
     console.log(`🎉 Demo provisioning complete for ${agencyName}: ${phoneData.number}`);
     return {
@@ -2752,8 +2785,11 @@ async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
       phoneId: phoneData.id
     };
   } catch (error) {
+    // Propagate the real reason (Telnyx/VAPI error, timeout, ...) so the
+    // background runner records it durably and the UI can show it, instead of
+    // collapsing every failure into a generic "please try again".
     console.error(`❌ Demo provisioning failed for ${agencyName}:`, error.message);
-    return null;
+    throw error;
   }
 }
 
@@ -3221,7 +3257,7 @@ async function provisionPhoneNumber(areaCode, options = {}) {
   console.log(`   📱 Found available number: ${selectedNumber} (area code: ${areaCode})`);
 
   // ── Step 2: Order the number from Telnyx ──────────────────────────
-  const orderRes = await fetch('https://api.telnyx.com/v2/number_orders', {
+  const orderRes = await fetchWithTimeout('https://api.telnyx.com/v2/number_orders', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -3282,7 +3318,7 @@ async function provisionPhoneNumber(areaCode, options = {}) {
   }
 
   // ── Step 4: Import the number into VAPI ───────────────────────────
-  const importRes = await fetch('https://api.vapi.ai/phone-number', {
+  const importRes = await fetchWithTimeout('https://api.vapi.ai/phone-number', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${VAPI_API_KEY}`,
@@ -3302,7 +3338,7 @@ async function provisionPhoneNumber(areaCode, options = {}) {
 
     // Try alternative provider format if 'telnyx' doesn't work
     console.log(`   🔄 Retrying VAPI import with provider: byo-phone-number...`);
-    const retryRes = await fetch('https://api.vapi.ai/phone-number', {
+    const retryRes = await fetchWithTimeout('https://api.vapi.ai/phone-number', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${VAPI_API_KEY}`,
