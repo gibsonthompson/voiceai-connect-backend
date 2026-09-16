@@ -214,6 +214,8 @@ try {
 
 const { handleClientSignup, provisionClient, handleAgencyAddClient, getClientProvisioningStatus, signupRateLimiter, reprovisionStrandedClients } = require('./routes/client-signup');
 const clientRoutes = require('./routes/client');
+const { createApiKey, listApiKeys, revokeApiKey } = require('./routes/agency-api-keys');
+const { processDueWebhookDeliveries } = require('./lib/webhooks');
 const clientContactsRoutes = require('./routes/client-contacts');
 const clientPromptRoutes = require('./routes/client-prompt');
 const clientKnowledgeBaseRoutes = require('./routes/client-knowledge-base');
@@ -364,6 +366,7 @@ app.use('/api/migrate', require('./routes/migrate-media'));   // TEMP, delete af
 
 app.use('/api/content-render', contentRender);
 app.use('/api/resto', restoRoutes);
+app.use('/api/v1', require('./routes/v1'));  // agency-facing REST API (Scale)
 
 // ============================================================================
 // AGENCY ROUTES (Platform to Agencies)
@@ -479,6 +482,9 @@ app.get('/api/agency/:agencyId/settings', getAgencySettings);
 // toggle can't write settings. Unauthenticated/owner calls pass through (the
 // guard is a no-op without a staff token), so no existing caller breaks.
 app.put('/api/agency/:agencyId/settings', requirePermissionIfAuthed('settings'), updateAgencySettings);
+app.get('/api/agency/:agencyId/api-keys', requirePermissionIfAuthed('settings'), listApiKeys);
+app.post('/api/agency/:agencyId/api-keys', requirePermissionIfAuthed('settings'), createApiKey);
+app.delete('/api/agency/:agencyId/api-keys/:keyId', requirePermissionIfAuthed('settings'), revokeApiKey);
 app.post('/api/agency/:agencyId/domain/verify', verifyAgencyDomain);
 // 'billing' gates the agency's own subscription actions. checkout is also hit
 // during signup before a token exists, so the soft guard is required here -
@@ -1751,7 +1757,24 @@ app.post('/api/cron/expire-trials', async (req, res) => {
     res.json({ success: true, message: 'Trial expiration check completed', ...result });
   } catch (error) {
     console.error('Cron error:', error);
+
     res.status(500).json({ error: 'Failed to run trial expiration' });
+  }
+});
+
+// Retry due webhook deliveries. Hit this on a schedule (e.g. every minute).
+// Immediate delivery happens at emit time; this catches failures and backs off.
+app.post('/api/cron/process-webhooks', async (req, res) => {
+  const cronSecret = req.headers['x-cron-secret'];
+  if (process.env.CRON_SECRET && cronSecret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const result = await processDueWebhookDeliveries();
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('Webhook retry cron error:', error);
+    res.status(500).json({ error: 'Failed to process webhook deliveries' });
   }
 });
 

@@ -423,7 +423,6 @@ async function handleDemoCall(agency, message, industryKey = null) {
           message: lines.join('\n'),
           agencyId: agency.id,
           recipientType: 'prospect',
-          from: agency.demo_phone_number || undefined,
           messageType: 'demo_followup_industry',
           metadata: { industryKey, businessName, businessType },
         });
@@ -435,7 +434,6 @@ async function handleDemoCall(agency, message, industryKey = null) {
           message: agency.demo_followup_sms_override,
           agencyId: agency.id,
           recipientType: 'prospect',
-          from: agency.demo_phone_number || undefined,
           messageType: 'demo_followup_custom',
           metadata: { businessName, businessType, custom: true },
         });
@@ -476,7 +474,6 @@ async function handleDemoCall(agency, message, industryKey = null) {
           message: lines.join('\n'),
           agencyId: agency.id,
           recipientType: 'prospect',
-          from: agency.demo_phone_number || undefined,
           messageType: 'demo_followup',
           metadata: { businessName, businessType, serviceDiscussed },
         });
@@ -678,7 +675,6 @@ async function handleDemoToolCall(req, res, message) {
       message: smsContent,
       agencyId: agency.id,
       recipientType: 'prospect',
-      from: agency.demo_phone_number || undefined,
       messageType: 'demo_sample_summary',
       metadata: { businessName: cleanBusinessName, businessType: args.business_type || null },
     });
@@ -1154,6 +1150,20 @@ async function handleVapiWebhook(req, res) {
       console.log(`📲 No owner_phone on client - skipping owner SMS`);
     }
     await notifyTeamMembers(client.id, aiData, agency);
+
+    // Fire the webhook event (non-blocking; the DB row is already enriched).
+    try {
+      if (savedCallId && agency?.id) {
+        const { dispatchWebhook } = require('../lib/webhooks');
+        dispatchWebhook(agency.id, wasTransferred ? 'call.transferred' : 'call.completed', {
+          id: savedCallId,
+          client_id: client.id,
+          call_status: wasTransferred ? 'transferred' : 'completed',
+          duration_seconds: durationSeconds,
+          created_at: initialRec.created_at,
+        });
+      }
+    } catch (e) { console.error('webhook emit (call):', e.message); }
 
     return res.status(200).json({ received: true, saved: true, callId: savedCallId,
       smsSent, emailSent, firstCall: isFirst, agency: agency?.name, duration: durationSeconds,
