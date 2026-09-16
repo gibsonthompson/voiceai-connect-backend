@@ -246,6 +246,8 @@ function publicAgencyShape(agency) {
     // public-facing toggle written via updateAgencySettings, and reveals
     // nothing sensitive.
     require_card_for_trial: agency.require_card_for_trial === true,
+    bill_minutes_during_trial: agency.bill_minutes_during_trial === true,
+    client_minute_rate_cents: agency.client_minute_rate_cents ?? null,
 
     // Analytics & Tracking (for marketing site script injection)
     gtm_id: agency.gtm_id || null,
@@ -550,6 +552,7 @@ async function getAgencySettings(req, res) {
         // allowed); included minutes are the per-plan free allotment.
         minute_pass_through: agency.minute_pass_through === true,
         client_minute_rate_cents: agency.client_minute_rate_cents ?? null,
+        bill_minutes_during_trial: agency.bill_minutes_during_trial === true,
         included_minutes_starter: agency.included_minutes_starter ?? 0,
         included_minutes_pro: agency.included_minutes_pro ?? 0,
         included_minutes_growth: agency.included_minutes_growth ?? 0,
@@ -674,6 +677,7 @@ async function updateAgencySettings(req, res) {
       // dedicated POST /api/agency/:agencyId/minute-pass-through endpoint.
       // connect_minute_meter_id is system-managed and never user-writable.
       'client_minute_rate_cents',
+      'bill_minutes_during_trial',
       'included_minutes_starter', 'included_minutes_pro', 'included_minutes_growth',
       // Client billing mode ('connect' | 'manual'). A plain settings write:
       // switching to manual changes what NEW clients get (each client is stamped
@@ -732,6 +736,7 @@ async function updateAgencySettings(req, res) {
     ];
     
     const sanitizedUpdates = {};
+    if (updates.bill_minutes_during_trial !== undefined) updates.bill_minutes_during_trial = updates.bill_minutes_during_trial === true;
     for (const key of allowedFields) {
       if (updates[key] !== undefined) {
         sanitizedUpdates[key] = updates[key];

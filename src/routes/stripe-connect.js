@@ -534,6 +534,15 @@ async function setMinutePassThrough(req, res) {
         });
       }
 
+      // GUARD: never let an agency bill its clients for minutes while the platform
+      // is not billing the agency for those same minutes.
+      if (!agency.usage_billing_enabled) {
+        return res.status(400).json({
+          error: 'usage_billing_required',
+          message: 'Per-minute client billing can only be turned on once usage billing is active on your own account. This activates when your plan subscription is live.',
+        });
+      }
+
       await ensureConnectMinuteMeter(agency);
       await supabase.from('agencies').update({ minute_pass_through: true }).eq('id', agencyId);
       agency.minute_pass_through = true;
@@ -1277,6 +1286,41 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
   const setupFeeItem = await buildSetupFeeLineItem(agency, plan, client);
   if (setupFeeItem) lineItems.push(setupFeeItem);
 
+  // Bill-during-trial (a true 7-day fee-free trial where the client still pays for
+  // their own minutes). Stripe waives ALL charges, metered included, during a
+  // trial period OR a billing-cycle-anchor free period, so neither can bill
+  // minutes in the free window. The only structure that bills minutes while the
+  // flat fee is waived is a subscription SCHEDULE: phase 1 (the 7-day window)
+  // carries the metered minute item ONLY (minutes bill, no flat fee); phase 2
+  // adds the flat fee. Checkout can't create a schedule, so we collect the card
+  // with a setup-mode Checkout and build the schedule on the webhook
+  // (handleClientCheckoutCompleted -> handleBillDuringTrialScheduleSetup).
+  const billMinutesDuringTrial = agency.bill_minutes_during_trial === true && minutePassThroughActive(agency);
+
+  if (billMinutesDuringTrial) {
+    const minutePriceForSchedule = await createConnectMinutePrice(agency, plan, client);
+    const setupFeeForSchedule = await buildSetupFeeLineItem(agency, plan, client);
+    const setupSession = await stripe.checkout.sessions.create({
+      customer: connectedCustomerId,
+      mode: 'setup',
+      payment_method_types: ['card'],
+      success_url: successUrl,
+      cancel_url: `${agencyUrl}/client/signup?canceled=true`,
+      metadata: {
+        client_id: client.id,
+        agency_id: agency.id,
+        plan,
+        call_limit: callLimits[plan].toString(),
+        type: 'trial_signup_schedule',
+        flat_price_id: price.id,
+        minute_price_id: minutePriceForSchedule.id,
+        ...(setupFeeForSchedule ? { setup_price_id: setupFeeForSchedule.price } : {}),
+      },
+    }, { stripeAccount: agency.stripe_account_id });
+    console.log(`✅ Bill-during-trial setup checkout created for client ${client.id}: session ${setupSession.id}`);
+    return { url: setupSession.url, sessionId: setupSession.id };
+  }
+
   const session = await stripe.checkout.sessions.create({
     customer: connectedCustomerId,
     mode: 'subscription',
@@ -1725,6 +1769,20 @@ async function changeClientPlan(req, res) {
 // immediate=true (agency/admin only) ends it now. resume=true un-schedules a
 // pending period-end cancel. A manual client has no Stripe subscription, so
 // cancel = tear down now.
+// A bill-during-trial subscription is governed by a subscription schedule until
+// it releases (after the first cycle). You can't cancel a schedule-governed sub
+// directly, so resolve the schedule id and act on it. Returns null for a normal
+// sub (or one that's already gone).
+async function scheduleIdForSub(subId, stripeAccount) {
+  try {
+    const sub = await stripe.subscriptions.retrieve(subId, { stripeAccount });
+    return sub.schedule || null;
+  } catch (e) {
+    if (e.code === 'resource_missing') return null;
+    throw e;
+  }
+}
+
 async function cancelClientSubscription(req, res) {
   try {
     const { client_id, immediate, resume } = req.body;
@@ -1775,10 +1833,17 @@ async function cancelClientSubscription(req, res) {
     // ── Immediate: cancel now (subscription.deleted webhook runs teardown). ──
     if (wantImmediate) {
       try {
-        await stripe.subscriptions.cancel(
-          client.stripe_connected_subscription_id,
-          { stripeAccount: agency.stripe_account_id }
-        );
+        // If a schedule governs the sub (bill-during-trial), cancelling the
+        // schedule cancels the subscription too. Otherwise cancel the sub.
+        const scheduleId = await scheduleIdForSub(client.stripe_connected_subscription_id, agency.stripe_account_id);
+        if (scheduleId) {
+          await stripe.subscriptionSchedules.cancel(scheduleId, { stripeAccount: agency.stripe_account_id });
+        } else {
+          await stripe.subscriptions.cancel(
+            client.stripe_connected_subscription_id,
+            { stripeAccount: agency.stripe_account_id }
+          );
+        }
       } catch (e) {
         if (e.code !== 'resource_missing') throw e; // already gone in Stripe
       }
@@ -1789,6 +1854,12 @@ async function cancelClientSubscription(req, res) {
     }
 
     // ── Default: cancel at period end. Client keeps service until it ends. ──
+    // If a schedule governs the sub (bill-during-trial), release it first so the
+    // subscription becomes a normal sub we can cancel at period end.
+    const cancelScheduleId = await scheduleIdForSub(client.stripe_connected_subscription_id, agency.stripe_account_id);
+    if (cancelScheduleId) {
+      await stripe.subscriptionSchedules.release(cancelScheduleId, { stripeAccount: agency.stripe_account_id });
+    }
     const sub = await stripe.subscriptions.update(
       client.stripe_connected_subscription_id,
       { cancel_at_period_end: true },
@@ -2359,6 +2430,100 @@ async function handleAccountUpdated(account) {
 // Discriminator: retrieve the subscription, check status. 'trialing' = card-
 // required trial signup. 'active' (or anything else) = upgrade flow.
 // ----------------------------------------------------------------------------
+// Bill-during-trial completion: the client finished a SETUP-mode Checkout (card
+// only). Build the two-phase subscription schedule that gives them a 7-day
+// fee-free window while their minutes bill from day one, then activate them.
+async function handleBillDuringTrialScheduleSetup(session, stripeAccountId, client) {
+  const clientId = client.id;
+
+  // Idempotency: Stripe retries checkout.session.completed. If a prior delivery
+  // already created the subscription, do nothing (never create two).
+  if (client.stripe_connected_subscription_id) {
+    console.log(`Bill-during-trial: client ${clientId} already provisioned, skipping (idempotent)`);
+    return;
+  }
+  const plan = session.metadata?.plan || 'starter';
+  const callLimit = parseInt(session.metadata?.call_limit) || 50;
+  const flatPriceId = session.metadata?.flat_price_id;
+  const minutePriceId = session.metadata?.minute_price_id;
+  const setupPriceId = session.metadata?.setup_price_id || null;
+
+  if (!flatPriceId || !minutePriceId) {
+    console.error('Bill-during-trial: missing price ids in metadata for client', clientId);
+    return;
+  }
+
+  // Card saved via the SetupIntent on the connected account.
+  let paymentMethodId = null;
+  try {
+    const si = await stripe.setupIntents.retrieve(session.setup_intent, { stripeAccount: stripeAccountId });
+    paymentMethodId = si.payment_method;
+  } catch (e) {
+    console.error('Bill-during-trial: failed to read setup intent:', e.message);
+    return;
+  }
+  if (!paymentMethodId) { console.error('Bill-during-trial: no payment method on setup intent'); return; }
+
+  const customerId = client.stripe_connected_customer_id || session.customer;
+  try {
+    await stripe.customers.update(customerId, { invoice_settings: { default_payment_method: paymentMethodId } }, { stripeAccount: stripeAccountId });
+  } catch (e) { console.warn('Bill-during-trial: could not set default PM:', e.message); }
+
+  // Phase 1: metered minutes ONLY for 7 days (bills at day 7, no flat fee).
+  // Phase 2: flat fee + metered minutes, open-ended.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const phase1End = nowSec + 7 * 24 * 60 * 60;
+  const phase1 = { items: [{ price: minutePriceId }], end_date: phase1End };
+  if (setupPriceId) phase1.add_invoice_items = [{ price: setupPriceId }];
+  // iterations:1 + release means: after phase 1 (7 days) and one phase-2 cycle, the
+  // schedule releases and the subscription continues on its own as a normal
+  // flat+metered sub, so normal cancellation works from then on.
+  const phase2 = { items: [{ price: flatPriceId, quantity: 1 }, { price: minutePriceId }], iterations: 1 };
+
+  let schedule;
+  try {
+    schedule = await stripe.subscriptionSchedules.create({
+      customer: customerId,
+      start_date: 'now',
+      end_behavior: 'release',
+      default_settings: { default_payment_method: paymentMethodId, collection_method: 'charge_automatically' },
+      phases: [phase1, phase2],
+      metadata: { client_id: clientId, agency_id: client.agency_id, plan, type: 'bill_during_trial' },
+    }, { stripeAccount: stripeAccountId });
+  } catch (e) {
+    console.error('Bill-during-trial: failed to create subscription schedule:', e.message);
+    return;
+  }
+
+  const subscriptionId = schedule.subscription;
+
+  // Active from day one (minutes bill). The fee-free 7 days are structural (phase
+  // 1 has no flat item), so the client is 'active'; trial_ends_at is stored for
+  // display of the fee-free window only and does not drive the trial-expiry cron.
+  const { error: updateError } = await supabase.from('clients').update({
+    subscription_status: 'active',
+    plan_type: plan,
+    monthly_call_limit: callLimit,
+    stripe_connected_subscription_id: subscriptionId,
+    trial_ends_at: new Date(phase1End * 1000).toISOString(),
+    status: 'active',
+    calls_this_month: 0,
+    minutes_this_period: 0,
+  }).eq('id', clientId);
+  if (updateError) { console.error('Bill-during-trial: failed to update client:', updateError); return; }
+
+  console.log(`✅ Bill-during-trial activated via schedule: ${client.business_name} (sub ${subscriptionId})`);
+
+  try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
+  await ensureProvisionedOnReactivate(client, 'schedule.completed');
+
+  const agency = client.agencies;
+  if (client.subscription_status === 'pending_payment' && client.owner_phone && client.vapi_phone_number) {
+    try { await sendWelcomeSMS(client.owner_phone, client.business_name, client.vapi_phone_number, agency); } catch (e) { console.error('Deferred welcome SMS failed:', e.message); }
+  }
+  await sendClientSubscriptionActivatedSMS(client, agency, plan);
+}
+
 async function handleClientCheckoutCompleted(session, stripeAccountId) {
   console.log('Client checkout completed:', session.id);
 
@@ -2370,6 +2535,12 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
   const { data: client, error } = await supabase
     .from('clients').select('*, agencies!clients_agency_id_fkey(*)').eq('id', clientId).single();
   if (error || !client) { console.error('Client not found:', clientId); return; }
+
+  // Bill-during-trial clients complete a SETUP-mode checkout (card only); build
+  // their two-phase schedule instead of the normal subscription activation.
+  if (session.mode === 'setup' || session.metadata?.type === 'trial_signup_schedule') {
+    return await handleBillDuringTrialScheduleSetup(session, stripeAccountId, client);
+  }
 
   const wasPendingPayment = client.subscription_status === 'pending_payment';
   const isUpgrade = client.subscription_status === 'trial_expired'

@@ -242,9 +242,15 @@ async function sendClientMinuteMeterEvent(clientId, minutes, usageRecordId) {
       return;
     }
 
-    // Trial minutes are free.
-    if (client.subscription_status === 'trial' || client.subscription_status === 'trialing') {
-      console.log(`   ⏭ Client minute event skipped, client ${clientId.slice(0, 8)} in trial`);
+    // Trial minutes are free, UNLESS the agency opted to bill for minutes during
+    // the trial. When that option is on, the subscription fee stays free (waived
+    // on the connected subscription) but metered minutes are billed from day one.
+    // NOTE: this only bills for real if the client's connected subscription is
+    // NOT running a plain Stripe trial (see createTrialCheckoutForSignup), because
+    // Stripe discards metered usage reported during a trial period.
+    const inTrial = client.subscription_status === 'trial' || client.subscription_status === 'trialing';
+    if (inTrial && agency.bill_minutes_during_trial !== true) {
+      console.log(`   ⏭ Client minute event skipped, client ${clientId.slice(0, 8)} in trial (bill_minutes_during_trial off)`);
       await markSettled();
       return;
     }
