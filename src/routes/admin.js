@@ -160,9 +160,13 @@ router.get('/agencies', requireAdmin, async (req, res) => {
   try {
     const { status, plan, search, limit = 100, offset = 0 } = req.query;
 
+    // Slim projection: the list only renders identity + status + the rollup
+    // counts. Pulling select('*') dragged marketing_config, plan_features and the
+    // custom-script columns (large) for every row, bloating the payload. The
+    // agency DETAIL endpoint still returns the full row.
     let query = supabase
       .from('agencies')
-      .select('*')
+      .select('id, name, email, phone, slug, country, plan_type, subscription_status, status, created_at, trial_ends_at, current_period_end, referral_source, stripe_charges_enabled, stripe_account_id, marketing_domain, byot_enabled, usage_billing_enabled, minute_pass_through')
       .order('created_at', { ascending: false })
       .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
 
@@ -182,8 +186,16 @@ router.get('/agencies', requireAdmin, async (req, res) => {
 
     // One Postgres call returns all per-agency aggregate counts. Coerce every
     // value to Number (bigint columns come back as strings over PostgREST).
-    const { data: rollupRows, error: rollupError } = await supabase.rpc('admin_agencies_rollup');
-    if (rollupError) throw rollupError;
+    // Rollup counts. If this is slow or errors, still return the agencies so the
+    // tab loads (counts fall back to 0) instead of the whole page failing.
+    let rollupRows = [];
+    try {
+      const { data: _rr, error: rollupError } = await supabase.rpc('admin_agencies_rollup');
+      if (rollupError) throw rollupError;
+      rollupRows = _rr || [];
+    } catch (rollupErr) {
+      console.error('admin_agencies_rollup failed, returning agencies without counts:', rollupErr.message);
+    }
 
     const rollup = {};
     (rollupRows || []).forEach(r => {
