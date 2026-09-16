@@ -13,11 +13,12 @@ const router = express.Router();
 const { supabase } = require('../../lib/supabase');
 const { resolveVapiRecordingUrl } = require('../../lib/vapi-recording');
 const { handleAgencyAddClient } = require('../client-signup');
+const { updateClientKnowledgeBase } = require('../client-knowledge-base');
 const {
   apiKeyAuth, requireScope, fail,
   parsePagination, sendList, toPublicClient, toPublicCall,
 } = require('../../middleware/api-auth');
-const { EVENT_TYPES, sendPing } = require('../../lib/webhooks');
+const { EVENT_TYPES, sendPing, isSafeWebhookUrl } = require('../../lib/webhooks');
 
 router.use(apiKeyAuth);
 
@@ -331,6 +332,20 @@ router.patch('/clients/:id/receptionist', requireScope('read_write'), async (req
 // Knowledge base (read). Writing the KB rebuilds a VAPI file + tool + assistant,
 // so it is intentionally not exposed here yet; edit the KB from the dashboard.
 // ----------------------------------------------------------------------------
+router.put('/clients/:id/knowledge-base', requireScope('read_write'), async (req, res) => {
+  try {
+    const result = await updateClientKnowledgeBase(req.agency.id, req.params.id, (req.body || {}).content);
+    if (!result.ok) {
+      const type = result.status === 404 ? 'not_found' : 'invalid_request';
+      return fail(res, result.status || 400, type, result.error);
+    }
+    return res.json({ client_id: req.params.id, content: result.content });
+  } catch (err) {
+    console.error('v1 PUT /clients/:id/knowledge-base:', err);
+    return fail(res, 500, 'api_error', 'Failed to update knowledge base.');
+  }
+});
+
 router.get('/clients/:id/knowledge-base', async (req, res) => {
   try {
     const c = await ownedClient(req.agency.id, req.params.id, 'id, knowledge_base_content, knowledge_base_updated_at');
@@ -574,7 +589,7 @@ router.get('/events', (req, res) => res.json({ data: EVENT_TYPES }));
 router.post('/webhooks', requireScope('read_write'), async (req, res) => {
   try {
     const b = req.body || {};
-    if (!b.url || !/^https?:\/\//i.test(b.url)) return fail(res, 400, 'invalid_request', 'url must be an http(s) URL.');
+    if (!b.url || !isSafeWebhookUrl(b.url)) return fail(res, 400, 'invalid_request', 'url must be a public http(s) URL (no localhost or private addresses).');
     const events = b.events || ['*'];
     const evErr = validateEvents(events);
     if (evErr) return fail(res, 400, 'invalid_request', evErr);
@@ -628,7 +643,7 @@ router.patch('/webhooks/:id', requireScope('read_write'), async (req, res) => {
     const b = req.body || {};
     const updates = {};
     if (b.url !== undefined) {
-      if (!/^https?:\/\//i.test(b.url)) return fail(res, 400, 'invalid_request', 'url must be an http(s) URL.');
+      if (!isSafeWebhookUrl(b.url)) return fail(res, 400, 'invalid_request', 'url must be a public http(s) URL (no localhost or private addresses).');
       updates.url = b.url;
     }
     if (b.events !== undefined) {

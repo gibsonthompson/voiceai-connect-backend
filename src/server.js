@@ -216,6 +216,7 @@ const { handleClientSignup, provisionClient, handleAgencyAddClient, getClientPro
 const clientRoutes = require('./routes/client');
 const { createApiKey, listApiKeys, revokeApiKey } = require('./routes/agency-api-keys');
 const { processDueWebhookDeliveries } = require('./lib/webhooks');
+const { createWebhook, listWebhooks, updateWebhook, deleteWebhook, pingWebhook, listWebhookDeliveries } = require('./routes/agency-webhooks');
 const clientContactsRoutes = require('./routes/client-contacts');
 const clientPromptRoutes = require('./routes/client-prompt');
 const clientKnowledgeBaseRoutes = require('./routes/client-knowledge-base');
@@ -485,6 +486,12 @@ app.put('/api/agency/:agencyId/settings', requirePermissionIfAuthed('settings'),
 app.get('/api/agency/:agencyId/api-keys', requirePermissionIfAuthed('settings'), listApiKeys);
 app.post('/api/agency/:agencyId/api-keys', requirePermissionIfAuthed('settings'), createApiKey);
 app.delete('/api/agency/:agencyId/api-keys/:keyId', requirePermissionIfAuthed('settings'), revokeApiKey);
+app.get('/api/agency/:agencyId/webhooks', requirePermissionIfAuthed('settings'), listWebhooks);
+app.post('/api/agency/:agencyId/webhooks', requirePermissionIfAuthed('settings'), createWebhook);
+app.patch('/api/agency/:agencyId/webhooks/:webhookId', requirePermissionIfAuthed('settings'), updateWebhook);
+app.delete('/api/agency/:agencyId/webhooks/:webhookId', requirePermissionIfAuthed('settings'), deleteWebhook);
+app.post('/api/agency/:agencyId/webhooks/:webhookId/ping', requirePermissionIfAuthed('settings'), pingWebhook);
+app.get('/api/agency/:agencyId/webhooks/:webhookId/deliveries', requirePermissionIfAuthed('settings'), listWebhookDeliveries);
 app.post('/api/agency/:agencyId/domain/verify', verifyAgencyDomain);
 // 'billing' gates the agency's own subscription actions. checkout is also hit
 // during signup before a token exists, so the soft guard is required here -

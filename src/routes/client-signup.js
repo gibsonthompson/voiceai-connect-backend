@@ -1362,25 +1362,38 @@ async function createClientProvisioningJob(id, agencyId) {
   } catch (e) { console.warn('\u26a0\ufe0f Could not create provisioning job:', e.message); }
 }
 
-function finishClientProvisioningJob(id, code, body) {
+function finishClientProvisioningJob(id, agencyId, code, body) {
   const ok = code >= 200 && code < 300 && body && body.client;
   const patch = ok
     ? { status: 'done', result: body }
     : { status: 'error', result: { error: (body && (body.message || body.error)) || 'Provisioning failed. Please try again.' } };
   supabase.from('client_provisioning_jobs').update(patch).eq('id', id)
     .then(() => {}, (e) => console.warn('\u26a0\ufe0f Could not update provisioning job:', e && e.message));
+  // Fire the webhook event (non-blocking).
+  try {
+    const { dispatchWebhook } = require('../lib/webhooks');
+    if (ok) {
+      const c = body.client;
+      dispatchWebhook(agencyId, 'client.provisioned', {
+        id: c.id, business_name: c.business_name, phone_number: c.phone_number,
+        status: c.status, created_at: c.created_at,
+      });
+    } else {
+      dispatchWebhook(agencyId, 'client.provisioning_failed', { agency_id: agencyId, error: patch.result.error });
+    }
+  } catch (e) { console.error('webhook emit (client provisioning):', e.message); }
 }
 
 // Stands in for Express res after the 202 is sent, so the existing provisioning
 // code records its outcome on the job instead of answering an already-answered
 // request. It accepts the same res.status().json() calls the code already makes.
-function makeJobRes(jobId) {
+function makeJobRes(jobId, agencyId) {
   const shim = {
     _code: 200,
     headersSent: true,
     status(code) { shim._code = code; return shim; },
-    json(body) { finishClientProvisioningJob(jobId, shim._code, body); return shim; },
-    send(body) { finishClientProvisioningJob(jobId, shim._code, body); return shim; },
+    json(body) { finishClientProvisioningJob(jobId, agencyId, shim._code, body); return shim; },
+    send(body) { finishClientProvisioningJob(jobId, agencyId, shim._code, body); return shim; },
     set() { return shim; },
     setHeader() { return shim; },
     end() { return shim; },
@@ -1534,7 +1547,7 @@ async function handleAgencyAddClient(req, res) {
     const provisioningJobId = `cj_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
     await createClientProvisioningJob(provisioningJobId, agencyId);
     res.status(202).json({ jobId: provisioningJobId, status: 'provisioning' });
-    res = makeJobRes(provisioningJobId);
+    res = makeJobRes(provisioningJobId, agencyId);
 
     // === STEP 1: Knowledge Base ===
     let knowledgeBaseData = null;

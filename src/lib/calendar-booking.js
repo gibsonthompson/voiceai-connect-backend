@@ -533,11 +533,33 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
       notes,
       status: 'confirmed',
     };
-    const { error: apptError } = await supabase.from('appointments').insert(appointmentRecord);
-    if (apptError && apptError.message && apptError.message.includes('staff_name')) {
-      delete appointmentRecord.staff_name;
-      await supabase.from('appointments').insert(appointmentRecord);
+    let insertedApptId = null;
+    {
+      const { data: ins, error: apptError } = await supabase.from('appointments').insert(appointmentRecord).select('id').single();
+      if (apptError && apptError.message && apptError.message.includes('staff_name')) {
+        delete appointmentRecord.staff_name;
+        const { data: ins2 } = await supabase.from('appointments').insert(appointmentRecord).select('id').single();
+        insertedApptId = ins2 && ins2.id;
+      } else {
+        insertedApptId = ins && ins.id;
+      }
     }
+    // Fire the webhook event (non-blocking).
+    try {
+      if (client.agency_id) {
+        const { dispatchWebhook } = require('./webhooks');
+        dispatchWebhook(client.agency_id, 'appointment.booked', {
+          id: insertedApptId,
+          client_id: clientId,
+          customer_name: customerName,
+          customer_phone: customerPhone,
+          appointment_time: appointmentRecord.appointment_time,
+          service_type: serviceType,
+          staff_name: staffName || null,
+          status: 'confirmed',
+        });
+      }
+    } catch (e) { console.error('webhook emit (appointment.booked):', e.message); }
 
     const dateObj = new Date(date + 'T12:00:00');
     const formattedDate = dateObj.toLocaleDateString('en-US', {

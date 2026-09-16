@@ -266,49 +266,45 @@ router.get('/:agencyId/clients/:clientId/knowledge-base', async (req, res) => {
 // PUT /:agencyId/clients/:clientId/knowledge-base
 // Updates KB: upload new file → create tool → swap on assistant → cache
 // ============================================================================
+// Reusable KB rebuild: upload content as a VAPI file + query tool, swap it onto
+// the assistant, and cache in Supabase. Shared by this route and the v1 API.
+// Returns { ok, content } or { ok:false, status, error } (never throws for the
+// expected failure cases; unexpected errors still throw to the caller).
+async function updateClientKnowledgeBase(agencyId, clientId, content) {
+  if (!content || typeof content !== 'string' || content.trim().length < 50) {
+    return { ok: false, status: 400, error: 'Content is required (minimum 50 characters)' };
+  }
+  const { data: client, error } = await supabase
+    .from('clients')
+    .select('id, vapi_assistant_id, business_name')
+    .eq('id', clientId)
+    .eq('agency_id', agencyId)
+    .single();
+  if (error || !client) return { ok: false, status: 404, error: 'Client not found' };
+  if (!client.vapi_assistant_id) return { ok: false, status: 400, error: 'Client has no AI assistant configured' };
+
+  const trimmed = content.trim();
+  const { fileId, toolId } = await uploadFileAndCreateTool(trimmed, client.business_name);
+  await swapToolOnAssistant(client.vapi_assistant_id, toolId);
+  await supabase
+    .from('clients')
+    .update({
+      knowledge_base_content: trimmed,
+      knowledge_base_data: { fileId, toolId },
+      knowledge_base_updated_at: new Date().toISOString(),
+      vapi_query_tool_id: toolId,
+    })
+    .eq('id', clientId);
+  console.log(`✅ Knowledge base updated for ${client.business_name} (${clientId})`);
+  return { ok: true, content: trimmed };
+}
+
 router.put('/:agencyId/clients/:clientId/knowledge-base', async (req, res) => {
   try {
     const { agencyId, clientId } = req.params;
-    const { content } = req.body;
-
-    if (!content || typeof content !== 'string' || content.trim().length < 50) {
-      return res.status(400).json({ success: false, error: 'Content is required (minimum 50 characters)' });
-    }
-
-    const { data: client, error } = await supabase
-      .from('clients')
-      .select('id, vapi_assistant_id, business_name')
-      .eq('id', clientId)
-      .eq('agency_id', agencyId)
-      .single();
-
-    if (error || !client) {
-      return res.status(404).json({ success: false, error: 'Client not found' });
-    }
-
-    if (!client.vapi_assistant_id) {
-      return res.status(400).json({ success: false, error: 'Client has no AI assistant configured' });
-    }
-
-    const trimmed = content.trim();
-
-    // Upload + create tool + swap on assistant
-    const { fileId, toolId } = await uploadFileAndCreateTool(trimmed, client.business_name);
-    await swapToolOnAssistant(client.vapi_assistant_id, toolId);
-
-    // Cache in Supabase + sync query tool ID for dynamic config builder
-    await supabase
-      .from('clients')
-      .update({
-        knowledge_base_content: trimmed,
-        knowledge_base_data: { fileId, toolId },
-        knowledge_base_updated_at: new Date().toISOString(),
-        vapi_query_tool_id: toolId,
-      })
-      .eq('id', clientId);
-
-    console.log(`✅ Knowledge base updated for ${client.business_name} (${clientId})`);
-    res.json({ success: true, content: trimmed });
+    const result = await updateClientKnowledgeBase(agencyId, clientId, req.body && req.body.content);
+    if (!result.ok) return res.status(result.status || 400).json({ success: false, error: result.error });
+    res.json({ success: true, content: result.content });
   } catch (error) {
     console.error('Error updating knowledge base:', error);
     res.status(500).json({ success: false, error: error.message || 'Server error' });
@@ -445,3 +441,4 @@ router.post('/:agencyId/clients/:clientId/knowledge-base/rescrape', async (req, 
 });
 
 module.exports = router;
+module.exports.updateClientKnowledgeBase = updateClientKnowledgeBase;

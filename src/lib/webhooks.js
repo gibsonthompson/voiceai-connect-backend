@@ -29,6 +29,28 @@ function sign(secret, timestamp, body) {
   return crypto.createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
 }
 
+// Baseline SSRF guard: reject endpoints on loopback / private / link-local ranges
+// so a registered webhook cannot be used to probe internal services. Not a full
+// defense (no DNS-rebind protection), but blocks the obvious targets.
+function isSafeWebhookUrl(url) {
+  try {
+    const u = new URL(url);
+    if (!['http:', 'https:'].includes(u.protocol)) return false;
+    const host = u.hostname.toLowerCase();
+    if (host === 'localhost' || host === '0.0.0.0' || host.endsWith('.local') || host.endsWith('.internal')) return false;
+    const m = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+    if (m) {
+      const a = +m[1], b = +m[2];
+      if (a === 127 || a === 10 || a === 0) return false;
+      if (a === 192 && b === 168) return false;
+      if (a === 169 && b === 254) return false;
+      if (a === 172 && b >= 16 && b <= 31) return false;
+    }
+    if (host === '::1' || host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80')) return false;
+    return true;
+  } catch (e) { return false; }
+}
+
 function isSubscribed(webhook, eventType) {
   const ev = webhook.events || [];
   return ev.includes('*') || ev.includes(eventType);
@@ -176,4 +198,4 @@ async function processDueWebhookDeliveries(batchSize = 50) {
   return { processed };
 }
 
-module.exports = { EVENT_TYPES, sign, dispatchWebhook, sendPing, processDueWebhookDeliveries };
+module.exports = { EVENT_TYPES, sign, dispatchWebhook, sendPing, processDueWebhookDeliveries, isSafeWebhookUrl };

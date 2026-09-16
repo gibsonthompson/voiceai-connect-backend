@@ -145,6 +145,9 @@ async function apiKeyAuth(req, res, next) {
     if (agencyErr || !agency) {
       return fail(res, 401, 'authentication_error', 'The agency for this key no longer exists.');
     }
+    if (agency.status === 'suspended') {
+      return fail(res, 403, 'account_suspended', 'This agency account is suspended. Contact support to restore API access.');
+    }
     if (!hasScale(agency)) {
       return res.status(403).json({
         error: {
