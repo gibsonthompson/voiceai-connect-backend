@@ -76,7 +76,7 @@ async function requireProPlan(req, res, next) {
     const isTrialing = ['trialing', 'trial'].includes(agency.subscription_status);
     const effectivePlan = isTrialing ? 'enterprise' : agency.plan_type;
 
-    const allowed = ['pro', 'professional', 'enterprise', 'scale'];
+    const allowed = ['free', 'starter', 'pro', 'professional', 'enterprise', 'scale']; // BYOT open to all plans: the agency pays their own Twilio, so it costs us nothing
     if (!allowed.includes(effectivePlan)) {
       return res.status(403).json({
         error: 'Pro plan required',

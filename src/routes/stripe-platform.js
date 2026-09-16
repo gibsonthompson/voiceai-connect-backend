@@ -1127,6 +1127,32 @@ async function handleAgencyPaymentFailed(invoice) {
     })
     .eq('id', agency.id);
 
+  // AUTOMATED CANCEL: Stripe sets next_payment_attempt to the next retry time, or
+  // null once it has exhausted its retry schedule. Null means THIS was the final
+  // attempt, so cancel the subscription automatically (the subscription.deleted
+  // handler runs teardown). No dashboard setting, no per-agency action; fires for
+  // every agency on the last failed charge.
+  if (!invoice.next_payment_attempt && invoice.subscription) {
+    try {
+      await stripe.subscriptions.cancel(invoice.subscription);
+      console.log(`Auto-canceled agency ${agency.id} after final failed payment`);
+    } catch (e) {
+      if (e.code !== 'resource_missing') console.error('Auto-cancel failed:', e.message);
+    }
+    await sendEmail({
+      to: agency.email,
+      subject: 'Your subscription has been canceled',
+      html: renderBrandedEmail({
+        preheader: 'Your subscription was canceled after a failed payment.',
+        heading: 'Subscription canceled',
+        bodyHtml:
+          `<p style="margin:0 0 16px;">Hi ${agency.name}, we were unable to process your payment after several attempts, so your subscription has been canceled. You can resubscribe anytime from your billing settings.</p>`,
+        cta: { label: 'Resubscribe', url: `${process.env.FRONTEND_URL}/agency/settings?tab=billing` },
+      }),
+    }).catch((e) => console.error('Failed to send cancellation email:', e.message));
+    return;
+  }
+
   await sendEmail({
     to: agency.email,
     subject: 'Payment failed, action required',

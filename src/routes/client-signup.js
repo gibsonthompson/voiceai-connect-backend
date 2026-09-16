@@ -479,6 +479,18 @@ function getFriendlyProvisioningError(error) {
     return 'No phone numbers are currently available in that area. Please try a different city or contact support.';
   }
 
+  // International agency without BYOT: the provisioning path already throws an
+  // actionable message (connect Twilio in Settings). Surface it verbatim instead
+  // of masking it with the generic error below.
+  if (msg.includes('not available for') || msg.includes('Twilio Integration') || msg.includes('available on the Pro plan')) {
+    return msg;
+  }
+
+  // No inventory in the requested area code.
+  if (msg.includes('No numbers available in area code')) {
+    return 'No phone numbers are available in that area code. Please try a different city or area code.';
+  }
+
   return 'Phone provisioning failed. Please try again or contact support.';
 }
 
@@ -691,7 +703,18 @@ async function provisionPhoneForClient(agency, clientData, assistantId, voiceRou
     };
   }
 
-  // PATH 3: International agency without BYOT configured
+  // PATH 3: International agency without BYOT configured. BYOT (connecting your own
+  // Twilio) is gated to paid plans, so a Free international agency literally cannot
+  // provision by any path and must be told to upgrade first, not just "connect Twilio".
+  const _isTrialing = ['trialing', 'trial'].includes(agency.subscription_status);
+  const _effectivePlan = _isTrialing ? 'enterprise' : agency.plan_type;
+  const _byotAllowed = ['pro', 'professional', 'enterprise', 'scale'].includes(_effectivePlan);
+  if (!_byotAllowed) {
+    throw new Error(
+      `Phone provisioning for ${agencyCountry} requires connecting your own Twilio account, which is available on the Pro plan. ` +
+      `Upgrade to Pro, then add your Twilio credentials in Settings → Twilio Integration.`
+    );
+  }
   throw new Error(
     `Phone provisioning not available for ${agencyCountry}. ` +
     `Please configure your Twilio credentials in Settings → Twilio Integration to provision numbers in your country.`

@@ -2758,6 +2758,29 @@ async function handleClientPaymentFailed(invoice, stripeAccountId) {
   if (!client) return;
   await supabase.from('clients').update({ subscription_status: 'past_due' }).eq('id', client.id);
   const agency = client.agencies;
+
+  // AUTOMATED CANCEL: on Stripe's final retry (next_payment_attempt is null),
+  // cancel the client and release their number + assistant. Handles a
+  // schedule-governed subscription (bill-during-trial) via its schedule.
+  if (!invoice.next_payment_attempt) {
+    try {
+      const subId = client.stripe_connected_subscription_id || invoice.subscription;
+      if (subId) {
+        const scheduleId = await scheduleIdForSub(subId, stripeAccountId);
+        if (scheduleId) {
+          await stripe.subscriptionSchedules.cancel(scheduleId, { stripeAccount: stripeAccountId });
+        } else {
+          await stripe.subscriptions.cancel(subId, { stripeAccount: stripeAccountId });
+        }
+      }
+    } catch (e) {
+      if (e.code !== 'resource_missing') console.error('Client auto-cancel failed:', e.message);
+    }
+    await cancelClientAndRelease(client, 'auto-cancel after final failed payment');
+    console.log(`Auto-canceled client ${client.id} after final failed payment`);
+    return;
+  }
+
   await sendClientPaymentFailedSMS(client, agency, invoice.hosted_invoice_url);
 }
 
