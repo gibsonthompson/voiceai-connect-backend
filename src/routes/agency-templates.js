@@ -10,7 +10,12 @@
 const express = require('express');
 const router = express.Router();
 const { supabase, getAgencyById } = require('../lib/supabase');
+const { requireAgencyAccess } = require('./auth');
 
+// Ownership guard for the whole AI-templates surface. Every route is under
+// /:agencyId/ai-templates; requireEnterprisePlan stays on the individual routes
+// for the Scale gate + req.agency loading, this adds token + ownership in front.
+router.use('/:agencyId/ai-templates', requireAgencyAccess());
 // ============================================================================
 // INDUSTRY CONFIGURATION
 // Each industry has its own unique key - matches vapi.js INDUSTRY_CONFIGS

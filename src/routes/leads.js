@@ -2,11 +2,30 @@
 // LEADS ROUTES - Agency Lead Management (Mini CRM)
 // VoiceAI Connect Multi-Tenant
 // WITH ACTIVITY LOGGING, OUTREACH TRACKING, CSV IMPORT, AND FOLLOW-UP QUEUE
+//
+// UPDATED: 2026-09-17 — SECURITY: added a top-of-router ownership guard. Every
+//          route here is an agency dashboard action scoped by the :agencyId in
+//          the URL, but none checked that the caller owns that agency, so an
+//          authenticated agency could read/create/update/delete/EXPORT another
+//          agency's entire lead CRM (prospect names, emails, phones, notes) just
+//          by changing the id. requireAgencyAccess('leads') now enforces: valid
+//          token, caller owns :agencyId, and (for staff) the 'leads' Page Access
+//          key. Applied via router.use on the two path prefixes so it covers
+//          every current and future route without touching each handler.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { logActivity, ACTION_TYPES } = require('./activity');
+const { requireAgencyAccess } = require('./auth');
+
+// ----------------------------------------------------------------------------
+// OWNERSHIP GUARD (must be registered before the routes below).
+// Two prefixes because "/:agencyId/leads" does not prefix-match the separate
+// "/:agencyId/leads-stats" segment.
+// ----------------------------------------------------------------------------
+router.use('/:agencyId/leads', requireAgencyAccess('leads'));
+router.use('/:agencyId/leads-stats', requireAgencyAccess('leads'));
 
 // ============================================================================
 // LEAD STATUS OPTIONS

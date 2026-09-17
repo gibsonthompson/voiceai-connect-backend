@@ -38,15 +38,32 @@
 //          agencies to CREATE an address they already had; the new copy tells
 //          them to confirm the bundle/address in Twilio AND paste its SID into
 //          Settings, Twilio, which is the step that was actually missing.
+// UPDATED: 2026-09-17 - SECURITY: added a top-of-router ownership guard. Every
+//          route here is scoped by the :agencyId in the URL but none checked
+//          that the caller owns that agency, so an authenticated agency could
+//          create/delete another agency's demo line or read their demo call
+//          history (caller PII). The public demo (a prospect CALLING the number)
+//          runs through the VAPI webhook, not these routes, so guarding every
+//          route here is safe. requireAgencyAccess enforces valid token + caller
+//          owns :agencyId (+ Page Access for staff). The existing paid-plan /
+//          subscription gates inside the create route still run after it.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { provisionAgencyDemo, updateDemoAssistantName, fullyReleaseNumber, createDemoAssistant } = require('../lib/vapi');
 const { provisionBYOTNumber, releaseBYOTNumber } = require('./byot');
+const { requireAgencyAccess } = require('./auth');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
+
+// ----------------------------------------------------------------------------
+// OWNERSHIP GUARD — covers every /:agencyId/demo-phone* and /:agencyId/demo-calls*
+// route. Registered before the routes below.
+// ----------------------------------------------------------------------------
+router.use('/:agencyId/demo-phone', requireAgencyAccess());
+router.use('/:agencyId/demo-calls', requireAgencyAccess());
 
 // ============================================================================
 // IN-MEMORY DEMO PROVISIONING JOBS
@@ -270,7 +287,7 @@ async function provisionAgencyDemoBYOT(agency) {
     const patchRes = await fetch(`https://api.vapi.ai/phone-number/${byot.vapiPhoneId}`, {
       method: 'PATCH',
       headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ assistantId: null, serverUrl: `${BACKEND_URL}/webhook/vapi` }),
+      body: JSON.stringify({ assistantId: null, serverUrl: `${BACKEND_URL}/webhook/vapi`, serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET }),
     });
     if (patchRes.ok) {
       console.log('✅ [BYOT demo] Phone set to dynamic assistant-request (assistantId null, serverUrl set)');

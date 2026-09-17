@@ -1,9 +1,21 @@
 // ============================================================================
 // AGENCY FEEDBACK ROUTES
+//
+// UPDATED: 2026-09-17 — SECURITY: added a top-of-router ownership guard. Both
+//          routes are scoped by :agencyId but had no ownership check, so an
+//          authenticated agency could read another agency's feedback history or
+//          submit feedback in their name. requireAgencyAccess enforces valid
+//          token + caller owns :agencyId.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
+const { requireAgencyAccess } = require('./auth');
+
+// ----------------------------------------------------------------------------
+// OWNERSHIP GUARD — covers /:agencyId/feedback (GET + POST).
+// ----------------------------------------------------------------------------
+router.use('/:agencyId/feedback', requireAgencyAccess());
 
 let sendPlatformNotificationSMS;
 try {

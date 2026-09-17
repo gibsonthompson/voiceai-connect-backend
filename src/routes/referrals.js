@@ -1,12 +1,29 @@
 // ============================================================================
 // REFERRAL SYSTEM ROUTES
 // VoiceAI Connect - Agency referral program (40% recurring commission)
+//
+// UPDATED: 2026-09-17 — SECURITY: added a top-of-router ownership guard. Every
+//          route is scoped by the :agencyId in the URL but none checked that the
+//          caller owns that agency, so an authenticated agency could read another
+//          agency's referral data, rename their referral code (breaking their
+//          attribution), and TRIGGER their payout (a Stripe transfer). The public
+//          referral flow (attribution on signup, commission on webhook) is done
+//          by the exported helper functions, NOT these routes, so guarding every
+//          route here is safe. requireAgencyAccess enforces valid token + caller
+//          owns :agencyId (+ Page Access for staff).
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase, getAgencyById } = require('../lib/supabase');
+const { requireAgencyAccess } = require('./auth');
 
 const COMMISSION_RATE = 0.40; // 40% - matching GoHighLevel
+
+// ----------------------------------------------------------------------------
+// OWNERSHIP GUARD — covers /:agencyId/referrals and everything under it
+// (/referrals/code, /referrals/payout). Registered before the routes below.
+// ----------------------------------------------------------------------------
+router.use('/:agencyId/referrals', requireAgencyAccess());
 
 // ============================================================================
 // GET /api/agency/:agencyId/referrals

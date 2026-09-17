@@ -11,8 +11,17 @@
 //      with a dynamic whisper that includes WHO is calling and WHAT they need
 //   5. Call transfers to Gibson at (678) 316-1454 with full context whisper
 //   6. On end-of-call, we log the support interaction
+//
+// UPDATED: 2026-09-17 - SECURITY: authenticated. Like the main VAPI webhook,
+//   this drives live calls and looks callers up by phone (leaking whether a
+//   number maps to a client + that client's business name) and writes
+//   support_calls rows, so an unauthenticated POST is a hole. handleSupportWebhook
+//   now calls verifyVapiWebhook (lib/vapi-webhook-auth.js) and 401s a bad/missing
+//   secret. Fails open when VAPI_WEBHOOK_SECRET is unset so it cannot break live
+//   support calls before VAPI is configured; see that module for rollout order.
 // ============================================================================
 const { supabase } = require('../lib/supabase');
+const { verifyVapiWebhook } = require('../lib/vapi-webhook-auth');
 
 const ESCALATION_PHONE = process.env.SUPPORT_ESCALATION_PHONE || '+16783161454';
 const SUPPORT_VOICE_ID = process.env.SUPPORT_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL'; // Sarah
@@ -225,6 +234,14 @@ IMPORTANT: When you call transferToHuman, the 'issue_summary' should be a concis
 // MAIN WEBHOOK HANDLER
 // ============================================================================
 async function handleSupportWebhook(req, res) {
+  // SECURITY: verify this POST actually came from VAPI before doing anything.
+  // Fails open only when VAPI_WEBHOOK_SECRET is unset (see lib/vapi-webhook-auth).
+  const _auth = verifyVapiWebhook(req);
+  if (!_auth.ok) {
+    console.warn(`🚫 Rejected VAPI support webhook (${_auth.reason})`);
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
   try {
     const message = req.body.message || req.body;
     const messageType = message?.type || req.body?.type;

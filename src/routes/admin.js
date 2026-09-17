@@ -18,11 +18,21 @@
 //          is_test_client to the list select (so the frontend billable filter
 //          is correct) and hardened the list route .range() with parseInt so a
 //          string limit/offset from the query string can no longer concatenate.
+// UPDATED: 2026-09-17: SECURITY. Removed the hardcoded '1234' admin PIN. It let
+//          anyone POST /api/admin/login with pin '1234' and receive a 7-day
+//          platform_admin token, which passes requireAdmin on every admin route
+//          across all admin routers: read/modify every agency and client, all
+//          PII and financials, and impersonate any agency. The access code now
+//          comes ONLY from the ADMIN_ACCESS_CODE env var (no default, fail
+//          closed if unset), constant-time compared. Set ADMIN_ACCESS_CODE to
+//          your access code / tap-pattern sequence before deploying, or admin
+//          login returns 503 until it is set.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 
 // ============================================================================
 // ADMIN WHITELIST - Add your email(s) here
@@ -31,6 +41,25 @@ const ADMIN_EMAILS = [
   'gibsonthompson1@gmail.com',
   // Add more admin emails as needed
 ];
+
+// ============================================================================
+// ADMIN ACCESS CODE
+// ----------------------------------------------------------------------------
+// The admin login secret (your tap-pattern sequence / PIN). Lives ONLY in the
+// ADMIN_ACCESS_CODE env var, with NO hardcoded default: the previous hardcoded
+// '1234' meant anyone could mint a platform_admin token. If the env var is not
+// set, admin login is disabled (fail closed) rather than falling back to a
+// guessable value. Compared in constant time via adminCodeMatches.
+// ============================================================================
+const ADMIN_ACCESS_CODE = process.env.ADMIN_ACCESS_CODE || null;
+
+function adminCodeMatches(a, b) {
+  // Hash both sides to a fixed 32 bytes so timingSafeEqual never throws on a
+  // length mismatch and no length is leaked via timing.
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
 
 // ============================================================================
 // ADMIN AUTH MIDDLEWARE
@@ -58,14 +87,20 @@ function requireAdmin(req, res, next) {
 }
 
 // ============================================================================
-// ADMIN LOGIN - Simple PIN
+// ADMIN LOGIN - access code (env-configured, no hardcoded default)
 // ============================================================================
 router.post('/login', async (req, res) => {
   try {
     const { pin } = req.body;
 
-    if (pin !== '1234') {
-      return res.status(401).json({ error: 'Invalid PIN' });
+    // Fail closed: the access code lives only in ADMIN_ACCESS_CODE. If it is
+    // not configured, admin login is disabled rather than accepting a default.
+    if (!ADMIN_ACCESS_CODE) {
+      console.error('ADMIN_ACCESS_CODE not set - admin login is disabled');
+      return res.status(503).json({ error: 'Admin login is not configured' });
+    }
+    if (!pin || !adminCodeMatches(String(pin), ADMIN_ACCESS_CODE)) {
+      return res.status(401).json({ error: 'Invalid access code' });
     }
 
     const token = jwt.sign(
@@ -79,7 +114,7 @@ router.post('/login', async (req, res) => {
       { expiresIn: '7d' }
     );
 
-    console.log('🔐 Platform admin logged in via PIN');
+    console.log('🔐 Platform admin logged in');
 
     res.json({
       success: true,

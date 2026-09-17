@@ -49,7 +49,10 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { supabase, getUserByEmail, getUserById, getUserByEmailForRoles } = require('../lib/supabase');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET;
+// Fail closed: never fall back to a hardcoded secret. A missing JWT_SECRET
+// would make every token forgeable, so refuse to start instead.
+if (!JWT_SECRET) throw new Error('FATAL: JWT_SECRET env var is not set. Refusing to start with a forgeable default.');
 const JWT_EXPIRES_IN = '30d';
 
 function generateToken(user) {
@@ -608,4 +611,101 @@ function requireAgencyAccess(permissionKey) {
   };
 }
 
-module.exports = { agencyLogin, clientLogin, recoverAccountSetup, verifyToken, setPassword, changePassword, authMiddleware, requirePermission, requirePermissionIfAuthed, requireAgencyAccess, generateToken };
+// ============================================================================
+// CLIENT OWNERSHIP MIDDLEWARE (hard)
+// ----------------------------------------------------------------------------
+// Mirror of requireAgencyAccess for routes carrying a :clientId param. Requires
+// a valid token AND that the caller is entitled to this client. Lets in every
+// legitimate caller so it does not break the client dashboard or an agency
+// managing its own clients:
+//
+//   - super_admin token                          → any client
+//   - the client itself ({ role:'client', clientId })      → clientId must match
+//   - the client's staff ({ role:'client_staff', clientId })→ clientId must match,
+//       AND the Page Access `permissionKey` (if given) is not explicitly false
+//   - the managing agency (agency_owner / agency_staff)     → resolves the
+//       client's agency_id and requires it to equal the caller's agency; for
+//       agency_staff the agency-side 'clients' Page Access must not be false
+//   - agency-impersonation token ({ id, type:'agency' })   → same agency match
+//
+// Deny conditions:
+//   - no/invalid token                           → 401
+//   - caller is neither the client nor its agency → 403
+// ============================================================================
+function requireClientAccess(permissionKey) {
+  return async (req, res, next) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      let decoded;
+      try { decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET); }
+      catch { return res.status(401).json({ error: 'Invalid or expired token' }); }
+      req.user = decoded;
+
+      const routeClientId = req.params.clientId;
+      if (!routeClientId) return res.status(400).json({ error: 'clientId required' });
+
+      // super_admin can access any client.
+      if (decoded.role === 'super_admin') return next();
+
+      // The client themselves (or its staff): token clientId must match.
+      if (decoded.clientId && decoded.clientId === routeClientId) {
+        if (decoded.role === 'client_staff' && permissionKey) {
+          const { data: member } = await supabase
+            .from('team_members')
+            .select('permissions, status')
+            .eq('member_user_id', decoded.userId)
+            .eq('entity_type', 'client')
+            .eq('entity_id', routeClientId)
+            .single();
+          if (!member || member.status === 'disabled') {
+            return res.status(403).json({ error: 'Access disabled' });
+          }
+          if (member.permissions && member.permissions[permissionKey] === false) {
+            return res.status(403).json({ error: `You do not have permission to access ${permissionKey}.` });
+          }
+        }
+        return next();
+      }
+
+      // The managing agency (owner/staff) or an agency-impersonation token:
+      // resolve the client's owning agency and require it to match.
+      const callerAgencyId = decoded.agencyId || (decoded.type === 'agency' ? decoded.id : null);
+      if (callerAgencyId) {
+        const { data: client } = await supabase
+          .from('clients')
+          .select('agency_id')
+          .eq('id', routeClientId)
+          .single();
+        if (client && client.agency_id === callerAgencyId) {
+          if (decoded.role === 'agency_staff') {
+            const { data: member } = await supabase
+              .from('team_members')
+              .select('permissions, status')
+              .eq('member_user_id', decoded.userId)
+              .eq('entity_type', 'agency')
+              .eq('entity_id', callerAgencyId)
+              .single();
+            if (!member || member.status === 'disabled') {
+              return res.status(403).json({ error: 'Access disabled' });
+            }
+            if (member.permissions && member.permissions.clients === false) {
+              return res.status(403).json({ error: 'You do not have permission to access clients.' });
+            }
+          }
+          return next();
+        }
+      }
+
+      return res.status(403).json({ error: 'Not authorized for this client' });
+    } catch (error) {
+      console.error('❌ requireClientAccess error:', error);
+      return res.status(500).json({ error: 'Authorization check failed' });
+    }
+  };
+}
+
+module.exports = { agencyLogin, clientLogin, recoverAccountSetup, verifyToken, setPassword, changePassword, authMiddleware, requirePermission, requirePermissionIfAuthed, requireAgencyAccess, requireClientAccess, generateToken };

@@ -4,22 +4,35 @@
 // what their client sees when logged in.
 // Destination: src/routes/preview-token.js
 // Mount in server.js: app.use('/api/agency', require('./routes/preview-token'));
+//
+// UPDATED: 2026-09-17 — SECURITY: added requireAgencyAccess('clients'). The
+//          route checked that the caller was AN agency owner but never that
+//          they owned the :agencyId in the URL, so any owner could mint a
+//          full-access preview token for any OTHER agency's client (the client
+//          lookup used the path agencyId, not the caller's). requireAgencyAccess
+//          now proves the caller owns :agencyId before the handler runs; the
+//          in-handler owner-only role check is kept. Also removed the hardcoded
+//          JWT_SECRET fallback (fail closed via auth.js at boot).
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { supabase } = require('../lib/supabase');
+const { requireAgencyAccess } = require('./auth');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET;
 
 // ============================================================================
 // POST /api/agency/:agencyId/clients/:clientId/preview-token
 // ============================================================================
-router.post('/:agencyId/clients/:clientId/preview-token', async (req, res) => {
+router.post('/:agencyId/clients/:clientId/preview-token', requireAgencyAccess('clients'), async (req, res) => {
   try {
     const { agencyId, clientId } = req.params;
 
-    // Verify caller is agency owner
+    // Verify caller is agency owner. requireAgencyAccess above already proved a
+    // valid token AND that the caller owns :agencyId; this keeps preview-token
+    // minting owner-only (a staff member with 'clients' passes the guard but is
+    // stopped here).
     const authHeader = req.headers.authorization;
     if (!authHeader) return res.status(401).json({ error: 'Authorization required' });
 

@@ -300,8 +300,46 @@ const {
   requirePermission,
   requirePermissionIfAuthed,
   requireAgencyAccess,
+  requireClientAccess,
   generateToken
 } = require('./routes/auth');
+
+// ============================================================================
+// BODY-BASED AGENCY OWNERSHIP GUARD (2026-09-17)
+// ----------------------------------------------------------------------------
+// requireAgencyAccess reads the agency id from req.params.agencyId. A few
+// billing/connect POSTs carry it in the JSON body as agency_id instead (they
+// have no :agencyId in the path), and were previously mounted with the SOFT
+// guard requirePermissionIfAuthed, which passes UNAUTHENTICATED requests
+// straight through. That let anyone cancel a subscription, open a Stripe
+// billing portal, or start/stop Stripe Connect for ANY agency just by putting
+// that agency's id in the body. This shim lifts body.agency_id into
+// req.params.agencyId and delegates to the exact same requireAgencyAccess rule
+// (valid token + caller-owns-that-agency + Page Access for staff), so there is
+// one source of truth for the check and no drift. The inner guard is built once
+// per route at mount time.
+//
+// NOT applied to /api/agency/checkout: that endpoint is legitimately called by
+// the onboarding page before a session exists, and its only effect is creating
+// a Stripe Checkout URL for that agency's own subscription (nothing destructive
+// or data-exposing), so it stays on the soft guard.
+// ============================================================================
+function requireAgencyAccessFromBody(permissionKey) {
+  const guard = requireAgencyAccess(permissionKey);
+  return (req, res, next) => {
+    const bodyAgencyId = req.body && req.body.agency_id;
+    if (!bodyAgencyId) {
+      return res.status(400).json({ error: 'agency_id required' });
+    }
+    // These routes have no :agencyId path param, so req.params.agencyId is
+    // unset; populate it from the body so requireAgencyAccess checks ownership
+    // of the exact agency the handler will act on (the handler still reads
+    // req.body.agency_id, the same value).
+    if (!req.params) req.params = {};
+    req.params.agencyId = bodyAgencyId;
+    return guard(req, res, next);
+  };
+}
 
 const passwordResetRoutes = require('./routes/password-reset');
 const { googleAuth, googleCallback } = require('./routes/google-auth');
@@ -479,25 +517,32 @@ app.get('/api/agency/by-id', getAgencyByIdPublic);
 // against /api/auth/verify instead. Note this route is publicly readable by
 // agency id, which is a separate item worth closing later.
 app.get('/api/agency/:agencyId/settings', getAgencySettings);
-// Page Access gating: a logged-in agency_staff member without the 'settings'
-// toggle can't write settings. Unauthenticated/owner calls pass through (the
-// guard is a no-op without a staff token), so no existing caller breaks.
-app.put('/api/agency/:agencyId/settings', requirePermissionIfAuthed('settings'), updateAgencySettings);
-app.get('/api/agency/:agencyId/api-keys', requirePermissionIfAuthed('settings'), listApiKeys);
-app.post('/api/agency/:agencyId/api-keys', requirePermissionIfAuthed('settings'), createApiKey);
-app.delete('/api/agency/:agencyId/api-keys/:keyId', requirePermissionIfAuthed('settings'), revokeApiKey);
-app.get('/api/agency/:agencyId/webhooks', requirePermissionIfAuthed('settings'), listWebhooks);
-app.post('/api/agency/:agencyId/webhooks', requirePermissionIfAuthed('settings'), createWebhook);
-app.patch('/api/agency/:agencyId/webhooks/:webhookId', requirePermissionIfAuthed('settings'), updateWebhook);
-app.delete('/api/agency/:agencyId/webhooks/:webhookId', requirePermissionIfAuthed('settings'), deleteWebhook);
-app.post('/api/agency/:agencyId/webhooks/:webhookId/ping', requirePermissionIfAuthed('settings'), pingWebhook);
-app.get('/api/agency/:agencyId/webhooks/:webhookId/deliveries', requirePermissionIfAuthed('settings'), listWebhookDeliveries);
+// SECURITY (2026-09-17): hardened from requirePermissionIfAuthed to
+// requireAgencyAccess('settings'). The soft guard let UNAUTHENTICATED requests
+// pass straight through, so anyone could write ANY agency's settings with no
+// token: change pricing, hijack the slug (their white-label subdomain), or
+// inject custom_head_scripts/custom_body_scripts into their public marketing
+// site (stored XSS). Verified safe to harden: every caller of this PUT (the
+// agency Settings page and Marketing page) sends a Bearer token, and onboarding
+// saves via POST /api/agency/onboarding, NOT this route, so no first-run flow
+// breaks. requireAgencyAccess enforces a valid token + caller-owns-:agencyId +
+// the 'settings' Page Access toggle for agency_staff.
+app.put('/api/agency/:agencyId/settings', requireAgencyAccess('settings'), updateAgencySettings);
+app.get('/api/agency/:agencyId/api-keys', requireAgencyAccess('settings'), listApiKeys);
+app.post('/api/agency/:agencyId/api-keys', requireAgencyAccess('settings'), createApiKey);
+app.delete('/api/agency/:agencyId/api-keys/:keyId', requireAgencyAccess('settings'), revokeApiKey);
+app.get('/api/agency/:agencyId/webhooks', requireAgencyAccess('settings'), listWebhooks);
+app.post('/api/agency/:agencyId/webhooks', requireAgencyAccess('settings'), createWebhook);
+app.patch('/api/agency/:agencyId/webhooks/:webhookId', requireAgencyAccess('settings'), updateWebhook);
+app.delete('/api/agency/:agencyId/webhooks/:webhookId', requireAgencyAccess('settings'), deleteWebhook);
+app.post('/api/agency/:agencyId/webhooks/:webhookId/ping', requireAgencyAccess('settings'), pingWebhook);
+app.get('/api/agency/:agencyId/webhooks/:webhookId/deliveries', requireAgencyAccess('settings'), listWebhookDeliveries);
 app.post('/api/agency/:agencyId/domain/verify', verifyAgencyDomain);
 // 'billing' gates the agency's own subscription actions. checkout is also hit
 // during signup before a token exists, so the soft guard is required here -
 // it only blocks an authenticated staff member who lacks 'billing'.
 app.post('/api/agency/checkout', requirePermissionIfAuthed('billing'), createAgencyCheckout);
-app.post('/api/agency/portal', requirePermissionIfAuthed('billing'), createAgencyPortal);
+app.post('/api/agency/portal', requireAgencyAccessFromBody('billing'), createAgencyPortal);
 
 // ============================================================================
 // AGENCY CANCELLATION
@@ -528,7 +573,7 @@ app.post('/api/agency/portal', requirePermissionIfAuthed('billing'), createAgenc
 //   6. SMS the platform owner via sendAndLogSMS as message type
 //      'agency_cancellation' so it is filterable in the admin SMS Log.
 // ============================================================================
-app.post('/api/agency/cancel', requirePermissionIfAuthed('billing'), async (req, res) => {
+app.post('/api/agency/cancel', requireAgencyAccessFromBody('billing'), async (req, res) => {
   const { agency_id, reason, feedback } = req.body;
 
   if (!agency_id) {
@@ -742,10 +787,12 @@ app.post('/api/agency/cancel', requirePermissionIfAuthed('billing'), async (req,
 // cancellations), and texts the platform owner a short follow-up logged as
 // 'agency_cancellation_reason'. If the user closes the screen without grading,
 // the cancellation itself is already complete and its SMS already fired.
-// requirePermissionIfAuthed('billing') mirrors /cancel; the JWT is still valid
-// right after cancellation.
+// requireAgencyAccessFromBody('billing') mirrors /cancel: a valid token that
+// owns body.agency_id (+ 'billing' Page Access for staff) is required. The
+// CancelSubscriptionModal keeps the session alive until "Done", so the JWT is
+// still valid for this follow-up POST right after cancellation.
 // ============================================================================
-app.post('/api/agency/cancel-category', requirePermissionIfAuthed('billing'), async (req, res) => {
+app.post('/api/agency/cancel-category', requireAgencyAccessFromBody('billing'), async (req, res) => {
   const { agency_id, category } = req.body;
 
   const CATEGORY_LABELS = {
@@ -809,9 +856,9 @@ app.post('/api/agency/cancel-category', requirePermissionIfAuthed('billing'), as
 
 // Stripe Connect = the Payments tab, which is grouped under the 'settings'
 // permission in the settings page tab gating. status (GET) stays open.
-app.post('/api/agency/connect/onboard', requirePermissionIfAuthed('settings'), createConnectAccountLink);
+app.post('/api/agency/connect/onboard', requireAgencyAccessFromBody('settings'), createConnectAccountLink);
 app.get('/api/agency/connect/status/:agencyId', getConnectStatus);
-app.post('/api/agency/:agencyId/connect/disconnect', requirePermissionIfAuthed('settings'), disconnectConnectAccount);
+app.post('/api/agency/:agencyId/connect/disconnect', requireAgencyAccess('settings'), disconnectConnectAccount);
 
 // Payments page data. Read-only against the connected Express account (balance,
 // payouts, recent charges). account-session mints an embedded-components secret
@@ -850,7 +897,7 @@ app.post('/api/agency/:agencyId/minute-pass-through', requireAgencyAccess('billi
 // AGENCY DASHBOARD & CLIENTS ROUTES
 // ============================================================================
 
-app.get('/api/agency/:agencyId/dashboard', async (req, res) => {
+app.get('/api/agency/:agencyId/dashboard', requireAgencyAccess('dashboard'), async (req, res) => {
   try {
     const { agencyId } = req.params;
 
@@ -898,7 +945,7 @@ app.get('/api/agency/:agencyId/dashboard', async (req, res) => {
   }
 });
 
-app.get('/api/agency/:agencyId/clients', async (req, res) => {
+app.get('/api/agency/:agencyId/clients', requireAgencyAccess('clients'), async (req, res) => {
   try {
     const { agencyId } = req.params;
 
@@ -921,13 +968,13 @@ app.get('/api/agency/:agencyId/clients', async (req, res) => {
   }
 });
 
-app.post('/api/agency/:agencyId/clients/add', handleAgencyAddClient);
-app.get('/api/agency/:agencyId/clients/provisioning-status/:jobId', getClientProvisioningStatus);
+app.post('/api/agency/:agencyId/clients/add', requireAgencyAccess('clients'), handleAgencyAddClient);
+app.get('/api/agency/:agencyId/clients/provisioning-status/:jobId', requireAgencyAccess('clients'), getClientProvisioningStatus);
 
 app.use('/api/agency', clientPromptRoutes);
 app.use('/api/agency', clientKnowledgeBaseRoutes);
 
-app.get('/api/agency/:agencyId/clients/:clientId', async (req, res) => {
+app.get('/api/agency/:agencyId/clients/:clientId', requireAgencyAccess('clients'), async (req, res) => {
   try {
     const { agencyId, clientId } = req.params;
 
@@ -968,7 +1015,7 @@ app.get('/api/agency/:agencyId/clients/:clientId', async (req, res) => {
   }
 });
 
-app.get('/api/agency/:agencyId/clients/:clientId/calls', async (req, res) => {
+app.get('/api/agency/:agencyId/clients/:clientId/calls', requireAgencyAccess('clients'), async (req, res) => {
   try {
     const { agencyId, clientId } = req.params;
     const limit = parseInt(req.query.limit) || 50;
@@ -1001,7 +1048,7 @@ app.get('/api/agency/:agencyId/clients/:clientId/calls', async (req, res) => {
   }
 });
 
-app.get('/api/agency/:agencyId/clients/:clientId/calls/:callId', async (req, res) => {
+app.get('/api/agency/:agencyId/clients/:clientId/calls/:callId', requireAgencyAccess('clients'), async (req, res) => {
   try {
     const { agencyId, clientId, callId } = req.params;
 
@@ -1031,7 +1078,7 @@ app.get('/api/agency/:agencyId/clients/:clientId/calls/:callId', async (req, res
   }
 });
 
-app.put('/api/agency/:agencyId/clients/:clientId/industry', async (req, res) => {
+app.put('/api/agency/:agencyId/clients/:clientId/industry', requireAgencyAccess('clients'), async (req, res) => {
   try {
     const { agencyId, clientId } = req.params;
     const { industry } = req.body;
@@ -1096,7 +1143,7 @@ app.put('/api/agency/:agencyId/clients/:clientId/industry', async (req, res) => 
 // GENERIC CLIENT FIELD UPDATE (business_name, owner_phone, etc.)
 // Whitelisted fields only. Used by the client detail page inline-edit UI.
 // ============================================================================
-app.put('/api/agency/:agencyId/clients/:clientId', async (req, res) => {
+app.put('/api/agency/:agencyId/clients/:clientId', requireAgencyAccess('clients'), async (req, res) => {
   try {
     const { agencyId, clientId } = req.params;
 
@@ -1171,7 +1218,7 @@ app.put('/api/agency/:agencyId/clients/:clientId', async (req, res) => {
 // users.visible_password column (see migration). Auto-generates a readable
 // password unless the body supplies one (>= 6 chars).
 // ============================================================================
-app.post('/api/agency/:agencyId/clients/:clientId/reset-password', async (req, res) => {
+app.post('/api/agency/:agencyId/clients/:clientId/reset-password', requireAgencyAccess('clients'), async (req, res) => {
   try {
     const { agencyId, clientId } = req.params;
 
@@ -1399,7 +1446,7 @@ app.get('/api/export/agency/:agencyId/calls', requireAgencyAccess('settings'), a
 
 
 
-app.get('/api/agency/:agencyId/analytics', async (req, res) => {
+app.get('/api/agency/:agencyId/analytics', requireAgencyAccess('analytics'), async (req, res) => {
   try {
     const { agencyId } = req.params;
 
@@ -1572,6 +1619,24 @@ app.post('/api/client/portal', createClientPortal);
 app.post('/api/client/change-plan', changeClientPlan);
 app.post('/api/client/cancel-subscription', cancelClientSubscription);
 app.post('/api/client/set-custom-pricing', setClientCustomPricing);
+// ============================================================================
+// CLIENT-SCOPED OWNERSHIP GUARD (applies to every /api/client/<uuid>/* route)
+// ----------------------------------------------------------------------------
+// The public client actions above (signup, checkout, portal, change-plan,
+// cancel-subscription, set-custom-pricing) are registered BEFORE this and match
+// first, so they are untouched. Everything below that carries a real client id
+// (a UUID) in the path is ownership-checked here in one place: the client
+// itself, its staff, the managing agency, super_admin, or an agency preview
+// token (which is a real client token). Non-UUID segments pass straight through,
+// so no keyword route can ever be caught. Per-tab Page Access gating still runs
+// inside the individual routers.
+// ============================================================================
+const _CLIENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+app.use('/api/client/:clientId', (req, res, next) => {
+  if (!_CLIENT_UUID_RE.test(req.params.clientId || '')) return next();
+  return requireClientAccess()(req, res, next);
+});
+
 app.use('/api/client', clientRoutes);
 app.use('/api/client', require('./routes/call-mode'));
 app.use('/api/client', clientContactsRoutes);
@@ -1589,7 +1654,7 @@ app.use('/api/sms', smsRoutes);
 // ============================================================================
 app.use('/api', teamRoutes);
 
-app.get('/api/client/:clientId/details', async (req, res) => {
+app.get('/api/client/:clientId/details', requireClientAccess(), async (req, res) => {
   try {
     const { clientId } = req.params;
 

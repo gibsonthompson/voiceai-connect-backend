@@ -1,10 +1,24 @@
 // ============================================================================
 // AI PLAYGROUND - Test & Configure AI Receptionists
 // Endpoints: client listing, AI config details (full prompt from VAPI), SMS swap
+//
+// UPDATED: 2026-09-17 — SECURITY: added a top-of-router ownership guard. Every
+//          route is scoped by :agencyId but had no ownership check, so an
+//          authenticated agency could list another agency's clients (owner PII),
+//          read a client's full AI configuration, and — worst — swap a client's
+//          notification phone (redirecting their call alerts). requireAgencyAccess
+//          enforces valid token + caller owns :agencyId. The per-route
+//          `.eq('agency_id', agencyId)` scoping stays as defense in depth.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
+const { requireAgencyAccess } = require('./auth');
+
+// ----------------------------------------------------------------------------
+// OWNERSHIP GUARD — covers /:agencyId/ai-playground and everything under it.
+// ----------------------------------------------------------------------------
+router.use('/:agencyId/ai-playground', requireAgencyAccess());
 
 // Local phone helpers (avoid dependency on notifications module)
 function formatPhoneE164(phone) {

@@ -2,13 +2,28 @@
 // CLIENT PROMPT ROUTES - Agency-level editing of individual client AI config
 // PUT handles: system_prompt, first_message, voice_id, model, temperature,
 //              call_mode (Supabase-only), transfer_phone (VAPI transferCall tool)
+//
+// UPDATED: 2026-09-17 — SECURITY: added a top-of-router ownership guard. Every
+//          route is scoped by :agencyId/:clientId but had no ownership check, so
+//          an authenticated agency could read/edit/reset another agency's
+//          client's AI config, including the transfer_phone (which redirects
+//          call transfers). requireAgencyAccess('clients') enforces valid token
+//          + caller owns :agencyId. The per-query `.eq('agency_id', agencyId)`
+//          scoping stays as defense in depth.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS } = require('../lib/vapi');
+const { requireAgencyAccess } = require('./auth');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
+
+// ----------------------------------------------------------------------------
+// OWNERSHIP GUARD — covers GET/PUT /:agencyId/clients/:clientId/prompt and
+// POST /:agencyId/clients/:clientId/prompt/reset (prefix match).
+// ----------------------------------------------------------------------------
+router.use('/:agencyId/clients/:clientId/prompt', requireAgencyAccess('clients'));
 
 // ============================================================================
 // GET /api/agency/:agencyId/clients/:clientId/prompt

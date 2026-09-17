@@ -3,6 +3,13 @@
 // Creates a demo AI receptionist for the agency to experience firsthand.
 // is_test_client = true → excluded from per-client billing.
 // Voice minutes are still tracked (agency eats the cost as acquisition cost).
+//
+// UPDATED: 2026-09-17 — SECURITY: added top-of-router ownership guards. Every
+//          route is scoped by :agencyId but had no ownership check, so an
+//          authenticated agency could provision (buying a real number on the
+//          victim's account), read, or tear down another agency's test client.
+//          requireAgencyAccess('clients') enforces valid token + caller owns
+//          :agencyId. The paid-plan gate inside provisioning still runs after.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -14,6 +21,14 @@ const {
 } = require('../lib/vapi');
 const { timezoneFromPhone } = require('../lib/area-code-timezone');
 const { formatPhoneE164 } = require('../lib/notifications');
+const { requireAgencyAccess } = require('./auth');
+
+// ----------------------------------------------------------------------------
+// OWNERSHIP GUARDS — two prefixes ("provision-test-client" and "test-client"
+// are different path roots). Registered before the routes below.
+// ----------------------------------------------------------------------------
+router.use('/:agencyId/provision-test-client', requireAgencyAccess('clients'));
+router.use('/:agencyId/test-client', requireAgencyAccess('clients'));
 
 // Max minutes for test clients (prevents abuse)
 const TEST_CLIENT_CALL_LIMIT = 30;
@@ -125,7 +140,8 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
         },
         body: JSON.stringify({
           assistantId: null,
-          serverUrl: process.env.BACKEND_URL + '/webhook/vapi'
+          serverUrl: process.env.BACKEND_URL + '/webhook/vapi',
+          serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET
         })
       });
 

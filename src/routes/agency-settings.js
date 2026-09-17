@@ -101,7 +101,7 @@ const { getAgencyPlans, generatePlanKey } = require('../lib/plans');
 // does not require this module back (no circular dependency).
 const { repriceMinuteItemsForAgency } = require('./stripe-connect');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET;
 
 // Client subscription_status values that count as a live/active client in the
 // agency's own dashboard stats. 'manual' is a first-class live status (a manual

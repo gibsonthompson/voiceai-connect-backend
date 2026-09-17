@@ -2539,6 +2539,7 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       recordingEnabled: true,
       serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
       serverUrl: `${BACKEND_URL}/webhook/vapi`,
+      serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET,
       hooks
     };
 
@@ -2647,7 +2648,8 @@ async function createDemoAssistant(agencyName) {
       firstMessage: getDemoFirstMessage(agencyName),
       recordingEnabled: true,
       serverMessages: ['end-of-call-report'],
-      serverUrl: `${BACKEND_URL}/webhook/vapi`
+      serverUrl: `${BACKEND_URL}/webhook/vapi`,
+      serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET
     };
 
     const response = await fetch('https://api.vapi.ai/assistant', {
@@ -2756,7 +2758,8 @@ async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
           // stale static demo assistant, which has no tools and never sends the
           // mid-call text.
           assistantId: null,
-          serverUrl: `${BACKEND_URL}/webhook/vapi`
+          serverUrl: `${BACKEND_URL}/webhook/vapi`,
+          serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET
         })
       });
       if (webhookResponse.ok) {
@@ -3519,7 +3522,7 @@ async function enableAssistant(assistantId) {
     await fetch(`https://api.vapi.ai/assistant/${assistantId}`, {
       method: 'PATCH',
       headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ serverUrl: `${BACKEND_URL}/webhook/vapi` })
+      body: JSON.stringify({ serverUrl: `${BACKEND_URL}/webhook/vapi`, serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET })
     });
     return true;
   } catch { return false; }
@@ -3541,7 +3544,7 @@ async function pinPhoneToDynamic(phoneId) {
     const res = await fetch(`https://api.vapi.ai/phone-number/${phoneId}`, {
       method: 'PATCH',
       headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ assistantId: null, serverUrl: `${BACKEND_URL}/webhook/vapi` }),
+      body: JSON.stringify({ assistantId: null, serverUrl: `${BACKEND_URL}/webhook/vapi`, serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET }),
     });
     if (res.ok) { console.log(`   ✅ Phone pinned to dynamic assistant-request: ${phoneId}`); return true; }
     console.warn(`   ⚠️ Failed to pin phone ${phoneId} to dynamic: ${res.status}`);
@@ -3586,7 +3589,8 @@ async function enablePhoneNumber(phoneId) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        serverUrl: `${BACKEND_URL}/webhook/vapi`
+        serverUrl: `${BACKEND_URL}/webhook/vapi`,
+        serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET
       })
     });
     if (response.ok) {

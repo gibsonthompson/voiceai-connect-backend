@@ -1,10 +1,24 @@
 // ============================================================================
 // ACTIVITY LOG ROUTES
 // VoiceAI Connect - Track all actions on leads and other entities
+//
+// UPDATED: 2026-09-17 — SECURITY: added a top-of-router ownership guard. The
+//          activity feed routes are scoped by :agencyId but had no ownership
+//          check, so an authenticated agency could read or write another
+//          agency's activity log. requireAgencyAccess enforces valid token +
+//          caller owns :agencyId. The exported logActivity() helper (used by
+//          the leads/outreach routes) is a function, not a route, and is not
+//          affected.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
+const { requireAgencyAccess } = require('./auth');
+
+// ----------------------------------------------------------------------------
+// OWNERSHIP GUARD — covers /:agencyId/activity and everything under it.
+// ----------------------------------------------------------------------------
+router.use('/:agencyId/activity', requireAgencyAccess());
 
 // ============================================================================
 // ACTION TYPE DEFINITIONS

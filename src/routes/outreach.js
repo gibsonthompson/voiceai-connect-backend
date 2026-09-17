@@ -1,11 +1,26 @@
 // ============================================================================
 // OUTREACH ROUTES
 // VoiceAI Connect - Templates, Composer, and Outreach History
+//
+// UPDATED: 2026-09-17 — SECURITY: added top-of-router ownership guards. Every
+//          route is scoped by :agencyId but had no ownership check, so an
+//          authenticated agency could read/create/update/delete another agency's
+//          outreach templates and outreach history, and compose against their
+//          leads. requireAgencyAccess('outreach') enforces valid token + caller
+//          owns :agencyId + the 'outreach' Page Access key for staff. Two
+//          prefixes because templates and outreach are separate path roots.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { logActivity, ACTION_TYPES } = require('./activity');
+const { requireAgencyAccess } = require('./auth');
+
+// ----------------------------------------------------------------------------
+// OWNERSHIP GUARDS — cover both path roots this router serves.
+// ----------------------------------------------------------------------------
+router.use('/:agencyId/templates', requireAgencyAccess('outreach'));
+router.use('/:agencyId/outreach', requireAgencyAccess('outreach'));
 
 // ============================================================================
 // TEMPLATE VARIABLES

@@ -47,6 +47,18 @@
 //          Both new checks fail OPEN if their generated columns are missing, so
 //          deploying this before the migration cannot break signups; the
 //          existing exact-email unique constraint still applies as a floor.
+// UPDATED: 2026-09-17 - SECURITY: handleAgencyOnboarding is now scoped to
+//          pre-activation agencies. The route is intentionally UNAUTHENTICATED
+//          (during signup the user has not set a password yet, so there is no
+//          session token to require), but without any guard anyone could POST
+//          another agency's id and overwrite its name+slug (which routes that
+//          agency's white-label subdomain), its client-facing pricing, and its
+//          branding. We can't add a token without breaking the tokenless flow,
+//          so the handler now refuses to write unless the agency is still
+//          'pending' / 'pending_payment'. A real onboarding agency is pending
+//          throughout onboarding; activation (start-trial / checkout) flips it
+//          to active/trial and locks this endpoint. This closes vandalism of
+//          every established agency while leaving real signups untouched.
 // ============================================================================
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
@@ -599,6 +611,10 @@ async function handleAgencySignup(req, res) {
 //   4 = Brand colors + theme
 //   5 = Password step
 //   6 = Complete
+//
+// SECURITY: this endpoint is intentionally UNAUTHENTICATED (during signup the
+// user has not set a password yet, so there is no session token to require).
+// See the pre-activation guard below.
 // ============================================================================
 async function handleAgencyOnboarding(req, res) {
   try {
@@ -616,6 +632,20 @@ async function handleAgencyOnboarding(req, res) {
 
     if (error || !agency) {
       return res.status(404).json({ error: 'Agency not found' });
+    }
+
+    // ── SECURITY GUARD: pre-activation agencies only ──────────────────────
+    // Without a token we cannot prove the caller owns this agency, so we scope
+    // the endpoint by state instead. A genuine onboarding agency is 'pending' /
+    // 'pending_payment' for the whole onboarding flow; activation (start-trial
+    // or checkout) flips it to active/trial. Refusing writes to any non-pending
+    // agency means an attacker can no longer POST an established agency's id to
+    // rewrite its name+slug (which routes its white-label subdomain), its
+    // client-facing pricing, or its branding. Real signups are unaffected: the
+    // sole caller (the onboarding page) only ever hits this while pending.
+    if (!['pending', 'pending_payment'].includes(agency.status)) {
+      console.warn(`🚫 Onboarding write refused for non-pending agency ${agency_id} (status=${agency.status})`);
+      return res.status(403).json({ error: 'Onboarding is closed for this account.' });
     }
 
     console.log(`📝 Onboarding step ${step} for: ${agency.name}`);

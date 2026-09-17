@@ -15,6 +15,17 @@
 //          should display max === -1 as "Unlimited" — getTeamMemberLimitDisplay
 //          in lib/plan-limits.ts already does this for client-side uses; team
 //          UI may need the same check.
+// UPDATED: 2026-09-17 — SECURITY: every team route now carries a hard ownership
+//          guard. Previously the two GET routes had NO auth (anyone could read
+//          any agency's or client's team members INCLUDING their plaintext
+//          visible_password), and the write routes checked the caller's ROLE
+//          but not that they owned the :agencyId / :clientId in the URL (one
+//          agency owner could manage another agency's team). requireAgencyAccess
+//          / requireClientAccess add: valid token, caller-owns-the-entity, and
+//          (for staff) the 'settings' Page Access key. The existing in-handler
+//          isAgencyOwnerRole / isClientOwnerRole checks are kept, so writes stay
+//          owner-only; the guards add the missing ownership + auth layer.
+//          Also removed the hardcoded JWT_SECRET fallback (fail closed).
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -22,6 +33,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { supabase } = require('../lib/supabase');
 const { getPlan } = require('../lib/plans');
+const { requireAgencyAccess, requireClientAccess } = require('./auth');
 
 let sendSms;
 function getSendSms() {
@@ -37,7 +49,7 @@ function getSendSms() {
 }
 
 const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET;
 
 function decodeToken(req) {
   try {
@@ -208,9 +220,12 @@ async function logActivity(teamMemberId, userId, entityType, entityId, action, d
 
 // ============================================================================
 // AGENCY TEAM ROUTES
+// Guarded by requireAgencyAccess('settings'): valid token, caller owns
+// :agencyId, and for agency_staff the 'settings' Page Access key. Writes stay
+// owner-only via the isAgencyOwnerRole check inside each handler.
 // ============================================================================
 
-router.get('/:agencyId/team', async (req, res) => {
+router.get('/:agencyId/team', requireAgencyAccess('settings'), async (req, res) => {
   try {
     const { agencyId } = req.params;
     const { data: members, error } = await supabase
@@ -228,7 +243,7 @@ router.get('/:agencyId/team', async (req, res) => {
   } catch (err) { console.error('❌ List team error:', err); res.status(500).json({ error: 'Failed to fetch team members' }); }
 });
 
-router.post('/:agencyId/team', async (req, res) => {
+router.post('/:agencyId/team', requireAgencyAccess('settings'), async (req, res) => {
   try {
     const { agencyId } = req.params;
     const { name, email, phone, permissions } = req.body;
@@ -274,7 +289,7 @@ router.post('/:agencyId/team', async (req, res) => {
   } catch (err) { console.error('❌ Add team member error:', err); res.status(500).json({ error: 'Failed to add team member' }); }
 });
 
-router.put('/:agencyId/team/:memberId', async (req, res) => {
+router.put('/:agencyId/team/:memberId', requireAgencyAccess('settings'), async (req, res) => {
   try {
     const { agencyId, memberId } = req.params;
     const { display_name, phone, permissions, notification_prefs, status } = req.body;
@@ -297,7 +312,7 @@ router.put('/:agencyId/team/:memberId', async (req, res) => {
   } catch (err) { console.error('❌ Update team member error:', err); res.status(500).json({ error: 'Failed to update team member' }); }
 });
 
-router.post('/:agencyId/team/:memberId/reset-password', async (req, res) => {
+router.post('/:agencyId/team/:memberId/reset-password', requireAgencyAccess('settings'), async (req, res) => {
   try {
     const { agencyId, memberId } = req.params;
     const { password } = req.body;
@@ -329,7 +344,7 @@ router.post('/:agencyId/team/:memberId/reset-password', async (req, res) => {
   } catch (err) { console.error('❌ Reset password error:', err); res.status(500).json({ error: 'Failed to reset password' }); }
 });
 
-router.delete('/:agencyId/team/:memberId', async (req, res) => {
+router.delete('/:agencyId/team/:memberId', requireAgencyAccess('settings'), async (req, res) => {
   try {
     const { agencyId, memberId } = req.params;
     const decoded = decodeToken(req);
@@ -345,9 +360,13 @@ router.delete('/:agencyId/team/:memberId', async (req, res) => {
 
 // ============================================================================
 // CLIENT TEAM ROUTES
+// Guarded by requireClientAccess('settings'): valid token, caller owns
+// :clientId (the client, its staff with 'settings', the managing agency, or
+// super_admin). Writes stay client-owner-only via the isClientOwnerRole check
+// inside each handler.
 // ============================================================================
 
-router.get('/client/:clientId/team', async (req, res) => {
+router.get('/client/:clientId/team', requireClientAccess('settings'), async (req, res) => {
   try {
     const { clientId } = req.params;
     const { data: members, error } = await supabase
@@ -365,7 +384,7 @@ router.get('/client/:clientId/team', async (req, res) => {
   } catch (err) { console.error('❌ List client team error:', err); res.status(500).json({ error: 'Failed to fetch team members' }); }
 });
 
-router.post('/client/:clientId/team', async (req, res) => {
+router.post('/client/:clientId/team', requireClientAccess('settings'), async (req, res) => {
   try {
     const { clientId } = req.params;
     const { name, email, phone, permissions } = req.body;
@@ -394,7 +413,7 @@ router.post('/client/:clientId/team', async (req, res) => {
   } catch (err) { console.error('❌ Add client team member error:', err); res.status(500).json({ error: 'Failed to add team member' }); }
 });
 
-router.put('/client/:clientId/team/:memberId', async (req, res) => {
+router.put('/client/:clientId/team/:memberId', requireClientAccess('settings'), async (req, res) => {
   try {
     const { clientId, memberId } = req.params;
     const { display_name, phone, permissions, notification_prefs, status } = req.body;
@@ -416,7 +435,7 @@ router.put('/client/:clientId/team/:memberId', async (req, res) => {
   } catch (err) { console.error('❌ Update client team member error:', err); res.status(500).json({ error: 'Failed to update team member' }); }
 });
 
-router.post('/client/:clientId/team/:memberId/reset-password', async (req, res) => {
+router.post('/client/:clientId/team/:memberId/reset-password', requireClientAccess('settings'), async (req, res) => {
   try {
     const { clientId, memberId } = req.params;
     const decoded = decodeToken(req);
@@ -432,7 +451,7 @@ router.post('/client/:clientId/team/:memberId/reset-password', async (req, res) 
   } catch (err) { console.error('❌ Reset client team password error:', err); res.status(500).json({ error: 'Failed to reset password' }); }
 });
 
-router.delete('/client/:clientId/team/:memberId', async (req, res) => {
+router.delete('/client/:clientId/team/:memberId', requireClientAccess('settings'), async (req, res) => {
   try {
     const { clientId, memberId } = req.params;
     const decoded = decodeToken(req);

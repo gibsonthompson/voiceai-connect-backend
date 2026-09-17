@@ -12,6 +12,15 @@
 // VAPI structure (from live assistant):
 //   model.toolIds = ["<query-tool-id>"]     ← KB query tool (what we swap)
 //   model.tools   = [{ type: "transferCall" ... }]  ← inline tools (DON'T TOUCH)
+//
+// UPDATED: 2026-09-17 — SECURITY: added a top-of-router ownership guard. Every
+//          route is scoped by :agencyId/:clientId but had no ownership check, so
+//          an authenticated agency could read/edit/reset/rescrape another
+//          agency's client's knowledge base. requireAgencyAccess('clients')
+//          enforces valid token + caller owns :agencyId. The exported
+//          updateClientKnowledgeBase() is a function (called by the /api/v1
+//          route, which has its own API-key auth) and is NOT affected by the
+//          route guard; it keeps its own agency_id scoping.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -19,6 +28,14 @@ const FormData = require('form-data');
 const fetch = require('node-fetch');
 const { supabase } = require('../lib/supabase');
 const { INDUSTRY_MAPPING } = require('../lib/vapi');
+const { requireAgencyAccess } = require('./auth');
+
+// ----------------------------------------------------------------------------
+// OWNERSHIP GUARD — covers GET/PUT /:agencyId/clients/:clientId/knowledge-base
+// and the /reset and /rescrape POSTs under it (prefix match). Does NOT affect
+// the exported updateClientKnowledgeBase() function below.
+// ----------------------------------------------------------------------------
+router.use('/:agencyId/clients/:clientId/knowledge-base', requireAgencyAccess('clients'));
 
 let INDUSTRY_KNOWLEDGE_BASES;
 try {

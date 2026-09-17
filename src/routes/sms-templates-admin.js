@@ -8,18 +8,52 @@
 // Mount in server.js:
 //   const smsTemplateRoutes = require('./routes/sms-templates-admin');
 //   app.use('/api/admin', smsTemplateRoutes);
+//
+// UPDATED: 2026-09-17 - SECURITY: added the requireAdmin guard. These routes
+//   were mounted at /api/admin but had NO auth check of any kind, so anyone
+//   could read every SMS template and, worse, PUT new text into any of them.
+//   Those templates drive real outbound SMS (password-reset codes, client
+//   notifications, trial warnings, demo-caller follow-ups), so an unauthenticated
+//   PUT was a stored-injection vector: rewrite a template to carry a phishing
+//   link or attacker number and it goes out on the platform number to real
+//   agencies, clients, and callers. Now every route requires a platform_admin
+//   token, matching email-templates-admin.js and the rest of the admin routers.
 // ============================================================================
 
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { clearTemplateCache } = require('../lib/sms-templates');
+const jwt = require('jsonwebtoken');
+
+// ----------------------------------------------------------------------------
+// ADMIN AUTH (mirrors requireAdmin in routes/admin.js and email-templates-admin.js
+// so this file is self-contained and can be mounted on its own).
+// ----------------------------------------------------------------------------
+function requireAdmin(req, res, next) {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+    const token = authHeader.split(' ')[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded.role !== 'platform_admin') {
+      return res.status(403).json({ error: 'Not authorized as platform admin' });
+    }
+    req.admin = decoded;
+    next();
+  } catch (error) {
+    console.error('Admin auth error:', error.message);
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
 
 // ============================================================================
 // LIST ALL TEMPLATES
 // GET /api/admin/sms-templates
 // ============================================================================
-router.get('/sms-templates', async (req, res) => {
+router.get('/sms-templates', requireAdmin, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('sms_templates')
@@ -85,7 +119,7 @@ router.get('/sms-templates', async (req, res) => {
 // PUT /api/admin/sms-templates/:key
 // Body: { message: "new message text" }
 // ============================================================================
-router.put('/sms-templates/:key', async (req, res) => {
+router.put('/sms-templates/:key', requireAdmin, async (req, res) => {
   try {
     const { key } = req.params;
     const { message } = req.body;
@@ -137,7 +171,7 @@ router.put('/sms-templates/:key', async (req, res) => {
 // RESET A TEMPLATE TO DEFAULT
 // POST /api/admin/sms-templates/:key/reset
 // ============================================================================
-router.post('/sms-templates/:key/reset', async (req, res) => {
+router.post('/sms-templates/:key/reset', requireAdmin, async (req, res) => {
   try {
     const { key } = req.params;
 
@@ -186,7 +220,7 @@ router.post('/sms-templates/:key/reset', async (req, res) => {
 // RESET ALL TEMPLATES TO DEFAULTS
 // POST /api/admin/sms-templates/reset-all
 // ============================================================================
-router.post('/sms-templates/reset-all', async (req, res) => {
+router.post('/sms-templates/reset-all', requireAdmin, async (req, res) => {
   try {
     // Use raw SQL to set message = default_message for all rows
     const { error } = await supabase.rpc('reset_all_sms_templates');

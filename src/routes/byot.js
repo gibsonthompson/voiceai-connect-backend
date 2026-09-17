@@ -53,15 +53,32 @@
 //          otherwise the business name trimmed to 40. This also silently
 //          repaired real non-US CLIENT signups, where any business name of 25+
 //          characters hit the same 400 (the 16-char suffix leaves only 24).
+// UPDATED: 2026-09-17 - SECURITY: added a top-of-router ownership guard in
+//          FRONT of requireProPlan. requireProPlan checks the plan and loads
+//          req.agency but never verified the CALLER owns :agencyId, so anyone
+//          could set their own Twilio credentials on another agency (hijacking
+//          that agency's number provisioning onto attacker-controlled Twilio),
+//          delete a victim's credentials, or read their BYOT status. Now
+//          requireAgencyAccess('settings') proves valid token + caller owns
+//          :agencyId before the plan check and handlers run. The exported
+//          provisionBYOTNumber / releaseBYOTNumber are functions (not routes)
+//          and are unaffected.
 // Destination: src/routes/byot.js
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase, getAgencyById } = require('../lib/supabase');
 const { encrypt, decrypt } = require('../lib/encryption');
+const { requireAgencyAccess } = require('./auth');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
+
+// ----------------------------------------------------------------------------
+// OWNERSHIP GUARD — covers every /:agencyId/byot* route. Runs BEFORE the
+// per-route requireProPlan (which stays for plan gating + req.agency loading).
+// ----------------------------------------------------------------------------
+router.use('/:agencyId/byot', requireAgencyAccess('settings'));
 
 // ============================================================================
 // MIDDLEWARE: Require Pro or Scale plan (with trial access)
@@ -408,6 +425,7 @@ async function importTwilioNumberToVapi({ number, accountSid, apiKey, apiSecret,
     name,
     assistantId,
     serverUrl: `${BACKEND_URL}/webhook/vapi`,
+    serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET,
   };
 
   const credentialShapes = [

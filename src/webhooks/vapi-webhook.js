@@ -39,6 +39,15 @@
 //   an active/trial client. Its monthly call cap is still enforced by the
 //   call-limit gate below (and reset each cycle by the reset-manual-usage cron),
 //   and -1 still means uncapped. No other behavior changes for connect clients.
+// UPDATED: 2026-09-17 - SECURITY: this endpoint is now authenticated. It drives
+//   live calls and writes call records, usage/billing counters, and outbound
+//   SMS, so an unauthenticated POST could exfiltrate a client's assistant config
+//   + transfer number, forge calls to inflate usage/billing or exhaust the call
+//   cap, and relay SMS to an attacker-chosen number (the send_demo_sms path).
+//   handleVapiWebhook now calls verifyVapiWebhook (lib/vapi-webhook-auth.js) at
+//   the top and 401s a bad/missing secret. It FAILS OPEN when
+//   VAPI_WEBHOOK_SECRET is unset so it cannot break live calls before VAPI is
+//   configured to send the secret; see that module for the rollout order.
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -51,6 +60,7 @@ const { getSmsTemplate } = require('../lib/sms-templates');
 const { sendAndLogSMS } = require('../lib/sms-logger');
 const { formatPhone, getPhoneLocation, formatDuration } = require('../lib/area-codes');
 const { insertUsageRecord } = require('../lib/usage-tracker');
+const { verifyVapiWebhook } = require('../lib/vapi-webhook-auth');
 
 // Live client subscription_status values that may take/save calls. 'manual' is
 // a first-class live status (billed by the agency outside Stripe), so it sits
@@ -866,6 +876,14 @@ async function handleAssistantRequest(req, res, message) {
 // MAIN WEBHOOK HANDLER
 // ============================================================================
 async function handleVapiWebhook(req, res) {
+  // SECURITY: verify this POST actually came from VAPI before doing anything.
+  // Fails open only when VAPI_WEBHOOK_SECRET is unset (see lib/vapi-webhook-auth).
+  const _auth = verifyVapiWebhook(req);
+  if (!_auth.ok) {
+    console.warn(`🚫 Rejected VAPI webhook (${_auth.reason})`);
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
   try {
     const message = req.body.message;
 

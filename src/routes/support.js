@@ -9,8 +9,13 @@
 const express = require('express');
 const router = express.Router();
 const fetch = require('node-fetch');
+const { requireAgencyAccess } = require('./auth');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+// Ownership guard: /support/chat proxies to the Anthropic API, so it must not
+// be callable anonymously (API-cost abuse). The handler ignores :agencyId for
+// data, but requiring a valid token that owns :agencyId is the right gate.
+router.use('/:agencyId/support', requireAgencyAccess('dashboard'));
 
 // ============================================================================
 // SYSTEM PROMPT — VoiceAI Connect support knowledge base

@@ -12,14 +12,28 @@
 // key is namespaced 'custom_<slug>' so it can never collide with a built-in
 // industry key. The assistant builder (lib/vapi.js) resolves these first, then
 // falls back to the built-in INDUSTRY_KNOWLEDGE_BASES.
+//
+// UPDATED: 2026-09-17 — SECURITY: added a top-of-router ownership guard. Every
+//          route is scoped by :agencyId but had no ownership check, so an
+//          authenticated agency could read another agency's custom industries,
+//          delete them, or create one on their account (the create also calls
+//          the Anthropic API, so it was an abuse vector too). requireAgencyAccess
+//          enforces valid token + caller owns :agencyId. The Scale-plan paywall
+//          inside POST still runs after.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const fetch = require('node-fetch');
 const { supabase } = require('../lib/supabase');
+const { requireAgencyAccess } = require('./auth');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const MAX_CUSTOM_INDUSTRIES = 25;
+
+// ----------------------------------------------------------------------------
+// OWNERSHIP GUARD — covers /:agencyId/custom-industries and everything under it.
+// ----------------------------------------------------------------------------
+router.use('/:agencyId/custom-industries', requireAgencyAccess());
 
 // Scale-only, matching the ai-templates gate: a trial counts as scale so it can
 // be evaluated during the trial; everyone else must be on the Scale plan. This
