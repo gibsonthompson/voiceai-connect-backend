@@ -61,6 +61,7 @@ const { sendAndLogSMS } = require('../lib/sms-logger');
 const { formatPhone, getPhoneLocation, formatDuration } = require('../lib/area-codes');
 const { insertUsageRecord } = require('../lib/usage-tracker');
 const { verifyVapiWebhook } = require('../lib/vapi-webhook-auth');
+const { isConciergeDemoNumber, sendConciergeDemoCallerSMS } = require('../lib/concierge-demo-sms');
 
 // Live client subscription_status values that may take/save calls. 'manual' is
 // a first-class live status (billed by the agency outside Stripe), so it sits
@@ -410,7 +411,16 @@ async function handleDemoCall(agency, message, industryKey = null) {
   // ════════════════════════════════════════════════════════════════════════
   // CALLER FOLLOW-UP SMS
   // ════════════════════════════════════════════════════════════════════════
-  if (callerPhone && callerPhone !== 'Unknown') {
+  // Concierge demo destination: if this is the agency demo line the concierge
+  // transfers prospects into, the caller is an agency BUYER. Send the
+  // "this is the demo you get to hand to businesses" angle instead of the normal
+  // agency-branded demo follow-up. isConciergeDemoNumber returns null for every
+  // other agency demo, so all existing demo follow-ups are unaffected.
+  const _conciergeAgencyDemo = isConciergeDemoNumber(agency.demo_phone_number) === 'agency';
+  if (_conciergeAgencyDemo && callerPhone && callerPhone !== 'Unknown') {
+    await sendConciergeDemoCallerSMS({ callerPhone, kind: 'agency' });
+    console.log('📲 Concierge agency demo: reframed SMS sent to caller');
+  } else if (callerPhone && callerPhone !== 'Unknown') {
     try {
       if (industryKey) {
         const displayName = industryKey.replace(/_/g, ' ');
@@ -1161,7 +1171,17 @@ async function handleVapiWebhook(req, res) {
     // branded. emailSent stays in the response (always false) for shape parity.
     let smsSent = false;
     const emailSent = false;
-    if (client.owner_phone) {
+    // Concierge demo destination: if this call came into the home-services demo
+    // line, the caller is a PROSPECT evaluating VoiceAI Connect, not a real
+    // business. Text THEM the summary framed as the owner's post-call text plus
+    // the agency angle, and skip the real owner SMS so no demo owner gets buzzed.
+    // isConciergeDemoNumber returns null for every normal client, so real
+    // clients are completely unaffected.
+    const _demoKind = isConciergeDemoNumber(client.vapi_phone_number || phoneNumber);
+    if (_demoKind === 'home_services') {
+      await sendConciergeDemoCallerSMS({ callerPhone, kind: 'home_services', summary: aiSummary });
+      console.log('📲 Concierge home-services demo: reframed SMS sent to caller, owner SMS skipped');
+    } else if (client.owner_phone) {
       smsSent = await sendCallNotificationSMS(client, agency, aiData);
       console.log(`📲 Owner SMS to ${client.owner_phone}: ${smsSent ? 'sent' : 'FAILED'}`);
     } else {

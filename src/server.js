@@ -261,6 +261,7 @@ const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 
 // SUPPORT LINE ADDITION: Voice support webhook (shared number, dynamic agency context)
 const { handleSupportWebhook } = require('./webhooks/vapi-support-webhook');
+const { handleConciergeWebhook } = require('./webhooks/vapi-concierge-webhook');
 
 const { 
   createAgencyCheckout, 
@@ -1811,6 +1812,7 @@ app.use('/api/admin', smsLogRoutes);
 app.use('/api/admin', smsTemplatesAdminRoutes);
 app.use('/api/admin', require('./routes/platform-inbox')); // agency SMS reply inbox
 app.use('/api/admin', emailTemplatesAdminRoutes);
+app.use('/api/admin', require('./routes/admin-demo-calls')); // concierge / demo-line call log
 app.use('/api/admin', errorReportRoutes);
 app.use('/api/admin', require('./routes/admin-expenses'));
 app.use('/api/admin', require('./routes/admin-margin'));
@@ -1952,6 +1954,9 @@ app.post('/webhook/vapi', handleVapiWebhook);
 
 // SUPPORT LINE ADDITION: Voice support webhook (shared number, dynamic agency context + whisper)
 app.post('/webhook/vapi-support', handleSupportWebhook);
+// CONCIERGE / DEMO LINE: the platform's own demo number (prospects evaluating VoiceAI Connect).
+// SDR entry AI + announced transfer to the home-services or agency demo. See vapi-concierge-webhook.js.
+app.post('/webhook/vapi-concierge', handleConciergeWebhook);
 app.post('/webhook/telnyx-sms', express.raw({ type: '*/*', limit: '2mb' }), handleTelnyxSMSWebhook);
 app.post('/webhook/twilio-sms', express.urlencoded({ extended: false, limit: '2mb' }), handleTwilioSMSWebhook);
 
