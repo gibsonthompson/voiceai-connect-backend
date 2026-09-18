@@ -44,6 +44,11 @@ const DEMO_AGENCY_NUMBER = process.env.DEMO_AGENCY_NUMBER || null;
 // unbounded voice cost on the public number.
 const MAX_CALL_SECONDS = Number(process.env.CONCIERGE_MAX_CALL_SECONDS || 600);
 
+// Speaking speed for the 11labs voice. 1.0 is normal; lower is slower. ElevenLabs
+// accepts 0.7 to 1.2. 0.85 reads noticeably slower and more relaxed than the
+// default. Tune with CONCIERGE_SPEED without a redeploy.
+const CONCIERGE_SPEED = Number(process.env.CONCIERGE_SPEED || 0.85);
+
 // ============================================================================
 // SYSTEM PROMPT — the SDR persona + accurate platform knowledge + routing
 // ----------------------------------------------------------------------------
@@ -60,7 +65,7 @@ function buildConciergeSystemPrompt() {
 1. Be genuinely helpful and answer their questions about the platform accurately.
 2. Qualify them lightly and naturally (are they starting fresh or already running an agency, and what kind of businesses do they want to serve).
 3. When it fits, offer to connect them to a LIVE receptionist demo so they can hear it, then use the connect_to_demo tool.
-4. Move them toward starting a free account. Never be pushy; be a knowledgeable guide.
+4. Move them toward starting a plan, Pro or Scale, using the 14-day free trial as the low-risk on-ramp. Never be pushy; be a knowledgeable guide.
 
 ## STYLE
 Conversational and brief, this is a phone call, not an essay. Two to three sentences per turn. Warm, confident, a little bit excited about the product because it's good. Never robotic. If they interrupt, roll with it.
@@ -69,7 +74,7 @@ Conversational and brief, this is a phone call, not an essay. Two to three sente
 A white-label AI receptionist platform for agencies and resellers. Operators brand the product as their own and resell AI receptionist subscriptions to local service businesses (home services, dental, medical, legal, restaurants, and more) for around 99 to 299 dollars per month. The platform provisions the AI voice agent, a dedicated phone number, and a client dashboard automatically at signup. We run the underlying infrastructure; the operator runs the business.
 
 ## PRICING (be precise)
-- FREE: no monthly platform fee. Usage-based: about 29.99 dollars per client per month plus 0.12 per voice minute. Zero risk to start, no card required.
+- FREE: no monthly platform fee, usage-based at about 29.99 dollars per client per month plus 0.12 per voice minute. Fine for kicking the tires, but most serious operators start on Pro or Scale for the white-label branding and the lower rates.
 - PRO: 99 dollars per month. Adds full white-label branding, a marketing website, and a branded demo phone line. Lower rates: about 9.99 per client and 0.10 per minute. Includes a 14-day free trial (a card is required to start the trial; not charged until day 14).
 - SCALE: 499 dollars per month. No per-client fees at all, lowest rate at 0.05 per minute, unlimited team members. Also a 14-day trial.
 - On the CLIENT side, every plan includes a 7-day free trial for the businesses they onboard.
@@ -94,7 +99,7 @@ Ask which they'd prefer if it's unclear ("I can connect you to a home-services r
 - Only discuss VoiceAI Connect and running an agency on it. If asked about anything unrelated, gently steer back.
 - Never invent features, prices, or guarantees. If you don't know, say a team member will follow up by text or email.
 - Do not give financial, legal, or tax advice.
-- Keep it moving; if the call is winding down, invite them to start free at ${SIGNUP_URL} and let them know you'll text them a summary and the link.`;
+- Keep it moving; if the call is winding down, point them to starting a 14-day free trial of Pro or Scale at ${SIGNUP_URL} and let them know you'll text them a summary and the link.`;
 }
 
 // ============================================================================
@@ -136,7 +141,7 @@ function buildConciergeAssistant() {
         },
       ],
     },
-    voice: { provider: '11labs', voiceId: CONCIERGE_VOICE_ID },
+    voice: { provider: '11labs', voiceId: CONCIERGE_VOICE_ID, speed: CONCIERGE_SPEED },
     transcriber: { provider: 'deepgram', model: 'nova-2', language: 'en' },
     silenceTimeoutSeconds: 30,
     maxDurationSeconds: MAX_CALL_SECONDS,
@@ -257,13 +262,24 @@ async function handleConciergeWebhook(req, res) {
       // here too would double-text the prospect.
       if (!transferred && callerPhone && callerPhone !== 'Unknown' && !alreadyTexted(callerPhone)) {
         try {
-          const lines = [
-            'Thanks for calling VoiceAI Connect! 🎉',
-            '',
-            "That summary you just saw is exactly what your clients get after every call, texted automatically.",
-            '',
-            `Start building your agency free (no card): ${SIGNUP_URL}`,
-          ];
+          const summaryText = (summary && summary.trim()) ? summary.trim() : null;
+          const lines = summaryText
+            ? [
+                'Thanks for calling VoiceAI Connect! 🎉',
+                '',
+                "Here's the summary from our call, the exact kind of text your clients get automatically after every call they answer:",
+                '',
+                summaryText,
+                '',
+                `Ready to launch your own agency? Start a 14-day free trial of Pro or Scale: ${SIGNUP_URL}`,
+              ]
+            : [
+                'Thanks for calling VoiceAI Connect! 🎉',
+                '',
+                'The automatic post-call text your clients get after every call? That is the feature you just experienced.',
+                '',
+                `Ready to launch your own agency? Start a 14-day free trial of Pro or Scale: ${SIGNUP_URL}`,
+              ];
           await sendAndLogSMS({
             phone: callerPhone,
             message: lines.join('\n'),
