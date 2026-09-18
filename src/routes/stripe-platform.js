@@ -247,6 +247,10 @@ async function syncPerClientSubscriptionItem(agencyId, planId, subscriptionId) {
 //     agency OWNER (a users row, not a team_members row) are never affected.
 //   - We disable rather than delete so a later re-upgrade can re-enable the
 //     same people and their credentials/data survive.
+//   - Members disabled here are stamped with seat_disabled_at. On a later
+//     upgrade (higher/unlimited cap) those, and only those, are re-enabled.
+//     A member the owner disabled by hand (status='disabled' with
+//     seat_disabled_at NULL) is left alone and never auto-re-enabled.
 //   - Counts match checkTeamLimit(): the cap is a number of staff seats, the
 //     owner is not counted.
 // ============================================================================
@@ -259,17 +263,16 @@ async function reconcileAgencyTeamSeats(agencyId, plan) {
     (p === 'pro' || p === 'professional')    ? 3  :
     0;
 
-  // Unlimited, nothing to enforce.
-  if (cap === -1) return;
-
-  // Active (non-disabled) agency members, oldest first so the first `cap`
-  // rows are the keepers and everything after them is over the cap.
-  const { data: members, error } = await supabase
+  // Pull the whole agency roster (oldest first). We manage only the "seat
+  // pool": members currently active, plus members WE previously seat-disabled
+  // (status='disabled' AND seat_disabled_at IS NOT NULL). A member the owner
+  // disabled by hand (status='disabled', seat_disabled_at NULL) is filtered
+  // out below and never touched or auto-re-enabled.
+  const { data: roster, error } = await supabase
     .from('team_members')
-    .select('id, created_at, status')
+    .select('id, created_at, status, seat_disabled_at')
     .eq('entity_type', 'agency')
     .eq('entity_id', agencyId)
-    .neq('status', 'disabled')
     .order('created_at', { ascending: true });
 
   if (error) {
@@ -277,23 +280,43 @@ async function reconcileAgencyTeamSeats(agencyId, plan) {
     return;
   }
 
-  const active = members || [];
-  if (active.length <= cap) return; // within cap, nothing to do
+  const pool = (roster || []).filter(
+    (m) => m.status !== 'disabled' || m.seat_disabled_at != null
+  );
 
-  const overCap = active.slice(cap); // everything past the first `cap` keepers
-  const ids = overCap.map((m) => m.id);
+  // Desired end state: with a finite cap the first `cap` (oldest) stay active
+  // and the rest are seat-disabled; with an unlimited cap everyone is active.
+  // This is symmetric, so an UPGRADE re-enables members a prior downgrade had
+  // seat-disabled, which the old version never did.
+  const nowIso = new Date().toISOString();
+  const toDisable = [];
+  const toEnable = [];
+  pool.forEach((m, idx) => {
+    const shouldBeActive = cap === -1 || idx < cap;
+    const isActive = m.status !== 'disabled';
+    if (shouldBeActive && !isActive) toEnable.push(m.id);   // bring a seat-disabled member back
+    if (!shouldBeActive && isActive) toDisable.push(m.id);  // over cap, disable
+  });
 
-  const { error: updErr } = await supabase
-    .from('team_members')
-    .update({ status: 'disabled', updated_at: new Date().toISOString() })
-    .in('id', ids);
-
-  if (updErr) {
-    console.error(`reconcileAgencyTeamSeats: failed to disable ${ids.length} member(s) for ${agencyId}:`, updErr.message);
-    return;
+  if (toDisable.length > 0) {
+    const { error: dErr } = await supabase
+      .from('team_members')
+      .update({ status: 'disabled', seat_disabled_at: nowIso, updated_at: nowIso })
+      .in('id', toDisable);
+    if (dErr) console.error(`reconcileAgencyTeamSeats: failed to disable ${toDisable.length} member(s) for ${agencyId}:`, dErr.message);
   }
 
-  console.log(`🔒 Seat reconcile (plan=${p}, cap=${cap}): disabled ${ids.length} over-cap agency member(s) for ${agencyId}`);
+  if (toEnable.length > 0) {
+    const { error: eErr } = await supabase
+      .from('team_members')
+      .update({ status: 'active', seat_disabled_at: null, updated_at: nowIso })
+      .in('id', toEnable);
+    if (eErr) console.error(`reconcileAgencyTeamSeats: failed to re-enable ${toEnable.length} member(s) for ${agencyId}:`, eErr.message);
+  }
+
+  if (toDisable.length || toEnable.length) {
+    console.log(`🔁 Seat reconcile (plan=${p}, cap=${cap === -1 ? 'unlimited' : cap}) for ${agencyId}: disabled ${toDisable.length}, re-enabled ${toEnable.length}`);
+  }
 }
 
 // ============================================================================
