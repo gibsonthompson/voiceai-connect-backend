@@ -156,17 +156,17 @@ async function getStepMessage(step, agency, urls) {
       const demoPhone = agency.demo_phone_number || null;
       const msg = await getSmsTemplate('activation_sms_1', { name, demo_phone: demoPhone, dashboard_url: urls.dashboardUrl });
       if (msg) return msg;
-      if (demoPhone) return `${name}, it's Gibson, founder of VoiceAI Connect. You're live! Call your demo AI and hear what you're selling: ${demoPhone}. What industry are you going after first?`;
-      return `${name}, it's Gibson, founder of VoiceAI Connect. You're live! Your test client in the dashboard is a real working AI receptionist. What industry are you going after first?`;
+      if (demoPhone) return `${name}, it's Gibson, founder of VoiceAI Connect. You're live! Call your demo AI and hear exactly what you're selling: ${demoPhone}. Reply to this number anytime with questions or feedback.`;
+      return `${name}, it's Gibson, founder of VoiceAI Connect. You're live! The test client in your dashboard is a real, working AI receptionist, give it a call. Reply to this number anytime with questions or feedback.`;
     }
     case 2: {
       const needsLogo = !agency.logo_url;
       const needsColors = !(agency.primary_color && agency.primary_color !== '#10b981');
       const msg = await getSmsTemplate('activation_sms_2', { name, settings_url: urls.settingsUrl });
       if (msg) return msg;
-      if (needsLogo && needsColors) return `${name}, quick 30-sec win: add your logo and brand colors in Settings so clients see your brand, not ours. Want a hand picking colors that fit?`;
-      if (needsLogo) return `${name}, your colors look good. Add your logo in Settings to finish the look. Need a hand?`;
-      return `${name}, your logo's up. Set your brand colors in Settings to match your agency, 10 seconds.`;
+      if (needsLogo && needsColors) return `${name}, add your logo in Settings and the whole platform, your site, dashboard, and client emails, turns into your brand instead of ours. That's the white-label piece clients actually notice.`;
+      if (needsLogo) return `${name}, your colors are set. Add your logo in Settings and the white-label look is done, clients see your brand top to bottom.`;
+      return `${name}, your logo's up and looking sharp. Set your brand colors in Settings so everything matches your agency.`;
     }
     case 3: {
       const msg = await getSmsTemplate('activation_sms_3', { name, clients_url: urls.clientsUrl });
@@ -176,19 +176,19 @@ async function getStepMessage(step, agency, urls) {
       const stripeStarted = !!agency.stripe_account_id;
       const msg = await getSmsTemplate('activation_sms_4', { name, settings_url: urls.settingsUrl });
       if (msg) return msg;
-      if (stripeStarted) return `${name}, you started Stripe but didn't finish, so clients can't pay you yet. 2-min wrap-up in Settings, under Payments. Want me to walk you through it?`;
-      return `${name}, connect Stripe in Settings, under Payments, so you can actually get paid. 2 min. Without it, a client who signs up can't pay you. Stuck on anything?`;
+      if (stripeStarted) return `${name}, your Stripe connection is half-finished, so right now a client who signs up can't actually pay you. Finish it in Settings, under Payments. Let me know if you need anything.`;
+      return `${name}, one thing to set up before you land a client: connect Stripe in Settings, under Payments. It's how clients pay you, and the money lands straight in your own account. Let me know if you need a hand.`;
     }
     case 5: {
       const msg = await getSmsTemplate('activation_sms_5', { name, signup_url: urls.signupUrl });
-      return msg || `${name}, your client signup page is ready. Grab the link in your dashboard and send it to one business this week. Who's first on your list?`;
+      return msg || `${name}, your client signup page is ready to send. Not sure who to send it to? The Leads tab pulls real local businesses in your area from Google Maps, so you've always got a list to work from. Grab your link in the dashboard and send it to a few this week. Let me know if you need anything.`;
     }
     case 6: {
       const stripeStarted6 = !!agency.stripe_account_id;
       const msg = await getSmsTemplate('activation_sms_6', { name, settings_url: urls.settingsUrl });
       if (msg) return msg;
-      if (stripeStarted6) return `${name}, your Stripe setup's still unfinished, so clients can't pay you yet. 2 min to wrap up in Settings, under Payments. Stuck?`;
-      return `${name}, heads up, your agency still can't accept payments, so a client who signs up can't pay you. 2-min fix in Settings, under Payments. Need a hand?`;
+      if (stripeStarted6) return `${name}, your Stripe setup is still unfinished, which means you can't get paid yet even if a client signs up today. It's waiting in Settings, under Payments. Let me know if something's blocking you and I'll help.`;
+      return `${name}, heads up, your agency still can't accept payments, so a client who signs up today couldn't actually pay you. Connecting Stripe in Settings, under Payments, fixes it. Let me know if you need a hand.`;
     }
     case 7: {
       const stats7 = await getAgencyStats(agency.id);
@@ -202,11 +202,11 @@ async function getStepMessage(step, agency, urls) {
       const done = 5 - missing.length;
       if (missing.length === 0) {
         const msg = await getSmsTemplate('activation_sms_7_complete', { name, signup_url: urls.signupUrl });
-        return msg || `${name}, you're fully set up: logo, colors, pricing, Stripe, first client. Now it's a numbers game. How many prospects can you reach this week?`;
+        return msg || `${name}, you're fully set up: logo, colors, pricing, Stripe, first client. Now it's about volume. The Leads tab pulls local businesses from Google Maps with outreach templates built in, work a batch each week and point them at your demo line. Let me know if you want a hand with your pitch.`;
       } else {
         const checklist = missing.map(m => `- ${m}`).join('\n');
         const msg = await getSmsTemplate('activation_sms_7_progress', { name, checklist, done, total: 5, login_url: urls.loginUrl });
-        return msg || `${name}, you're ${done}/5 set up. Still left:\n${checklist}\nWhich one's tripping you up? Reply and I'll help.`;
+        return msg || `${name}, you're ${done}/5 set up. Still left:\n${checklist}\nKnock these out and you're ready to start pulling leads. Let me know if any of them are giving you trouble.`;
       }
     }
     case 8: {
