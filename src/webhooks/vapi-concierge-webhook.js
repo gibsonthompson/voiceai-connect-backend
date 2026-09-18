@@ -106,8 +106,8 @@ function buildConciergeAssistant() {
     serverUrl: `${BACKEND_URL}/webhook/vapi-concierge`,
     serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET,
     model: {
-      provider: 'anthropic',
-      model: 'claude-sonnet-4-6-20260217',
+      provider: 'openai',
+      model: 'gpt-4o-mini',
       temperature: 0.5,
       messages: [{ role: 'system', content: buildConciergeSystemPrompt() }],
       tools: [
