@@ -214,8 +214,13 @@ async function getStepMessage(step, agency, urls) {
       return msg || `${name}, on the Free plan your clients still see our name. Pro ($99/mo) makes it fully yours: your site, your domain, your brand. Worth it once you've landed a client. Questions?`;
     }
     case 9: {
-      const msg = await getSmsTemplate('activation_sms_9', { name, signup_url: urls.signupUrl });
-      return msg || `${name}, everything's built, you just need client #1. Agencies who land one in the first two weeks are the ones who stick. Want the outreach approach that's working right now? Reply YES.`;
+      const demoPhone9 = agency.demo_phone_number || null;
+      const msg = await getSmsTemplate('activation_sms_9', { name, demo_phone: demoPhone9, signup_url: urls.signupUrl });
+      if (msg) return msg;
+      if (demoPhone9) {
+        return `${name}, everything's built, all that's left is client #1. The move that lands them: get a local business to call your demo line and hear the AI answer as their own receptionist. That 30-second call sells it better than anything you could say. Give a few your demo number this week:\n${demoPhone9}`;
+      }
+      return `${name}, everything's built, all that's left is client #1. The move that lands them: let a local business actually hear the AI answer as their own receptionist, it sells itself. Send a few your signup link so they can hear it free for a week:\n${urls.signupUrl}`;
     }
     default: return null;
   }

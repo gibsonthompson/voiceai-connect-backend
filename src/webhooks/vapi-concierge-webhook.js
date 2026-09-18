@@ -45,9 +45,9 @@ const DEMO_AGENCY_NUMBER = process.env.DEMO_AGENCY_NUMBER || null;
 const MAX_CALL_SECONDS = Number(process.env.CONCIERGE_MAX_CALL_SECONDS || 600);
 
 // Speaking speed for the 11labs voice. 1.0 is normal; lower is slower. ElevenLabs
-// accepts 0.7 to 1.2. 0.85 reads noticeably slower and more relaxed than the
-// default. Tune with CONCIERGE_SPEED without a redeploy.
-const CONCIERGE_SPEED = Number(process.env.CONCIERGE_SPEED || 0.85);
+// accepts 0.7 to 1.2. 0.92 is a touch slower than default without dragging.
+// Tune with CONCIERGE_SPEED without a redeploy.
+const CONCIERGE_SPEED = Number(process.env.CONCIERGE_SPEED || 0.92);
 
 // ============================================================================
 // SYSTEM PROMPT — the SDR persona + accurate platform knowledge + routing
@@ -67,8 +67,14 @@ function buildConciergeSystemPrompt() {
 3. When it fits, offer to connect them to a LIVE receptionist demo so they can hear it, then use the connect_to_demo tool.
 4. Move them toward starting a plan, Pro or Scale, using the 14-day free trial as the low-risk on-ramp. Never be pushy; be a knowledgeable guide.
 
-## STYLE
-Conversational and brief, this is a phone call, not an essay. Two to three sentences per turn. Warm, confident, a little bit excited about the product because it's good. Never robotic. If they interrupt, roll with it.
+## STYLE — SOUND LIKE A PERSON, NOT A SCRIPT
+This is a real phone call with a sharp, friendly human who knows this product cold. Not a brochure, not a menu.
+- Keep turns short: a sentence or two, then let them talk. Never monologue or read a list.
+- Talk naturally, use contractions and real phrasing ("yeah", "honestly", "so here's the thing", "good question"). React to what they actually just said before you move on.
+- Answer the question they asked, not the five around it. Don't recite pricing or features unless they ask; drop the one detail that matters and keep the conversation moving.
+- Guide with a light hand. You always have a next beat in mind (a question back, or offering the live demo), but never make it feel like you're working through a form. Structure, not script.
+- If they interrupt or wander, roll with it, then ease back on track.
+- Warm and a little energized, you genuinely think this is great. Confident, never pushy, never salesy-cheesy.
 
 ## WHAT VOICEAI CONNECT IS
 A white-label AI receptionist platform for agencies and resellers. Operators brand the product as their own and resell AI receptionist subscriptions to local service businesses (home services, dental, medical, legal, restaurants, and more) for around 99 to 299 dollars per month. The platform provisions the AI voice agent, a dedicated phone number, and a client dashboard automatically at signup. We run the underlying infrastructure; the operator runs the business.
@@ -113,7 +119,7 @@ function buildConciergeAssistant() {
     model: {
       provider: 'openai',
       model: 'gpt-4o-mini',
-      temperature: 0.5,
+      temperature: 0.7,
       messages: [{ role: 'system', content: buildConciergeSystemPrompt() }],
       tools: [
         {
@@ -271,14 +277,16 @@ async function handleConciergeWebhook(req, res) {
                 '',
                 summaryText,
                 '',
-                `Ready to launch your own agency? Start a 14-day free trial of Pro or Scale: ${SIGNUP_URL}`,
+                'Ready to launch your own agency? Start a 14-day free trial of Pro or Scale:',
+                SIGNUP_URL,
               ]
             : [
                 'Thanks for calling VoiceAI Connect! 🎉',
                 '',
                 'The automatic post-call text your clients get after every call? That is the feature you just experienced.',
                 '',
-                `Ready to launch your own agency? Start a 14-day free trial of Pro or Scale: ${SIGNUP_URL}`,
+                'Ready to launch your own agency? Start a 14-day free trial of Pro or Scale:',
+                SIGNUP_URL,
               ];
           await sendAndLogSMS({
             phone: callerPhone,
