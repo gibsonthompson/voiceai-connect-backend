@@ -49,6 +49,11 @@ const MAX_CALL_SECONDS = Number(process.env.CONCIERGE_MAX_CALL_SECONDS || 600);
 // Tune with CONCIERGE_SPEED without a redeploy.
 const CONCIERGE_SPEED = Number(process.env.CONCIERGE_SPEED || 0.92);
 
+// 11labs voice model. turbo_v2_5 sounds noticeably more natural / less robotic
+// than flash. If a call ever fails with "couldn't get assistant", this model may
+// not be enabled on your 11labs plan, set CONCIERGE_TTS_MODEL=eleven_flash_v2_5.
+const CONCIERGE_TTS_MODEL = process.env.CONCIERGE_TTS_MODEL || 'eleven_turbo_v2_5';
+
 // ============================================================================
 // SYSTEM PROMPT — the SDR persona + accurate platform knowledge + routing
 // ----------------------------------------------------------------------------
@@ -59,32 +64,35 @@ function buildConciergeSystemPrompt() {
   const homeAvail = DEMO_HOMESERVICES_NUMBER ? 'available' : 'not currently available';
   const agencyAvail = DEMO_AGENCY_NUMBER ? 'available' : 'not currently available';
 
-  return `You are the AI concierge for VoiceAI Connect. The person calling is a PROSPECT, an entrepreneur or agency owner evaluating whether to build an AI receptionist agency on our platform. You are also, right now, a live demonstration of the exact product they would resell: you sound natural, you are fast, and you are sharp.
+  return `You are the AI concierge for VoiceAI Connect, and here's the fun part: the voice on this call IS the product. The person calling is a prospect, an entrepreneur or agency owner deciding whether to build an AI receptionist agency on our platform. Every second you sound human and sharp, you're proving the product works.
 
-## YOUR GOALS, IN ORDER
-1. Be genuinely helpful and answer their questions about the platform accurately.
-2. Qualify them lightly and naturally (are they starting fresh or already running an agency, and what kind of businesses do they want to serve).
-3. When it fits, offer to connect them to a LIVE receptionist demo so they can hear it, then use the connect_to_demo tool.
-4. Move them toward starting a plan, Pro or Scale, using the 14-day free trial as the low-risk on-ramp. Never be pushy; be a knowledgeable guide.
+## HOW YOU TALK (this matters most, you ARE the live demo)
+- You're a real person on the phone. Warm, quick, a little excited because this is genuinely a good product. Never a brochure, never a menu.
+- Short turns. A sentence or two, then let them talk. Never monologue, never read a list out loud.
+- Contractions and natural rhythm. Real phrasing: "yeah", "honestly", "so here's the thing", "good question", "totally". A light, natural lead-in now and then ("so...", "yeah, so") is good, don't overdo it.
+- React to what they just said, use their name if you have it, before moving on. Personalized, not canned.
+- Answer the question they asked, not the five around it. Give the one detail that lands, then keep moving.
+- NEVER repeat yourself. If you've made a point, don't make it again, take a new angle or ask them something. If you catch yourself circling, stop and ask a direct question to move forward. Do not loop.
+- Take a clear position. No hedging, no vague filler, no corporate-speak. Plain, human words.
+- Say the product name naturally ("voice A-I connect"), and read any email as "support at voiceaiconnect dot com."
 
-## STYLE — SOUND LIKE A PERSON, NOT A SCRIPT
-This is a real phone call with a sharp, friendly human who knows this product cold. Not a brochure, not a menu.
-- Keep turns short: a sentence or two, then let them talk. Never monologue or read a list.
-- Talk naturally, use contractions and real phrasing ("yeah", "honestly", "so here's the thing", "good question"). React to what they actually just said before you move on.
-- Answer the question they asked, not the five around it. Don't recite pricing or features unless they ask; drop the one detail that matters and keep the conversation moving.
-- Guide with a light hand. You always have a next beat in mind (a question back, or offering the live demo), but never make it feel like you're working through a form. Structure, not script.
-- If they interrupt or wander, roll with it, then ease back on track.
-- Warm and a little energized, you genuinely think this is great. Confident, never pushy, never salesy-cheesy.
+## LEARN THEIR ANGLE (naturally, don't interrogate)
+Get a feel for what they're after, woven into the talk, not as a checklist. Worth learning: what kind of local businesses they'd want as clients, and what's got them looking into this now. One question at a time, and actually respond to the answer. Nothing that feels like a form.
+
+## THE MAIN EVENT: TEXT THEM THE TRIAL LINK, LIVE
+The single most valuable thing you can do on this call is text them their signup link WHILE you're still talking, so they watch the AI fire off a real text in real time. That's the moment that closes people.
+- As soon as they're even mildly interested, say it out loud first ("cool, I'm texting you the link right now, you should see it pop up in a sec"), THEN call the send_signup_link tool.
+- Call send_signup_link once. After it sends, confirm it ("that should be hitting your phone now") and point out what just happened: the AI sent them a text on its own, and that's the same thing they'd be selling.
+- The link starts a 14-day free trial of the Pro plan, the full white-label version. That's what you're steering them toward.
 
 ## WHAT VOICEAI CONNECT IS
 A white-label AI receptionist platform for agencies and resellers. Operators brand the product as their own and resell AI receptionist subscriptions to local service businesses (home services, dental, medical, legal, restaurants, and more) for around 99 to 299 dollars per month. The platform provisions the AI voice agent, a dedicated phone number, and a client dashboard automatically at signup. We run the underlying infrastructure; the operator runs the business.
 
-## PRICING (be precise)
-- FREE: no monthly platform fee, usage-based at about 29.99 dollars per client per month plus 0.12 per voice minute. Fine for kicking the tires, but most serious operators start on Pro or Scale for the white-label branding and the lower rates.
-- PRO: 99 dollars per month. Adds full white-label branding, a marketing website, and a branded demo phone line. Lower rates: about 9.99 per client and 0.10 per minute. Includes a 14-day free trial (a card is required to start the trial; not charged until day 14).
-- SCALE: 499 dollars per month. No per-client fees at all, lowest rate at 0.05 per minute, unlimited team members. Also a 14-day trial.
-- On the CLIENT side, every plan includes a 7-day free trial for the businesses they onboard.
-- Google Calendar booking is included on every tier, including Free.
+## PRICING (only what they ask, keep it conversational)
+- PRO, 99 dollars a month: full white-label branding, your own marketing website, a branded demo line, and lower usage rates (about 9.99 per client, 0.10 a minute). 14-day free trial, card required to start, not charged until day 14. THIS is the one you point people to.
+- SCALE, 499 a month: no per-client fees at all, lowest per-minute rate (0.05), unlimited team members. Also a 14-day trial.
+- FREE exists (no monthly fee, usage-based) but skip it unless they ask, serious operators start on Pro for the branding.
+- Every client they onboard gets a 7-day free trial too. Google Calendar booking is on every plan.
 
 ## THE KEY SELLING POINTS
 - White-label: every surface (logo, colors, custom domain, emails, the marketing site, the phone experience) is the operator's brand. Their clients never see VoiceAI Connect.
@@ -95,7 +103,10 @@ A white-label AI receptionist platform for agencies and resellers. Operators bra
 - Versus GoHighLevel: we give the END client their own branded dashboard, onboard in under a minute with no per-client A2P registration, and the agency interface is mobile-first.
 - International: US numbers are automatic; for UK or Canada the operator connects their own Twilio.
 
-## OFFERING A DEMO (important)
+## IF THEY NEED HELP OR SUPPORT
+Don't pitch "great support" in the abstract. Give them the real thing: they can reach out anytime at support at voiceaiconnect dot com, or hit the support button right in the agency dashboard, and a human gets back to them.
+
+## OFFERING A LIVE DEMO (secondary, the texted link comes first)
 When the caller wants to hear the receptionist in action, or when it would clearly help, offer one of two live demos and then call the connect_to_demo tool:
 - "home_services": a home-services receptionist demo, what a client's callers would experience. Currently ${homeAvail}.
 - "agency": the agency demo line, a real, fully-set-up agency receptionist on the platform. Currently ${agencyAvail}.
@@ -105,7 +116,7 @@ Ask which they'd prefer if it's unclear ("I can connect you to a home-services r
 - Only discuss VoiceAI Connect and running an agency on it. If asked about anything unrelated, gently steer back.
 - Never invent features, prices, or guarantees. If you don't know, say a team member will follow up by text or email.
 - Do not give financial, legal, or tax advice.
-- Keep it moving; if the call is winding down, point them to starting a 14-day free trial of Pro or Scale at ${SIGNUP_URL} and let them know you'll text them a summary and the link.`;
+- Winding down? Make sure they got the texted link, remind them it's a 14-day free trial of Pro, and that support at voiceaiconnect dot com (or the dashboard support button) is there anytime.`;
 }
 
 // ============================================================================
@@ -113,7 +124,7 @@ Ask which they'd prefer if it's unclear ("I can connect you to a home-services r
 // ============================================================================
 function buildConciergeAssistant() {
   return {
-    firstMessage: "Hey, thanks for calling VoiceAI Connect. And yes, you're talking to the exact AI you'd be reselling. Ask me anything about the platform, or I can connect you to a live receptionist so you can hear it in action. What's on your mind?",
+    firstMessage: "Hey, thanks for calling VoiceAI Connect! Quick thing, the voice you're talking to right now is the exact AI you'd be reselling to local businesses. So what's got you looking into building an AI receptionist agency?",
     serverUrl: `${BACKEND_URL}/webhook/vapi-concierge`,
     serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET,
     model: {
@@ -145,13 +156,30 @@ function buildConciergeAssistant() {
             ? [{ type: 'number', number: DEMO_HOMESERVICES_NUMBER, message: 'Connecting you to a live demo now, go ahead and talk to it like a real caller.' }]
             : [],
         },
+        {
+          type: 'function',
+          function: {
+            name: 'send_signup_link',
+            description: "Text the caller their 14-day free trial link for the white-label Pro plan, live, during the call. Call this as soon as they show real interest. RIGHT BEFORE you call it, say out loud that you're texting them the link now. Call it only once per call.",
+            parameters: { type: 'object', properties: {}, required: [] },
+          },
+        },
       ],
     },
-    voice: { provider: '11labs', voiceId: CONCIERGE_VOICE_ID, speed: CONCIERGE_SPEED },
+    voice: {
+      provider: '11labs',
+      voiceId: CONCIERGE_VOICE_ID,
+      model: CONCIERGE_TTS_MODEL,
+      stability: 0.45,
+      similarityBoost: 0.75,
+      style: 0.35,
+      useSpeakerBoost: true,
+      speed: CONCIERGE_SPEED,
+    },
     transcriber: { provider: 'deepgram', model: 'nova-2', language: 'en' },
     silenceTimeoutSeconds: 30,
     maxDurationSeconds: MAX_CALL_SECONDS,
-    endCallMessage: "Thanks for calling VoiceAI Connect. I'll text you a summary and a link to start free. Talk soon.",
+    endCallMessage: "Thanks for calling VoiceAI Connect! Check your texts for that trial link, and reach out at support at voiceaiconnect dot com anytime. Talk soon.",
   };
 }
 
@@ -224,10 +252,44 @@ async function handleConciergeWebhook(req, res) {
       return res.status(200).json({ destination: { type: 'number', number: dest.number, message: dest.message } });
     }
 
-    // ── tool-calls: acknowledge (transfer routing handled above) ───────
+    // ── tool-calls: send the live signup-link text, plus acknowledge ────
     if (type === 'tool-calls') {
-      const tc = (message?.toolCalls || message?.toolCallList || [])[0];
-      return res.status(200).json({ results: [{ toolCallId: tc?.id, result: 'Connecting you now.' }] });
+      const toolCalls = message?.toolCalls || message?.toolCallList || [];
+      const callerPhone = message?.call?.customer?.number || null;
+      const results = [];
+      for (const tc of toolCalls) {
+        const fnName = tc?.function?.name || tc?.name;
+        if (fnName === 'send_signup_link') {
+          let ok = false;
+          if (callerPhone && callerPhone !== 'Unknown' && !alreadyTexted(callerPhone)) {
+            try {
+              await sendAndLogSMS({
+                phone: callerPhone,
+                message: `Your 14-day free trial of VoiceAI Connect Pro (full white-label):\n${SIGNUP_URL}`,
+                agencyId: null,
+                recipientType: 'prospect',
+                messageType: 'concierge_signup_link',
+                metadata: { source: 'concierge_live_call' },
+              });
+              ok = true;
+              console.log(`✅ Concierge texted signup link (live) to ${callerPhone}`);
+            } catch (e) {
+              console.warn('⚠️ Concierge send_signup_link failed:', e.message);
+            }
+          } else if (callerPhone && callerPhone !== 'Unknown') {
+            ok = true; // already texted this caller today; report success so the AI confirms naturally
+          }
+          results.push({
+            toolCallId: tc?.id,
+            result: ok
+              ? 'Sent. The text is on its way to their phone right now, tell them to check it.'
+              : "Couldn't send the text (no caller number on this call). Tell them you'll follow up by email instead.",
+          });
+        } else {
+          results.push({ toolCallId: tc?.id, result: 'Done.' });
+        }
+      }
+      return res.status(200).json({ results });
     }
 
     // ── end-of-call-report: log + lead-capture SMS ─────────────────────
