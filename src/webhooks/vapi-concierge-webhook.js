@@ -335,7 +335,7 @@ async function handleConciergeWebhook(req, res) {
           const summaryText = (summary && summary.trim()) ? summary.trim() : null;
           const lines = summaryText
             ? [
-                'Thanks for calling VoiceAI Connect! 🎉',
+                'Thanks for calling VoiceAI Connect!',
                 '',
                 "Here's the summary from our call, the exact kind of text your clients get automatically after every call they answer:",
                 '',
@@ -345,7 +345,7 @@ async function handleConciergeWebhook(req, res) {
                 SIGNUP_URL,
               ]
             : [
-                'Thanks for calling VoiceAI Connect! 🎉',
+                'Thanks for calling VoiceAI Connect!',
                 '',
                 'The automatic post-call text your clients get after every call? That is the feature you just experienced.',
                 '',

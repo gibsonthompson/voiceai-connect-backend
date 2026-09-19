@@ -426,14 +426,14 @@ async function handleDemoCall(agency, message, industryKey = null) {
         const displayName = industryKey.replace(/_/g, ' ');
         const nameNote = businessName ? ` for ${businessName}` : '';
         const lines = [
-          `Thanks for trying the ${displayName} AI receptionist demo${nameNote}! 🎉`,
+          `Thanks for trying the ${displayName} AI receptionist demo${nameNote}!`,
           '',
         ];
         if (serviceDiscussed) {
           lines.push(`Here's what we covered:`);
-          lines.push(`✅ ${serviceDiscussed}`);
-          lines.push(`✅ Instant text summaries after every call`);
-          lines.push(`✅ 24/7 coverage, unlimited simultaneous calls`);
+          lines.push(`- ${serviceDiscussed}`);
+          lines.push(`- Instant text summaries after every call`);
+          lines.push(`- 24/7 coverage, unlimited simultaneous calls`);
           lines.push('');
         }
         lines.push(`Questions? Give us a call back anytime.`);
@@ -476,11 +476,11 @@ async function handleDemoCall(agency, message, industryKey = null) {
         const lines = [];
 
         if (businessName) {
-          lines.push(`Thanks for trying ${agencyName}'s AI receptionist${nameNote}! 🎉`);
+          lines.push(`Thanks for trying ${agencyName}'s AI receptionist${nameNote}!`);
           lines.push('');
           lines.push(`That demo showed exactly how AI would answer calls for ${businessName} - 24/7, with instant text summaries after every call.`);
         } else {
-          lines.push(`Thanks for trying ${agencyName}'s AI receptionist! 🎉`);
+          lines.push(`Thanks for trying ${agencyName}'s AI receptionist!`);
           lines.push('');
           lines.push(`What you just experienced is exactly how AI would answer your business calls - 24/7, no missed calls, instant summaries.`);
         }
@@ -510,19 +510,18 @@ async function handleDemoCall(agency, message, industryKey = null) {
   if (agency.phone) {
     try {
       const lines = [];
-      lines.push(`🎤 Demo Call - ${agency.name}`);
+      lines.push(`Demo Call - ${agency.name}`);
       lines.push(`━━━━━━━━━━━━━━━━━━`);
-      lines.push(`📞 ${callerDisplay}`);
-      if (businessLabel) lines.push(`🏢 ${businessLabel}`);
-      if (callerName && callerName !== 'Unknown') lines.push(`👤 ${callerName}`);
-      if (durationDisplay) lines.push(`⏱ ${durationDisplay}`);
+      lines.push(`Caller: ${callerDisplay}`);
+      if (businessLabel) lines.push(`Business: ${businessLabel}`);
+      if (callerName && callerName !== 'Unknown') lines.push(`Contact: ${callerName}`);
+      if (durationDisplay) lines.push(`Duration: ${durationDisplay}`);
 
       if (interestLevel) {
-        const emoji = interestLevel === 'high' ? '🔥' : interestLevel === 'medium' ? '👀' : '❄️';
-        lines.push(`${emoji} Interest: ${interestLevel.toUpperCase()}`);
+        lines.push(`Interest: ${interestLevel.toUpperCase()}`);
       }
-      if (askedQuestions) lines.push(`❓ Asked follow-up questions`);
-      if (vapiSuccessScore) lines.push(`📊 Demo score: ${vapiSuccessScore}/10`);
+      if (askedQuestions) lines.push(`Asked follow-up questions`);
+      if (vapiSuccessScore) lines.push(`Demo score: ${vapiSuccessScore}/10`);
 
       if (summary) {
         lines.push(`━━━━━━━━━━━━━━━━━━`);
@@ -538,13 +537,13 @@ async function handleDemoCall(agency, message, industryKey = null) {
 
       lines.push(`━━━━━━━━━━━━━━━━━━`);
       if (interestLevel === 'high') {
-        lines.push(`💡 Hot lead - follow up within the hour.`);
+        lines.push(`Hot lead - follow up within the hour.`);
       } else if (interestLevel === 'medium') {
-        lines.push(`💡 Warm lead - follow up within 24 hours.`);
+        lines.push(`Warm lead - follow up within 24 hours.`);
       } else {
         lines.push(callerPhone && callerPhone !== 'Unknown'
-          ? `✅ Follow-up SMS sent to caller`
-          : `⚠️ No caller phone - follow-up not sent`
+          ? `Follow-up SMS sent to caller`
+          : `No caller phone - follow-up not sent`
         );
       }
 
