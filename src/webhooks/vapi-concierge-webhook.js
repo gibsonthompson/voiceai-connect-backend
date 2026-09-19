@@ -107,10 +107,10 @@ A white-label AI receptionist platform for agencies and resellers. Operators bra
 Don't pitch "great support" in the abstract. Give them the real thing: they can reach out anytime at support at voiceaiconnect dot com, or hit the support button right in the agency dashboard, and a human gets back to them.
 
 ## OFFERING A LIVE DEMO (secondary, the texted link comes first)
-When the caller wants to hear the receptionist in action, or when it would clearly help, offer one of two live demos and then call the connect_to_demo tool:
-- "home_services": a home-services receptionist demo, what a client's callers would experience. Currently ${homeAvail}.
-- "agency": the agency demo line, a real, fully-set-up agency receptionist on the platform. Currently ${agencyAvail}.
-Ask which they'd prefer if it's unclear ("I can connect you to a home-services receptionist so you hear a client call, or to a live agency line, which sounds better?"). BEFORE the tool fires, tell them you're connecting them and to go ahead and talk to it like a real caller. If a demo is not currently available, don't promise it; offer the other one or offer to have a human follow up.
+If they want to actually hear a receptionist, offer one and call connect_to_demo:
+- "home_services": a home-services receptionist, what a client's callers hear. Currently ${homeAvail}.
+- "agency": a real, fully-set-up agency line on the platform. Currently ${agencyAvail}.
+Ask which they'd prefer if it's unclear. Timing matters on the hand-off: keep your lead-in to a quick beat ("awesome, connecting you now") and then call the tool. The system speaks the hand-off line and dials automatically, so don't give a long speech or you'll talk over the transfer. And text them the trial link with send_signup_link BEFORE you transfer, so they already have it while they're in the demo. If a demo isn't available, don't promise it, offer the other one or a human follow-up.
 
 ## GUARDRAILS
 - Only discuss VoiceAI Connect and running an agency on it. If asked about anything unrelated, gently steer back.
@@ -150,11 +150,11 @@ function buildConciergeAssistant() {
               required: ['demo_type'],
             },
           },
-          // Fallback destination; the real destination is resolved dynamically in
-          // transfer-destination-request below from demo_type.
-          destinations: DEMO_HOMESERVICES_NUMBER
-            ? [{ type: 'number', number: DEMO_HOMESERVICES_NUMBER, message: 'Connecting you to a live demo now, go ahead and talk to it like a real caller.' }]
-            : [],
+          // No static destinations on purpose. A static destination makes VAPI
+          // dial that number directly and SKIP the transfer-destination-request
+          // event, which would send every transfer to one line and ignore
+          // demo_type. Leaving it off forces the server event below, so we route
+          // to the correct demo (home_services vs agency) on each transfer.
         },
         {
           type: 'function',
@@ -262,27 +262,28 @@ async function handleConciergeWebhook(req, res) {
         if (fnName === 'send_signup_link') {
           let ok = false;
           if (callerPhone && callerPhone !== 'Unknown' && !alreadyTexted(callerPhone)) {
-            try {
-              await sendAndLogSMS({
-                phone: callerPhone,
-                message: `Your 14-day free trial of VoiceAI Connect Pro (full white-label):\n${SIGNUP_URL}`,
-                agencyId: null,
-                recipientType: 'prospect',
-                messageType: 'concierge_signup_link',
-                metadata: { source: 'concierge_live_call' },
-              });
-              ok = true;
-              console.log(`✅ Concierge texted signup link (live) to ${callerPhone}`);
-            } catch (e) {
-              console.warn('⚠️ Concierge send_signup_link failed:', e.message);
-            }
+            // Fire-and-forget: don't await the SMS API, or the model waits (dead
+            // air on the live call) for the result. Persistent Node process on
+            // DigitalOcean keeps the promise alive after we respond. The AI has
+            // already told them it's coming, so we just confirm it's on the way.
+            sendAndLogSMS({
+              phone: callerPhone,
+              message: `Your 14-day free trial of VoiceAI Connect Pro (full white-label):\n${SIGNUP_URL}`,
+              agencyId: null,
+              recipientType: 'prospect',
+              messageType: 'concierge_signup_link',
+              metadata: { source: 'concierge_live_call' },
+            })
+              .then(() => console.log(`✅ Concierge texted signup link (live) to ${callerPhone}`))
+              .catch((e) => console.warn('⚠️ Concierge send_signup_link failed:', e.message));
+            ok = true;
           } else if (callerPhone && callerPhone !== 'Unknown') {
             ok = true; // already texted this caller today; report success so the AI confirms naturally
           }
           results.push({
             toolCallId: tc?.id,
             result: ok
-              ? 'Sent. The text is on its way to their phone right now, tell them to check it.'
+              ? 'On its way, tell them it will pop up on their phone in a few seconds.'
               : "Couldn't send the text (no caller number on this call). Tell them you'll follow up by email instead.",
           });
         } else {
@@ -324,10 +325,11 @@ async function handleConciergeWebhook(req, res) {
         console.warn('⚠️ platform_demo_calls insert threw:', e.message);
       }
 
-      // Lead-capture SMS: summary + signup link. Best-effort, deduped. Skipped
-      // when the call was transferred to a demo: the demo destination sends the
-      // better, reframed follow-up (with the actual demo summary), so sending one
-      // here too would double-text the prospect.
+      // Post-call SMS: summary + signup link, sent on end-of-call-report (i.e.
+      // right after the call ends). Best-effort, deduped via alreadyTexted:
+      // skipped if we already texted this caller during the call
+      // (send_signup_link) or transferred them to a demo (they got the link just
+      // before the transfer), so a prospect never gets two texts from one call.
       if (!transferred && callerPhone && callerPhone !== 'Unknown' && !alreadyTexted(callerPhone)) {
         try {
           const summaryText = (summary && summary.trim()) ? summary.trim() : null;
