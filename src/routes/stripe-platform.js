@@ -751,6 +751,7 @@ async function handleAgencyCheckoutCompleted(session) {
         plan_type: plan,
         stripe_subscription_id: session.subscription,
         trial_ends_at: null,
+        numbers_release_at: null,     // came back in time: keep the client numbers
         max_team_members_agency: null,
         max_team_members_client: null,
         updated_at: new Date().toISOString(),
@@ -773,6 +774,7 @@ async function handleAgencyCheckoutCompleted(session) {
         plan_type: plan,
         stripe_subscription_id: session.subscription,
         trial_ends_at: trialEndsAt,
+        numbers_release_at: null,     // clear any stale grace deadline on (re)activation
         // Clear per-row team caps so plan-based defaults in routes/team.js
         // (checkTeamLimit) take effect. The column is treated as a hard
         // override when non-null, including the value 0 which would block
@@ -917,18 +919,20 @@ async function handleAgencySubscriptionUpdated(subscription) {
     .update(updates)
     .eq('id', agency.id);
 
-  // Cascade the client teardown when THIS update suspends the agency
-  // (canceled / unpaid / paused all map to 'suspended' above). Previously only
-  // the subscription.DELETED handler released client numbers, but Stripe ends
-  // most subscriptions via a subscription.UPDATED -> canceled/unpaid event
-  // (cancel-at-period-end, dunning lapse), so agencies that lapsed that way left
-  // every client active with a live, still-billing number. Guard on a real
-  // transition INTO suspended so an update while already suspended is a no-op;
-  // releaseAgencyClientNumbers is itself idempotent as a second safety net.
+  // When THIS update suspends the agency (canceled / unpaid / paused all map to
+  // 'suspended' above), give it the same 3-day client-number grace as the
+  // deleted handler: stamp numbers_release_at instead of releasing now, so a
+  // re-subscribe within the window keeps the clients' numbers, and the daily
+  // grace sweep releases them if the agency doesn't come back. The agency's own
+  // demo number isn't client-facing, so it's released now. Guarded on a real
+  // transition INTO suspended so an update while already suspended is a no-op.
   if (agencyStatus === 'suspended' && agency.status !== 'suspended') {
-    console.log(`🧹 Agency ${agency.id} suspended via subscription.updated (${status}); cascading client number release`);
-    try { await releaseAgencyClientNumbers(agency.id); await releaseAgencyDemoNumber(agency.id); }
-    catch (cascadeErr) { console.error(`   ❌ Cascade release failed for ${agency.id}:`, cascadeErr.message); }
+    console.log(`🧹 Agency ${agency.id} suspended via subscription.updated (${status}); starting 3-day client-number grace`);
+    try {
+      const graceReleaseAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+      await supabase.from('agencies').update({ numbers_release_at: graceReleaseAt }).eq('id', agency.id);
+      await releaseAgencyDemoNumber(agency.id);
+    } catch (cascadeErr) { console.error(`   ❌ Grace setup failed for ${agency.id}:`, cascadeErr.message); }
   }
 
   if (planChanged) {
@@ -958,12 +962,16 @@ async function handleAgencySubscriptionDeleted(subscription) {
     return;
   }
 
-  // Full reset back to a clean Free state. Clearing stripe_subscription_id
-  // is important because createAgencyCheckout's duplicate-subscription guard
-  // would otherwise treat the stale id as an active subscription and block
-  // the agency from re-subscribing after cancellation. trial_ends_at is also
-  // nulled so the trial-warning cron doesn't keep emailing about an ended
-  // trial on a canceled agency.
+  // Full reset back to a clean Free state, PLUS a 3-day grace before client
+  // numbers are released. numbers_release_at is the deadline: the client
+  // receptionist numbers are KEPT (not released) until then, so if the agency
+  // re-subscribes within 3 days their clients keep the exact same numbers.
+  // releaseExpiredGraceNumbers() (run from the daily agency-trial cron) does the
+  // real release once the deadline passes, and reactivation clears the deadline.
+  // The agency is suspended immediately, so its clients' calls already hit the
+  // "no longer in service" gate during the grace window; only the physical
+  // number teardown is deferred.
+  const graceReleaseAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
   await supabase
     .from('agencies')
     .update({
@@ -972,6 +980,7 @@ async function handleAgencySubscriptionDeleted(subscription) {
       plan_type: 'free',
       stripe_subscription_id: null,
       trial_ends_at: null,
+      numbers_release_at: graceReleaseAt,
       max_team_members_agency: null,
       max_team_members_client: null,
     })
@@ -983,10 +992,10 @@ async function handleAgencySubscriptionDeleted(subscription) {
   // for a later reactivation/upgrade.
   await reconcileAgencyTeamSeats(agency.id, 'free');
 
-  // Cascade a number release to every client under this agency. Without this,
-  // the agency is suspended but all of its clients' Telnyx numbers keep
-  // renting monthly forever. See releaseAgencyClientNumbers for the tradeoff.
-  await releaseAgencyClientNumbers(agency.id);
+  // Client numbers are NOT released here anymore. They're held for the 3-day
+  // grace window above and released by releaseExpiredGraceNumbers() once it
+  // expires (or never, if the agency re-subscribes in time). The agency's own
+  // demo number isn't client-facing, so it's released now as before.
   await releaseAgencyDemoNumber(agency.id);
 
   // Capture cancellation details. Both paths land here eventually:
@@ -1195,6 +1204,26 @@ async function handleAgencyTrialEnding(subscription) {
   const agency = await getAgencyByStripeCustomerId(subscription.customer);
   if (!agency) return;
 
+  // No-card trials (e.g. a manually granted trial) have no payment method, so
+  // this subscription will not auto-charge, it cancels at trial end and prompts
+  // the agency to subscribe. The default "the card on file will be charged"
+  // copy below is wrong in that case, so skip the pre-conversion email entirely
+  // when there's no card. (Paying/standard trials, which collect a card at
+  // checkout, get the email exactly as before.)
+  let hasPaymentMethod = !!subscription.default_payment_method;
+  if (!hasPaymentMethod && subscription.customer) {
+    try {
+      const cust = await stripe.customers.retrieve(subscription.customer);
+      hasPaymentMethod = !!(cust && !cust.deleted && (cust.invoice_settings?.default_payment_method || cust.default_source));
+    } catch (e) {
+      console.warn('trial-ending: could not check payment method:', e.message);
+    }
+  }
+  if (!hasPaymentMethod) {
+    console.log(`Skipping trial-ending email for ${agency.id}: no card on file (no-card trial won't auto-charge).`);
+    return;
+  }
+
   const trialEnd = new Date(subscription.trial_end * 1000);
   const daysLeft = Math.ceil((trialEnd - new Date()) / (1000 * 60 * 60 * 24));
 
@@ -1226,6 +1255,56 @@ async function handleAgencyTrialEnding(subscription) {
 }
 
 // ============================================================================
+// RELEASE EXPIRED-GRACE CLIENT NUMBERS
+// ----------------------------------------------------------------------------
+// handleAgencySubscriptionDeleted no longer releases client numbers on the spot,
+// it stamps agencies.numbers_release_at = now + 3 days and keeps the numbers so
+// a re-subscribe within the window restores the clients' exact same numbers.
+// This sweep releases the client numbers of any agency whose grace deadline has
+// passed and that did NOT come back (reactivation nulls numbers_release_at). It
+// is called from warnExpiringAgencyTrials (the daily agency-trial cron), so no
+// new cron endpoint or schedule is required. Idempotent: releaseAgencyClientNumbers
+// no-ops on already-released numbers, and the deadline is cleared after release.
+// A failed release leaves numbers_release_at set so the next daily run retries.
+// ============================================================================
+async function releaseExpiredGraceNumbers() {
+  const nowIso = new Date().toISOString();
+  const { data: agencies, error } = await supabase
+    .from('agencies')
+    .select('id, name, status, subscription_status, numbers_release_at')
+    .not('numbers_release_at', 'is', null)
+    .lte('numbers_release_at', nowIso);
+
+  if (error) {
+    console.error('releaseExpiredGraceNumbers: query failed:', error.message);
+    return { graceReleased: 0, graceError: error.message };
+  }
+
+  let graceReleased = 0;
+  for (const a of agencies || []) {
+    // If the agency came back to life within the window, keep the numbers and
+    // just clear the deadline (reactivation already nulls it; this is a guard).
+    const alive = ['active', 'trial', 'trialing'].includes(a.subscription_status) || a.status === 'active' || a.status === 'trial';
+    if (alive) {
+      await supabase.from('agencies').update({ numbers_release_at: null }).eq('id', a.id);
+      continue;
+    }
+    console.log(`⏳ Grace window over for ${a.name} (${a.id}); releasing client numbers now.`);
+    try {
+      await releaseAgencyClientNumbers(a.id);
+    } catch (e) {
+      console.error(`Grace release failed for ${a.id} (next run retries):`, e.message);
+      continue; // leave numbers_release_at set so the next daily run retries
+    }
+    await supabase.from('agencies').update({ numbers_release_at: null }).eq('id', a.id);
+    graceReleased++;
+  }
+
+  if (graceReleased) console.log(`🧹 Grace sweep released client numbers for ${graceReleased} agency(ies).`);
+  return { graceReleased, graceChecked: (agencies || []).length };
+}
+
+// ============================================================================
 // CRON: WARN AGENCIES WITH TRIALS ENDING IN 3 DAYS
 // ----------------------------------------------------------------------------
 // server.js imports this for /api/cron/warn-agency-trials. The original file
@@ -1235,6 +1314,8 @@ async function handleAgencyTrialEnding(subscription) {
 // before trial end automatically, so this is a redundant safety net. NOTE: as
 // a result an agency can receive BOTH this email and handleAgencyTrialEnding's
 // around the same time; if that double-send is unwanted, disable one.
+// This cron ALSO runs the number-release grace sweep (releaseExpiredGraceNumbers)
+// so no separate cron/schedule is needed for it.
 // ============================================================================
 async function warnExpiringAgencyTrials() {
   console.log('⏰ Running agency trial warning check...');
@@ -1287,7 +1368,13 @@ async function warnExpiringAgencyTrials() {
     }
 
     console.log(`✅ Warned ${warned} agency trials expiring in 3 days`);
-    return { warned };
+
+    // Piggyback the number-release grace sweep on this daily cron so no separate
+    // schedule is needed: release client numbers for any agency whose 3-day
+    // grace has passed without re-subscribing.
+    const graceResult = await releaseExpiredGraceNumbers();
+
+    return { warned, ...graceResult };
   } catch (e) {
     console.error('Trial warning cron error:', e.message);
     return { warned: 0, error: e.message };
@@ -1382,6 +1469,7 @@ module.exports = {
   createAgencyPortal,
   handlePlatformStripeWebhook,
   warnExpiringAgencyTrials,
+  releaseExpiredGraceNumbers,
   canAgencyAddClient,
   reconcileAgencyTeamSeats,
   releaseAgencyClientNumbers,
