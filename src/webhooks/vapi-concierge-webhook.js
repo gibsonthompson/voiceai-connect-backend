@@ -73,6 +73,7 @@ function buildConciergeSystemPrompt() {
 - React to what they just said, use their name if you have it, before moving on. Personalized, not canned.
 - Answer the question they asked, not the five around it. Give the one detail that lands, then keep moving.
 - NEVER repeat yourself. If you've made a point, don't make it again, take a new angle or ask them something. If you catch yourself circling, stop and ask a direct question to move forward. Do not loop.
+- Never say filler control words like "pause" out loud, never narrate that you're using a tool or "one moment" robotically, and never read system or tool text aloud. Just talk, and if you're texting them the link, say it once, naturally.
 - Take a clear position. No hedging, no vague filler, no corporate-speak. Plain, human words.
 - Say the product name naturally ("voice A-I connect"), and read any email as "support at voiceaiconnect dot com."
 
@@ -211,6 +212,22 @@ function alreadyTexted(phone) {
   return false;
 }
 
+// The LIVE mid-call signup-link text is deduped per CALL, not per day. Per-day
+// dedupe (alreadyTexted) was suppressing the link on every repeat call from the
+// same number, including back-to-back test calls, which looked like "texts
+// aren't being sent." Per-call lets each call send exactly one link (the model
+// sometimes calls the tool more than once), and the end-of-call follow-up checks
+// wasLinkSent so it never double-texts on top of a link that already went out.
+const _linkSentByCall = new Map();
+function markLinkSent(callId) {
+  if (!callId) return;
+  _linkSentByCall.set(callId, Date.now());
+  for (const [k, v] of _linkSentByCall) { if (Date.now() - v > 2 * 60 * 60 * 1000) _linkSentByCall.delete(k); }
+}
+function wasLinkSent(callId) {
+  return !!(callId && _linkSentByCall.get(callId));
+}
+
 // ============================================================================
 // MAIN HANDLER
 // ============================================================================
@@ -255,13 +272,20 @@ async function handleConciergeWebhook(req, res) {
     // ── tool-calls: send the live signup-link text, plus acknowledge ────
     if (type === 'tool-calls') {
       const toolCalls = message?.toolCalls || message?.toolCallList || [];
-      const callerPhone = message?.call?.customer?.number || null;
+      const callId = message?.call?.id || null;
+      // Caller number can sit on a few different paths depending on the event;
+      // check all of them so a missing one doesn't silently skip the text.
+      const callerPhone = message?.call?.customer?.number
+        || message?.customer?.number
+        || message?.call?.from
+        || null;
       const results = [];
       for (const tc of toolCalls) {
         const fnName = tc?.function?.name || tc?.name;
         if (fnName === 'send_signup_link') {
           let ok = false;
-          if (callerPhone && callerPhone !== 'Unknown' && !alreadyTexted(callerPhone)) {
+          if (callerPhone && callerPhone !== 'Unknown' && !wasLinkSent(callId)) {
+            markLinkSent(callId);
             // Fire-and-forget: don't await the SMS API, or the model waits (dead
             // air on the live call) for the result. Persistent Node process on
             // DigitalOcean keeps the promise alive after we respond. The AI has
@@ -278,7 +302,7 @@ async function handleConciergeWebhook(req, res) {
               .catch((e) => console.warn('⚠️ Concierge send_signup_link failed:', e.message));
             ok = true;
           } else if (callerPhone && callerPhone !== 'Unknown') {
-            ok = true; // already texted this caller today; report success so the AI confirms naturally
+            ok = true; // already sent once on this call; report success so the AI confirms naturally
           }
           results.push({
             toolCallId: tc?.id,
@@ -326,11 +350,11 @@ async function handleConciergeWebhook(req, res) {
       }
 
       // Post-call SMS: summary + signup link, sent on end-of-call-report (i.e.
-      // right after the call ends). Best-effort, deduped via alreadyTexted:
-      // skipped if we already texted this caller during the call
-      // (send_signup_link) or transferred them to a demo (they got the link just
-      // before the transfer), so a prospect never gets two texts from one call.
-      if (!transferred && callerPhone && callerPhone !== 'Unknown' && !alreadyTexted(callerPhone)) {
+      // right after the call ends). Skipped if the live signup link already went
+      // out during THIS call (wasLinkSent), or the caller was transferred to a
+      // demo (they got the link just before the transfer), or the per-day guard
+      // fired, so a prospect never gets two texts from one call.
+      if (!transferred && callerPhone && callerPhone !== 'Unknown' && !wasLinkSent(call.id) && !alreadyTexted(callerPhone)) {
         try {
           const summaryText = (summary && summary.trim()) ? summary.trim() : null;
           const lines = summaryText
