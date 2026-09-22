@@ -48,6 +48,19 @@
 //   the top and 401s a bad/missing secret. It FAILS OPEN when
 //   VAPI_WEBHOOK_SECRET is unset so it cannot break live calls before VAPI is
 //   configured to send the secret; see that module for the rollout order.
+// UPDATED: 2026-09-21 - Manual access window. A manual-billing client can be
+//   given a free access window (agency.client_trial_days > 0): it is created
+//   as subscription_status='manual' with trial_ends_at set, so it takes calls
+//   normally during the window. When the window passes, BOTH gates below flip
+//   it to subscription_status='manual_suspended' + status='suspended' and block
+//   the call, WITHOUT releasing the number (the agency is invoicing this client
+//   and wants the number kept for when they pay; releasing is the cancel path,
+//   not this one). 'manual_suspended' is deliberately absent from
+//   LIVE_CLIENT_STATUSES, so once flipped every future call is blocked at the
+//   status gate above the expiry check. A permanent manual client carries
+//   trial_ends_at=null, so isTrialExpired(null)=false and it is never suspended
+//   by this check. Mirrors the existing 'trial' -> 'trial_expired' expiry check
+//   exactly, except the target status keeps (not releases) the number.
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
@@ -68,7 +81,10 @@ const { isConciergeDemoNumber, sendConciergeDemoCallerSMS } = require('../lib/co
 // alongside 'active' and 'trial'. Used by the client-status gates in both
 // handleAssistantRequest and the end-of-call handler, and by the crash
 // fallback. The trial-expiry sub-check only fires for 'trial', so a manual
-// client (which carries no trial_ends_at) is never treated as expired.
+// client without a window (no trial_ends_at) is never treated as expired; a
+// manual client WITH a window that has passed is flipped to 'manual_suspended'
+// (absent from this list) by the dedicated manual-expiry check, so it then
+// blocks here on status alone.
 const LIVE_CLIENT_STATUSES = ['active', 'trial', 'manual'];
 
 function detectTransferStatus(endedReason, transcript) {
@@ -828,6 +844,18 @@ async function handleAssistantRequest(req, res, message) {
       await supabase.from('clients').update({ subscription_status: 'trial_expired', status: 'suspended' }).eq('id', client.id);
       return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
     }
+    // Manual access window expired: a manual client given a free window
+    // (agency.client_trial_days > 0) carries trial_ends_at. When it passes,
+    // suspend WITHOUT releasing the number (the agency invoices this client and
+    // wants the number kept for when they pay; releasing is the cancel path).
+    // Flip to 'manual_suspended' (absent from LIVE_CLIENT_STATUSES, so the
+    // status gate just above blocks every future call) and block this one. A
+    // permanent manual client has trial_ends_at=null, so isTrialExpired(null)
+    // is false and it is never suspended here.
+    if (client.subscription_status === 'manual' && isTrialExpired(client.trial_ends_at)) {
+      await supabase.from('clients').update({ subscription_status: 'manual_suspended', status: 'suspended' }).eq('id', client.id);
+      return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
+    }
 
     const currentCallCount = client.calls_this_month || 0;
     const callLimit = client.monthly_call_limit ?? 50;
@@ -990,6 +1018,16 @@ async function handleVapiWebhook(req, res) {
       console.log(`🚫 BLOCKED at client-trial-expired gate: trial_ends_at=${client.trial_ends_at}`);
       await supabase.from('clients').update({ subscription_status: 'trial_expired', status: 'suspended' }).eq('id', client.id);
       return res.status(200).json({ received: true, blocked: true, reason: 'Trial expired' });
+    }
+    // Manual access window expired (see handleAssistantRequest). Suspend WITHOUT
+    // releasing the number and block saving this call. Flip to 'manual_suspended'
+    // (absent from LIVE_CLIENT_STATUSES, so the status gate above blocks every
+    // future call). Permanent manual clients (trial_ends_at=null) are never
+    // caught here.
+    if (client.subscription_status === 'manual' && isTrialExpired(client.trial_ends_at)) {
+      console.log(`🚫 BLOCKED at manual-window-expired gate: trial_ends_at=${client.trial_ends_at}`);
+      await supabase.from('clients').update({ subscription_status: 'manual_suspended', status: 'suspended' }).eq('id', client.id);
+      return res.status(200).json({ received: true, blocked: true, reason: 'Manual access window ended' });
     }
 
     const currentCallCount = client.calls_this_month || 0;

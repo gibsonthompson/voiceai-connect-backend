@@ -88,6 +88,15 @@
 //                      signup widget / marketing site can show it before
 //                      checkout. The fee itself is charged by stripe-connect's
 //                      buildSetupFeeLineItem on the client's first paid invoice.
+// UPDATED: 2026-09-21: Configurable client trial length. client_trial_days
+//                      (integer days; 0 = no trial; default 7) is whitelisted
+//                      and range-validated (0..365) in updateAgencySettings,
+//                      returned in the authenticated getAgencySettings payload
+//                      so the Payments tab can render the trial-length picker,
+//                      and exposed on publicAgencyShape so the signup widget can
+//                      show the right "N-day free trial" (or charge-now) copy.
+//                      It governs Connect signups only (resolveClientTrialDays
+//                      in client-signup.js); manual clients ignore it.
 // Destination: src/routes/agency-settings.js (REPLACE existing)
 // ============================================================================
 const dns = require('dns').promises;
@@ -246,6 +255,10 @@ function publicAgencyShape(agency) {
     // public-facing toggle written via updateAgencySettings, and reveals
     // nothing sensitive.
     require_card_for_trial: agency.require_card_for_trial === true,
+    // Configurable client trial length (days; 0 = no trial; default 7). Public
+    // so the signup widget can show the right "N-day free trial" (or charge-now)
+    // copy. Connect signups only; manual clients ignore it. Non-sensitive.
+    client_trial_days: agency.client_trial_days ?? 7,
     bill_minutes_during_trial: agency.bill_minutes_during_trial === true,
     client_minute_rate_cents: agency.client_minute_rate_cents ?? null,
 
@@ -568,6 +581,11 @@ async function getAgencySettings(req, res) {
         // the Settings pricing tab can render and toggle it. The signup flow
         // ANDs it with stripe_charges_enabled to decide the card-required path.
         require_card_for_trial: agency.require_card_for_trial === true,
+
+        // Configurable client trial length (days; 0 = no trial; default 7).
+        // Returned so the Payments tab can render the trial-length picker.
+        // Governs Connect signups only (resolveClientTrialDays); manual ignores it.
+        client_trial_days: agency.client_trial_days ?? 7,
         
         // Demo phone (auto-provisioned per agency via VAPI)
         demo_phone_number: agency.demo_phone_number || null,
@@ -712,9 +730,12 @@ async function updateAgencySettings(req, res) {
       'calendar_enabled_plans',
       // Client trial card requirement (require_card_for_trial)
       // When true, /api/client/signup creates Stripe Connect Checkout with
-      // trial_period_days=7. When false (default), trials are DB-only.
-      // Backend silently no-ops if stripe_charges_enabled is false.
+      // trial_period_days=client_trial_days. When false (default), trials are
+      // DB-only. Backend silently no-ops if stripe_charges_enabled is false.
       'require_card_for_trial',
+      // Configurable client trial length in days (0 = no trial, default 7).
+      // Range-validated below (0..365). Connect signups only; manual ignores it.
+      'client_trial_days',
       // Marketing page currency override
       'display_currency',
       // Analytics & Tracking
@@ -1126,6 +1147,25 @@ async function updateAgencySettings(req, res) {
     // so no cross-field check is needed here.
     if (sanitizedUpdates.require_card_for_trial !== undefined) {
       sanitizedUpdates.require_card_for_trial = sanitizedUpdates.require_card_for_trial === true;
+    }
+
+    // Validate the configurable client trial length (days). Integer 0..365;
+    // 0 = no trial. Empty/null resets to the default of 7. Connect signups read
+    // this (resolveClientTrialDays in client-signup.js); manual clients ignore it.
+    if (sanitizedUpdates.client_trial_days !== undefined) {
+      const raw = sanitizedUpdates.client_trial_days;
+      if (raw === null || raw === '') {
+        sanitizedUpdates.client_trial_days = 7;
+      } else {
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 0) {
+          return res.status(400).json({ error: 'client_trial_days must be an integer of 0 or greater' });
+        }
+        if (n > 365) {
+          return res.status(400).json({ error: 'client_trial_days cannot exceed 365' });
+        }
+        sanitizedUpdates.client_trial_days = n;
+      }
     }
     
     // Validate display_currency if provided

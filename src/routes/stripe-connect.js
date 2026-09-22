@@ -17,8 +17,8 @@
 //          points to an active|trialing|past_due Stripe subscription.
 // UPDATED: 2026-06-10, require_card_for_trial support:
 //          (a) createTrialCheckoutForSignup creates a Stripe Connect Checkout
-//              with trial_period_days=7 for card-required signups, called from
-//              handleClientSignup in routes/client-signup.js.
+//              with trial_period_days=trialDays for card-required signups,
+//              called from handleClientSignup in routes/client-signup.js.
 //          (b) handleClientCheckoutCompleted detects trial-mode sessions
 //              (subscription.status='trialing') and writes subscription_status
 //              ='trial' (not 'active'), setting trial_ends_at from Stripe.
@@ -97,6 +97,13 @@
 //          never reaches these builders). changeClientPlan does NOT add it, and
 //          the createClientCheckout active-subscription guard prevents a paying
 //          client from being re-charged it.
+// UPDATED: 2026-09-21: Configurable client trial length (Connect). The signup
+//          handler threads the agency's client_trial_days into
+//          createTrialCheckoutForSignup as trialDays; 0 = no trial (omit
+//          trial_period_days so Stripe charges immediately at checkout and the
+//          client activates), and bill-during-trial is gated on trialDays > 0.
+//          handleBillDuringTrialScheduleSetup reads trial_days from the session
+//          metadata for its phase-1 fee-free window instead of a hardcoded 7.
 // ============================================================================
 const Stripe = require('stripe');
 const fetch = require('node-fetch');
@@ -177,7 +184,7 @@ function isSupportedConnectCountry(countryCode) {
 //
 // In mode:'subscription', a one-time line item bills on the FIRST invoice only:
 //   - createClientCheckout (no trial)         -> charged immediately at checkout
-//   - createTrialCheckoutForSignup (7d trial) -> charged on the first invoice at
+//   - createTrialCheckoutForSignup (trial)    -> charged on the first invoice at
 //                                                trial end, with the first month,
 //                                                never during the free trial
 //
@@ -1182,12 +1189,15 @@ async function disconnectConnectAccount(req, res) {
 // ----------------------------------------------------------------------------
 // Called from handleClientSignup in routes/client-signup.js when the agency
 // has require_card_for_trial=true. Creates a Stripe Connect Checkout session
-// with trial_period_days=7. Client enters card, gets 7-day free trial, Stripe
-// auto-charges at trial end.
+// with trial_period_days=trialDays (the agency's configured client_trial_days,
+// threaded in by the signup handler). trialDays=0 = no trial: trial_period_days
+// is omitted so Stripe charges immediately at checkout and the client activates.
+// Client enters card, gets the free trial, Stripe auto-charges at trial end.
 //
 // On success, the subsequent checkout.session.completed webhook fires
 // handleClientCheckoutCompleted below, which detects the trialing status and
-// transitions the client from 'pending_payment' to 'trial' (not 'active').
+// transitions the client from 'pending_payment' to 'trial' (not 'active'), or
+// straight to 'active' when there was no trial (days=0, charged now).
 //
 // Mirrors createClientCheckout structure but adds trial_period_days and uses
 // different status_url paths since this is a fresh signup, not an upgrade.
@@ -1201,7 +1211,7 @@ async function disconnectConnectAccount(req, res) {
 //
 // Returns: { url } on success, throws on error. Caller handles errors.
 // ============================================================================
-async function createTrialCheckoutForSignup({ client, agency, plan, passwordToken }) {
+async function createTrialCheckoutForSignup({ client, agency, plan, passwordToken, trialDays }) {
   // Manual-billing clients never take a card and have no Stripe subscription.
   // The signup handler already skips this path for a manual client; this is the
   // hard backstop so a manual client can never be routed into a Stripe trial
@@ -1209,6 +1219,14 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
   if (client.billing_mode === 'manual') {
     throw new Error('Manual-billing client cannot use Stripe trial checkout');
   }
+
+  // Trial length is the agency's configured client_trial_days, threaded in by
+  // the signup handler (resolveClientTrialDays). 0 = no trial: Stripe charges
+  // immediately at checkout and the client activates (no trialing status).
+  // Clamp defensively to 0..365 so a bad value can't break the checkout.
+  const days = (Number.isFinite(Number(trialDays)) && Number(trialDays) >= 0)
+    ? Math.min(Math.floor(Number(trialDays)), 365)
+    : 7;
 
   if (!agency.stripe_account_id || !agency.stripe_charges_enabled) {
     throw new Error('Agency Stripe Connect not configured');
@@ -1271,8 +1289,8 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     : `${agencyUrl}/client/welcome?trial=started`;
 
   // Flat base item, plus the metered minute item when pass-through is active.
-  // The metered item accrues nothing during the 7-day trial because the meter
-  // event in usage-tracker is gated on the client not being in trial.
+  // The metered item accrues nothing during the trial because the meter event
+  // in usage-tracker is gated on the client not being in trial.
   const lineItems = [{ price: price.id, quantity: 1 }];
   if (minutePassThroughActive(agency)) {
     const minutePrice = await createConnectMinutePrice(agency, plan, client);
@@ -1286,16 +1304,18 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
   const setupFeeItem = await buildSetupFeeLineItem(agency, plan, client);
   if (setupFeeItem) lineItems.push(setupFeeItem);
 
-  // Bill-during-trial (a true 7-day fee-free trial where the client still pays for
+  // Bill-during-trial (a true fee-free trial where the client still pays for
   // their own minutes). Stripe waives ALL charges, metered included, during a
   // trial period OR a billing-cycle-anchor free period, so neither can bill
   // minutes in the free window. The only structure that bills minutes while the
-  // flat fee is waived is a subscription SCHEDULE: phase 1 (the 7-day window)
+  // flat fee is waived is a subscription SCHEDULE: phase 1 (the free window)
   // carries the metered minute item ONLY (minutes bill, no flat fee); phase 2
   // adds the flat fee. Checkout can't create a schedule, so we collect the card
   // with a setup-mode Checkout and build the schedule on the webhook
   // (handleClientCheckoutCompleted -> handleBillDuringTrialScheduleSetup).
-  const billMinutesDuringTrial = agency.bill_minutes_during_trial === true && minutePassThroughActive(agency);
+  // Only meaningful with an actual fee-free window; with days=0 there is no free
+  // window, so fall through to the normal charge-now checkout below.
+  const billMinutesDuringTrial = agency.bill_minutes_during_trial === true && minutePassThroughActive(agency) && days > 0;
 
   if (billMinutesDuringTrial) {
     const minutePriceForSchedule = await createConnectMinutePrice(agency, plan, client);
@@ -1312,6 +1332,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
         plan,
         call_limit: callLimits[plan].toString(),
         type: 'trial_signup_schedule',
+        trial_days: String(days),
         flat_price_id: price.id,
         minute_price_id: minutePriceForSchedule.id,
         ...(setupFeeForSchedule ? { setup_price_id: setupFeeForSchedule.price } : {}),
@@ -1336,12 +1357,14 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
       type: 'trial_signup', // distinguishes from upgrade-mode checkouts
     },
     subscription_data: {
-      trial_period_days: 7,
+      // days=0 omits the trial entirely so Stripe charges immediately at
+      // checkout and the subscription starts 'active' (no trialing status).
+      ...(days > 0 ? { trial_period_days: days } : {}),
       metadata: { client_id: client.id, agency_id: agency.id, plan, type: 'trial_signup' },
     },
   }, { stripeAccount: agency.stripe_account_id });
 
-  console.log(`✅ Trial checkout created for client ${client.id}: session ${session.id}, plan ${plan}, currency ${currency}`);
+  console.log(`✅ Trial checkout created for client ${client.id}: session ${session.id}, plan ${plan}, currency ${currency}, trialDays ${days}`);
   return { url: session.url, sessionId: session.id };
 }
 
@@ -2422,17 +2445,18 @@ async function handleAccountUpdated(account) {
 //
 //   2. CARD-REQUIRED TRIAL SIGNUP: client filled embed widget on agency with
 //      require_card_for_trial=true. Backend set client to 'pending_payment'
-//      and created a Stripe checkout with trial_period_days=7. Client entered
-//      card. We must set subscription_status='trial' (not 'active') with
-//      trial_ends_at from Stripe, and send the welcome SMS now (deferred at
-//      signup since they hadn't paid yet).
+//      and created a Stripe checkout with trial_period_days=trialDays (or none
+//      when trialDays=0). Client entered card. We must set subscription_status
+//      ='trial' (not 'active') with trial_ends_at from Stripe when it started
+//      trialing, or 'active' when there was no trial (charged now), and send
+//      the welcome SMS now (deferred at signup since they hadn't paid yet).
 //
 // Discriminator: retrieve the subscription, check status. 'trialing' = card-
-// required trial signup. 'active' (or anything else) = upgrade flow.
+// required trial signup. 'active' (or anything else) = upgrade / no-trial.
 // ----------------------------------------------------------------------------
 // Bill-during-trial completion: the client finished a SETUP-mode Checkout (card
-// only). Build the two-phase subscription schedule that gives them a 7-day
-// fee-free window while their minutes bill from day one, then activate them.
+// only). Build the two-phase subscription schedule that gives them a fee-free
+// window while their minutes bill from day one, then activate them.
 async function handleBillDuringTrialScheduleSetup(session, stripeAccountId, client) {
   const clientId = client.id;
 
@@ -2469,15 +2493,19 @@ async function handleBillDuringTrialScheduleSetup(session, stripeAccountId, clie
     await stripe.customers.update(customerId, { invoice_settings: { default_payment_method: paymentMethodId } }, { stripeAccount: stripeAccountId });
   } catch (e) { console.warn('Bill-during-trial: could not set default PM:', e.message); }
 
-  // Phase 1: metered minutes ONLY for 7 days (bills at day 7, no flat fee).
-  // Phase 2: flat fee + metered minutes, open-ended.
+  // Phase 1: metered minutes ONLY for the fee-free window (bills at window end,
+  // no flat fee). Phase 2: flat fee + metered minutes, open-ended.
+  // Window length is the agency's configured trial (trial_days in the session
+  // metadata; default 7 if somehow absent). createTrialCheckoutForSignup only
+  // takes the bill-during-trial path when days > 0, so this is never zero.
+  const days = parseInt(session.metadata?.trial_days) || 7;
   const nowSec = Math.floor(Date.now() / 1000);
-  const phase1End = nowSec + 7 * 24 * 60 * 60;
+  const phase1End = nowSec + days * 24 * 60 * 60;
   const phase1 = { items: [{ price: minutePriceId }], end_date: phase1End };
   if (setupPriceId) phase1.add_invoice_items = [{ price: setupPriceId }];
-  // iterations:1 + release means: after phase 1 (7 days) and one phase-2 cycle, the
-  // schedule releases and the subscription continues on its own as a normal
-  // flat+metered sub, so normal cancellation works from then on.
+  // iterations:1 + release means: after phase 1 (the fee-free window) and one
+  // phase-2 cycle, the schedule releases and the subscription continues on its
+  // own as a normal flat+metered sub, so normal cancellation works from then on.
   const phase2 = { items: [{ price: flatPriceId, quantity: 1 }, { price: minutePriceId }], iterations: 1 };
 
   let schedule;
@@ -2497,7 +2525,7 @@ async function handleBillDuringTrialScheduleSetup(session, stripeAccountId, clie
 
   const subscriptionId = schedule.subscription;
 
-  // Active from day one (minutes bill). The fee-free 7 days are structural (phase
+  // Active from day one (minutes bill). The fee-free window is structural (phase
   // 1 has no flat item), so the client is 'active'; trial_ends_at is stored for
   // display of the fee-free window only and does not drive the trial-expiry cron.
   const { error: updateError } = await supabase.from('clients').update({

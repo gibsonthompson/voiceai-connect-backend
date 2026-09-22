@@ -85,6 +85,14 @@
 //          pays the platform per client + per minute (updateClientBillingQuantity
 //          still fires), so manual mode removes ONLY the agency->client rail.
 //          See isManualBillingAgency / manualUsageResetAt below.
+// UPDATED: 2026-09-21 - Configurable client trial length (Connect only).
+//          resolveClientTrialDays(agency) resolves agency.client_trial_days
+//          (0 = no trial, default 7, clamped 0..365) and both signup paths use
+//          it for trial_ends_at instead of a hardcoded 7 days; the card-required
+//          path passes it through to createTrialCheckoutForSignup as the Stripe
+//          trial_period_days. Manual clients ignore it entirely (live now, no
+//          trial), because a trial is a Connect-billing construct with no
+//          meaning when the platform never charges the client.
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -152,6 +160,30 @@ function manualUsageResetAt() {
   const d = new Date();
   d.setMonth(d.getMonth() + 1);
   return d.toISOString();
+}
+
+// ============================================================================
+// CONFIGURABLE CLIENT TRIAL LENGTH (Connect signups only)
+// ----------------------------------------------------------------------------
+// Resolves agency.client_trial_days to a whole number of days. 0 = no trial.
+// Defaults to 7 when unset/invalid so existing agencies are byte-for-byte
+// unchanged, and clamps to 0..365 so a bad value can never set an absurd trial
+// or push Stripe's trial_period_days out of range.
+//
+// Applies to CONNECT signups and to a MANUAL client's optional free access
+// window. Connect: it is the trial length (0 = no trial, charge/activate now).
+// Manual: when > 0 the client is created subscription_status='manual' with
+// trial_ends_at set, so it takes calls during the window and is auto-SUSPENDED
+// (never released) at the vapi-webhook gate when the window passes; the agency
+// reactivates it after payment. When 0, a manual client is created live and
+// permanent (trial_ends_at=null), the original manual behavior. A manual client
+// is never auto-released by expireTrials (that sweep only touches 'trial'
+// status), so its number is always kept for the agency to keep invoicing.
+// ============================================================================
+function resolveClientTrialDays(agency) {
+  const n = Number(agency && agency.client_trial_days);
+  if (!Number.isFinite(n) || n < 0) return 7;
+  return Math.min(Math.floor(n), 365);
 }
 
 // ============================================================================
@@ -843,6 +875,10 @@ async function insertClientWithStaleNumberRecovery(payload) {
 // client_billing_mode='manual', this path creates the client live with NO
 // Stripe checkout (skips the card-required branch entirely, see manualBilling
 // below).
+// UPDATED 2026-09-21, Configurable trial: connect clients use
+// resolveClientTrialDays(agency) for trial_ends_at (0 = no trial), and the
+// card-required path passes trialDays to createTrialCheckoutForSignup. Manual
+// clients are unchanged (trial_ends_at=null, live now).
 // ============================================================================
 async function handleClientSignup(req, res) {
   // Track created resources for rollback on failure
@@ -926,10 +962,10 @@ async function handleClientSignup(req, res) {
     // CARD-REQUIRED CONSENT GATE (2026-07-17)
     // If this signup will require a card (agency toggle on AND Stripe charges
     // enabled), the client is about to authorize an auto-renewing charge after
-    // the 7-day trial. That is a negative option: we must have their
-    // affirmative consent BEFORE taking a card or provisioning any billable
-    // resource. Reject here, before STEP 1, so a missing-consent card-required
-    // signup never creates a VAPI assistant or rents a Telnyx number.
+    // the trial. That is a negative option: we must have their affirmative
+    // consent BEFORE taking a card or provisioning any billable resource.
+    // Reject here, before STEP 1, so a missing-consent card-required signup
+    // never creates a VAPI assistant or rents a Telnyx number.
     //
     // willRequireCard mirrors the cardRequired computation in STEP 6b exactly,
     // so the gate and the checkout decision can never disagree. Manual billing
@@ -1073,14 +1109,24 @@ async function handleClientSignup(req, res) {
     // Phase 1: monthly_call_limit now derived from the chosen plan's column
     // (agency[`limit_${planType}`]) instead of hardcoded agency.limit_starter.
     //
-    // Manual billing (2026-08-13): a manual client is born LIVE and permanent,
-    // so subscription_status='manual', trial_ends_at is null (no countdown),
-    // billing_mode='manual', and usage_resets_at is set one month out so the
-    // monthly call-cap reset cron can refresh it. A connect client is unchanged
-    // (7-day trial), and is stamped billing_mode='connect' for an explicit,
-    // per-client source of truth.
+    // Manual billing (2026-08-13): a manual client is subscription_status='manual',
+    // billing_mode='manual', with usage_resets_at one month out so the monthly
+    // call-cap reset cron can refresh it. A connect client is stamped
+    // billing_mode='connect' for an explicit, per-client source of truth.
+    //
+    // Trial length (2026-09-21): trialEndsAt below is now used by BOTH modes.
+    // Connect (no-card): the trial window (0 = now, immediately due). Connect
+    // (card-required): overwritten to null at pending_payment (STEP 6b), Stripe
+    // owns the trial. Manual: when trialDays>0 it is the free ACCESS window,
+    // the client stays subscription_status='manual' and takes calls until the
+    // window passes, then the vapi-webhook gate flips it to 'manual_suspended'
+    // WITHOUT releasing the number; when trialDays=0 a manual client is live and
+    // permanent (trial_ends_at=null), the original behavior.
     // ============================================
-    const trialEndsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const trialDays = resolveClientTrialDays(agency);
+    const trialEndsAt = trialDays > 0
+      ? new Date(Date.now() + trialDays * 24 * 60 * 60 * 1000)
+      : new Date(); // 0 = no trial: a no-card connect client is immediately due (upgrade to activate)
     const callLimitKey = `limit_${planType}`;
     const callLimit = agency[callLimitKey] ?? agency.limit_starter ?? 50;
     
@@ -1104,7 +1150,7 @@ async function handleClientSignup(req, res) {
       knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
       knowledge_base_data: templateKB,
       subscription_status: manualBilling ? 'manual' : 'trial',
-      trial_ends_at: manualBilling ? null : trialEndsAt,
+      trial_ends_at: manualBilling ? (trialDays > 0 ? trialEndsAt : null) : trialEndsAt,
       status: 'active',
       billing_mode: manualBilling ? 'manual' : 'connect',
       usage_resets_at: manualBilling ? manualUsageResetAt() : null,
@@ -1216,11 +1262,12 @@ async function handleClientSignup(req, res) {
     // ────────────────────────────────────────────
     // When agency.require_card_for_trial=true AND stripe_charges_enabled=true
     // AND the agency is NOT in manual billing mode, create a Stripe Connect
-    // Checkout with trial_period_days=7 and flip the client to
+    // Checkout with trial_period_days=trialDays and flip the client to
     // subscription_status='pending_payment'. The checkout.session.completed
     // webhook (handleClientCheckoutCompleted in stripe-connect.js) then
-    // transitions to 'trial' with trial_ends_at from Stripe and sends the
-    // deferred welcome SMS.
+    // transitions to 'trial' (or straight to 'active' when trialDays=0, since
+    // Stripe charges immediately with no trial) with trial_ends_at from Stripe
+    // and sends the deferred welcome SMS.
     //
     // Manual billing skips this entirely (manualBilling short-circuits
     // cardRequired to false), so a manual client never enters pending_payment
@@ -1247,7 +1294,7 @@ async function handleClientSignup(req, res) {
     if (cardRequired) {
       try {
         const { createTrialCheckoutForSignup } = require('./stripe-connect');
-        const checkout = await createTrialCheckoutForSignup({ client: newClient, agency, plan: planType, passwordToken });
+        const checkout = await createTrialCheckoutForSignup({ client: newClient, agency, plan: planType, passwordToken, trialDays });
         cardRequiredCheckoutUrl = checkout.url;
 
         const { error: pendingErr } = await supabase
@@ -1336,7 +1383,7 @@ async function handleClientSignup(req, res) {
         email: newClient.email,
         country: clientCountry,
         location: `${businessCity}, ${businessState}`,
-        trial_ends_at: cardRequiredCheckoutUrl ? null : (manualBilling ? null : newClient.trial_ends_at),
+        trial_ends_at: cardRequiredCheckoutUrl ? null : newClient.trial_ends_at,
         subscription_status: cardRequiredCheckoutUrl ? 'pending_payment' : (manualBilling ? 'manual' : 'trial'),
         plan_type: planType,
         monthly_call_limit: callLimit,
@@ -1366,6 +1413,9 @@ async function handleClientSignup(req, res) {
 // subscription_status='manual' / billing_mode='manual' (no trial countdown).
 // This path never had a Stripe checkout step (it is always no-card), so the
 // only change here is the status/billing fields on the inserted row.
+// UPDATED 2026-09-21, Configurable trial: connect add-client uses
+// resolveClientTrialDays(agency) for trial_ends_at (0 = no trial). Manual is
+// unchanged (trial_ends_at=null, live now).
 // ============================================================================
 // ============================================================================
 // ASYNC CLIENT PROVISIONING (agency add-client)
@@ -1638,11 +1688,17 @@ async function handleAgencyAddClient(req, res) {
     try { await enableSMSForNumber(phoneResult.number); } catch (e) { console.warn('⚠️ SMS enable failed:', e.message); }
 
     // === STEP 4: Create Client Record ===
-    // Manual billing (2026-08-13): manual clients are LIVE and permanent, so
-    // subscription_status='manual', no trial countdown, billing_mode='manual',
-    // and usage_resets_at one month out for the monthly cap reset. Connect
-    // clients are unchanged (7-day trial) and stamped billing_mode='connect'.
-    const trialEndsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    // Manual billing (2026-08-13): a manual client is subscription_status='manual',
+    // billing_mode='manual', usage_resets_at one month out for the monthly cap
+    // reset. Connect clients are stamped billing_mode='connect'.
+    // Trial length (2026-09-21): trialDays>0 gives a manual client a free ACCESS
+    // window (trial_ends_at set, stays 'manual', auto-suspended without release
+    // at the gate when it passes); trialDays=0 keeps a manual client live and
+    // permanent (trial_ends_at=null). Connect uses it as the trial length.
+    const trialDays = resolveClientTrialDays(agency);
+    const trialEndsAt = trialDays > 0
+      ? new Date(Date.now() + trialDays * 24 * 60 * 60 * 1000)
+      : new Date();
     const callLimitKey = `limit_${resolvedPlanType}`;
     const callLimit = agency[callLimitKey] ?? agency.limit_starter ?? 50;
 
@@ -1666,7 +1722,7 @@ async function handleAgencyAddClient(req, res) {
       knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
       knowledge_base_data: templateKB,
       subscription_status: manualBilling ? 'manual' : 'trial',
-      trial_ends_at: manualBilling ? null : trialEndsAt,
+      trial_ends_at: manualBilling ? (trialDays > 0 ? trialEndsAt : null) : trialEndsAt,
       status: 'active',
       billing_mode: manualBilling ? 'manual' : 'connect',
       usage_resets_at: manualBilling ? manualUsageResetAt() : null,
@@ -1784,7 +1840,7 @@ async function handleAgencyAddClient(req, res) {
         industry: newClient.industry,
         country: clientCountry,
         location: `${businessCity}, ${businessState}`,
-        trial_ends_at: manualBilling ? null : newClient.trial_ends_at,
+        trial_ends_at: newClient.trial_ends_at,
         subscription_status: manualBilling ? 'manual' : 'trial',
         plan_type: newClient.plan_type,
         provisioning_method: phoneResult.provisioningMethod
