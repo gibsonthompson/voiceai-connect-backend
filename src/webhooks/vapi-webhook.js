@@ -72,7 +72,7 @@ const { buildDemoDynamicConfig, buildDemoSmsContent, getIndustryDemoByPhone, bui
 const { getSmsTemplate } = require('../lib/sms-templates');
 const { sendAndLogSMS } = require('../lib/sms-logger');
 const { formatPhone, getPhoneLocation, formatDuration } = require('../lib/area-codes');
-const { insertUsageRecord } = require('../lib/usage-tracker');
+const { insertUsageRecord, updateClientBillingQuantity } = require('../lib/usage-tracker');
 const { verifyVapiWebhook } = require('../lib/vapi-webhook-auth');
 const { isConciergeDemoNumber, sendConciergeDemoCallerSMS } = require('../lib/concierge-demo-sms');
 
@@ -854,6 +854,11 @@ async function handleAssistantRequest(req, res, message) {
     // is false and it is never suspended here.
     if (client.subscription_status === 'manual' && isTrialExpired(client.trial_ends_at)) {
       await supabase.from('clients').update({ subscription_status: 'manual_suspended', status: 'suspended' }).eq('id', client.id);
+      // Drop the just-suspended client out of the agency's per-client platform
+      // charge now (fire-and-forget). The cron sweep handles windows that expire
+      // without a call; this covers the lazy path where a call lands first, so
+      // the billable count doesn't lag to the next agency-wide recompute.
+      updateClientBillingQuantity(client.agency_id).catch(() => {});
       return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
     }
 
@@ -1027,6 +1032,10 @@ async function handleVapiWebhook(req, res) {
     if (client.subscription_status === 'manual' && isTrialExpired(client.trial_ends_at)) {
       console.log(`🚫 BLOCKED at manual-window-expired gate: trial_ends_at=${client.trial_ends_at}`);
       await supabase.from('clients').update({ subscription_status: 'manual_suspended', status: 'suspended' }).eq('id', client.id);
+      // Fire-and-forget: drop this client from the agency's per-client platform
+      // charge now, so a call-triggered suspension doesn't lag billing (see the
+      // assistant-request gate for the full note).
+      updateClientBillingQuantity(client.agency_id).catch(() => {});
       return res.status(200).json({ received: true, blocked: true, reason: 'Manual access window ended' });
     }
 

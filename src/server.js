@@ -288,7 +288,11 @@ const {
   expireTrials,
   reconcileClientSubscriptions,
   releaseClientResources,
-  setMinutePassThrough
+  setMinutePassThrough,
+  // Manual free-access window (auto-suspend sweep + agency reactivate/suspend)
+  suspendExpiredManualTrials,
+  reactivateManualClient,
+  suspendManualClient
 } = require('./routes/stripe-connect');
 
 const { 
@@ -1624,12 +1628,20 @@ app.post('/api/client/portal', createClientPortal);
 app.post('/api/client/change-plan', changeClientPlan);
 app.post('/api/client/cancel-subscription', cancelClientSubscription);
 app.post('/api/client/set-custom-pricing', setClientCustomPricing);
+// Manual free-access window controls. Agency/admin only: the handlers self-
+// authorize via bearer token (managing agency or super_admin, never the client
+// itself), so like the client actions above they carry no route middleware.
+// reactivate marks a manual client paid and live permanently; suspend cuts it
+// off while keeping its number. The path segment is a keyword (not a UUID), so
+// the client-UUID guard below never matches these.
+app.post('/api/client/reactivate', reactivateManualClient);
+app.post('/api/client/suspend', suspendManualClient);
 // ============================================================================
 // CLIENT-SCOPED OWNERSHIP GUARD (applies to every /api/client/<uuid>/* route)
 // ----------------------------------------------------------------------------
 // The public client actions above (signup, checkout, portal, change-plan,
-// cancel-subscription, set-custom-pricing) are registered BEFORE this and match
-// first, so they are untouched. Everything below that carries a real client id
+// cancel-subscription, set-custom-pricing, reactivate, suspend) are registered
+// BEFORE this and match first, so they are untouched. Everything below that carries a real client id
 // (a UUID) in the path is ownership-checked here in one place: the client
 // itself, its staff, the managing agency, super_admin, or an agency preview
 // token (which is a real client token). Non-UUID segments pass straight through,
@@ -1832,7 +1844,19 @@ app.post('/api/cron/expire-trials', async (req, res) => {
   }
   try {
     const result = await expireTrials();
-    res.json({ success: true, message: 'Trial expiration check completed', ...result });
+    // Manual-billing free-access windows expire the same way a connect trial
+    // does, so sweep them on the same schedule: flip any manual client past its
+    // access window to manual_suspended (number kept, dropped from the per-client
+    // platform charge). Isolated in its own try so a manual-sweep error can never
+    // fail the connect-trial expiry, and reported under manualWindows.
+    let manualWindows = null;
+    try {
+      manualWindows = await suspendExpiredManualTrials();
+    } catch (mwErr) {
+      console.error('Manual-window suspend sweep error (non-fatal):', mwErr.message);
+      manualWindows = { success: false, error: mwErr.message };
+    }
+    res.json({ success: true, message: 'Trial expiration check completed', ...result, manualWindows });
   } catch (error) {
     console.error('Cron error:', error);
 

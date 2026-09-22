@@ -2813,6 +2813,242 @@ async function handleClientPaymentFailed(invoice, stripeAccountId) {
 }
 
 // ============================================================================
+// MANUAL FREE-ACCESS WINDOW: auto-suspend, reactivate, manual suspend
+// ----------------------------------------------------------------------------
+// A manual-billing client created with client_trial_days > 0 gets a free ACCESS
+// window: it is born subscription_status='manual' with trial_ends_at set, takes
+// calls during the window, and when the window passes it is SUSPENDED WITHOUT
+// releasing its number (the agency invoices its own client and wants the number
+// kept). Suspend = subscription_status='manual_suspended', status='suspended'.
+// The vapi-webhook gate treats any status outside its live set as disconnected,
+// so a suspended manual client stops taking calls the instant its status flips,
+// while its VAPI phone + assistant stay intact for a later reactivation.
+//
+// Number release for a manual client only ever happens through an explicit
+// cancel (cancelClientAndRelease). None of the three functions here release a
+// number, and none touches a connect (Stripe) client: they all filter on
+// billing_mode='manual'.
+//
+//   suspendExpiredManualTrials()  - cron sweep. Proactively flip every manual
+//       client whose window has passed to manual_suspended, so the dashboard
+//       reflects the suspension even before the next inbound call. The
+//       vapi-webhook gate is the lazy backstop that catches a call arriving
+//       before this sweep runs; this is the proactive pass. NEVER releases a
+//       number.
+//   reactivateManualClient(req,res) - the agency marks the client paid: go live
+//       PERMANENTLY (subscription_status='manual', status='active',
+//       trial_ends_at=null, so there is no second countdown and the gate's
+//       manual-window check can never re-suspend it). Re-enables the VAPI phone
+//       + assistant idempotently in case anything disabled them. Managing agency
+//       or super_admin only, never the client itself.
+//   suspendManualClient(req,res)  - the agency manually suspends a live manual
+//       client (non-payment after reactivation, or any reason): the same
+//       manual_suspended/suspended flip, number kept. Managing agency or
+//       super_admin only.
+//
+// Billing note: suspend and reactivate call updateClientBillingQuantity so the
+// agency's per-client platform charge tracks reality. That count is
+// status='active' AND not a test client (see usage-tracker), so flipping a
+// manual client to status='suspended' drops it out of the billable count, and
+// reactivating (status='active') adds it back, exactly like expireTrials does
+// for a trial. Tradeoff: the number is KEPT while suspended (so reactivation is
+// seamless), so the platform holds that Telnyx number for a client the agency
+// is no longer paying the per-client fee on. That holding cost is small and is
+// the price of keeping the number; if manual_suspended rows ever pile up, an
+// auto-cancel-after-N-days sweep would release those parked numbers.
+// ============================================================================
+async function suspendExpiredManualTrials({ dryRun = false, limit = 100 } = {}) {
+  console.log(`⏳ Suspending expired manual-access windows (dryRun=${dryRun})`);
+  const now = new Date().toISOString();
+
+  const { data: rows, error } = await supabase
+    .from('clients')
+    .select('id, business_name, agency_id, trial_ends_at')
+    .eq('billing_mode', 'manual')
+    .eq('subscription_status', 'manual')
+    .not('trial_ends_at', 'is', null)
+    .lt('trial_ends_at', now)
+    .limit(limit);
+
+  if (error) {
+    console.error('❌ suspendExpiredManualTrials query failed:', error.message);
+    return { success: false, error: error.message };
+  }
+
+  const expired = rows || [];
+  console.log(`⏳ ${expired.length} manual client(s) past their access window`);
+
+  const results = [];
+  let suspended = 0, failed = 0;
+  for (const c of expired) {
+    if (dryRun) {
+      results.push({ client_id: c.id, business_name: c.business_name, action: 'would_suspend' });
+      continue;
+    }
+
+    // Flip status only. The number + VAPI resources are deliberately kept so the
+    // agency can reactivate after payment; the vapi-webhook gate already blocks
+    // calls for any non-live status, so no call gets through while suspended.
+    // The extra guards make this a no-op if the row already moved off the
+    // window state between the SELECT and this write: subscription_status is
+    // still 'manual' catches the gate having suspended it; the trial_ends_at
+    // filters catch a reactivate, which leaves subscription_status='manual' but
+    // clears trial_ends_at to null, so without them an in-flight sweep could
+    // wrongly re-suspend a client the agency just marked paid.
+    const { data: updated, error: upErr } = await supabase
+      .from('clients')
+      .update({
+        subscription_status: 'manual_suspended',
+        status: 'suspended',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', c.id)
+      .eq('subscription_status', 'manual')
+      .eq('billing_mode', 'manual')
+      .not('trial_ends_at', 'is', null)
+      .lt('trial_ends_at', now)
+      .select('id');
+
+    if (upErr) {
+      console.error(`❌ Failed to suspend manual client ${c.id}:`, upErr.message);
+      results.push({ client_id: c.id, business_name: c.business_name, action: 'failed', error: upErr.message });
+      failed++;
+      continue;
+    }
+    if (!updated || updated.length === 0) {
+      // Row moved off 'manual' before we wrote; nothing to do.
+      results.push({ client_id: c.id, business_name: c.business_name, action: 'skipped_state_changed' });
+      continue;
+    }
+
+    console.log(`⏸️ Manual access window ended, suspended (number kept): ${c.business_name}`);
+    // Drop the suspended client out of the agency's per-client platform charge
+    // (the billable count is status='active'; this client is now 'suspended').
+    // Same pattern as expireTrials. Non-blocking.
+    try { await updateClientBillingQuantity(c.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
+    results.push({ client_id: c.id, business_name: c.business_name, action: 'suspended' });
+    suspended++;
+  }
+
+  return { success: true, dryRun, found: expired.length, suspended, failed, results };
+}
+
+// Shared auth + lookup for the two manual client-state endpoints. Returns
+// { client, agency } on success, or sends the error response and returns null.
+// Managing agency or super_admin only (never the client itself): a client must
+// not be able to lift its own suspension and keep using the service without
+// paying its agency.
+async function loadManualClientForStateChange(req, res) {
+  const { client_id } = req.body;
+  if (!client_id) { res.status(400).json({ error: 'Missing required field', required: ['client_id'] }); return null; }
+
+  const decoded = decodeToken(req);
+  if (!decoded) { res.status(401).json({ error: 'Authentication required' }); return null; }
+
+  const { data: client, error: clientError } = await supabase
+    .from('clients').select('*, agencies!clients_agency_id_fkey(*)').eq('id', client_id).single();
+  if (clientError || !client) { res.status(404).json({ error: 'Client not found' }); return null; }
+
+  const isSuperAdmin = decoded.role === 'super_admin';
+  const isManagingAgency = decoded.agencyId && decoded.agencyId === client.agency_id;
+  if (!isSuperAdmin && !isManagingAgency) { res.status(403).json({ error: 'Forbidden' }); return null; }
+
+  if (client.billing_mode !== 'manual') {
+    res.status(400).json({
+      error: 'not_manual_client',
+      message: 'This action only applies to manually billed clients.',
+    });
+    return null;
+  }
+
+  return { client, agency: client.agencies };
+}
+
+// ── REACTIVATE A MANUAL CLIENT (agency marks it paid) ──────────────────────
+// Goes live PERMANENTLY: subscription_status='manual', status='active',
+// trial_ends_at=null. Clearing trial_ends_at is what makes this a one-time
+// window, the gate's manual-window expiry check (subscription_status==='manual'
+// && isTrialExpired(trial_ends_at)) is false once trial_ends_at is null, so the
+// client can never be auto-suspended again; any later cut-off is a deliberate
+// suspendManualClient / cancel. Re-enables the VAPI phone + assistant
+// idempotently (they were never released during the window, this is defensive).
+async function reactivateManualClient(req, res) {
+  try {
+    const loaded = await loadManualClientForStateChange(req, res);
+    if (!loaded) return;
+    const { client } = loaded;
+
+    const { error: upErr } = await supabase
+      .from('clients')
+      .update({
+        subscription_status: 'manual',
+        status: 'active',
+        trial_ends_at: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', client.id);
+
+    if (upErr) {
+      console.error(`❌ Failed to reactivate manual client ${client.id}:`, upErr.message);
+      return res.status(500).json({ error: 'Failed to reactivate client' });
+    }
+
+    // Defensive re-enable. The window-suspend never disabled these (it only
+    // flips DB status), but a manual Suspend or some other path might have, and
+    // enable is idempotent. Guarded so a telnyx_cc client (no vapi_phone_id) is
+    // skipped cleanly.
+    if (client.vapi_phone_id) { try { await enablePhoneNumber(client.vapi_phone_id); } catch (e) { console.error('Reactivate: enable phone failed:', e.message); } }
+    if (client.vapi_assistant_id) { try { await enableAssistant(client.vapi_assistant_id); } catch (e) { console.error('Reactivate: enable assistant failed:', e.message); } }
+
+    // Add the reactivated client back into the agency's per-client platform
+    // charge (status is 'active' again). Non-blocking.
+    try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
+
+    console.log(`✅ Manual client reactivated (live, permanent): ${client.business_name}`);
+    return res.json({ success: true, reactivated: true, subscription_status: 'manual', status: 'active' });
+  } catch (error) {
+    console.error('❌ Reactivate manual client error:', error);
+    return res.status(500).json({ error: 'Failed to reactivate client' });
+  }
+}
+
+// ── SUSPEND A MANUAL CLIENT (agency cuts off, number kept) ─────────────────
+// The manual equivalent of a soft cut-off: subscription_status='manual_suspended',
+// status='suspended'. The number + VAPI resources are kept (NOT released), so
+// the agency can reactivate after payment. To fully release a manual client's
+// number, the agency uses cancel (cancelClientSubscription), not this.
+async function suspendManualClient(req, res) {
+  try {
+    const loaded = await loadManualClientForStateChange(req, res);
+    if (!loaded) return;
+    const { client } = loaded;
+
+    const { error: upErr } = await supabase
+      .from('clients')
+      .update({
+        subscription_status: 'manual_suspended',
+        status: 'suspended',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', client.id);
+
+    if (upErr) {
+      console.error(`❌ Failed to suspend manual client ${client.id}:`, upErr.message);
+      return res.status(500).json({ error: 'Failed to suspend client' });
+    }
+
+    console.log(`⏸️ Manual client suspended (number kept): ${client.business_name}`);
+    // Drop the suspended client out of the agency's per-client platform charge.
+    // Non-blocking.
+    try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
+    return res.json({ success: true, suspended: true, subscription_status: 'manual_suspended', status: 'suspended' });
+  } catch (error) {
+    console.error('❌ Suspend manual client error:', error);
+    return res.status(500).json({ error: 'Failed to suspend client' });
+  }
+}
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 module.exports = {
@@ -2842,5 +3078,9 @@ module.exports = {
   attachMinuteItemsForAgency,   // ON sweep: attach to every existing client (used by toggle + backfill)
   repriceMinuteItemsForAgency,  // rate/included change sweep: re-point existing metered items to a fresh price
   setMinutePassThrough,         // POST handler for the on/off toggle
-  buildSetupFeeLineItem         // one-time client setup fee line item (used by both client checkout builders)
+  buildSetupFeeLineItem,        // one-time client setup fee line item (used by both client checkout builders)
+  // Manual free-access window (number always kept; release only via cancel)
+  suspendExpiredManualTrials,   // cron: suspend manual clients whose access window passed
+  reactivateManualClient,       // agency marks a manual client paid: live permanently (window cleared)
+  suspendManualClient           // agency manually suspends a live manual client
 };
