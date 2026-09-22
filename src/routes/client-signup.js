@@ -85,14 +85,17 @@
 //          pays the platform per client + per minute (updateClientBillingQuantity
 //          still fires), so manual mode removes ONLY the agency->client rail.
 //          See isManualBillingAgency / manualUsageResetAt below.
-// UPDATED: 2026-09-21 - Configurable client trial length (Connect only).
-//          resolveClientTrialDays(agency) resolves agency.client_trial_days
-//          (0 = no trial, default 7, clamped 0..365) and both signup paths use
-//          it for trial_ends_at instead of a hardcoded 7 days; the card-required
-//          path passes it through to createTrialCheckoutForSignup as the Stripe
-//          trial_period_days. Manual clients ignore it entirely (live now, no
-//          trial), because a trial is a Connect-billing construct with no
-//          meaning when the platform never charges the client.
+// UPDATED: 2026-09-21 - Configurable client trial length. resolveClientTrialDays(agency)
+//          resolves agency.client_trial_days (0 = no trial, default 7, clamped
+//          0..365) and both signup paths use it for trial_ends_at instead of a
+//          hardcoded 7 days; the card-required (Connect) path passes it through
+//          to createTrialCheckoutForSignup as the Stripe trial_period_days. It
+//          also governs a MANUAL client's optional free-access window: when > 0
+//          the manual client is created subscription_status='manual' with
+//          trial_ends_at set, takes calls during the window, and is auto-
+//          SUSPENDED (never released) at the vapi-webhook gate when it passes;
+//          when 0 the manual client is live and permanent (trial_ends_at=null),
+//          the original manual behavior. See resolveClientTrialDays below.
 // Adapted from CallBird's native-signup.js
 // ============================================================================
 const crypto = require('crypto');
@@ -878,7 +881,9 @@ async function insertClientWithStaleNumberRecovery(payload) {
 // UPDATED 2026-09-21, Configurable trial: connect clients use
 // resolveClientTrialDays(agency) for trial_ends_at (0 = no trial), and the
 // card-required path passes trialDays to createTrialCheckoutForSignup. Manual
-// clients are unchanged (trial_ends_at=null, live now).
+// clients use it too: trialDays>0 gives a free-access window (trial_ends_at set,
+// stays 'manual', auto-suspended without release at the webhook gate when it
+// passes), trialDays=0 stays live and permanent (trial_ends_at=null).
 // ============================================================================
 async function handleClientSignup(req, res) {
   // Track created resources for rollback on failure
@@ -1414,8 +1419,10 @@ async function handleClientSignup(req, res) {
 // This path never had a Stripe checkout step (it is always no-card), so the
 // only change here is the status/billing fields on the inserted row.
 // UPDATED 2026-09-21, Configurable trial: connect add-client uses
-// resolveClientTrialDays(agency) for trial_ends_at (0 = no trial). Manual is
-// unchanged (trial_ends_at=null, live now).
+// resolveClientTrialDays(agency) for trial_ends_at (0 = no trial). Manual uses
+// it too: trialDays>0 gives a free-access window (trial_ends_at set, stays
+// 'manual', auto-suspended without release at the gate when it passes),
+// trialDays=0 stays live and permanent (trial_ends_at=null).
 // ============================================================================
 // ============================================================================
 // ASYNC CLIENT PROVISIONING (agency add-client)
