@@ -38,36 +38,49 @@ function enqueueSearch(fn) {
 // ── Job tracking ────────────────────────────────────────────────────────
 const jobs = new Map();
 
-// ── Cross-search dedup cache ────────────────────────────────────────────
-const dedupCache = new Map();
-const DEDUP_TTL_MS = 60 * 60 * 1000;
+// ── Lead-scrape metering (monthly, per agency) ──────────────────
+// Scale = unlimited; Pro = capped. Counted at scrape time (every unique
+// enriched business), which is where the Google spend actually happens.
+const PLAN_LEAD_CAPS = { free: 100, pro: 1000, scale: Infinity };
+const FIND_ALL_JOB_CAP = 1000; // per-job ceiling, including Scale fair-use
 
-function getDedupSet(agencyId) {
-  if (!agencyId) return new Set();
-  const entry = dedupCache.get(agencyId);
-  if (entry && Date.now() - entry.timestamp < DEDUP_TTL_MS) return entry.companies;
-  const s = new Set();
-  dedupCache.set(agencyId, { companies: s, timestamp: Date.now() });
-  return s;
+function planLeadCap(agency) {
+  const isTrialing = ['trialing', 'trial'].includes(agency && agency.subscription_status);
+  const plan = isTrialing ? 'scale' : ((agency && agency.plan_type) || 'free');
+  return PLAN_LEAD_CAPS[plan] != null ? PLAN_LEAD_CAPS[plan] : PLAN_LEAD_CAPS.free;
 }
 
-function addToDedup(agencyId, names) {
-  if (!agencyId) return;
-  const s = getDedupSet(agencyId);
-  for (const n of names) s.add(n.toLowerCase().trim());
+function currentBillingMonth() {
+  const d = new Date();
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString().slice(0, 10);
 }
 
-function filterDuplicates(leads, agencyId) {
-  if (!agencyId) return { filtered: leads, dupCount: 0 };
-  const seen = getDedupSet(agencyId);
-  const filtered = [];
-  let dupCount = 0;
-  for (const lead of leads) {
-    const key = lead.companyName.toLowerCase().trim();
-    if (seen.has(key)) dupCount++;
-    else filtered.push(lead);
+async function getMonthlyLeadUsage(agencyId) {
+  try {
+    const { data, error } = await supabase
+      .from('lead_scrape_usage')
+      .select('leads_scraped')
+      .eq('agency_id', agencyId)
+      .eq('billing_month', currentBillingMonth())
+      .maybeSingle();
+    if (error) { console.error('[LeadScraper] usage read failed:', error.message); return 0; }
+    return (data && data.leads_scraped) || 0;
+  } catch (e) {
+    console.error('[LeadScraper] usage read threw:', e.message);
+    return 0; // fail open: never block a scrape on a transient counter error
   }
-  return { filtered, dupCount };
+}
+
+async function incrementMonthlyLeadUsage(agencyId, count) {
+  if (!agencyId || !count || count <= 0) return;
+  try {
+    const { error } = await supabase.rpc('increment_lead_scrape_usage', {
+      p_agency_id: agencyId, p_month: currentBillingMonth(), p_count: count,
+    });
+    if (error) console.error('[LeadScraper] usage increment failed:', error.message);
+  } catch (e) {
+    console.error('[LeadScraper] usage increment threw:', e.message);
+  }
 }
 
 
@@ -80,6 +93,7 @@ router.post('/search', async (req, res) => {
       source = "indeed",
       keywords, query, location, industry,
       maxPages = 1, maxLeads = 25, agencyId,
+      findAll = false,
     } = req.body;
 
     if (!location) {
@@ -94,6 +108,10 @@ router.post('/search', async (req, res) => {
       return res.status(400).json({ error: 'industry or query is required for Google Maps search' });
     }
 
+    if (findAll && source !== "google_maps") {
+      return res.status(400).json({ error: 'Find-all is only available for Google Maps search' });
+    }
+
     // Prevent concurrent searches per agency
     if (agencyId) {
       for (const [, job] of jobs) {
@@ -106,6 +124,28 @@ router.post('/search', async (req, res) => {
       }
     }
 
+    // Monthly lead metering (only when the agency is known)
+    let leadCap = Infinity, usedThisMonth = 0, meteredAgency = null;
+    if (agencyId) {
+      const { data: agency } = await supabase
+        .from('agencies').select('id, plan_type, subscription_status').eq('id', agencyId).maybeSingle();
+      if (agency) {
+        meteredAgency = agency;
+        leadCap = planLeadCap(agency);
+        usedThisMonth = await getMonthlyLeadUsage(agencyId);
+        if (leadCap !== Infinity && usedThisMonth >= leadCap) {
+          return res.json({
+            limitReached: true, used: usedThisMonth, cap: leadCap,
+            message: `You've used all ${leadCap} leads on your plan this month. Upgrade to Scale for unlimited leads.`,
+          });
+        }
+      }
+    }
+    const remaining = leadCap === Infinity ? Infinity : Math.max(leadCap - usedThisMonth, 0);
+    const perJobCap = findAll ? FIND_ALL_JOB_CAP
+      : (source === "google_maps" ? 60 : Math.max(Number(maxLeads) || 25, 1));
+    const scrapeMaxLeads = remaining === Infinity ? perJobCap : Math.min(perJobCap, remaining);
+
     const jobId = uuidv4();
     const jobData = {
       id: jobId,
@@ -115,19 +155,24 @@ router.post('/search', async (req, res) => {
       stats: null,
       error: null,
       createdAt: new Date().toISOString(),
-      params: { source, keywords, query, location, industry, maxPages, maxLeads },
+      params: { source, keywords, query, location, industry, maxPages, maxLeads, findAll },
       agencyId: agencyId || null,
     };
     jobs.set(jobId, jobData);
 
     res.json({ jobId, status: 'running', message: 'Search started' });
 
-    // Google Maps doesn't need Puppeteer — skip the queue
+    // Standard Maps search hard-caps at 60 / 3 pages; derive pages from the
+    // requested lead count so "Max 60" pulls all three pages. Find-all ignores
+    // maxPages (the tiling engine paginates each tile itself).
     const pipelineParams = {
       source,
+      mode: findAll ? "find_all" : "standard",
       keywords, query, location, industry,
-      maxPages: Math.min(maxPages, 3),
-      maxLeads: Math.min(maxLeads, 60),
+      maxPages: source === "google_maps"
+        ? Math.min(Math.ceil(Math.min(scrapeMaxLeads, 60) / 20), 3)
+        : Math.min(maxPages, 3),
+      maxLeads: scrapeMaxLeads,
       onProgress: (progress) => {
         const job = jobs.get(jobId);
         if (job) job.progress = progress;
@@ -139,19 +184,29 @@ router.post('/search', async (req, res) => {
       : () => runPipeline(pipelineParams);
 
     runFn()
-      .then(({ leads, stats }) => {
+      .then(async ({ leads, stats }) => {
         const job = jobs.get(jobId);
         if (!job) return;
 
-        const { filtered, dupCount } = filterDuplicates(leads, agencyId);
-        addToDedup(agencyId, filtered.map((l) => l.companyName));
+        if (meteredAgency) {
+          await incrementMonthlyLeadUsage(agencyId, leads.length);
+          const newUsed = usedThisMonth + leads.length;
+          if (stats) {
+            stats.usage = {
+              used: newUsed,
+              cap: leadCap === Infinity ? null : leadCap,
+              remaining: leadCap === Infinity ? null : Math.max(leadCap - newUsed, 0),
+              limitReached: leadCap !== Infinity && (newUsed >= leadCap || stats.capped === true),
+            };
+          }
+        }
 
         job.status = 'complete';
-        job.leads = filtered;
-        job.stats = { ...stats, duplicatesRemoved: dupCount };
+        job.leads = leads;
+        job.stats = stats;
         job.progress = { stage: 'done', message: 'Complete', percent: 100 };
 
-        console.log(`[LeadScraper] Job ${jobId} [${source}] complete — ${filtered.length} leads (${dupCount} dupes filtered)`);
+        console.log(`[LeadScraper] Job ${jobId} [${source}${findAll ? ':find_all' : ''}] complete, ${leads.length} leads`);
       })
       .catch((error) => {
         console.error(`[LeadScraper] Job ${jobId} failed:`, error);
@@ -292,7 +347,7 @@ router.post('/save-to-crm', async (req, res) => {
         const sourceLabel = lead.leadSource === "google_maps" ? "lead_finder_maps" : "lead_finder";
 
         const notes = [
-          `🎯 Lead Finder Import (Fit Score: ${lead.fitScore}/100)`,
+          `🎯 Lead Finder Import`,
           lead.leadSource === "google_maps" ? "Source: Google Maps" : `Hiring: ${lead.jobTitle || 'N/A'}`,
           lead.address ? `Address: ${lead.address}` : '',
           lead.rating ? `Google Rating: ${lead.rating} (${lead.reviewCount} reviews)` : '',
@@ -343,7 +398,7 @@ router.post('/export', (req, res) => {
 
     const headers = [
       'Company Name', 'Phone', 'Email', 'Website', 'Address',
-      'Industry', 'Fit Score', 'Rating', 'Reviews', 'Hiring For',
+      'Industry', 'Rating', 'Reviews', 'Hiring For',
       'Job Location', 'Source', 'Tech Stack', 'Google Maps',
       'Facebook', 'Instagram', 'LinkedIn', 'Warnings',
     ];
@@ -351,7 +406,7 @@ router.post('/export', (req, res) => {
     const rows = leads.map((l) => [
       l.companyName || '', l.phone || '', l.email || '',
       l.website || '', l.address || '', l.industry || '',
-      l.fitScore || 0, l.rating || '', l.reviewCount || '',
+      l.rating || '', l.reviewCount || '',
       l.jobTitle || '', l.jobLocation || '', l.leadSource || 'indeed',
       (l.techStack || []).join(', '), l.googleMapsUrl || '',
       l.socialLinks?.facebook || '', l.socialLinks?.instagram || '',
@@ -378,9 +433,6 @@ setInterval(() => {
   const now = Date.now();
   for (const [id, job] of jobs.entries()) {
     if (now - new Date(job.createdAt).getTime() > 60 * 60 * 1000) jobs.delete(id);
-  }
-  for (const [id, entry] of dedupCache.entries()) {
-    if (now - entry.timestamp > DEDUP_TTL_MS) dedupCache.delete(id);
   }
 }, 30 * 60 * 1000);
 

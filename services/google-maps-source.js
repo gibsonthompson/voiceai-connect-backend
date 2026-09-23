@@ -50,9 +50,10 @@ const INDUSTRY_QUERIES = {
  * @param {string} params.location - City/state (e.g., "Atlanta, GA")
  * @param {string} params.industry - Industry preset key (optional, overrides query)
  * @param {number} params.maxPages - Max pages to fetch (1-3, default 1)
+ * @param {number} params.maxLeads - Target lead count; caps how many pages are pulled (1-60)
  * @returns {Array} Array of place objects with basic data
  */
-async function searchGoogleMaps({ query, location, industry, maxPages = 1 }) {
+async function searchGoogleMaps({ query, location, industry, maxPages = 1, maxLeads = 60 }) {
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
   if (!apiKey) throw new Error("GOOGLE_PLACES_API_KEY not set");
 
@@ -61,73 +62,106 @@ async function searchGoogleMaps({ query, location, industry, maxPages = 1 }) {
   if (industry && INDUSTRY_QUERIES[industry]) {
     searchQuery = INDUSTRY_QUERIES[industry];
   }
-  const fullQuery = `${searchQuery} ${location}`;
+  if (!searchQuery || !String(searchQuery).trim()) {
+    throw new Error("A search query or industry is required");
+  }
+  const fullQuery = `${searchQuery} ${location}`.trim();
 
-  console.log(`[GoogleMaps] Searching: "${fullQuery}" (max ${maxPages} pages)`);
+  // Google Places text search hard-caps at 60 results (20 per page, 3 pages).
+  // Pull only as many pages as maxLeads needs, never more than 3.
+  const wanted = Math.min(Math.max(Number(maxLeads) || 20, 1), 60);
+  const pagesForLeads = Math.ceil(wanted / 20);
+  const maxPagesClamp = Math.min(Math.max(Number(maxPages) || pagesForLeads, pagesForLeads), 3);
+
+  console.log(`[GoogleMaps] Searching: "${fullQuery}" (up to ${maxPagesClamp} pages / ${wanted} leads)`);
 
   let allResults = [];
   let nextPageToken = null;
-  const maxPagesClamp = Math.min(maxPages, 3);
 
   for (let page = 0; page < maxPagesClamp; page++) {
-    let url = `${PLACES_BASE}/textsearch/json?query=${encodeURIComponent(fullQuery)}&key=${apiKey}`;
+    let data = null;
 
-    if (nextPageToken) {
-      url = `${PLACES_BASE}/textsearch/json?pagetoken=${nextPageToken}&key=${apiKey}`;
-    }
-
-    try {
-      const res = await fetch(url);
-      const data = await res.json();
-
-      if (data.status === "REQUEST_DENIED") {
-        throw new Error(`Google Places API denied: ${data.error_message || "Check API key"}`);
+    if (page === 0) {
+      const url = `${PLACES_BASE}/textsearch/json?query=${encodeURIComponent(fullQuery)}&key=${apiKey}`;
+      try {
+        const res = await fetch(url);
+        data = await res.json();
+      } catch (error) {
+        // A first-page network failure means we got nothing usable.
+        throw new Error(`Google Places request failed: ${error.message}`);
       }
-
-      if (data.status === "OVER_QUERY_LIMIT") {
-        console.warn("[GoogleMaps] Rate limited — stopping pagination");
+    } else {
+      // Pages 2 and 3 use next_page_token, which Google only makes valid a few
+      // seconds after the previous page returns. Poll with backoff, retrying
+      // while the token still reports INVALID_REQUEST (not ready yet), then
+      // give up on it rather than returning a short result set.
+      const url = `${PLACES_BASE}/textsearch/json?pagetoken=${nextPageToken}&key=${apiKey}`;
+      const backoffsMs = [2000, 2500, 3500];
+      for (let attempt = 0; attempt < backoffsMs.length; attempt++) {
+        await delay(backoffsMs[attempt]);
+        try {
+          const res = await fetch(url);
+          data = await res.json();
+        } catch (error) {
+          console.error(`[GoogleMaps] Page ${page + 1} fetch error (attempt ${attempt + 1}): ${error.message}`);
+          data = null;
+          continue;
+        }
+        // Token not valid yet: wait longer and retry.
+        if (data.status === "INVALID_REQUEST") { data = null; continue; }
         break;
       }
-
-      if (data.status !== "OK" || !data.results?.length) {
-        console.log(`[GoogleMaps] No results on page ${page + 1} (status: ${data.status})`);
-        break;
-      }
-
-      // Filter out results that are permanently closed
-      const validResults = data.results.filter(
-        (r) => r.business_status !== "CLOSED_PERMANENTLY"
-      );
-
-      allResults = allResults.concat(validResults);
-      console.log(`[GoogleMaps] Page ${page + 1}: ${validResults.length} results`);
-
-      // Check for next page
-      nextPageToken = data.next_page_token || null;
-      if (!nextPageToken) break;
-
-      // Google requires a short delay before using next_page_token
-      if (page < maxPagesClamp - 1) {
-        await delay(2000);
-      }
-    } catch (error) {
-      console.error(`[GoogleMaps] Search failed on page ${page + 1}:`, error.message);
-      if (page === 0) throw error; // First page fail is fatal
-      break; // Later pages — return what we have
     }
+
+    if (!data) {
+      console.warn(`[GoogleMaps] Page ${page + 1}: no valid response after retries, stopping with ${allResults.length} so far`);
+      break;
+    }
+
+    if (data.status === "REQUEST_DENIED") {
+      const msg = `Google Places API denied: ${data.error_message || "check GOOGLE_PLACES_API_KEY / billing"}`;
+      if (page === 0) throw new Error(msg);
+      console.warn(`[GoogleMaps] ${msg} (page ${page + 1}), returning ${allResults.length}`);
+      break;
+    }
+
+    if (data.status === "OVER_QUERY_LIMIT") {
+      console.warn(`[GoogleMaps] Over query limit on page ${page + 1}, returning ${allResults.length}`);
+      break;
+    }
+
+    if (data.status !== "OK" || !data.results?.length) {
+      console.log(`[GoogleMaps] Page ${page + 1}: no usable results (status: ${data.status})`);
+      break;
+    }
+
+    // Filter out results that are permanently closed
+    const validResults = data.results.filter(
+      (r) => r.business_status !== "CLOSED_PERMANENTLY"
+    );
+
+    allResults = allResults.concat(validResults);
+    console.log(`[GoogleMaps] Page ${page + 1}: ${validResults.length} results (running total ${allResults.length})`);
+
+    // Stop once we have enough to satisfy the request.
+    if (allResults.length >= wanted) break;
+
+    // Queue the next page if Google offered one.
+    nextPageToken = data.next_page_token || null;
+    if (!nextPageToken) break;
   }
 
   // Deduplicate by place_id
   const seen = new Set();
   const deduped = [];
   for (const result of allResults) {
-    if (!seen.has(result.place_id)) {
+    if (result.place_id && !seen.has(result.place_id)) {
       seen.add(result.place_id);
       deduped.push(result);
     }
   }
 
-  console.log(`[GoogleMaps] Total: ${deduped.length} unique businesses`);
+  console.log(`[GoogleMaps] Total: ${deduped.length} unique businesses for "${fullQuery}"`);
 
   // Map to our standard format
   return deduped.map((r) => ({
