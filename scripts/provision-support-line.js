@@ -23,10 +23,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const FormData = require('form-data');
 
 const {
   createQueryTool,
+  createIndustryKnowledgeBase,
   provisionLocalPhone,
   assignNumberForSMS,
   getPlatformSetting,
@@ -61,25 +61,6 @@ When you cannot fully resolve the caller's issue by explaining it (something is 
 The team is automatically texted a summary after every call, so nothing is lost.
 
 Keep calls warm, efficient, and focused on getting the caller unstuck.`;
-
-async function uploadKbFile(content, filename) {
-  const buffer = Buffer.from(content, 'utf-8');
-  const form = new FormData();
-  form.append('file', buffer, {
-    filename,
-    contentType: 'text/plain',
-    knownLength: buffer.length,
-  });
-  const res = await fetch('https://api.vapi.ai/file', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${VAPI_API_KEY}`, ...form.getHeaders() },
-    body: form,
-  });
-  if (!res.ok) throw new Error(`KB upload failed (HTTP ${res.status}): ${await res.text()}`);
-  const data = await res.json();
-  console.log(`✅ Support KB uploaded: ${data.id} (${buffer.length} bytes)`);
-  return data.id;
-}
 
 async function createSupportAssistant(queryToolId) {
   const assistantConfig = {
@@ -134,7 +115,12 @@ async function main() {
   // 1 + 2. Knowledge base -> VAPI file -> query tool
   const kbPath = path.join(__dirname, 'support-kb.md');
   const kbContent = fs.readFileSync(kbPath, 'utf-8');
-  const fileId = await uploadKbFile(kbContent, 'support_knowledge_base.txt');
+  // Reuse vapi.js's proven uploader (node-fetch + knownLength). Passing the KB as
+  // customIndustryDoc uploads it as-is, regardless of the industry key.
+  const kb = await createIndustryKnowledgeBase(SUPPORT_NAME, 'support', null, kbContent);
+  if (!kb || !kb.fileId) throw new Error('KB upload failed');
+  const fileId = kb.fileId;
+  console.log(`✅ Support KB uploaded: ${fileId}`);
   const queryToolId = await createQueryTool(fileId, SUPPORT_NAME);
   if (!queryToolId) throw new Error('Failed to create the support KB query tool');
 
