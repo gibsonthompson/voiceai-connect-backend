@@ -19,7 +19,6 @@ const INDUSTRY_QUERIES = {
   medical: "medical clinic doctor office",
   veterinary: "veterinary clinic animal hospital",
   legal: "law firm attorney office",
-  "home_services": "plumber hvac contractor",
   plumbing: "plumber plumbing company",
   hvac: "hvac heating cooling company",
   roofing: "roofing company",
