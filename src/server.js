@@ -89,7 +89,7 @@ require('dns').setDefaultResultOrder('ipv4first');
 const express = require('express');
 const cors = require('cors');
 const { supabase } = require('./lib/supabase');
-const { fullyReleaseNumber, INDUSTRY_MAPPING, INDUSTRY_CONFIGS } = require('./lib/vapi');
+const { fullyReleaseNumber, INDUSTRY_MAPPING, INDUSTRY_CONFIGS, getPlatformSetting } = require('./lib/vapi');
 const { releaseBYOTNumber } = require('./routes/byot');
 // Number cleanup: canonical per-client teardown (used by the agency-cancel
 // cascade below) plus the backfill + Telnyx-reconcile cron routes mounted
@@ -395,6 +395,17 @@ app.get('/health', (req, res) => {
       resetManualUsage: true
     }
   });
+
+// Public: the platform AI support line clients see in their dashboard. Reads the
+// live number stored by scripts/provision-support-line.js so it never goes stale.
+app.get('/api/support-line', async (req, res) => {
+  try {
+    const number = await getPlatformSetting('support_line_number');
+    res.json({ number: number || null });
+  } catch (e) {
+    res.json({ number: null });
+  }
+});
 });
 
 // TEMP read-only debug route (delete after greeting diagnosis)
