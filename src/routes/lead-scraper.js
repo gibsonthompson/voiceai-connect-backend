@@ -113,14 +113,14 @@ router.post('/search', async (req, res) => {
       return res.status(400).json({ error: 'Find-all is only available for Google Maps search' });
     }
 
-    // Prevent concurrent searches per agency
+    // A new search supersedes any still-running job for this agency (e.g. a page
+    // refresh left an old job running). Drop the old job from the map so its
+    // completion no-ops instead of blocking the new search with a 429.
     if (agencyId) {
-      for (const [, job] of jobs) {
+      for (const [id, job] of jobs) {
         if (job.agencyId === agencyId && job.status === 'running') {
-          return res.status(429).json({
-            error: 'A search is already running. Please wait for it to complete.',
-            existingJobId: job.id,
-          });
+          job.status = 'superseded';
+          jobs.delete(id);
         }
       }
     }

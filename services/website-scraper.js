@@ -227,6 +227,7 @@ function extractSocialLinks($) {
     youtube: /youtube\.com\//,
     tiktok: /tiktok\.com\//,
     yelp: /yelp\.com\//,
+    pinterest: /pinterest\.com\//,
   };
 
   $("a[href]").each((_, el) => {
@@ -313,7 +314,8 @@ async function scrapeWebsite(websiteUrl) {
       const platform = Object.entries({
         facebook: /facebook/, twitter: /twitter|x\.com/,
         linkedin: /linkedin/, instagram: /instagram/,
-        youtube: /youtube/, yelp: /yelp/,
+        youtube: /youtube/, tiktok: /tiktok/, yelp: /yelp/,
+        pinterest: /pinterest/,
       }).find(([, r]) => r.test(link));
       if (platform) result.socialLinks[platform[0]] = link;
     }
