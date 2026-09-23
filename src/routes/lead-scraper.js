@@ -41,8 +41,9 @@ const jobs = new Map();
 // ── Lead-scrape metering (monthly, per agency) ──────────────────
 // Scale = unlimited; Pro = capped. Counted at scrape time (every unique
 // enriched business), which is where the Google spend actually happens.
-const PLAN_LEAD_CAPS = { free: 100, pro: 1000, scale: Infinity };
-const FIND_ALL_JOB_CAP = 1000; // per-job ceiling, including Scale fair-use
+const PLAN_LEAD_CAPS = { free: 0, pro: 1000, scale: Infinity };
+const FIND_ALL_JOB_CAP = 1000;        // per-job ceiling for capped plans
+const FIND_ALL_SCALE_JOB_CAP = 3000;  // per-job ceiling for Scale (monthly still unlimited)
 
 function planLeadCap(agency) {
   const isTrialing = ['trialing', 'trial'].includes(agency && agency.subscription_status);
@@ -136,13 +137,16 @@ router.post('/search', async (req, res) => {
         if (leadCap !== Infinity && usedThisMonth >= leadCap) {
           return res.json({
             limitReached: true, used: usedThisMonth, cap: leadCap,
-            message: `You've used all ${leadCap} leads on your plan this month. Upgrade to Scale for unlimited leads.`,
+            message: leadCap === 0
+              ? "Lead Finder isn't included on your current plan."
+              : `You've used all ${leadCap} leads on your plan this month. Upgrade to Scale for unlimited leads.`,
           });
         }
       }
     }
     const remaining = leadCap === Infinity ? Infinity : Math.max(leadCap - usedThisMonth, 0);
-    const perJobCap = findAll ? FIND_ALL_JOB_CAP
+    const perJobCap = findAll
+      ? (leadCap === Infinity ? FIND_ALL_SCALE_JOB_CAP : FIND_ALL_JOB_CAP)
       : (source === "google_maps" ? 60 : Math.max(Number(maxLeads) || 25, 1));
     const scrapeMaxLeads = remaining === Infinity ? perJobCap : Math.min(perJobCap, remaining);
 

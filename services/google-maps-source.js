@@ -34,12 +34,101 @@ const INDUSTRY_QUERIES = {
   chiropractic: "chiropractor chiropractic",
   therapy: "therapy counseling therapist office",
   optometry: "optometrist eye doctor",
+  "plastic_surgery": "plastic surgeon cosmetic surgery clinic",
   "moving_storage": "moving company storage facility",
   "property_management": "property management company",
   "funeral": "funeral home mortuary",
   "cleaning": "cleaning service janitorial",
   towing: "towing company",
 };
+
+const PLACES_SEARCHTEXT = "https://places.googleapis.com/v1/places:searchText";
+
+const NEW_FIELD_MASK = [
+  "places.id", "places.displayName", "places.formattedAddress", "places.location",
+  "places.types", "places.primaryType", "places.businessStatus", "places.googleMapsUri",
+  "places.nationalPhoneNumber", "places.internationalPhoneNumber", "places.websiteUri",
+  "places.rating", "places.userRatingCount", "places.regularOpeningHours.weekdayDescriptions",
+  "nextPageToken",
+].join(",");
+
+function dedupeByPlaceId(items) {
+  const seen = new Set();
+  const out = [];
+  for (const it of items) {
+    if (it.placeId && !seen.has(it.placeId)) { seen.add(it.placeId); out.push(it); }
+  }
+  return out;
+}
+
+function mapNewPlace(p) {
+  return {
+    companyName: (p.displayName && p.displayName.text) || p.displayName || "Unknown",
+    address: p.formattedAddress || null,
+    location: p.formattedAddress || null,
+    placeId: p.id || null,
+    rating: typeof p.rating === "number" ? p.rating : null,
+    reviewCount: typeof p.userRatingCount === "number" ? p.userRatingCount : null,
+    businessStatus: p.businessStatus || null,
+    businessTypes: p.types || [],
+    phone: p.nationalPhoneNumber || p.internationalPhoneNumber || null,
+    website: p.websiteUri || null,
+    hours: (p.regularOpeningHours && p.regularOpeningHours.weekdayDescriptions) || null,
+    googleMapsUrl: p.googleMapsUri || null,
+    source: "google_maps",
+    _tiled: true,
+  };
+}
+
+/**
+ * Standard area search via the Places API (New). Paginates textQuery up to 3
+ * pages (60 results) using the New API page token, which is reliable, unlike
+ * the legacy next_page_token. Returns { results, denied }; denied=true means the
+ * New API is not enabled on the key, so the caller should fall back to legacy.
+ */
+async function searchTextNewApi(fullQuery, apiKey, wanted) {
+  const results = [];
+  let pageToken = null;
+  const maxPages = Math.min(Math.ceil(wanted / 20), 3);
+
+  for (let page = 0; page < maxPages; page++) {
+    const body = { textQuery: fullQuery, pageSize: 20 };
+    if (pageToken) body.pageToken = pageToken;
+
+    let data = null;
+    try {
+      const res = await fetch(PLACES_SEARCHTEXT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": apiKey,
+          "X-Goog-FieldMask": NEW_FIELD_MASK,
+        },
+        body: JSON.stringify(body),
+      });
+      data = await res.json();
+      if (!res.ok) {
+        const code = (data && data.error && data.error.status) || res.status;
+        if (code === "PERMISSION_DENIED" || code === 403) return { results, denied: true };
+        console.warn(`[GoogleMaps] New API page ${page + 1} error: ${(data.error && data.error.message) || code}`);
+        break;
+      }
+    } catch (e) {
+      console.error(`[GoogleMaps] New API fetch failed: ${e.message}`);
+      break;
+    }
+
+    if (!Array.isArray(data.places) || data.places.length === 0) break;
+    for (const p of data.places) {
+      if (p.businessStatus !== "CLOSED_PERMANENTLY") results.push(mapNewPlace(p));
+    }
+    if (results.length >= wanted) break;
+    pageToken = data.nextPageToken || null;
+    if (!pageToken) break;
+  }
+
+  return { results, denied: false };
+}
 
 /**
  * Search Google Places by query + location
@@ -66,6 +155,18 @@ async function searchGoogleMaps({ query, location, industry, maxPages = 1, maxLe
     throw new Error("A search query or industry is required");
   }
   const fullQuery = `${searchQuery} ${location}`.trim();
+
+  // Prefer the Places API (New): its page token paginates reliably to 60,
+  // unlike the deprecated legacy next_page_token. Fall back to legacy only if
+  // the New API is not enabled on the key.
+  const targetLeads = Math.min(Math.max(Number(maxLeads) || 20, 1), 60);
+  const attempt = await searchTextNewApi(fullQuery, apiKey, targetLeads);
+  if (!attempt.denied) {
+    const dedupedNew = dedupeByPlaceId(attempt.results).slice(0, targetLeads);
+    console.log(`[GoogleMaps] New API: ${dedupedNew.length} unique businesses for "${fullQuery}"`);
+    return dedupedNew;
+  }
+  console.warn(`[GoogleMaps] Places API (New) not enabled; falling back to legacy Text Search for "${fullQuery}"`);
 
   // Google Places text search hard-caps at 60 results (20 per page, 3 pages).
   // Pull only as many pages as maxLeads needs, never more than 3.
