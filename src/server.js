@@ -395,6 +395,7 @@ app.get('/health', (req, res) => {
       resetManualUsage: true
     }
   });
+});
 
 // Public: the platform AI support line clients see in their dashboard. Reads the
 // live number stored by scripts/provision-support-line.js so it never goes stale.
@@ -405,7 +406,6 @@ app.get('/api/support-line', async (req, res) => {
   } catch (e) {
     res.json({ number: null });
   }
-});
 });
 
 // TEMP read-only debug route (delete after greeting diagnosis)
