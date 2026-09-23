@@ -144,8 +144,19 @@ async function waitForTelnyxActive(number, maxSeconds = 150) {
   return false;
 }
 
-// Import a number VAPI does not yet have, retrying transient errors against the
-// SAME number (never orders another).
+async function attachAssistant(phoneId, assistantId) {
+  const patch = await fetch(`https://api.vapi.ai/phone-number/${phoneId}`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ assistantId, name: SUPPORT_NAME }),
+  });
+  if (!patch.ok) throw new Error(`Failed to attach assistant to ${phoneId} (HTTP ${patch.status}): ${await patch.text()}`);
+  console.log(`✅ Attached support assistant ${assistantId} to ${phoneId}`);
+}
+
+// Get the number into VAPI, attached to the support assistant. Retries transient
+// errors against the SAME number (never orders another). If VAPI already has the
+// number (Telnyx auto-import), attach the assistant to that existing object.
 async function importExistingNumber(number, assistantId) {
   await waitForTelnyxActive(number);
   const credentialId = await getVapiTelnyxCredentialId();
@@ -160,14 +171,16 @@ async function importExistingNumber(number, assistantId) {
     if (res.ok) {
       const phone = JSON.parse(body);
       console.log(`✅ Imported ${number} into VAPI: ${phone.id}`);
-      const patch = await fetch(`https://api.vapi.ai/phone-number/${phone.id}`, {
-        method: 'PATCH',
-        headers: { Authorization: `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ assistantId }),
-      });
-      if (!patch.ok) throw new Error(`Imported but failed to attach assistant (HTTP ${patch.status}): ${await patch.text()}`);
-      console.log(`✅ Attached support assistant ${assistantId}`);
+      await attachAssistant(phone.id, assistantId);
       return phone;
+    }
+    // VAPI already has this number (auto-imported): attach to the existing object.
+    const existing = body.match(/Existing Phone Number ([0-9a-fA-F-]{36})/);
+    if (existing) {
+      const phoneId = existing[1];
+      console.log(`ℹ️  ${number} already in VAPI as ${phoneId}; attaching assistant instead of re-importing.`);
+      await attachAssistant(phoneId, assistantId);
+      return { id: phoneId };
     }
     last = `HTTP ${res.status}: ${body}`;
     const transient = res.status >= 500 || body.includes('502') || body.includes('Update Telnyx Number');
