@@ -30,6 +30,7 @@ const {
   setPlatformSetting,
   sanitizeAssistantName,
   releaseTelnyxNumber,
+  fullyReleaseNumber,
 } = require('../src/lib/vapi');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
@@ -180,6 +181,36 @@ async function importExistingNumber(number, assistantId) {
   throw new Error(`Import still failing after retries: ${last}`);
 }
 
+async function searchAvailable(areaCode) {
+  const params = [
+    'filter[country_code]=US',
+    `filter[national_destination_code]=${areaCode}`,
+    'filter[features][]=sms',
+    'filter[features][]=voice',
+    'filter[limit]=30',
+  ];
+  const res = await fetch(`https://api.telnyx.com/v2/available_phone_numbers?${params.join('&')}`, {
+    headers: { Authorization: `Bearer ${TELNYX_API_KEY}` },
+  });
+  if (!res.ok) throw new Error(`Telnyx search failed (HTTP ${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  const nums = (data.data || []).map((n) => n.phone_number).filter(Boolean);
+  // Skip patterns that look bad on a business support line.
+  return nums.filter((n) => !n.includes('666') && !n.includes('0000'));
+}
+
+async function orderTelnyxNumber(number) {
+  const res = await fetch('https://api.telnyx.com/v2/number_orders', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${TELNYX_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone_numbers: [{ phone_number: number }] }),
+  });
+  if (!res.ok) throw new Error(`Telnyx order failed for ${number} (HTTP ${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  console.log(`🛒 Ordered ${number} (order ${data.data && data.data.id}, status ${data.data && data.data.status})`);
+  return data;
+}
+
 async function main() {
   if (!VAPI_API_KEY) throw new Error('VAPI_API_KEY not set');
   if (!BACKEND_URL) throw new Error('BACKEND_URL (public backend URL) not set');
@@ -207,7 +238,43 @@ async function main() {
     return;
   }
 
-  // default: full provision (orders a number). Prefer `import` when you have one.
+  if (cmd === 'search') {
+    const areaCode = process.argv[3];
+    if (!areaCode) throw new Error('Usage: search <areaCode>   e.g. search 404');
+    if (!TELNYX_API_KEY) throw new Error('TELNYX_API_KEY not set');
+    const nums = await searchAvailable(areaCode);
+    if (nums.length === 0) { console.log(`No clean numbers found in ${areaCode}. Try another area code.`); return; }
+    console.log(`Available in ${areaCode} (666 / 0000 filtered out):\n`);
+    nums.slice(0, 20).forEach((n) => console.log(`   ${n}`));
+    console.log(`\nPick one, then:  node scripts/provision-support-line.js buy <number>`);
+    return;
+  }
+
+  if (cmd === 'buy') {
+    const num = process.argv[3];
+    if (!num) throw new Error('Usage: buy <+1XXXXXXXXXX> [assistantId]');
+    if (!TELNYX_API_KEY) throw new Error('TELNYX_API_KEY not set');
+    const assistantId = await ensureAssistant(process.argv[4]);
+    await orderTelnyxNumber(num);
+    const phone = await importExistingNumber(num, assistantId);
+    try { await assignNumberForSMS(num); } catch (e) { console.warn(`   ⚠️  SMS assign on ${num}: ${e.message}`); }
+    await setPlatformSetting('support_line_number', num);
+    if (phone.id) await setPlatformSetting('support_phone_id', phone.id);
+    console.log(`\n🎉 Support line ready: ${num} -> assistant ${assistantId}`);
+    return;
+  }
+
+  if (cmd === 'fully-release') {
+    const num = process.argv[3];
+    const vapiPhoneId = process.argv[4];
+    if (!num) throw new Error('Usage: fully-release <+1XXXXXXXXXX> [vapiPhoneId]');
+    console.log(`🗑️  Fully releasing ${num}${vapiPhoneId ? ` (VAPI ${vapiPhoneId})` : ''}...`);
+    await fullyReleaseNumber(vapiPhoneId, num);
+    console.log('✅ Done.');
+    return;
+  }
+
+  // default: full provision (orders a number). Prefer `import`/`buy` when you have one.
   const existing = await getPlatformSetting('support_line_number');
   if (existing && !process.argv.includes('--force')) {
     console.log(`⚠️  Support line already set: ${existing}. Re-run with --force to reprovision.`);
