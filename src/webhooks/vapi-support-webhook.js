@@ -4,13 +4,12 @@
 //
 // Flow:
 //   1. Client calls the support number
-//   2. VAPI sends assistant-request → we return dynamic config with agency name
-//   3. AI helps the caller; if escalation needed, AI calls transferToHuman
-//      with a summary of the issue
-//   4. VAPI sends tool-calls to our serverUrl → we return transfer destination
-//      with a dynamic whisper that includes WHO is calling and WHAT they need
-//   5. Call transfers to Gibson at (678) 316-1454 with full context whisper
-//   6. On end-of-call, we log the support interaction
+//   2. VAPI sends assistant-request; we return dynamic config with agency name
+//   3. AI helps the caller from the knowledge base
+//   4. If the AI cannot help (or the caller asks for a person), it takes a
+//      message and ends the call. There is NO transfer to a human.
+//   5. On end-of-call, we log the interaction and text the owner a summary
+//      (caller, duration, whether it needs follow-up, and the one-line message)
 //
 // UPDATED: 2026-09-17 - SECURITY: authenticated. Like the main VAPI webhook,
 //   this drives live calls and looks callers up by phone (leaking whether a
@@ -22,10 +21,17 @@
 // ============================================================================
 const { supabase } = require('../lib/supabase');
 const { verifyVapiWebhook } = require('../lib/vapi-webhook-auth');
+const { sendAndLogSMS } = require('../lib/sms-logger');
+const Anthropic = require('@anthropic-ai/sdk');
 
-const ESCALATION_PHONE = process.env.SUPPORT_ESCALATION_PHONE || '+16783161454';
 const SUPPORT_VOICE_ID = process.env.SUPPORT_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL'; // Sarah
 const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
+// Owner-notify number (same resolution order as routes/help.js). recipientType
+// 'admin' below keeps this on platform Telnyx regardless of the caller's agency.
+const SUPPORT_PHONE = process.env.SUPPORT_PHONE_NUMBER || process.env.PLATFORM_OWNER_PHONE || '+16783161454';
+const anthropic = process.env.ANTHROPIC_API_KEY
+  ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+  : null;
 
 // ============================================================================
 // CALLER LOOKUP — find client + agency from caller's phone number
@@ -139,7 +145,7 @@ ${contextLine}
 - Knowledge base → AI Agent tab → Knowledge Base
 
 ### Billing Questions
-- "How much does it cost?" → "Your agency sets the pricing. Check your plan details in Settings, or I can transfer you to the team."
+- "How much does it cost?" → "Your agency sets the pricing. Check your plan details in Settings, or I can take a message for the team."
 - Upgrade/downgrade → Settings → Billing
 - Cancel → Settings → Billing → Cancel subscription
 - Payment failed → Settings → update payment method
@@ -149,19 +155,15 @@ ${contextLine}
 - You cannot access their call recordings or transcripts
 - You cannot process refunds or billing changes
 - You cannot reset passwords (direct them to the app's Forgot Password)
-- For any of these, offer to transfer to the support team
+- For any of these, offer to take a message for the support team
 
-## ESCALATION RULES
-Transfer the call using the transferToHuman tool if:
-1. The caller explicitly asks to speak to a person/human/manager
-2. The issue involves billing disputes, refunds, or account cancellation
-3. You've attempted to help twice and the caller is still confused or frustrated
-4. The issue is technical and beyond basic troubleshooting
-5. The caller reports a critical outage (their AI isn't answering ANY calls)
-
-When transferring, first call the transferToHuman tool with a clear summary of the issue, THEN say: "Let me connect you with our support team who can help with that directly. One moment please."
-
-IMPORTANT: When you call transferToHuman, the 'issue_summary' should be a concise but complete description of what the caller needs help with. Example: "Caller says their AI receptionist stopped answering calls yesterday, they've verified call forwarding is set up correctly."
+## WHEN YOU CANNOT HELP
+There is no live person to transfer to on this line. If you cannot resolve the caller's issue from the information above, or the caller asks for a human, take a message:
+1. Let them know you'll pass this along to the support team and someone will follow up.
+2. Make sure you clearly understand what they need, and if you don't already have a good callback number, ask for the best one.
+3. Do NOT promise a specific callback time.
+4. Then use the endCall tool to end the call politely.
+Do the same for anything you cannot handle: billing disputes, refunds, cancellations, a critical outage (their AI isn't answering ANY calls), or a technical problem beyond basic troubleshooting. Take a message, do not transfer."
 
 ## GUARDRAILS
 - ONLY discuss topics related to ${agencyName}'s AI receptionist service
@@ -172,7 +174,7 @@ IMPORTANT: When you call transferToHuman, the 'issue_summary' should be a concis
 
   return {
     firstMessage: greeting,
-    // serverUrl — VAPI sends tool-calls and transfer-destination-request here
+    // serverUrl - VAPI posts server messages here (end-of-call-report, etc.)
     serverUrl: `${BACKEND_URL}/webhook/vapi-support`,
     model: {
       provider: 'anthropic',
@@ -194,40 +196,78 @@ IMPORTANT: When you call transferToHuman, the 'issue_summary' should be a concis
       model: 'nova-2',
       language: 'en',
     },
-    // Transfer tool — AI passes issue_summary, backend builds dynamic whisper
+    // The AI resolves the call or takes a message, then ends the call itself.
+    // There is no human transfer on the client support line.
     tools: [
       {
-        type: 'transferCall',
-        function: {
-          name: 'transferToHuman',
-          description: 'Transfer the call to a human support agent. Use when the caller asks for a human, has a billing issue, or you cannot resolve their problem after two attempts. You MUST provide a clear summary of the issue.',
-          parameters: {
-            type: 'object',
-            properties: {
-              issue_summary: {
-                type: 'string',
-                description: 'A concise summary of what the caller needs help with and what you already tried. Example: "Caller reports AI not answering calls since yesterday, verified forwarding is correct, may be a provisioning issue."',
-              },
-            },
-            required: ['issue_summary'],
-          },
-        },
-        // Destinations defined here as fallback; dynamic destination returned via
-        // transfer-destination-request webhook overrides this
-        destinations: [
-          {
-            type: 'number',
-            number: ESCALATION_PHONE,
-            message: 'Support call being transferred.',
-          }
-        ],
+        type: 'endCall',
       },
     ],
-    // Store caller context in metadata so we can access it in transfer-destination-request
-    metadata: {
-      callerContext: context || null,
-    },
   };
+}
+
+// ============================================================================
+// POST-CALL OWNER NOTIFICATION
+// Every support call texts Gibson a short summary. On this line the AI takes a
+// message when it cannot help, so this text IS the message delivery, and the
+// only push visibility into calls the AI handled on its own or that hung up. A
+// support_calls row nobody reads is not a signal; a text is.
+// ============================================================================
+function formatCallDuration(seconds) {
+  const s = Math.round(Number(seconds) || 0);
+  if (s <= 0) return 'unknown';
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return r ? `${m}m ${r}s` : `${m}m`;
+}
+
+function buildCallerLabel(context) {
+  if (!context) return 'Unknown caller';
+  if (context.type === 'agency_owner') {
+    return `${context.agencyName} (agency owner)`;
+  }
+  const parts = [context.businessName || 'Client'];
+  const meta = [];
+  if (context.agencyName && context.agencyName !== 'VoiceAI Connect') meta.push(context.agencyName);
+  if (context.planType) meta.push(`${context.planType} plan`);
+  if (meta.length) parts.push(`(${meta.join(', ')})`);
+  return parts.join(' ');
+}
+
+// One-line "what did they need" plus whether it still needs Gibson's follow-up,
+// from the transcript. Returns null when there is nothing worth summarizing
+// (very short call, no transcript, or AI unavailable). On any parse trouble it
+// defaults to needs-follow-up: over-notifying is safer than dropping a message.
+async function summarizeSupportCall(transcript) {
+  const text = (transcript || '').trim();
+  if (!anthropic || text.length < 40) return null;
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 120,
+      system: 'You review a support phone call transcript for an AI receptionist product. Reply with ONLY a JSON object, no preamble and no code fences: {"need":"<one sentence, 15 words max, what the caller needed>","needs_followup":<true if the AI did not fully resolve it or the caller wanted a person, false if the AI clearly handled it>}.',
+      messages: [{ role: 'user', content: `Transcript:\n${text.substring(0, 6000)}` }],
+    });
+    const raw = response.content
+      .filter(block => block.type === 'text')
+      .map(block => block.text)
+      .join(' ')
+      .trim();
+    const cleaned = raw.replace(/```json/g, '').replace(/```/g, '').trim();
+    try {
+      const parsed = JSON.parse(cleaned);
+      return {
+        need: (parsed.need || '').toString().trim() || null,
+        needsFollowup: parsed.needs_followup !== false,
+      };
+    } catch {
+      return { need: cleaned || null, needsFollowup: true };
+    }
+  } catch (err) {
+    console.warn('⚠️ Support summary generation failed (non-fatal):', err.message);
+    return null;
+  }
 }
 
 // ============================================================================
@@ -268,93 +308,12 @@ async function handleSupportWebhook(req, res) {
     }
 
     // ============================
-    // TRANSFER DESTINATION REQUEST — dynamic whisper with conversation context
-    // This fires when the AI triggers transferToHuman. VAPI asks us where to
-    // send the call. We return the destination with a whisper that includes
-    // WHO is calling and WHAT they discussed.
-    // ============================
-    if (messageType === 'transfer-destination-request') {
-      console.log('🔀 Transfer destination request received');
-
-      // Extract caller context from the call metadata (set during assistant-request)
-      const metadata = message?.call?.assistant?.metadata || message?.artifact?.metadata || {};
-      const callerContext = metadata.callerContext || null;
-
-      // Extract the issue summary from the tool call arguments
-      const toolCallArgs = message?.toolCalls?.[0]?.function?.arguments || 
-                           message?.functionCall?.parameters || {};
-      
-      let issueSummary = '';
-      try {
-        const parsed = typeof toolCallArgs === 'string' ? JSON.parse(toolCallArgs) : toolCallArgs;
-        issueSummary = parsed.issue_summary || '';
-      } catch {
-        issueSummary = typeof toolCallArgs === 'string' ? toolCallArgs : '';
-      }
-
-      // Build the dynamic whisper with full context
-      const whisperParts = [];
-      whisperParts.push('Incoming support call');
-
-      if (callerContext?.businessName) {
-        whisperParts.push(`from ${callerContext.businessName}`);
-      }
-      if (callerContext?.agencyName && callerContext.agencyName !== 'VoiceAI Connect') {
-        whisperParts.push(`${callerContext.agencyName} client`);
-      }
-      if (callerContext?.planType) {
-        whisperParts.push(`on the ${callerContext.planType} plan`);
-      }
-      if (issueSummary) {
-        whisperParts.push(`Issue: ${issueSummary}`);
-      }
-
-      const whisperMessage = whisperParts.join('. ') + '.';
-      console.log(`📋 Whisper: ${whisperMessage}`);
-
-      return res.status(200).json({
-        destination: {
-          type: 'number',
-          number: ESCALATION_PHONE,
-          message: whisperMessage,
-        },
-      });
-    }
-
-    // ============================
-    // TOOL CALLS — handle server-side tool execution
-    // (VAPI sends this when the AI calls a function with serverUrl set)
-    // ============================
-    if (messageType === 'tool-calls') {
-      const toolCalls = message?.toolCalls || message?.toolCallList || [];
-      
-      for (const toolCall of toolCalls) {
-        const functionName = toolCall?.function?.name;
-        
-        if (functionName === 'transferToHuman') {
-          // The transfer-destination-request handles the actual routing
-          // Just acknowledge here
-          console.log('🔀 Transfer tool called — waiting for transfer-destination-request');
-          return res.status(200).json({
-            results: [{
-              toolCallId: toolCall.id,
-              result: 'Transferring to support team now.',
-            }],
-          });
-        }
-      }
-
-      // Unknown tool — acknowledge
-      return res.status(200).json({ received: true });
-    }
-
-    // ============================
     // END OF CALL REPORT — log the support interaction
     // ============================
     if (messageType === 'end-of-call-report') {
       const call = message.call;
       const callerPhone = call?.customer?.number || 'Unknown';
-      const transcript = message.transcript || '';
+      const transcript = message.transcript || message.artifact?.transcript || '';
       const durationSeconds = call?.duration || message?.duration || null;
 
       console.log(`🎧 Support call completed: ${callerPhone}, ${durationSeconds ? durationSeconds + 's' : 'unknown duration'}`);
@@ -375,6 +334,37 @@ async function handleSupportWebhook(req, res) {
         console.log('✅ Support call logged');
       } catch (dbErr) {
         console.warn('⚠️ Could not log support call (non-fatal):', dbErr.message);
+      }
+
+      // Notify the owner. Best-effort and non-blocking: a texting failure must
+      // never 500 the webhook back to VAPI. This delivers the message the AI
+      // took and is the only push visibility into every support call.
+      try {
+        const summary = await summarizeSupportCall(transcript);
+        const need = summary?.need || null;
+        const needsFollowup = summary ? summary.needsFollowup : true;
+
+        const smsBody = [
+          '🎧 VoiceAI Support Call',
+          `From: ${buildCallerLabel(context)}`,
+          `Number: ${callerPhone}`,
+          `Duration: ${formatCallDuration(durationSeconds)}`,
+          `Status: ${needsFollowup ? 'Needs your follow-up' : 'Handled by AI'}`,
+          `Message: ${need || 'No transcript (very short call)'}`,
+          `Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}`,
+        ].join('\n');
+
+        await sendAndLogSMS({
+          phone: SUPPORT_PHONE,
+          message: smsBody,
+          agencyId: context?.agencyId || null,
+          recipientType: 'admin',
+          messageType: 'support_call_summary',
+          metadata: { callerPhone, needsFollowup, clientId: context?.clientId || null },
+        });
+        console.log('✅ Support call summary texted to owner');
+      } catch (smsErr) {
+        console.warn('⚠️ Support summary SMS failed (non-fatal):', smsErr.message);
       }
 
       return res.status(200).json({ received: true });
