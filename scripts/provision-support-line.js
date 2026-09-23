@@ -1,24 +1,21 @@
 /**
- * Provision the platform AI support line (one-time, idempotent).
+ * Support line tool. Three subcommands:
  *
- * What it does, reusing the existing provisioning stack in src/lib/vapi.js:
- *   1. Uploads the support knowledge base (support-kb.md) to VAPI as a file.
- *   2. Wraps that file in a VAPI query tool the assistant can search.
- *   3. Creates a dedicated support assistant (support prompt + the KB tool),
- *      pointed at the same /webhook/vapi endpoint clients use, so the end-of-call
- *      report fires and the webhook can text you.
- *   4. Buys a Telnyx number, imports it into VAPI, attaches the support
- *      assistant, and enables SMS (messaging profile + 10DLC).
- *   5. Stores the number, assistant id, tool id and file id in platform_settings
- *      so the webhook can recognise a support call and the app can show the number.
+ *   node scripts/provision-support-line.js import <+1XXXXXXXXXX> [assistantId]
+ *       Import a Telnyx number you ALREADY own into VAPI and attach the support
+ *       assistant. Waits until the number is active on Telnyx, then imports and
+ *       retries transient errors against the SAME number. Orders nothing. This is
+ *       the reliable path and the one to use for cleanup.
  *
- * Run once from the backend host (has the same env as the app):
- *   node scripts/provision-support-line.js
- * Re-running is safe: it stops if a support line already exists unless you pass
- *   node scripts/provision-support-line.js --force
+ *   node scripts/provision-support-line.js release <+1XXXXXXXXXX>
+ *       Release a stranded Telnyx number so it stops billing.
  *
- * Requires env already used by the app: VAPI_API_KEY, BACKEND_URL (public URL of
- * the backend), VAPI_WEBHOOK_SECRET, TELNYX_API_KEY, TELNYX_MESSAGING_PROFILE_ID.
+ *   node scripts/provision-support-line.js provision
+ *       Full flow: create the assistant + KB, order a new number, import it. Only
+ *       for a brand-new line when you have no number to reuse.
+ *
+ * Reuses src/lib/vapi.js. Uses the app's existing env: VAPI_API_KEY, BACKEND_URL,
+ * VAPI_WEBHOOK_SECRET, TELNYX_API_KEY, TELNYX_MESSAGING_PROFILE_ID.
  */
 
 const fs = require('fs');
@@ -32,16 +29,14 @@ const {
   getPlatformSetting,
   setPlatformSetting,
   sanitizeAssistantName,
+  releaseTelnyxNumber,
 } = require('../src/lib/vapi');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
+const TELNYX_API_KEY = process.env.TELNYX_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || process.env.PUBLIC_BACKEND_URL;
-
-// Where to source the support number's area (the line is platform-wide, so this
-// only affects the number's area code, not who it serves).
-const SUPPORT_CITY = process.env.SUPPORT_LINE_CITY || 'Atlanta';
-const SUPPORT_STATE = process.env.SUPPORT_LINE_STATE || 'GA';
 const SUPPORT_NAME = 'AI Receptionist Support';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const SUPPORT_FIRST_MESSAGE =
   "Thanks for calling support. I can help you set up and troubleshoot your AI receptionist. What are you trying to do?";
@@ -75,19 +70,12 @@ async function createSupportAssistant(queryToolId) {
       tools: [{ type: 'endCall' }],
     },
     voice: { provider: '11labs', model: 'eleven_flash_v2_5', voiceId: 'burt' },
-    startSpeakingPlan: {
-      waitSeconds: 0.4,
-      smartEndpointingPlan: { provider: 'vapi' },
-      transcriptionEndpointingPlan: { onPunctuationSeconds: 0.2, onNoPunctuationSeconds: 1.0, onNumberSeconds: 0.4 },
-    },
-    stopSpeakingPlan: { numWords: 2, voiceSeconds: 0.2, backoffSeconds: 1.0 },
     firstMessage: SUPPORT_FIRST_MESSAGE,
     recordingEnabled: true,
     serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
     serverUrl: `${BACKEND_URL}/webhook/vapi`,
     serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET,
   };
-
   const res = await fetch('https://api.vapi.ai/assistant', {
     method: 'POST',
     headers: { Authorization: `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
@@ -99,64 +87,143 @@ async function createSupportAssistant(queryToolId) {
   return assistant;
 }
 
-async function main() {
-  const force = process.argv.includes('--force');
+// Reuse an existing support assistant (arg / env / stored), or build one once.
+async function ensureAssistant(explicitId) {
+  let assistantId = explicitId || process.env.SUPPORT_ASSISTANT_ID || (await getPlatformSetting('support_assistant_id'));
+  if (assistantId) {
+    console.log(`♻️  Reusing support assistant: ${assistantId}`);
+    await setPlatformSetting('support_assistant_id', assistantId);
+    return assistantId;
+  }
+  const kbContent = fs.readFileSync(path.join(__dirname, 'support-kb.md'), 'utf-8');
+  const kb = await createIndustryKnowledgeBase(SUPPORT_NAME, 'support', null, kbContent);
+  if (!kb || !kb.fileId) throw new Error('KB upload failed');
+  console.log(`✅ Support KB uploaded: ${kb.fileId}`);
+  await setPlatformSetting('support_kb_file_id', kb.fileId);
+  const toolId = await createQueryTool(kb.fileId, SUPPORT_NAME);
+  if (!toolId) throw new Error('Failed to create the KB query tool');
+  await setPlatformSetting('support_query_tool_id', toolId);
+  const assistant = await createSupportAssistant(toolId);
+  await setPlatformSetting('support_assistant_id', assistant.id);
+  return assistant.id;
+}
 
+async function getVapiTelnyxCredentialId() {
+  const res = await fetch('https://api.vapi.ai/credential', {
+    headers: { Authorization: `Bearer ${VAPI_API_KEY}` },
+  });
+  if (!res.ok) throw new Error(`Could not list VAPI credentials (HTTP ${res.status})`);
+  const creds = await res.json();
+  const telnyx = (Array.isArray(creds) ? creds : []).find((c) => c.provider === 'telnyx');
+  if (!telnyx) throw new Error('No Telnyx credential in VAPI (add your Telnyx key under VAPI dashboard, Provider Keys)');
+  return telnyx.id;
+}
+
+// Poll Telnyx until the number reports active. The 502 on import happens when
+// VAPI tries to configure a number Telnyx has not finished activating.
+async function waitForTelnyxActive(number, maxSeconds = 150) {
+  const deadline = Date.now() + maxSeconds * 1000;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`https://api.telnyx.com/v2/phone_numbers?filter[phone_number]=${encodeURIComponent(number)}`, {
+        headers: { Authorization: `Bearer ${TELNYX_API_KEY}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const rec = data.data && data.data[0];
+        if (rec && rec.status === 'active') { console.log(`   ✅ ${number} active on Telnyx`); return true; }
+        console.log(`   ⏳ ${number} status: ${rec ? rec.status : 'not found yet'}...`);
+      }
+    } catch (e) {
+      console.log(`   ⏳ Telnyx status check retrying (${e.message})...`);
+    }
+    await sleep(8000);
+  }
+  console.warn(`   ⚠️  ${number} not confirmed active after ${maxSeconds}s; importing anyway.`);
+  return false;
+}
+
+// Import a number VAPI does not yet have, retrying transient errors against the
+// SAME number (never orders another).
+async function importExistingNumber(number, assistantId) {
+  await waitForTelnyxActive(number);
+  const credentialId = await getVapiTelnyxCredentialId();
+  let last = '';
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    const res = await fetch('https://api.vapi.ai/phone-number', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'telnyx', number, credentialId, name: SUPPORT_NAME }),
+    });
+    const body = await res.text();
+    if (res.ok) {
+      const phone = JSON.parse(body);
+      console.log(`✅ Imported ${number} into VAPI: ${phone.id}`);
+      const patch = await fetch(`https://api.vapi.ai/phone-number/${phone.id}`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assistantId }),
+      });
+      if (!patch.ok) throw new Error(`Imported but failed to attach assistant (HTTP ${patch.status}): ${await patch.text()}`);
+      console.log(`✅ Attached support assistant ${assistantId}`);
+      return phone;
+    }
+    last = `HTTP ${res.status}: ${body}`;
+    const transient = res.status >= 500 || body.includes('502') || body.includes('Update Telnyx Number');
+    if (transient && attempt < 6) {
+      console.log(`   ⏳ Transient import error (attempt ${attempt}/6), waiting 12s and retrying same number...`);
+      await sleep(12000);
+      continue;
+    }
+    throw new Error(`Import failed: ${last}`);
+  }
+  throw new Error(`Import still failing after retries: ${last}`);
+}
+
+async function main() {
   if (!VAPI_API_KEY) throw new Error('VAPI_API_KEY not set');
   if (!BACKEND_URL) throw new Error('BACKEND_URL (public backend URL) not set');
+  const cmd = process.argv[2];
 
-  const existing = await getPlatformSetting('support_line_number');
-  if (existing && !force) {
-    console.log(`⚠️  A support line already exists: ${existing}`);
-    console.log('   Re-run with --force to provision a new one (the old number keeps billing until released).');
+  if (cmd === 'release') {
+    const num = process.argv[3];
+    if (!num) throw new Error('Usage: release <+1XXXXXXXXXX>');
+    console.log(`🗑️  Releasing ${num}...`);
+    await releaseTelnyxNumber(num);
+    console.log('✅ Release requested.');
     return;
   }
 
-  // 1 + 2. Knowledge base -> VAPI file -> query tool
-  const kbPath = path.join(__dirname, 'support-kb.md');
-  const kbContent = fs.readFileSync(kbPath, 'utf-8');
-  // Reuse vapi.js's proven uploader (node-fetch + knownLength). Passing the KB as
-  // customIndustryDoc uploads it as-is, regardless of the industry key.
-  const kb = await createIndustryKnowledgeBase(SUPPORT_NAME, 'support', null, kbContent);
-  if (!kb || !kb.fileId) throw new Error('KB upload failed');
-  const fileId = kb.fileId;
-  console.log(`✅ Support KB uploaded: ${fileId}`);
-  const queryToolId = await createQueryTool(fileId, SUPPORT_NAME);
-  if (!queryToolId) throw new Error('Failed to create the support KB query tool');
-
-  // 3. Support assistant
-  const assistant = await createSupportAssistant(queryToolId);
-
-  // 4. Buy Telnyx number, import to VAPI, attach the assistant (provisionLocalPhone
-  //    takes the assistantId and handles the Telnyx purchase + VAPI import).
-  const phone = await provisionLocalPhone(SUPPORT_CITY, SUPPORT_STATE, assistant.id, SUPPORT_NAME, null, {});
-  const number = phone.number || phone.phoneNumber;
-  console.log(`✅ Support number provisioned: ${number}`);
-
-  // Enable two-way SMS on the number (messaging profile + 10DLC). Non-fatal.
-  try {
-    await assignNumberForSMS(number);
-  } catch (e) {
-    console.warn(`⚠️  SMS assignment on ${number} did not complete: ${e.message} (run the assign-sms backfill later)`);
+  if (cmd === 'import') {
+    const num = process.argv[3];
+    if (!num) throw new Error('Usage: import <+1XXXXXXXXXX> [assistantId]');
+    if (!TELNYX_API_KEY) throw new Error('TELNYX_API_KEY not set');
+    const assistantId = await ensureAssistant(process.argv[4]);
+    const phone = await importExistingNumber(num, assistantId);
+    try { await assignNumberForSMS(num); } catch (e) { console.warn(`   ⚠️  SMS assign on ${num}: ${e.message}`); }
+    await setPlatformSetting('support_line_number', num);
+    if (phone.id) await setPlatformSetting('support_phone_id', phone.id);
+    console.log(`\n🎉 Support line ready: ${num} -> assistant ${assistantId}`);
+    return;
   }
 
-  // 5. Persist so the webhook can recognise support calls and the app can show it.
+  // default: full provision (orders a number). Prefer `import` when you have one.
+  const existing = await getPlatformSetting('support_line_number');
+  if (existing && !process.argv.includes('--force')) {
+    console.log(`⚠️  Support line already set: ${existing}. Re-run with --force to reprovision.`);
+    return;
+  }
+  const assistantId = await ensureAssistant();
+  const phone = await provisionLocalPhone(process.env.SUPPORT_LINE_CITY || 'Atlanta', process.env.SUPPORT_LINE_STATE || 'GA', assistantId, SUPPORT_NAME, null, {});
+  const number = phone.number || phone.phoneNumber;
+  console.log(`✅ Support number provisioned: ${number}`);
+  try { await assignNumberForSMS(number); } catch (e) { console.warn(`   ⚠️  SMS assign on ${number}: ${e.message}`); }
   await setPlatformSetting('support_line_number', number);
-  await setPlatformSetting('support_assistant_id', assistant.id);
-  await setPlatformSetting('support_query_tool_id', queryToolId);
-  await setPlatformSetting('support_kb_file_id', fileId);
   if (phone.id || phone.phoneId) await setPlatformSetting('support_phone_id', phone.id || phone.phoneId);
-
-  console.log('\n🎉 Support line ready:');
-  console.log(`   Number:        ${number}`);
-  console.log(`   Assistant id:  ${assistant.id}`);
-  console.log(`   KB file id:    ${fileId}`);
-  console.log('\nNext: the /webhook/vapi handler texts you on end-of-call when the');
-  console.log('assistant id matches support_assistant_id, and the UI reads');
-  console.log('support_line_number in place of the old hardcoded number.');
+  console.log(`\n🎉 Support line ready: ${number} -> assistant ${assistantId}`);
 }
 
 main().catch((err) => {
-  console.error('❌ Provisioning failed:', err.message);
+  console.error('❌ Failed:', err.message);
   process.exit(1);
 });
