@@ -601,6 +601,41 @@ router.post('/:agencyId/outreach/log', async (req, res) => {
       }
     }
 
+    // Every logged outreach marks the lead contacted and schedules the next
+    // follow-up on a 24h / 3-day / 7-day cadence (by how many times it has been
+    // contacted). Won/lost leads get no follow-up.
+    if (leadId) {
+      const { count } = await supabase
+        .from('outreach_history')
+        .select('id', { count: 'exact', head: true })
+        .eq('lead_id', leadId)
+        .eq('agency_id', agencyId);
+      const touches = count || 1;
+      const days = touches <= 1 ? 1 : touches === 2 ? 3 : 7;
+      const followUp = new Date();
+      followUp.setDate(followUp.getDate() + days);
+
+      const { data: leadRow } = await supabase
+        .from('leads')
+        .select('status')
+        .eq('id', leadId)
+        .eq('agency_id', agencyId)
+        .single();
+
+      const nowIso = new Date().toISOString();
+      const leadUpdates = {
+        last_contacted_at: nowIso,
+        last_outreach_at: nowIso,
+        last_outreach_type: type,
+      };
+      const closed = leadRow && (leadRow.status === 'won' || leadRow.status === 'lost');
+      if (!closed) leadUpdates.next_follow_up = followUp.toISOString().slice(0, 10);
+      // Promote an untouched lead to contacted; never downgrade a further-along one.
+      if (leadRow && (leadRow.status === 'new' || !leadRow.status)) leadUpdates.status = 'contacted';
+
+      await supabase.from('leads').update(leadUpdates).eq('id', leadId).eq('agency_id', agencyId);
+    }
+
     // Update template use count
     if (templateId) {
       const { data: template } = await supabase
