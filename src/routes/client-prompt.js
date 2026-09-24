@@ -80,7 +80,7 @@ router.get('/:agencyId/clients/:clientId/prompt', async (req, res) => {
 router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
   try {
     const { agencyId, clientId } = req.params;
-    const { system_prompt, first_message, voice_id, model, temperature, call_mode, transfer_phone } = req.body;
+    const { system_prompt, first_message, voice_id, model, temperature, call_mode, transfer_phone, speed } = req.body;
 
     // Detect which fields were provided
     const hasPrompt = typeof system_prompt === 'string' && system_prompt.trim().length >= 10;
@@ -90,13 +90,14 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     const hasTemp = typeof temperature === 'number' && temperature >= 0 && temperature <= 1;
     const hasCallMode = typeof call_mode === 'string' && (call_mode === 'primary' || call_mode === 'secondary');
     const hasTransferPhone = typeof transfer_phone === 'string' && transfer_phone.trim().length > 0;
+    const hasSpeed = typeof speed === 'number' && speed >= 0.7 && speed <= 1.2;
 
     // Validate prompt length
     if (typeof system_prompt === 'string' && system_prompt.trim().length > 0 && system_prompt.trim().length < 10) {
       return res.status(400).json({ success: false, error: 'system_prompt must be at least 10 characters' });
     }
 
-    if (!hasPrompt && !hasGreeting && !hasVoice && !hasModel && !hasTemp && !hasCallMode && !hasTransferPhone) {
+    if (!hasPrompt && !hasGreeting && !hasVoice && !hasModel && !hasTemp && !hasCallMode && !hasTransferPhone && !hasSpeed) {
       return res.status(400).json({ success: false, error: 'At least one field required' });
     }
 
@@ -115,7 +116,7 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     // ====================================================================
     // VAPI PATCH
     // ====================================================================
-    const needsVapiPatch = hasPrompt || hasGreeting || hasVoice || hasModel || hasTemp || hasTransferPhone;
+    const needsVapiPatch = hasPrompt || hasGreeting || hasVoice || hasModel || hasTemp || hasTransferPhone || hasSpeed;
 
     if (needsVapiPatch) {
       if (!client.vapi_assistant_id) {
@@ -197,9 +198,9 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
         patchPayload.firstMessage = first_message.trim();
       }
 
-      // --- voice ---
-      if (hasVoice) {
-        patchPayload.voice = { ...currentVoice, voiceId: voice_id.trim() };
+      // --- voice (voiceId and/or speed) ---
+      if (hasVoice || hasSpeed) {
+        patchPayload.voice = { ...currentVoice, ...(hasVoice && { voiceId: voice_id.trim() }), ...(hasSpeed && { speed }) };
       }
 
       // PATCH VAPI
@@ -236,6 +237,7 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     if (hasTemp) updated.temperature = temperature;
     if (hasCallMode) updated.call_mode = call_mode;
     if (hasTransferPhone) updated.transfer_phone = transfer_phone.trim();
+    if (hasSpeed) updated.speed = speed;
 
     console.log(`✅ AI config updated for ${client.business_name} (${clientId}): ${Object.keys(updated).join(', ')}`);
     res.json({ success: true, updated });
