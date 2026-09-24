@@ -176,9 +176,10 @@ Do the same for anything you cannot handle: billing disputes, refunds, cancellat
     firstMessage: greeting,
     // serverUrl - VAPI posts server messages here (end-of-call-report, etc.)
     serverUrl: `${BACKEND_URL}/webhook/vapi-support`,
+    serverMessages: ['end-of-call-report'],
     model: {
       provider: 'anthropic',
-      model: 'claude-sonnet-4-6-20260217',
+      model: 'claude-sonnet-4-6',
       messages: [
         { role: 'system', content: systemPrompt }
       ],
