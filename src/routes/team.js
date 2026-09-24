@@ -392,6 +392,11 @@ router.post('/client/:clientId/team', requireClientAccess('settings'), async (re
     if (!decoded || !isClientOwnerRole(decoded.role)) return res.status(403).json({ error: 'Only the account owner can manage team members' });
     const ownerUserId = decoded.userId;
     if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
+    // The acting owner must resolve to a real users row: invited_by / owner_user_id
+    // reference it, so a stale session (userId no longer in users) otherwise fails the
+    // insert with an opaque 500. Fail clearly and tell them to re-authenticate.
+    const { data: ownerRow } = await supabase.from('users').select('id').eq('id', ownerUserId).single();
+    if (!ownerRow) return res.status(401).json({ error: 'Your session is out of date. Please log out and back in, then add the member again.' });
     const limits = await checkTeamLimit('client', clientId);
     if (!limits.allowed) {
       const limitDisplay = limits.max === -1 ? 'Unlimited' : limits.max;

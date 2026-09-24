@@ -157,6 +157,15 @@ async function attachAssistant(phoneId, assistantId) {
 // Get the number into VAPI, attached to the support assistant. Retries transient
 // errors against the SAME number (never orders another). If VAPI already has the
 // number (Telnyx auto-import), attach the assistant to that existing object.
+async function listVapiPhoneNumbers() {
+  const res = await fetch('https://api.vapi.ai/phone-number', {
+    headers: { Authorization: `Bearer ${VAPI_API_KEY}` },
+  });
+  if (!res.ok) throw new Error(`List VAPI phone numbers failed: HTTP ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.results || data.data || []);
+}
+
 async function importExistingNumber(number, assistantId) {
   await waitForTelnyxActive(number);
   const credentialId = await getVapiTelnyxCredentialId();
@@ -238,10 +247,28 @@ async function main() {
     return;
   }
 
+  if (cmd === 'numbers') {
+    // Diagnostic: list every VAPI phone object and the assistant attached to it.
+    // Pass a number to flag matches. Use when a call answers with the wrong
+    // assistant, to see which phone object actually carries the number.
+    const target = process.argv[3] || null;
+    const nums = await listVapiPhoneNumbers();
+    console.log(`\nVAPI phone objects (${nums.length}):\n`);
+    for (const n of nums) {
+      const mark = target && n.number === target ? '   <== MATCH' : '';
+      console.log(`   ${n.number || '(no number)'}  id=${n.id}  assistant=${n.assistantId || '(none)'}  provider=${n.provider || '?'}${mark}`);
+    }
+    if (target && !nums.some((n) => n.number === target)) {
+      console.log(`\n\u26a0\ufe0f  No VAPI phone object carries ${target}. It is not imported into VAPI (Telnyx may route it elsewhere).`);
+    }
+    return;
+  }
+
   if (cmd === 'refresh') {
     // Force the live number onto a freshly-built assistant with the CURRENT config.
-    // Use when the line answers with a stale assistant (wrong greeting, wrong
-    // webhook). Ignores the stored assistant id and replaces it. KB/tool reused.
+    // Finds the ACTUAL VAPI phone object(s) BY NUMBER (a stored phone id can be
+    // stale or a duplicate) and attaches to every match, so whichever object VAPI
+    // routes the call to has the correct assistant. KB/tool reused.
     const num = process.argv[3] || (await getPlatformSetting('support_line_number'));
     if (!num) throw new Error('Usage: refresh <+1XXXXXXXXXX>');
     let toolId = process.env.SUPPORT_QUERY_TOOL_ID || (await getPlatformSetting('support_query_tool_id'));
@@ -256,12 +283,22 @@ async function main() {
     }
     const assistant = await createSupportAssistant(toolId);
     await setPlatformSetting('support_assistant_id', assistant.id);
-    let phoneId = await getPlatformSetting('support_phone_id');
-    if (phoneId) {
-      await attachAssistant(phoneId, assistant.id);
-    } else {
+
+    const all = await listVapiPhoneNumbers();
+    const matches = all.filter((n) => n.number === num);
+    if (matches.length === 0) {
+      console.warn(`\u26a0\ufe0f  No VAPI phone object carries ${num}. Importing it now...`);
       const phone = await importExistingNumber(num, assistant.id);
       if (phone && phone.id) await setPlatformSetting('support_phone_id', phone.id);
+    } else {
+      for (const m of matches) {
+        console.log(`   Attaching to ${m.number} (id=${m.id}, was assistant=${m.assistantId || 'none'})`);
+        await attachAssistant(m.id, assistant.id);
+      }
+      await setPlatformSetting('support_phone_id', matches[0].id);
+      if (matches.length > 1) {
+        console.warn(`\u26a0\ufe0f  ${matches.length} VAPI phone objects carry ${num} (duplicates from earlier imports). Attached the new assistant to ALL of them so the call is correct no matter which VAPI uses. Delete the extras in the VAPI dashboard when convenient.`);
+      }
     }
     console.log(`\n🎉 Support line refreshed: ${num} -> NEW assistant ${assistant.id}`);
     return;
