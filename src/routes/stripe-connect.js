@@ -1629,7 +1629,11 @@ async function changeClientPlan(req, res) {
     // Restricted to the managing agency or super_admin: the client itself must
     // NOT change its own manual plan/cap, or it could set its limit to -1 and
     // run up the agency's platform minute bill with no payment signal to stop it.
-    if (client.billing_mode === 'manual') {
+    // Test clients take this same feature-only path: they have no real billing,
+    // so a plan change just updates plan_type and the cap (matches the UI, which
+    // shows "no charge" for test clients). Without this they fell through to the
+    // Stripe path and the change silently failed, so the plan reverted on reload.
+    if (client.billing_mode === 'manual' || client.is_test_client) {
       if (!isSuperAdmin && !isManagingAgency) {
         return res.status(403).json({ error: 'Forbidden', message: 'Only your provider can change this plan.' });
       }
