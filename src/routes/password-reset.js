@@ -61,7 +61,7 @@ async function findClientUserByPhone(rawPhone) {
   const last4 = digits.slice(-4);
   const { data: candidates } = await supabase
     .from('clients')
-    .select('id, owner_phone, agency_id')
+    .select('id, owner_phone, agency_id, vapi_phone_number')
     .not('owner_phone', 'is', null)
     .ilike('owner_phone', `%${last4}`);
   const client = (candidates || []).find(
@@ -106,6 +106,7 @@ router.post('/forgot-password', async (req, res) => {
     let userType = 'client';
     let phone = null;
     let clientAgencyId = null;
+    let clientAiNumber = null; // the client's AI receptionist number, used as the white-label SMS sender
     let recordEmail = null; // stored on the token row for reference/audit
 
     if (scope === 'client') {
@@ -127,6 +128,7 @@ router.post('/forgot-password', async (req, res) => {
       userType = 'client';
       phone = found.client.owner_phone;
       clientAgencyId = found.client.agency_id || null;
+      clientAiNumber = found.client.vapi_phone_number || null;
       recordEmail = found.user.email || null;
     } else {
       // AGENCY (or unscoped): identify by EMAIL; the code is emailed.
@@ -155,9 +157,10 @@ router.post('/forgot-password', async (req, res) => {
         // the client's owner_phone (white-label).
         userType = 'client';
         const { data: client } = await supabase
-          .from('clients').select('owner_phone, agency_id').eq('id', user.client_id).single();
+          .from('clients').select('owner_phone, agency_id, vapi_phone_number').eq('id', user.client_id).single();
         phone = client?.owner_phone;
         clientAgencyId = client?.agency_id || null;
+        clientAiNumber = client?.vapi_phone_number || null;
         if (!phone) { await antiEnumDelay(); return neutral(); }
       } else {
         userType = 'client';
@@ -231,9 +234,10 @@ router.post('/forgot-password', async (req, res) => {
     }
 
     // ---- CLIENT: deliver the code by SMS (white-label safe) ------------------
-    // Route through sendAndLogSMS WITH the client's agency, so a non-US BYOT
-    // agency sends the code from its OWN Twilio. US clients fall through to
-    // platform Telnyx inside sendAndLogSMS.
+    // Route through sendAndLogSMS WITH the client's agency and AI number, so a
+    // non-US BYOT agency sends from its OWN Twilio, and a US client sends from
+    // its own AI receptionist number (the recognizable white-label sender),
+    // falling back to platform Telnyx when the client has no number on file yet.
     const templateMsg = await getSmsTemplate('password_reset_code', { code });
     const smsMessage = templateMsg || `Your verification code is: ${code}\n\nThis code expires in 15 minutes. Do not share it with anyone.`;
 
@@ -242,6 +246,7 @@ router.post('/forgot-password', async (req, res) => {
       smsSent = (await sendAndLogSMS({
         phone,
         message: smsMessage,
+        from: clientAiNumber,
         agencyId: clientAgencyId,
         recipientType: 'client_owner',
         messageType: 'client_password_reset',
