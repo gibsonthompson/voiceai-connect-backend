@@ -70,7 +70,7 @@ async function createSupportAssistant(queryToolId) {
       ...(queryToolId && { toolIds: [queryToolId] }),
       tools: [{ type: 'endCall' }],
     },
-    voice: { provider: '11labs', model: 'eleven_flash_v2_5', voiceId: 'burt' },
+    voice: { provider: '11labs', model: 'eleven_flash_v2_5', voiceId: 'EXAVITQu4vr4xnSDxMaL' },
     firstMessage: SUPPORT_FIRST_MESSAGE,
     recordingEnabled: true,
     serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
