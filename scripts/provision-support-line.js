@@ -74,7 +74,7 @@ async function createSupportAssistant(queryToolId) {
     firstMessage: SUPPORT_FIRST_MESSAGE,
     recordingEnabled: true,
     serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
-    serverUrl: `${BACKEND_URL}/webhook/vapi`,
+    serverUrl: `${BACKEND_URL}/webhook/vapi-support`,
     serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET,
   };
   const res = await fetch('https://api.vapi.ai/assistant', {
@@ -235,6 +235,35 @@ async function main() {
     console.log(`🗑️  Releasing ${num}...`);
     await releaseTelnyxNumber(num);
     console.log('✅ Release requested.');
+    return;
+  }
+
+  if (cmd === 'refresh') {
+    // Force the live number onto a freshly-built assistant with the CURRENT config.
+    // Use when the line answers with a stale assistant (wrong greeting, wrong
+    // webhook). Ignores the stored assistant id and replaces it. KB/tool reused.
+    const num = process.argv[3] || (await getPlatformSetting('support_line_number'));
+    if (!num) throw new Error('Usage: refresh <+1XXXXXXXXXX>');
+    let toolId = process.env.SUPPORT_QUERY_TOOL_ID || (await getPlatformSetting('support_query_tool_id'));
+    if (!toolId) {
+      const kbContent = fs.readFileSync(path.join(__dirname, 'support-kb.md'), 'utf-8');
+      const kb = await createIndustryKnowledgeBase(SUPPORT_NAME, 'support', null, kbContent);
+      if (!kb || !kb.fileId) throw new Error('KB upload failed');
+      await setPlatformSetting('support_kb_file_id', kb.fileId);
+      toolId = await createQueryTool(kb.fileId, SUPPORT_NAME);
+      if (!toolId) throw new Error('Failed to create the KB query tool');
+      await setPlatformSetting('support_query_tool_id', toolId);
+    }
+    const assistant = await createSupportAssistant(toolId);
+    await setPlatformSetting('support_assistant_id', assistant.id);
+    let phoneId = await getPlatformSetting('support_phone_id');
+    if (phoneId) {
+      await attachAssistant(phoneId, assistant.id);
+    } else {
+      const phone = await importExistingNumber(num, assistant.id);
+      if (phone && phone.id) await setPlatformSetting('support_phone_id', phone.id);
+    }
+    console.log(`\n🎉 Support line refreshed: ${num} -> NEW assistant ${assistant.id}`);
     return;
   }
 
