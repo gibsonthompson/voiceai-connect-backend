@@ -176,10 +176,10 @@ Do the same for anything you cannot handle: billing disputes, refunds, cancellat
     firstMessage: greeting,
     // serverUrl - VAPI posts server messages here (end-of-call-report, etc.)
     serverUrl: `${BACKEND_URL}/webhook/vapi-support`,
-    serverMessages: ['end-of-call-report'],
+    serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
     model: {
-      provider: 'anthropic',
-      model: 'claude-sonnet-4-6',
+      provider: 'openai',
+      model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: systemPrompt }
       ],
@@ -187,7 +187,19 @@ Do the same for anything you cannot handle: billing disputes, refunds, cancellat
     },
     voice: {
       provider: '11labs',
+      model: 'eleven_flash_v2_5',
       voiceId: SUPPORT_VOICE_ID,
+    },
+    // Turn-taking parity with the working client receptionists so the caller
+    // gets natural back-and-forth instead of long dead-air pauses.
+    startSpeakingPlan: {
+      waitSeconds: 0.4,
+      smartEndpointingPlan: { provider: 'vapi' },
+    },
+    stopSpeakingPlan: {
+      numWords: 2,
+      voiceSeconds: 0.2,
+      backoffSeconds: 1.0,
     },
     silenceTimeoutSeconds: 30,
     maxDurationSeconds: 600,
