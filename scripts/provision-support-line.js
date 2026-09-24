@@ -297,6 +297,93 @@ async function main() {
     return;
   }
 
+  if (cmd === 'telnyx') {
+    // Inspect the Telnyx-side config for one or more numbers. Inbound voice reaches
+    // VAPI only when the number is on VAPI's Telnyx connection AND has no call
+    // forwarding. Compare the support number against a client number that answers.
+    if (!TELNYX_API_KEY) throw new Error('TELNYX_API_KEY not set');
+    const targets = process.argv.slice(3).filter(Boolean);
+    if (targets.length === 0) throw new Error('Usage: telnyx <+1XXXXXXXXXX> [+1workingNumber ...]');
+    const getRec = async (number) => {
+      const res = await fetch(`https://api.telnyx.com/v2/phone_numbers?filter[phone_number]=${encodeURIComponent(number)}`, {
+        headers: { Authorization: `Bearer ${TELNYX_API_KEY}` },
+      });
+      const body = await res.json();
+      return (body.data && body.data[0]) || null;
+    };
+    for (const number of targets) {
+      const rec = await getRec(number);
+      if (!rec) { console.log(`\n${number}: NOT found in this Telnyx account.`); continue; }
+      console.log(`\n${number} (Telnyx):`);
+      console.log(`   id: ${rec.id}`);
+      console.log(`   status: ${rec.status}`);
+      console.log(`   connection_id: ${rec.connection_id || '(NONE - inbound has nowhere to go)'}`);
+      console.log(`   connection_name: ${rec.connection_name || '(none)'}`);
+      console.log(`   messaging_profile_id: ${rec.messaging_profile_id || '(none)'}`);
+      const vRes = await fetch(`https://api.telnyx.com/v2/phone_numbers/${rec.id}/voice`, {
+        headers: { Authorization: `Bearer ${TELNYX_API_KEY}` },
+      });
+      if (vRes.ok) {
+        const v = (await vRes.json()).data || {};
+        const cf = v.call_forwarding || {};
+        console.log(`   voice.call_forwarding_enabled: ${cf.call_forwarding_enabled === true}`);
+        console.log(`   voice.forwards_to: ${cf.forwards_to || '(none)'}`);
+      }
+    }
+    console.log(`\nThe support number must share the SAME connection_id as a client number that answers, and have call_forwarding_enabled = false.`);
+    console.log(`Fixes:  align-voice ${targets[0]} <workingNumber>   |   no-forward ${targets[0]}`);
+    return;
+  }
+
+  if (cmd === 'align-voice') {
+    // Copy a working number's Telnyx connection_id onto the support number so
+    // inbound routes to VAPI the same way. Fixes drop-to-voicemail when the number
+    // is not on VAPI's Telnyx voice connection.
+    if (!TELNYX_API_KEY) throw new Error('TELNYX_API_KEY not set');
+    const target = process.argv[3], working = process.argv[4];
+    if (!target || !working) throw new Error('Usage: align-voice <+1supportNumber> <+1workingNumber>');
+    const getRec = async (number) => {
+      const res = await fetch(`https://api.telnyx.com/v2/phone_numbers?filter[phone_number]=${encodeURIComponent(number)}`, {
+        headers: { Authorization: `Bearer ${TELNYX_API_KEY}` },
+      });
+      return ((await res.json()).data || [])[0] || null;
+    };
+    const wRec = await getRec(working);
+    if (!wRec || !wRec.connection_id) throw new Error(`Working number ${working} not found or has no connection_id.`);
+    const tRec = await getRec(target);
+    if (!tRec) throw new Error(`Support number ${target} not found in Telnyx.`);
+    console.log(`Setting ${target} connection_id: ${tRec.connection_id || '(none)'} -> ${wRec.connection_id} (from ${working})`);
+    const patch = await fetch(`https://api.telnyx.com/v2/phone_numbers/${tRec.id}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${TELNYX_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ connection_id: wRec.connection_id }),
+    });
+    if (!patch.ok) throw new Error(`Telnyx PATCH failed: HTTP ${patch.status}: ${await patch.text()}`);
+    console.log(`✅ ${target} now on connection ${wRec.connection_id}. Call it again.`);
+    return;
+  }
+
+  if (cmd === 'no-forward') {
+    // Turn OFF Telnyx-level call forwarding on the number, so inbound calls stop
+    // being sent to voicemail before VAPI answers.
+    if (!TELNYX_API_KEY) throw new Error('TELNYX_API_KEY not set');
+    const target = process.argv[3];
+    if (!target) throw new Error('Usage: no-forward <+1XXXXXXXXXX>');
+    const res = await fetch(`https://api.telnyx.com/v2/phone_numbers?filter[phone_number]=${encodeURIComponent(target)}`, {
+      headers: { Authorization: `Bearer ${TELNYX_API_KEY}` },
+    });
+    const rec = ((await res.json()).data || [])[0] || null;
+    if (!rec) throw new Error(`${target} not found in Telnyx.`);
+    const patch = await fetch(`https://api.telnyx.com/v2/phone_numbers/${rec.id}/voice`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${TELNYX_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ call_forwarding: { call_forwarding_enabled: false } }),
+    });
+    if (!patch.ok) throw new Error(`Telnyx voice PATCH failed: HTTP ${patch.status}: ${await patch.text()}`);
+    console.log(`✅ Call forwarding disabled on ${target}. Call it again.`);
+    return;
+  }
+
   if (cmd === 'refresh') {
     // Force the live number onto a freshly-built assistant with the CURRENT config.
     // Finds the ACTUAL VAPI phone object(s) BY NUMBER (a stored phone id can be
