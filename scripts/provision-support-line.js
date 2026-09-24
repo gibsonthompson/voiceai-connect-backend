@@ -384,6 +384,68 @@ async function main() {
     return;
   }
 
+  if (cmd === 'delete-vapi') {
+    // Clear the VAPI phone object(s) for a number, and release the Telnyx number
+    // if this account still owns it. Use before rebuild to remove a ghost object.
+    const num = process.argv[3];
+    if (!num) throw new Error('Usage: delete-vapi <+1XXXXXXXXXX>');
+    const all = await listVapiPhoneNumbers();
+    const matches = all.filter((n) => n.number === num);
+    if (matches.length === 0) {
+      console.log(`No VAPI phone object carries ${num}.`);
+    } else {
+      for (const m of matches) {
+        const del = await fetch(`https://api.vapi.ai/phone-number/${m.id}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${VAPI_API_KEY}` },
+        });
+        console.log(`   VAPI delete ${m.id}: HTTP ${del.status}`);
+      }
+    }
+    if (TELNYX_API_KEY) {
+      try { await fullyReleaseNumber(null, num); console.log(`   Telnyx release requested for ${num}.`); }
+      catch (e) { console.log(`   Telnyx release skipped (likely not owned here): ${e.message}`); }
+    }
+    console.log(`\u2705 Cleaned up ${num}. Next: node scripts/provision-support-line.js rebuild`);
+    return;
+  }
+
+  if (cmd === 'rebuild') {
+    // Provision a FRESH support number the correct, proven way (identical path to
+    // client numbers): order in Telnyx -> import to VAPI (this sets the 'Vapi'
+    // connection so inbound routes in) -> assign SMS -> attach a freshly-built
+    // static support assistant. Stores the new number in platform settings.
+    if (!TELNYX_API_KEY) throw new Error('TELNYX_API_KEY not set');
+    const city = process.env.SUPPORT_LINE_CITY || 'Atlanta';
+    const state = process.env.SUPPORT_LINE_STATE || 'GA';
+    // Build a fresh assistant with the CURRENT config (reuse KB/tool if present).
+    let toolId = process.env.SUPPORT_QUERY_TOOL_ID || (await getPlatformSetting('support_query_tool_id'));
+    if (!toolId) {
+      const kbContent = fs.readFileSync(path.join(__dirname, 'support-kb.md'), 'utf-8');
+      const kb = await createIndustryKnowledgeBase(SUPPORT_NAME, 'support', null, kbContent);
+      if (!kb || !kb.fileId) throw new Error('KB upload failed');
+      await setPlatformSetting('support_kb_file_id', kb.fileId);
+      toolId = await createQueryTool(kb.fileId, SUPPORT_NAME);
+      if (!toolId) throw new Error('Failed to create the KB query tool');
+      await setPlatformSetting('support_query_tool_id', toolId);
+    }
+    const assistant = await createSupportAssistant(toolId);
+    await setPlatformSetting('support_assistant_id', assistant.id);
+    console.log(`Provisioning a fresh number in ${city}, ${state}...`);
+    const phone = await provisionLocalPhone(city, state, assistant.id, SUPPORT_NAME, null, {});
+    const number = phone.number || phone.phoneNumber;
+    const phoneId = phone.id || phone.phoneId;
+    // provisionLocalPhone pins the number to dynamic; attach the STATIC support
+    // assistant so the line uses our fixed config.
+    if (phoneId) await attachAssistant(phoneId, assistant.id);
+    try { await assignNumberForSMS(number); } catch (e) { console.warn(`   \u26a0\ufe0f  SMS assign: ${e.message}`); }
+    await setPlatformSetting('support_line_number', number);
+    if (phoneId) await setPlatformSetting('support_phone_id', phoneId);
+    console.log(`\n\ud83c\udf89 New support line: ${number} (VAPI phone ${phoneId}, assistant ${assistant.id})`);
+    console.log(`   Tell Claude this number so the frontend gets updated (or make it fetch support_line_number).`);
+    return;
+  }
+
   if (cmd === 'refresh') {
     // Force the live number onto a freshly-built assistant with the CURRENT config.
     // Finds the ACTUAL VAPI phone object(s) BY NUMBER (a stored phone id can be
