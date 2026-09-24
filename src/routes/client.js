@@ -364,10 +364,16 @@ router.get('/:id/voice', requirePermissionIfAuthed('ai_agent'), async (req, res)
       return res.json({ success: true, voice_id: client.voice_id, voice });
     }
     if (client.vapi_assistant_id) {
-      const response = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, { headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` } });
-      if (response.ok) { const assistant = await response.json(); const voiceId = assistant.voice?.voiceId; const voice = VOICE_OPTIONS.find(v => v.id === voiceId); return res.json({ success: true, voice_id: voiceId, voice }); }
+      try {
+        const response = await fetch(`https://api.vapi.ai/assistant/${client.vapi_assistant_id}`, { headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` } });
+        if (response.ok) { const assistant = await response.json(); const voiceId = assistant.voice?.voiceId; const voice = VOICE_OPTIONS.find(v => v.id === voiceId); if (voice) return res.json({ success: true, voice_id: voiceId, voice }); }
+      } catch {}
     }
-    res.json({ success: true, voice_id: null, voice: null });
+    // No explicit voice saved and none resolvable from the assistant. Return the
+    // default voice so the dashboard always shows the voice callers actually hear
+    // as selected, instead of nothing.
+    const fallbackVoice = VOICE_OPTIONS.find(v => v.id === 'EXAVITQu4vr4xnSDxMaL') || VOICE_OPTIONS[0];
+    res.json({ success: true, voice_id: fallbackVoice ? fallbackVoice.id : null, voice: fallbackVoice || null });
   } catch (error) { console.error('Error fetching voice:', error); res.status(500).json({ success: false, error: 'Server error' }); }
 });
 
