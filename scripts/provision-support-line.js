@@ -264,6 +264,39 @@ async function main() {
     return;
   }
 
+  if (cmd === 'inspect') {
+    // Dump the live phone object for a number and the assistant attached to it,
+    // so we can see the ACTUAL firstMessage, model, voice, and any squad/workflow
+    // that could be answering instead of the assistant.
+    const num = process.argv[3] || (await getPlatformSetting('support_line_number'));
+    if (!num) throw new Error('Usage: inspect <+1XXXXXXXXXX>');
+    const all = await listVapiPhoneNumbers();
+    const phone = all.find((n) => n.number === num);
+    if (!phone) { console.log(`No VAPI phone object carries ${num}.`); return; }
+    console.log(`\nPhone object for ${num}:`);
+    console.log(`   id: ${phone.id}`);
+    console.log(`   assistantId: ${phone.assistantId || '(none)'}`);
+    console.log(`   squadId: ${phone.squadId || '(none)'}`);
+    console.log(`   workflowId: ${phone.workflowId || '(none)'}`);
+    console.log(`   fallbackDestination: ${phone.fallbackDestination ? JSON.stringify(phone.fallbackDestination) : '(none)'}`);
+    console.log(`   server: ${phone.server ? JSON.stringify(phone.server) : '(none)'}`);
+    if (phone.assistantId) {
+      const aRes = await fetch(`https://api.vapi.ai/assistant/${phone.assistantId}`, { headers: { Authorization: `Bearer ${VAPI_API_KEY}` } });
+      if (!aRes.ok) { console.log(`\n\u26a0\ufe0f  Could not fetch assistant ${phone.assistantId}: HTTP ${aRes.status}`); return; }
+      const a = await aRes.json();
+      console.log(`\nAttached assistant ${a.id}:`);
+      console.log(`   name: ${a.name}`);
+      console.log(`   firstMessageMode: ${a.firstMessageMode || '(default: assistant-speaks-first)'}`);
+      console.log(`   firstMessage: ${JSON.stringify(a.firstMessage)}`);
+      console.log(`   model: ${a.model && a.model.provider} / ${a.model && a.model.model}`);
+      console.log(`   voice: ${a.voice && a.voice.provider} / ${a.voice && a.voice.voiceId} (model ${(a.voice && a.voice.model) || '-'})`);
+      console.log(`   serverUrl: ${a.serverUrl || (a.server && a.server.url) || '(none)'}`);
+      const toolTypes = ((a.model && a.model.tools) || []).map((t) => t.type || (t.function && t.function.name)).join(', ');
+      console.log(`   tools: ${toolTypes || '(none)'}   toolIds: ${((a.model && a.model.toolIds) || []).length}`);
+    }
+    return;
+  }
+
   if (cmd === 'refresh') {
     // Force the live number onto a freshly-built assistant with the CURRENT config.
     // Finds the ACTUAL VAPI phone object(s) BY NUMBER (a stored phone id can be
