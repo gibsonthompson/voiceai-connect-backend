@@ -56,7 +56,7 @@ When you cannot fully resolve the caller's issue by explaining it (something is 
 3. Read it back, thank them, and let them know someone will get back to them.
 The team is automatically texted a summary after every call, so nothing is lost.
 
-Keep calls warm, efficient, and focused on getting the caller unstuck.`;
+Keep every reply short and natural, one or two sentences, the way a real person talks on the phone. Do not lecture or read long lists; get to the point, ask a quick follow-up if you need more, and stay warm and focused on getting the caller unstuck.`;
 
 async function createSupportAssistant(queryToolId) {
   const assistantConfig = {
@@ -64,13 +64,21 @@ async function createSupportAssistant(queryToolId) {
     transcriber: { provider: 'deepgram', model: 'nova-2', language: 'multi' },
     model: {
       provider: 'openai',
-      model: 'gpt-4o',
+      model: 'gpt-4o-mini',
       temperature: 0.4,
       messages: [{ role: 'system', content: SUPPORT_SYSTEM_PROMPT }],
       ...(queryToolId && { toolIds: [queryToolId] }),
       tools: [{ type: 'endCall' }],
     },
     voice: { provider: '11labs', model: 'eleven_flash_v2_5', voiceId: 'EXAVITQu4vr4xnSDxMaL' },
+    // Turn-taking tuned to match the client receptionists so support feels snappy
+    // and conversational instead of laggy (VAPI's default waits ~1.5s per turn).
+    startSpeakingPlan: {
+      waitSeconds: 0.4,
+      smartEndpointingPlan: { provider: 'vapi' },
+      transcriptionEndpointingPlan: { onPunctuationSeconds: 0.2, onNoPunctuationSeconds: 1.0, onNumberSeconds: 0.4 },
+    },
+    stopSpeakingPlan: { numWords: 2, voiceSeconds: 0.2, backoffSeconds: 1.0 },
     firstMessage: SUPPORT_FIRST_MESSAGE,
     recordingEnabled: true,
     serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
@@ -443,6 +451,33 @@ async function main() {
     if (phoneId) await setPlatformSetting('support_phone_id', phoneId);
     console.log(`\n\ud83c\udf89 New support line: ${number} (VAPI phone ${phoneId}, assistant ${assistant.id})`);
     console.log(`   Tell Claude this number so the frontend gets updated (or make it fetch support_line_number).`);
+    return;
+  }
+
+  if (cmd === 'use-dynamic') {
+    // Point the support number at the dynamic assistant-request webhook so each
+    // call is built per-caller (agency-aware greeting + caller lookup). Removes
+    // the static assistant. Revert to the static line with: refresh <number>.
+    const num = process.argv[3] || (await getPlatformSetting('support_line_number'));
+    if (!num) throw new Error('Usage: use-dynamic <+1XXXXXXXXXX>');
+    const all = await listVapiPhoneNumbers();
+    const matches = all.filter((n) => n.number === num);
+    if (matches.length === 0) throw new Error(`No VAPI phone object carries ${num}. Run: numbers ${num}`);
+    for (const m of matches) {
+      const res = await fetch(`https://api.vapi.ai/phone-number/${m.id}`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          assistantId: null,
+          serverUrl: `${BACKEND_URL}/webhook/vapi-support`,
+          serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET,
+        }),
+      });
+      const body = await res.text();
+      console.log(`   ${m.number} (${m.id}) -> dynamic assistant-request: HTTP ${res.status}`);
+      if (!res.ok) console.warn(`      ${body}`);
+    }
+    console.log(`\n\u2705 ${num} now uses the dynamic support webhook (agency-aware greeting). Revert with: refresh ${num}`);
     return;
   }
 

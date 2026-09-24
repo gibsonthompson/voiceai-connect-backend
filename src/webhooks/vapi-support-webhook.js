@@ -102,99 +102,66 @@ async function lookupCallerContext(callerPhone) {
 // ============================================================================
 // BUILD DYNAMIC ASSISTANT CONFIG
 // ============================================================================
-function buildSupportAssistant(context) {
-  const agencyName = context?.agencyName || 'VoiceAI Connect';
+async function buildSupportAssistant(context) {
+  const agencyName = context?.agencyName || null;
   const clientName = context?.businessName || null;
   const planType = context?.planType || null;
 
-  const greeting = clientName
-    ? `Hi, thanks for calling ${agencyName} support! I can see you're calling from ${clientName}. How can I help you today?`
-    : `Hi, thanks for calling ${agencyName} support! How can I help you today?`;
+  // Agency-aware greeting: a caller who matches a client hears their agency's own
+  // branded support line. Unknown callers get a plain greeting (no platform name).
+  const greeting = agencyName
+    ? `Thanks for calling ${agencyName} support. How can I help you today?`
+    : `Thanks for calling support. How can I help you today?`;
 
   const contextLine = clientName
-    ? `The caller is ${clientName}, a ${planType || 'client'} on the ${agencyName} platform.`
-    : `The caller's identity is unknown. Ask for their name and business name to help them.`;
+    ? `The caller is ${clientName}, a ${planType || 'client'} on ${agencyName}. Treat this as ${agencyName}'s own support line.`
+    : (agencyName
+        ? `The caller is with ${agencyName}. Treat this as ${agencyName}'s own support line.`
+        : `The caller's identity is unknown. If you need it, ask for their name and business name.`);
 
-  const systemPrompt = `You are the phone support assistant for ${agencyName}. You help business owners who use ${agencyName}'s AI receptionist service.
+  const systemPrompt = `You are the voice support line for an AI receptionist service${agencyName ? ` provided by ${agencyName}` : ''}. Callers are business owners who use the AI receptionist and have questions about setting it up or troubleshooting it: their greeting, call forwarding, reading call transcripts, voice, business hours, billing, and so on.
 
-## YOUR ROLE
-You provide friendly, concise voice support. Keep responses SHORT — this is a phone call, not a text chat. 2-3 sentences max per turn. Be warm and helpful.
+How to help:
+- For any how-to or troubleshooting question, FIRST call the search_knowledge_base tool and answer from what it returns. Do not guess, and never invent features, prices, or policies.
+- Keep every reply short and natural, one or two sentences, the way a real person talks on the phone. Get to the point and ask a quick follow-up if you need more.
+- You cannot make changes to their account, access their recordings or transcripts, process billing, or reset passwords. For those, point them to the right place in the app, or take a message.
+- There is no live person to transfer to. If you cannot resolve it, or they ask for a human, take a message: get their name, business name, a callback number, and a one-sentence description, read it back, and let them know the team will follow up. The team is texted a summary after every call, so nothing is lost.
 
-## CALLER CONTEXT
 ${contextLine}
 
-## WHAT YOU CAN HELP WITH
+Never mention internal tools or vendors (no VAPI, Supabase, Telnyx, and so on). Stay warm, brief, and focused on getting the caller unstuck.`;
 
-### Call Forwarding Setup
-- "To forward your calls to your AI number, open your phone app, go to Settings, then Call Forwarding, and enter your AI phone number."
-- For conditional forwarding (only when busy/no answer): "Check with your phone carrier — most support codes like *67 or *61 for conditional forwarding."
-- If they can't find the setting: "It varies by carrier. I'd recommend calling your phone provider and asking them to set up call forwarding to your AI number."
-
-### AI Receptionist Issues
-- "Not answering calls" → Check if they forwarded correctly, check if their trial is active, check if call limit is reached
-- "Wrong information" → They can update their Knowledge Base in the app under AI Agent
-- "Sounds robotic" → They can change the voice in AI Agent → Voice settings
-- "Not booking appointments" → Calendar integration needs to be connected in Settings
-
-### Dashboard / App Questions
-- Login issues → Try "Forgot Password" which sends an SMS code, or contact support
-- Can't find calls → Calls tab shows all call history with recordings and transcripts
-- Updating greeting → AI Agent tab → Greeting section
-- Changing voice → AI Agent tab → Voice section
-- Business hours → AI Agent tab → Business Hours
-- Knowledge base → AI Agent tab → Knowledge Base
-
-### Billing Questions
-- "How much does it cost?" → "Your agency sets the pricing. Check your plan details in Settings, or I can take a message for the team."
-- Upgrade/downgrade → Settings → Billing
-- Cancel → Settings → Billing → Cancel subscription
-- Payment failed → Settings → update payment method
-
-### Things You CANNOT Do
-- You cannot make changes to their account
-- You cannot access their call recordings or transcripts
-- You cannot process refunds or billing changes
-- You cannot reset passwords (direct them to the app's Forgot Password)
-- For any of these, offer to take a message for the support team
-
-## WHEN YOU CANNOT HELP
-There is no live person to transfer to on this line. If you cannot resolve the caller's issue from the information above, or the caller asks for a human, take a message:
-1. Let them know you'll pass this along to the support team and someone will follow up.
-2. Make sure you clearly understand what they need, and if you don't already have a good callback number, ask for the best one.
-3. Do NOT promise a specific callback time.
-4. Then use the endCall tool to end the call politely.
-Do the same for anything you cannot handle: billing disputes, refunds, cancellations, a critical outage (their AI isn't answering ANY calls), or a technical problem beyond basic troubleshooting. Take a message, do not transfer."
-
-## GUARDRAILS
-- ONLY discuss topics related to ${agencyName}'s AI receptionist service
-- If asked about unrelated topics, say: "I'm here to help with your AI receptionist. What can I help you with?"
-- NEVER reveal technical details: API providers, database systems, hosting, infrastructure
-- NEVER mention: VAPI, Supabase, Telnyx, Vercel, or any internal tooling
-- Keep responses conversational and brief — this is a phone call`;
+  // Load the KB query tool so the assistant can actually answer from the support
+  // knowledge base. Without it the line is only conversational, not useful.
+  let toolId = null;
+  try {
+    const { data } = await supabase.from('platform_settings').select('value').eq('key', 'support_query_tool_id').maybeSingle();
+    toolId = data?.value || null;
+  } catch (e) {
+    console.warn('\u26a0\ufe0f Could not load support_query_tool_id (KB tool):', e.message);
+  }
 
   return {
     firstMessage: greeting,
-    // serverUrl - VAPI posts server messages here (end-of-call-report, etc.)
     serverUrl: `${BACKEND_URL}/webhook/vapi-support`,
     serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
     model: {
       provider: 'openai',
       model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: systemPrompt }
-      ],
       temperature: 0.4,
+      messages: [{ role: 'system', content: systemPrompt }],
+      ...(toolId && { toolIds: [toolId] }),
+      tools: [{ type: 'endCall' }],
     },
     voice: {
       provider: '11labs',
       model: 'eleven_flash_v2_5',
       voiceId: SUPPORT_VOICE_ID,
     },
-    // Turn-taking parity with the working client receptionists so the caller
-    // gets natural back-and-forth instead of long dead-air pauses.
     startSpeakingPlan: {
       waitSeconds: 0.4,
       smartEndpointingPlan: { provider: 'vapi' },
+      transcriptionEndpointingPlan: { onPunctuationSeconds: 0.2, onNoPunctuationSeconds: 1.0, onNumberSeconds: 0.4 },
     },
     stopSpeakingPlan: {
       numWords: 2,
@@ -209,13 +176,6 @@ Do the same for anything you cannot handle: billing disputes, refunds, cancellat
       model: 'nova-2',
       language: 'en',
     },
-    // The AI resolves the call or takes a message, then ends the call itself.
-    // There is no human transfer on the client support line.
-    tools: [
-      {
-        type: 'endCall',
-      },
-    ],
   };
 }
 
@@ -316,7 +276,7 @@ async function handleSupportWebhook(req, res) {
         console.log('⚠️ Unknown caller — generic greeting');
       }
 
-      const assistant = buildSupportAssistant(context);
+      const assistant = await buildSupportAssistant(context);
       return res.status(200).json({ assistant });
     }
 
