@@ -247,7 +247,15 @@ async function sendCallNotificationSMS(client, agency, callData) {
   // From the client's own AI-receptionist number (white-label + recognizable
   // to the owner), not the platform 505 number. The number is provisioned on the
   // messaging profile well before any call, so it's registered by call-time.
-  return _logSMS({ phone: client.owner_phone, message: smsMessage, from: client.vapi_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_call_notification', metadata: { clientName: client.business_name, customerName, urgency } });
+  const sent = await _logSMS({ phone: client.owner_phone, message: smsMessage, from: client.vapi_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_call_notification', metadata: { clientName: client.business_name, customerName, urgency } });
+  if (!sent && client.vapi_phone_number) {
+    // The client's own number isn't SMS-ready yet (not on the messaging profile /
+    // 10DLC campaign). Retry from the platform number so the owner still gets the
+    // summary instead of nothing. The warning shows which clients need SMS setup.
+    console.warn(`\u26a0\ufe0f Owner SMS from client number ${client.vapi_phone_number} failed; retrying from the platform number.`);
+    return _logSMS({ phone: client.owner_phone, message: smsMessage, from: null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_call_notification', metadata: { clientName: client.business_name, customerName, urgency, fallback: 'platform' } });
+  }
+  return sent;
 }
 
 async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency) {
