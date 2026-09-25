@@ -223,6 +223,8 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     const supabaseUpdate = {};
     if (hasPrompt) supabaseUpdate.system_prompt = system_prompt.trim();
     if (hasCallMode) supabaseUpdate.call_mode = call_mode;
+    if (hasVoice) supabaseUpdate.voice_id = voice_id.trim();
+    if (hasSpeed) supabaseUpdate.voice_speed = speed;
 
     if (Object.keys(supabaseUpdate).length > 0) {
       await supabase.from('clients').update(supabaseUpdate).eq('id', clientId);

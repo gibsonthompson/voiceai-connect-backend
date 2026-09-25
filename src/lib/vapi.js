@@ -2528,7 +2528,7 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
         ...(queryToolId && { toolIds: [queryToolId] }),
         ...(tools.length > 0 && { tools })
       },
-      voice: { provider: '11labs', model: 'eleven_flash_v2_5', voiceId },
+      voice: { provider: '11labs', model: 'eleven_flash_v2_5', voiceId, ...(Number(client.voice_speed) >= 0.7 && Number(client.voice_speed) <= 1.2 ? { speed: Number(client.voice_speed) } : {}) },
       startSpeakingPlan: {
         waitSeconds: 0.4,
         smartEndpointingPlan: { provider: 'vapi' },
