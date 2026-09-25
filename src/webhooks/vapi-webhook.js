@@ -71,6 +71,20 @@ const { notifyTeamMembers } = require('../lib/team-notifications');
 const { buildDemoDynamicConfig, buildDemoSmsContent, getIndustryDemoByPhone, buildIndustryDemoConfig, isValidBusinessName, sanitizeBusinessName, extractDemoToolCallArgs } = require('../lib/demo-config');
 const { getSmsTemplate } = require('../lib/sms-templates');
 const { sendAndLogSMS } = require('../lib/sms-logger');
+
+// Prospect-facing demo texts should come FROM the demo number the caller just
+// dialed (recognizable + white-label), not the shared platform number. Falls
+// back to the platform sender if the demo number is not SMS-ready, so the
+// prospect always gets the text.
+async function sendDemoProspectSMS(agency, params) {
+  const fromDemo = agency?.demo_phone_number || null;
+  const sent = await sendAndLogSMS({ ...params, from: fromDemo });
+  if (!sent && fromDemo) {
+    console.warn(`\u26a0\ufe0f Demo SMS from demo number ${fromDemo} failed; retrying from the platform number.`);
+    return sendAndLogSMS({ ...params, from: null, metadata: { ...(params.metadata || {}), fallback: 'platform' } });
+  }
+  return sent;
+}
 const { formatPhone, getPhoneLocation, formatDuration } = require('../lib/area-codes');
 const { insertUsageRecord, updateClientBillingQuantity } = require('../lib/usage-tracker');
 const { verifyVapiWebhook } = require('../lib/vapi-webhook-auth');
@@ -454,7 +468,7 @@ async function handleDemoCall(agency, message, industryKey = null) {
         }
         lines.push(`Questions? Give us a call back anytime.`);
 
-        await sendAndLogSMS({
+        await sendDemoProspectSMS(agency, {
           phone: callerPhone,
           message: lines.join('\n'),
           agencyId: agency.id,
@@ -465,7 +479,7 @@ async function handleDemoCall(agency, message, industryKey = null) {
         console.log('✅ Industry demo follow-up SMS sent');
 
       } else if (agency.demo_followup_sms_override) {
-        await sendAndLogSMS({
+        await sendDemoProspectSMS(agency, {
           phone: callerPhone,
           message: agency.demo_followup_sms_override,
           agencyId: agency.id,
@@ -505,7 +519,7 @@ async function handleDemoCall(agency, message, industryKey = null) {
         lines.push(`Ready to get this${businessName ? ` for ${businessName}` : ' for your business'}? Start free, no credit card needed:`);
         lines.push(signupUrl);
 
-        await sendAndLogSMS({
+        await sendDemoProspectSMS(agency, {
           phone: callerPhone,
           message: lines.join('\n'),
           agencyId: agency.id,
@@ -705,7 +719,7 @@ async function handleDemoToolCall(req, res, message) {
     // from its own Twilio (see sms-logger.js), and so it is logged like every
     // other SMS. agency.id is authoritative even when resolveAgencyForDemo
     // returned a partial record, sms-logger re-fetches the full agency row.
-    await sendAndLogSMS({
+    await sendDemoProspectSMS(agency, {
       phone: callerPhone,
       message: smsContent,
       agencyId: agency.id,
