@@ -102,17 +102,22 @@ async function getClientByVapiAssistantId(assistantId) {
 }
 
 async function getClientByVapiPhoneNumber(phoneNumber) {
+  // Resolve a client by its number in EITHER column (vapi_phone_number or
+  // phone_number) and tolerant of formatting: we compare the last 10 digits, so
+  // "+14043482773", "14043482773" and "(404) 348-2773" all resolve to the same
+  // client. A real client must never fall through to the demo path over a column
+  // or format mismatch (which is what sent a demo text on a real client's call).
+  const digits = String(phoneNumber || '').replace(/\D/g, '');
+  const last10 = digits.slice(-10);
+  if (!last10) return null;
+  const sel = '*, agencies!clients_agency_id_fkey(*)';
   const { data, error } = await supabase
     .from('clients')
-    .select('*, agencies!clients_agency_id_fkey(*)')
-    .eq('vapi_phone_number', phoneNumber)
-    .single();
-  
-  if (error) {
-    console.error('❌ getClientByVapiPhoneNumber error:', error.message, error.code, error.details);
-    return null;
-  }
-  return data;
+    .select(sel)
+    .or(`vapi_phone_number.ilike.*${last10},phone_number.ilike.*${last10}`)
+    .limit(1);
+  if (error) { console.error('❌ getClientByVapiPhoneNumber error:', error.message); return null; }
+  return (data && data[0]) || null;
 }
 
 async function getClientByEmail(email, agencyId = null) {
