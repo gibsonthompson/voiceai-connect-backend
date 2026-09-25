@@ -30,6 +30,7 @@
 const { supabase } = require('../lib/supabase');
 const { verifyVapiWebhook } = require('../lib/vapi-webhook-auth');
 const { sendAndLogSMS } = require('../lib/sms-logger');
+const { markConciergeTransfer } = require('../lib/concierge-demo-sms');
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 const CONCIERGE_VOICE_ID = process.env.CONCIERGE_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL'; // Sarah (11labs)
@@ -272,6 +273,10 @@ async function handleConciergeWebhook(req, res) {
         // No destination configured, decline gracefully; the AI keeps talking.
         return res.status(200).json({ error: 'No demo line is available right now.' });
       }
+      // Mark the prospect so the demo destination's end-of-call knows this call
+      // arrived via a concierge transfer (not a direct customer on a dual-role number).
+      const prospectPhone = message?.call?.customer?.number || message?.customer?.number || null;
+      if (prospectPhone && prospectPhone !== 'Unknown') markConciergeTransfer(prospectPhone, demoType);
       console.log(`🔀 Concierge transferring to ${demoType || 'default'} demo → ${dest.number}`);
       return res.status(200).json({ destination: { type: 'number', number: dest.number, message: dest.message } });
     }

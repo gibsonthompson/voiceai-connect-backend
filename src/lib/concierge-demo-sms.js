@@ -43,6 +43,28 @@ function isConciergeDemoNumber(number) {
 
 // Dedupe so a prospect who calls a few times in a day isn't spammed.
 const _sent = new Map();
+
+// Concierge transfer markers. When the concierge transfers a prospect to a demo
+// destination that is ALSO a real client's number (the home-services demo can
+// point at a live client), the end-of-call handler must tell a transferred demo
+// prospect apart from a real customer dialing that client directly. The concierge
+// marks the prospect on transfer; the end-of-call consumes it once.
+const _transfers = new Map(); // last10(prospect) -> { demoType, at }
+const TRANSFER_TTL_MS = 15 * 60 * 1000;
+function markConciergeTransfer(prospectPhone, demoType) {
+  const d = last10(prospectPhone);
+  if (!d) return;
+  _transfers.set(d, { demoType, at: Date.now() });
+}
+function consumeConciergeTransfer(prospectPhone) {
+  const d = last10(prospectPhone);
+  if (!d) return null;
+  const rec = _transfers.get(d);
+  if (!rec) return null;
+  _transfers.delete(d);
+  if (Date.now() - rec.at > TRANSFER_TTL_MS) return null;
+  return rec.demoType;
+}
 function alreadySent(phone, kind) {
   if (!phone) return true;
   const key = `${last10(phone)}:${kind}:${new Date().toISOString().slice(0, 10)}`;
@@ -96,4 +118,4 @@ async function sendConciergeDemoCallerSMS({ callerPhone, kind, summary }) {
   }
 }
 
-module.exports = { isConciergeDemoNumber, sendConciergeDemoCallerSMS };
+module.exports = { isConciergeDemoNumber, sendConciergeDemoCallerSMS, markConciergeTransfer, consumeConciergeTransfer };

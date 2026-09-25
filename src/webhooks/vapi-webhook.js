@@ -88,7 +88,7 @@ async function sendDemoProspectSMS(agency, params) {
 const { formatPhone, getPhoneLocation, formatDuration } = require('../lib/area-codes');
 const { insertUsageRecord, updateClientBillingQuantity } = require('../lib/usage-tracker');
 const { verifyVapiWebhook } = require('../lib/vapi-webhook-auth');
-const { isConciergeDemoNumber, sendConciergeDemoCallerSMS } = require('../lib/concierge-demo-sms');
+const { isConciergeDemoNumber, sendConciergeDemoCallerSMS, consumeConciergeTransfer } = require('../lib/concierge-demo-sms');
 
 // Live client subscription_status values that may take/save calls. 'manual' is
 // a first-class live status (billed by the agency outside Stripe), so it sits
@@ -1244,9 +1244,11 @@ async function handleVapiWebhook(req, res) {
     // line, the caller is a PROSPECT evaluating VoiceAI Connect, not a real
     // business. Text THEM the summary framed as the owner's post-call text plus
     // the agency angle, and skip the real owner SMS so no demo owner gets buzzed.
-    // isConciergeDemoNumber returns null for every normal client, so real
-    // clients are completely unaffected.
-    const _demoKind = isConciergeDemoNumber(client.vapi_phone_number || phoneNumber);
+    // Only treat this as a concierge demo if the CALLER was actually just
+    // transferred here from the concierge line. A direct customer dialing a
+    // dual-role number (a real client that is also a demo destination) gets the
+    // normal owner summary, not the demo text.
+    const _demoKind = consumeConciergeTransfer(callerPhone);
     if (_demoKind === 'home_services') {
       await sendConciergeDemoCallerSMS({ callerPhone, kind: 'home_services', summary: aiSummary });
       console.log('📲 Concierge home-services demo: reframed SMS sent to caller, owner SMS skipped');
