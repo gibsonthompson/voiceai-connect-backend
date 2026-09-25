@@ -1,5 +1,5 @@
 // ============================================================================
-// VOICEAI CONNECT — CONCIERGE / DEMO LINE WEBHOOK
+// VOICEAI CONNECT, CONCIERGE / DEMO LINE WEBHOOK
 // ----------------------------------------------------------------------------
 // This is the PLATFORM's own demo number, the one a PROSPECT (an agency owner
 // evaluating VoiceAI Connect) calls. It is NOT the client support line
@@ -7,21 +7,21 @@
 //
 // What it does, in one call the prospect experiences the product from every
 // seat it touches:
-//   1. As the BUYER  — they're talking to VoiceAI Connect's own AI, which is
+//   1. As the BUYER , they're talking to VoiceAI Connect's own AI, which is
 //      the exact product they'd resell. It answers platform questions (pricing,
 //      white-label, margins, onboarding) AND qualifies them (starting vs running
 //      an agency, target vertical).
-//   2. As their CLIENT'S CUSTOMER — on request it announces and performs a real
+//   2. As their CLIENT'S CUSTOMER, on request it announces and performs a real
 //      transfer to a live demo receptionist, either the HOME-SERVICES demo or
 //      the AGENCY demo line, so they hear exactly what their clients' callers get.
 //      The announced transfer is itself a live demo of the transfer feature.
-//   3. Watching FEATURES fire — after the call it texts a summary + signup link
+//   3. Watching FEATURES fire, after the call it texts a summary + signup link
 //      (demoing the post-call SMS feature and capturing the lead).
 //
 // TRANSFER DESTINATIONS are configurable, not hardcoded, so you point them at
 // whatever numbers you want:
-//   DEMO_HOMESERVICES_NUMBER  — a home-services receptionist demo (E.164)
-//   DEMO_AGENCY_NUMBER        — the agency demo line (E.164)
+//   DEMO_HOMESERVICES_NUMBER , a home-services receptionist demo (E.164)
+//   DEMO_AGENCY_NUMBER       , the agency demo line (E.164)
 //
 // SAFE TO DEPLOY: nothing here is wired into server.js until you add the mount
 // line, so dropping this file in changes no existing behavior. See the WIRING
@@ -55,7 +55,7 @@ const CONCIERGE_SPEED = Number(process.env.CONCIERGE_SPEED || 0.92);
 const CONCIERGE_TTS_MODEL = process.env.CONCIERGE_TTS_MODEL || 'eleven_turbo_v2_5';
 
 // ============================================================================
-// SYSTEM PROMPT — the SDR persona + accurate platform knowledge + routing
+// SYSTEM PROMPT, the SDR persona + accurate platform knowledge + routing
 // ----------------------------------------------------------------------------
 // Every fact here is drawn from the live marketing site / FAQ. Do not invent
 // features or prices; if unsure, the AI says a human will follow up.
@@ -77,12 +77,19 @@ function buildConciergeSystemPrompt() {
 - Take a clear position. No hedging, no vague filler, no corporate-speak. Plain, human words.
 - Say the product name naturally ("voice A-I connect"), and read any email as "support at voiceaiconnect dot com."
 
+## THE FIRST MINUTE (this sets the whole call)
+- React to why they called before you pitch anything. Let them talk first, you are guiding the call, not presenting to them.
+- One idea per turn. Do not stack a statement, a question, and a pitch in the same breath, that is exactly where it starts to sound scripted. Say the one thing that lands, then hand it back.
+- Vary your rhythm. A short, punchy line, then a slightly longer one. Real people do not talk in even blocks, and even pacing is the fastest way to sound like a bot.
+- Ask, then actually wait. Silence for a beat is fine. Do not fill every gap or rush to the next point.
+- Build on their exact words. If they say "I run a marketing agency," your next line uses that, not a generic pivot. The reveal that they are talking to the product is a one-time moment, land it once and never repeat it.
+
 ## LEARN THEIR ANGLE (naturally, don't interrogate)
 Get a feel for what they're after, woven into the talk, not as a checklist. Worth learning: what kind of local businesses they'd want as clients, and what's got them looking into this now. One question at a time, and actually respond to the answer. Nothing that feels like a form.
 
 ## THE MAIN EVENT: TEXT THEM THE TRIAL LINK, LIVE
 The single most valuable thing you can do on this call is text them their signup link WHILE you're still talking, so they watch the AI fire off a real text in real time. That's the moment that closes people.
-- As soon as they're even mildly interested, say it out loud first ("cool, I'm texting you the link right now, you should see it pop up in a sec"), THEN call the send_signup_link tool.
+- Once you have actually talked a bit and they are genuinely interested (not the second they say hello), say it out loud first ("cool, I'm texting you the link right now, you should see it pop up in a sec"), THEN call the send_signup_link tool.
 - Call send_signup_link once. After it sends, confirm it ("that should be hitting your phone now") and point out what just happened: the AI sent them a text on its own, and that's the same thing they'd be selling.
 - The link starts a 14-day free trial of the Pro plan, the full white-label version. That's what you're steering them toward.
 
@@ -125,7 +132,7 @@ Ask which they'd prefer if it's unclear. Timing matters on the hand-off: keep yo
 // ============================================================================
 function buildConciergeAssistant() {
   return {
-    firstMessage: "Hey, thanks for calling VoiceAI Connect! Quick thing, the voice you're talking to right now is the exact AI you'd be reselling to local businesses. So what's got you looking into building an AI receptionist agency?",
+    firstMessage: "Hey, thanks for calling VoiceAI Connect. The voice you're talking to right now is the actual AI you'd be reselling to local businesses. So what's got you looking into starting an agency?",
     serverUrl: `${BACKEND_URL}/webhook/vapi-concierge`,
     serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET,
     model: {
