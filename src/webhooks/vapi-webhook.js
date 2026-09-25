@@ -951,7 +951,16 @@ async function handleVapiWebhook(req, res) {
         const pid = message.call?.phoneNumberId || message.phoneNumber?.id;
         if (pid) { vapiPhone = await getPhoneNumberFromVapi(pid); if (vapiPhone) message.phoneNumber = { ...(message.phoneNumber || {}), number: vapiPhone }; }
       }
-      if (vapiPhone) { const { agency } = await resolveAgencyForDemo(vapiPhone); if (agency) return handleDemoToolCall(req, res, message); }
+      if (vapiPhone) {
+        const { agency } = await resolveAgencyForDemo(vapiPhone);
+        // A real client's number MUST win over a demo mapping. Without this, if a
+        // number is both a client's number and (stale-)configured as an agency
+        // demo_phone_number, the client's tool calls get hijacked into the demo
+        // handler and it fires the demo "sample summary" text on a real call.
+        if (agency && !(await getClientByVapiPhoneNumber(vapiPhone))) {
+          return handleDemoToolCall(req, res, message);
+        }
+      }
       console.log(`🔧 Tool-call received (non-demo) - acknowledging`);
       return res.status(200).json({ received: true });
     }
