@@ -194,7 +194,7 @@ app.use((req, res, next) => {
 // ============================================================================
 
 const { handleAgencySignup, handleAgencyOnboarding } = require('./routes/agency-signup');
-const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySettings, verifyAgencyDomain } = require('./routes/agency-settings');
+const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySettings, verifyAgencyDomain, connectPaystack, disconnectPaystack } = require('./routes/agency-settings');
 const demoPhoneRoutes = require('./routes/demo-phone');
 const customIndustriesRoutes = require('./routes/custom-industries');
 const referralRoutes = require('./routes/referrals');
@@ -545,6 +545,8 @@ app.get('/api/agency/:agencyId/settings', getAgencySettings);
 // breaks. requireAgencyAccess enforces a valid token + caller-owns-:agencyId +
 // the 'settings' Page Access toggle for agency_staff.
 app.put('/api/agency/:agencyId/settings', requireAgencyAccess('settings'), updateAgencySettings);
+app.post('/api/agency/:agencyId/paystack/connect', requireAgencyAccess('settings'), connectPaystack);
+app.post('/api/agency/:agencyId/paystack/disconnect', requireAgencyAccess('settings'), disconnectPaystack);
 app.get('/api/agency/:agencyId/api-keys', requireAgencyAccess('settings'), listApiKeys);
 app.post('/api/agency/:agencyId/api-keys', requireAgencyAccess('settings'), createApiKey);
 app.delete('/api/agency/:agencyId/api-keys/:keyId', requireAgencyAccess('settings'), revokeApiKey);

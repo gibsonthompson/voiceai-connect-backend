@@ -109,6 +109,8 @@ const { getAgencyPlans, generatePlanKey } = require('../lib/plans');
 // background after such a change. Requiring stripe-connect here is safe: it
 // does not require this module back (no circular dependency).
 const { repriceMinuteItemsForAgency } = require('./stripe-connect');
+const paystack = require('../lib/paystack');
+const { encrypt } = require('../lib/encryption');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -577,6 +579,8 @@ async function getAgencySettings(req, res) {
         // (validated to connect|manual there).
         client_billing_mode: agency.client_billing_mode || 'connect',
         allow_client_plan_changes: agency.allow_client_plan_changes === true,
+        paystack_connected: agency.paystack_connected === true,
+        paystack_currency: agency.paystack_currency || null,
         
         // Client trial card requirement (require_card_for_trial). Returned so
         // the Settings pricing tab can render and toggle it. The signup flow
@@ -1505,10 +1509,60 @@ async function verifyAgencyDomain(req, res) {
 // ============================================================================
 // EXPORTS
 // ============================================================================
+// Connect an agency's Paystack account: validate the secret key against Paystack,
+// then store it ENCRYPTED (mirrors twilio_api_key_encrypted). The key is never
+// returned to the client. Auth is enforced by requireAgencyAccess('settings').
+async function connectPaystack(req, res) {
+  try {
+    const { agencyId } = req.params;
+    const { secret_key, public_key, currency } = req.body || {};
+    const key = typeof secret_key === 'string' ? secret_key.trim() : '';
+    if (!key.startsWith('sk_')) {
+      return res.status(400).json({ error: 'A Paystack secret key (starts with sk_) is required.' });
+    }
+    try {
+      await paystack.verifyKey(key);
+    } catch (e) {
+      return res.status(400).json({ error: 'Paystack rejected that key. Make sure you pasted the SECRET key (sk_...) from the right account.', detail: e.message });
+    }
+    const update = {
+      paystack_secret_key_encrypted: encrypt(key),
+      paystack_public_key: (typeof public_key === 'string' && public_key.trim()) ? public_key.trim() : null,
+      paystack_currency: (typeof currency === 'string' && currency.trim()) ? currency.trim().toUpperCase() : null,
+      paystack_connected: true,
+    };
+    const { error } = await supabase.from('agencies').update(update).eq('id', agencyId);
+    if (error) { console.error('connectPaystack update error:', error.message); return res.status(500).json({ error: 'Failed to save Paystack connection.' }); }
+    return res.json({ success: true, connected: true, currency: update.paystack_currency });
+  } catch (e) {
+    console.error('\u274c connectPaystack error:', e.message);
+    return res.status(500).json({ error: 'Failed to connect Paystack.' });
+  }
+}
+
+async function disconnectPaystack(req, res) {
+  try {
+    const { agencyId } = req.params;
+    const { error } = await supabase.from('agencies').update({
+      paystack_secret_key_encrypted: null,
+      paystack_public_key: null,
+      paystack_currency: null,
+      paystack_connected: false,
+    }).eq('id', agencyId);
+    if (error) return res.status(500).json({ error: 'Failed to disconnect Paystack.' });
+    return res.json({ success: true, connected: false });
+  } catch (e) {
+    console.error('\u274c disconnectPaystack error:', e.message);
+    return res.status(500).json({ error: 'Failed to disconnect Paystack.' });
+  }
+}
+
 module.exports = {
   getAgencyByHost,
   getAgencyByIdPublic,
   getAgencySettings,
   updateAgencySettings,
-  verifyAgencyDomain
+  verifyAgencyDomain,
+  connectPaystack,
+  disconnectPaystack
 };
