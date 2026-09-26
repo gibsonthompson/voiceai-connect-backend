@@ -576,6 +576,7 @@ async function getAgencySettings(req, res) {
         // toggle can render its current state. Written via the settings PUT
         // (validated to connect|manual there).
         client_billing_mode: agency.client_billing_mode || 'connect',
+        allow_client_plan_changes: agency.allow_client_plan_changes === true,
         
         // Client trial card requirement (require_card_for_trial). Returned so
         // the Settings pricing tab can render and toggle it. The signup flow
@@ -724,6 +725,8 @@ async function updateAgencySettings(req, res) {
       // Client dashboard settings
       'client_header_mode',
       'allow_client_branding',
+      // Let clients change their own plan (self-serve upgrade via Stripe)
+      'allow_client_plan_changes',
       // Client plan feature gating
       'plan_features',
       // Calendar plan gating (which client plans can connect Google Calendar)
@@ -758,6 +761,7 @@ async function updateAgencySettings(req, res) {
     
     const sanitizedUpdates = {};
     if (updates.bill_minutes_during_trial !== undefined) updates.bill_minutes_during_trial = updates.bill_minutes_during_trial === true;
+    if (updates.allow_client_plan_changes !== undefined) updates.allow_client_plan_changes = updates.allow_client_plan_changes === true;
     for (const key of allowedFields) {
       if (updates[key] !== undefined) {
         sanitizedUpdates[key] = updates[key];

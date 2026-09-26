@@ -119,7 +119,7 @@ router.get('/:id', async (req, res) => {
     const { id } = req.params;
     const { data: client, error } = await supabase
       .from('clients')
-      .select(`*, agency:agencies!clients_agency_id_fkey ( id, name, slug, primary_color, secondary_color, accent_color, logo_url, support_email, support_phone, website_theme, client_header_mode, price_starter, price_pro, price_growth, limit_starter, limit_pro, limit_growth, plan_features, allow_client_branding, marketing_domain, domain_verified )`)
+      .select(`*, agency:agencies!clients_agency_id_fkey ( id, name, slug, primary_color, secondary_color, accent_color, logo_url, support_email, support_phone, website_theme, client_header_mode, price_starter, price_pro, price_growth, limit_starter, limit_pro, limit_growth, plan_starter_name, plan_pro_name, plan_growth_name, plan_features, plans, allow_client_branding, allow_client_plan_changes, marketing_domain, domain_verified )`)
       .eq('id', id)
       .single();
     if (error || !client) return res.status(404).json({ error: 'Client not found' });

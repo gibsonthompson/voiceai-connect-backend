@@ -1609,6 +1609,12 @@ async function changeClientPlan(req, res) {
     const agency = client.agencies;
     if (!agency) return res.status(404).json({ error: 'Agency not found' });
 
+    // Client self-service plan changes require the agency to have opted in.
+    // Agency and super_admin callers are never gated by this.
+    if (isOwnClient && !isSuperAdmin && !isManagingAgency && !agency.allow_client_plan_changes) {
+      return res.status(403).json({ error: 'client_plan_changes_disabled', message: 'Plan changes are managed by your provider.' });
+    }
+
     // Validate + resolve the target plan against THIS agency's actual plans
     // (legacy starter/pro/growth OR custom Path B keys), not a hardcoded list,
     // so custom-keyed plans work and price/limit come from the real plan.
