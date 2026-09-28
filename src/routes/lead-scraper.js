@@ -147,7 +147,7 @@ router.post('/search', async (req, res) => {
     const remaining = leadCap === Infinity ? Infinity : Math.max(leadCap - usedThisMonth, 0);
     const perJobCap = findAll
       ? (leadCap === Infinity ? FIND_ALL_SCALE_JOB_CAP : FIND_ALL_JOB_CAP)
-      : (source === "google_maps" ? 60 : Math.max(Number(maxLeads) || 25, 1));
+      : Math.max(Number(maxLeads) || 25, 1);
     const scrapeMaxLeads = remaining === Infinity ? perJobCap : Math.min(perJobCap, remaining);
 
     const jobId = uuidv4();
