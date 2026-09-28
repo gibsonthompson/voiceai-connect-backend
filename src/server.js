@@ -182,7 +182,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 app.use((req, res, next) => {
-  if (req.originalUrl === '/webhook/stripe' || req.originalUrl === '/webhook/stripe-connect' || req.originalUrl === '/webhook/telnyx-sms' || req.originalUrl === '/webhook/telnyx-voice' || req.originalUrl === '/webhook/twilio-sms') {
+  if (req.originalUrl === '/webhook/stripe' || req.originalUrl === '/webhook/stripe-connect' || req.originalUrl === '/webhook/telnyx-sms' || req.originalUrl === '/webhook/telnyx-voice' || req.originalUrl === '/webhook/twilio-sms' || req.originalUrl === '/webhook/paystack') {
     next();
   } else {
     express.json({ limit: '10mb' })(req, res, next);
@@ -547,6 +547,11 @@ app.get('/api/agency/:agencyId/settings', getAgencySettings);
 app.put('/api/agency/:agencyId/settings', requireAgencyAccess('settings'), updateAgencySettings);
 app.post('/api/agency/:agencyId/paystack/connect', requireAgencyAccess('settings'), connectPaystack);
 app.post('/api/agency/:agencyId/paystack/disconnect', requireAgencyAccess('settings'), disconnectPaystack);
+const { initPaystackCharge, paystackCallback, paystackRecurringCron, handlePaystackWebhook } = require('./routes/paystack');
+app.post('/api/client/paystack/init', initPaystackCharge);
+app.get('/api/client/paystack/callback', paystackCallback);
+app.post('/webhook/paystack', express.raw({ type: 'application/json' }), handlePaystackWebhook);
+app.post('/api/cron/paystack-recurring', paystackRecurringCron);
 app.get('/api/agency/:agencyId/api-keys', requireAgencyAccess('settings'), listApiKeys);
 app.post('/api/agency/:agencyId/api-keys', requireAgencyAccess('settings'), createApiKey);
 app.delete('/api/agency/:agencyId/api-keys/:keyId', requireAgencyAccess('settings'), revokeApiKey);

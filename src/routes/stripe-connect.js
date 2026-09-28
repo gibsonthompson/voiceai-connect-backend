@@ -1639,6 +1639,33 @@ async function changeClientPlan(req, res) {
     // so a plan change just updates plan_type and the cap (matches the UI, which
     // shows "no charge" for test clients). Without this they fell through to the
     // Stripe path and the change silently failed, so the plan reverted on reload.
+    // ── Paystack client: I own the billing schedule (no Stripe subscription). A
+    //    plan change is feature-only here; the recurring job charges the new
+    //    plan's price on the next cycle. Client self-change was already gated on
+    //    allow_client_plan_changes above, so a client may legitimately reach this
+    //    branch when their agency has opted in. ──
+    if (client.billing_mode === 'paystack') {
+      let limit = Number.isInteger(targetPlan.call_limit) ? targetPlan.call_limit : 50;
+      const rawLimit = req.body.monthly_call_limit;
+      if (rawLimit !== undefined && rawLimit !== null && rawLimit !== '') {
+        const n = Number(rawLimit);
+        if (!Number.isInteger(n) || n < -1) {
+          return res.status(400).json({ error: 'monthly_call_limit must be an integer of -1 or greater' });
+        }
+        limit = n;
+      }
+      const { error: psPlanErr } = await supabase
+        .from('clients')
+        .update({ plan_type: plan, monthly_call_limit: limit })
+        .eq('id', client.id);
+      if (psPlanErr) {
+        console.error('❌ Paystack client plan change DB write failed:', psPlanErr.message);
+        return res.status(500).json({ error: 'Failed to update plan' });
+      }
+      console.log(`✅ Paystack client ${client.id} plan changed ${client.plan_type} -> ${plan} (limit ${limit}); new price applies next cycle`);
+      return res.json({ success: true, plan, monthly_call_limit: limit, paystack: true, note: 'New price applies on your next billing date.' });
+    }
+
     if (client.billing_mode === 'manual' || client.is_test_client) {
       if (!isSuperAdmin && !isManagingAgency) {
         return res.status(403).json({ error: 'Forbidden', message: 'Only your provider can change this plan.' });
@@ -1840,6 +1867,41 @@ async function cancelClientSubscription(req, res) {
     // does so at period end (they keep what they paid for), so they can never
     // instantly wipe out paid service by mistake.
     const wantImmediate = immediate === true && (isManagingAgency || isSuperAdmin);
+
+    // ── Paystack client: I own the billing schedule (no Stripe subscription).
+    //    A Paystack client also has no stripe_connected_subscription_id, so this
+    //    branch MUST come before the manual branch below or they'd be torn down
+    //    immediately by mistake. Client self-cancel is at period end: stop the
+    //    recurring charge but keep paid service until paystack_next_charge_at, at
+    //    which point the recurring job flips them to expired. Agency/admin may
+    //    force an immediate teardown. resume=true reverses a pending cancel. ──
+    if (client.billing_mode === 'paystack') {
+      if (resume === true) {
+        const { error: psResumeErr } = await supabase
+          .from('clients')
+          .update({ paystack_status: 'active' })
+          .eq('id', client.id);
+        if (psResumeErr) return res.status(500).json({ error: 'Failed to resume subscription' });
+        console.log(`✅ Paystack client ${client.id} resumed (period-end cancel reversed)`);
+        return res.json({ success: true, resumed: true, paystack: true });
+      }
+      if (wantImmediate) {
+        const result = await cancelClientAndRelease(client, isOwnClient ? 'client self-cancel (paystack, immediate)' : 'agency/admin cancel (paystack)');
+        if (!result || !result.ok) return res.status(500).json({ error: 'Failed to cancel client' });
+        await supabase.from('clients').update({ paystack_status: 'canceled', paystack_next_charge_at: null }).eq('id', client.id);
+        return res.json({ success: true, canceled: true, immediate: true, paystack: true });
+      }
+      const { error: psCancelErr } = await supabase
+        .from('clients')
+        .update({ paystack_status: 'canceling' })
+        .eq('id', client.id);
+      if (psCancelErr) {
+        console.error('❌ Paystack cancel DB write failed:', psCancelErr.message);
+        return res.status(500).json({ error: 'Failed to cancel subscription' });
+      }
+      console.log(`✅ Paystack client ${client.id} set to cancel at period end (through ${client.paystack_next_charge_at || 'n/a'})`);
+      return res.json({ success: true, canceled: true, immediate: false, paystack: true, cancels_at: client.paystack_next_charge_at || null });
+    }
 
     // ── Manual client: no Stripe subscription. Cancel = tear down now. ──
     if (client.billing_mode === 'manual' || !client.stripe_connected_subscription_id) {
