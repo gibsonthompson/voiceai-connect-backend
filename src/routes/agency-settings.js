@@ -1543,6 +1543,25 @@ async function connectPaystack(req, res) {
 async function disconnectPaystack(req, res) {
   try {
     const { agencyId } = req.params;
+    // Guard: don't silently strip the key while clients are still billed through
+    // Paystack, or they'd stop being charged with no failure surfaced. Caller may
+    // pass { force: true } to override after moving them off Paystack.
+    const force = req.body && req.body.force === true;
+    if (!force) {
+      const { count } = await supabase
+        .from('clients')
+        .select('id', { count: 'exact', head: true })
+        .eq('agency_id', agencyId)
+        .eq('billing_mode', 'paystack')
+        .in('paystack_status', ['active', 'canceling', 'past_due']);
+      if (count && count > 0) {
+        return res.status(409).json({
+          error: 'active_clients',
+          activeClients: count,
+          message: `${count} client${count === 1 ? ' is' : 's are'} currently billed through Paystack. Move them to another billing method before disconnecting, or they will stop being charged.`,
+        });
+      }
+    }
     const { error } = await supabase.from('agencies').update({
       paystack_secret_key_encrypted: null,
       paystack_public_key: null,

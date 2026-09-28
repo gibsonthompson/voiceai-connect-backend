@@ -130,7 +130,14 @@ async function chargeClientOnce(client) {
   const plan = getPlan(agency, client.plan_type);
   const priceCents = plan && Number.isInteger(plan.price_cents) ? plan.price_cents : 0;
   if (!priceCents || priceCents <= 0) return { skipped: true };
-  const reference = `psr_${client.id}_${Date.now()}`;
+  // Deterministic per-attempt reference: the same client, same due date and same
+  // retry number always produce the same reference. If two recurring runs ever
+  // overlap, Paystack rejects the second as a duplicate instead of double-charging.
+  // A genuine retry has a later due date (and a higher retry count), so it still
+  // gets a fresh reference.
+  const dueDate = client.paystack_next_charge_at ? new Date(client.paystack_next_charge_at) : new Date();
+  const period = dueDate.toISOString().slice(0, 10).replace(/-/g, '');
+  const reference = `psr_${client.id}_${period}_r${client.paystack_retry_count || 0}`;
   try {
     const tx = await paystack.chargeAuthorization(secretKey, {
       email: client.paystack_email || client.email,
@@ -154,6 +161,14 @@ async function chargeClientOnce(client) {
     }
     return await handleChargeFailure(client, (tx && tx.gateway_response) || 'declined');
   } catch (e) {
+    // A duplicate-reference rejection means another overlapping run already owns
+    // this exact charge attempt. Treat it as a no-op, never a payment failure, so
+    // we don't run dunning on a client the other run is charging.
+    const dup = /duplicate/i.test(e.message || '') || (e.paystack && e.paystack.code === 'duplicate_reference');
+    if (dup) {
+      console.warn(`\u23e9 Paystack recurring skipped duplicate charge for client ${client.id} (ref ${reference})`);
+      return { skipped: true, duplicate: true };
+    }
     return await handleChargeFailure(client, e.message);
   }
 }
@@ -228,11 +243,16 @@ async function runPaystackRecurring(limit = 50) {
 // POST /api/cron/paystack-recurring  (hit by an external scheduler)
 async function paystackRecurringCron(req, res) {
   try {
+    // Fail closed: if no secret is configured, refuse rather than run an open,
+    // unauthenticated charge endpoint. Set CRON_SECRET on the backend (and match
+    // it in the Vercel cron route) to enable recurring billing.
     const secret = process.env.CRON_SECRET;
-    if (secret) {
-      const provided = req.headers['x-cron-secret'] || (req.query && req.query.secret);
-      if (provided !== secret) return res.status(403).json({ error: 'Forbidden' });
+    if (!secret) {
+      console.error('\u274c paystackRecurringCron blocked: CRON_SECRET is not set on the backend');
+      return res.status(503).json({ error: 'Cron secret not configured' });
     }
+    const provided = req.headers['x-cron-secret'] || (req.query && req.query.secret);
+    if (provided !== secret) return res.status(403).json({ error: 'Forbidden' });
     const results = await runPaystackRecurring(Number(req.query && req.query.limit) || 50);
     return res.json({ success: true, ...results });
   } catch (e) {

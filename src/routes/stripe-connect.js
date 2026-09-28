@@ -1877,6 +1877,16 @@ async function cancelClientSubscription(req, res) {
     //    force an immediate teardown. resume=true reverses a pending cancel. ──
     if (client.billing_mode === 'paystack') {
       if (resume === true) {
+        // Only a pending period-end cancel can be resumed. If they've already
+        // lapsed (swept to 'canceled'/expired), flipping them back to active would
+        // leave them with no next-charge date (unbilled), so send them to
+        // re-subscribe instead. An already-active client is a harmless no-op.
+        if (client.paystack_status !== 'canceling') {
+          if (client.paystack_status === 'active') {
+            return res.json({ success: true, resumed: true, paystack: true, alreadyActive: true });
+          }
+          return res.status(400).json({ error: 'Subscription ended', message: 'This subscription has ended. Please set up billing again to reactivate.' });
+        }
         const { error: psResumeErr } = await supabase
           .from('clients')
           .update({ paystack_status: 'active' })
