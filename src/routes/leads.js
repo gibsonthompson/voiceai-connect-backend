@@ -896,6 +896,31 @@ router.post('/:agencyId/leads/:leadId/log-call', async (req, res) => {
 });
 
 // ============================================================================
+// POST /api/agency/:agencyId/leads/:leadId/convert  { client_id }
+// Marks a lead won and links it to the client it became. Called by the add-client
+// flow AFTER the client is created (never on the button click), so an abandoned
+// conversion leaves the lead untouched.
+// ============================================================================
+router.post('/:agencyId/leads/:leadId/convert', async (req, res) => {
+  try {
+    const { agencyId, leadId } = req.params;
+    const { client_id } = req.body || {};
+    const { data: lead, error } = await supabase
+      .from('leads')
+      .update({ status: 'won', converted_client_id: client_id || null, converted_at: new Date().toISOString() })
+      .eq('id', leadId)
+      .eq('agency_id', agencyId)
+      .select()
+      .single();
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ success: true, lead });
+  } catch (error) {
+    console.error('Error converting lead:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
 // GET /api/agency/:agencyId/leads/:leadId/outreach
 // ============================================================================
 router.get('/:agencyId/leads/:leadId/outreach', async (req, res) => {
