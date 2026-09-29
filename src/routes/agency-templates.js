@@ -1682,6 +1682,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         voice: voice || null,
         model: customTemplate?.model || 'gpt-4o-mini',
         temperature: customTemplate?.temperature || 0.7,
+        voice_speed: customTemplate?.voice_speed ?? 1,
         knowledge_base_data: customTemplate?.knowledge_base_data || null,
         updated_at: customTemplate?.updated_at || null,
       },
@@ -1691,6 +1692,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         voice_id: defaults.voice_id,
         model: 'gpt-4o-mini',
         temperature: 0.7,
+        voice_speed: 1,
       },
       placeholders: [
         { variable: '{businessName}', description: 'The client\'s business name (auto-filled)' },
@@ -1707,7 +1709,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
 // ============================================================================
 router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (req, res) => {
   const { agencyId, industry } = req.params;
-  const { system_prompt, first_message, voice_id, temperature, is_active, model, knowledge_base_data } = req.body;
+  const { system_prompt, first_message, voice_id, temperature, is_active, model, knowledge_base_data, voice_speed } = req.body;
   
   const resolved = await resolveIndustryConfig(agencyId, industry);
   if (!resolved) {
@@ -1727,6 +1729,14 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
 
   const validModels = ['gpt-4o-mini', 'gpt-4.1-mini', 'gpt-4o'];
   const finalModel = validModels.includes(model) ? model : 'gpt-4o-mini';
+
+  // Voice speed is optional; only store a value inside VAPI's supported 0.7-1.2
+  // range, otherwise null (which falls back to the default 1.0 at call time).
+  let finalSpeed = null;
+  if (voice_speed !== undefined && voice_speed !== null && voice_speed !== '') {
+    const vs = parseFloat(voice_speed);
+    if (!isNaN(vs) && vs >= 0.7 && vs <= 1.2) finalSpeed = vs;
+  }
   
   try {
     const { data, error } = await supabase
@@ -1739,6 +1749,7 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         voice_id,
         model: finalModel,
         temperature: temp,
+        voice_speed: finalSpeed,
         knowledge_base_data: knowledge_base_data || null,
         is_active: is_active !== false,
         updated_at: new Date().toISOString(),

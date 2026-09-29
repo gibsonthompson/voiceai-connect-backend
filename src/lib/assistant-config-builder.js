@@ -1242,6 +1242,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   let voiceId = config.voiceId;
   let temperature = config.temperature;
   let modelId = 'gpt-4o-mini';
+  let voiceSpeed;
 
   if (agency?.id && supabase) {
     try {
@@ -1251,7 +1252,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
       if (effectivePlan === 'scale') {
         const { data: template } = await supabase
           .from('agency_prompt_templates')
-          .select('voice_id, temperature, model')
+          .select('voice_id, temperature, model, voice_speed')
           .eq('agency_id', agency.id)
           .eq('industry', industryKey)
           .eq('is_active', true)
@@ -1261,6 +1262,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
           voiceId = template.voice_id || voiceId;
           temperature = template.temperature || temperature;
           modelId = template.model || modelId;
+          voiceSpeed = template.voice_speed || voiceSpeed;
         }
       }
     } catch { /* Use defaults */ }
@@ -1272,6 +1274,9 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   // what the client picked. (The picker itself is plan-gated in the dashboard;
   // here we simply honor whatever value was saved.)
   if (client.voice_id) voiceId = client.voice_id;
+  // Client's own voice speed overrides the template default; both are honored
+  // only inside VAPI's supported 0.7-1.2 range.
+  if (client.voice_speed) voiceSpeed = client.voice_speed;
 
   const systemPrompt = await buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook, handoff);
   const firstMessage = buildFirstMessage(client.business_name, industryKey, callerContext, isAfterHours, toolConfig, hipaaMode, client.greeting_message);
@@ -1303,7 +1308,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     },
     // Real-time TTS model (~75ms first audio). Without an explicit model, VAPI
     // falls back to a slower ElevenLabs default; flash v2.5 is the live-call model.
-    voice: { provider: '11labs', model: 'eleven_flash_v2_5', voiceId },
+    voice: { provider: '11labs', model: 'eleven_flash_v2_5', voiceId, ...(Number(voiceSpeed) >= 0.7 && Number(voiceSpeed) <= 1.2 ? { speed: Number(voiceSpeed) } : {}) },
     // Latency: smart endpointing. VAPI's default no-punctuation wait is ~1.5s per
     // turn; this replaces it. Provider 'vapi' (NOT 'livekit') because the transcriber
     // runs language:'multi' and LiveKit smart endpointing is English-only.
