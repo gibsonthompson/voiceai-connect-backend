@@ -182,7 +182,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 app.use((req, res, next) => {
-  if (req.originalUrl === '/webhook/stripe' || req.originalUrl === '/webhook/stripe-connect' || req.originalUrl === '/webhook/telnyx-sms' || req.originalUrl === '/webhook/telnyx-voice' || req.originalUrl === '/webhook/twilio-sms' || req.originalUrl === '/webhook/paystack' || req.originalUrl === '/webhook/flutterwave') {
+  if (req.originalUrl === '/webhook/stripe' || req.originalUrl === '/webhook/stripe-connect' || req.originalUrl === '/webhook/telnyx-sms' || req.originalUrl === '/webhook/telnyx-voice' || req.originalUrl === '/webhook/twilio-sms' || req.originalUrl === '/webhook/paystack') {
     next();
   } else {
     express.json({ limit: '10mb' })(req, res, next);
@@ -194,7 +194,7 @@ app.use((req, res, next) => {
 // ============================================================================
 
 const { handleAgencySignup, handleAgencyOnboarding } = require('./routes/agency-signup');
-const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySettings, verifyAgencyDomain, connectPaystack, disconnectPaystack, connectFlutterwave, disconnectFlutterwave } = require('./routes/agency-settings');
+const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySettings, verifyAgencyDomain, connectPaystack, disconnectPaystack } = require('./routes/agency-settings');
 const demoPhoneRoutes = require('./routes/demo-phone');
 const customIndustriesRoutes = require('./routes/custom-industries');
 const referralRoutes = require('./routes/referrals');
@@ -214,6 +214,7 @@ try {
 
 const { handleClientSignup, provisionClient, handleAgencyAddClient, getClientProvisioningStatus, signupRateLimiter, reprovisionStrandedClients } = require('./routes/client-signup');
 const clientRoutes = require('./routes/client');
+const { resolveVapiRecordingUrl } = require('./lib/vapi-recording');
 const { createApiKey, listApiKeys, revokeApiKey } = require('./routes/agency-api-keys');
 const { processDueWebhookDeliveries } = require('./lib/webhooks');
 const { createWebhook, listWebhooks, updateWebhook, deleteWebhook, pingWebhook, listWebhookDeliveries } = require('./routes/agency-webhooks');
@@ -547,8 +548,6 @@ app.get('/api/agency/:agencyId/settings', getAgencySettings);
 app.put('/api/agency/:agencyId/settings', requireAgencyAccess('settings'), updateAgencySettings);
 app.post('/api/agency/:agencyId/paystack/connect', requireAgencyAccess('settings'), connectPaystack);
 app.post('/api/agency/:agencyId/paystack/disconnect', requireAgencyAccess('settings'), disconnectPaystack);
-app.post('/api/agency/:agencyId/flutterwave/connect', requireAgencyAccess('settings'), connectFlutterwave);
-app.post('/api/agency/:agencyId/flutterwave/disconnect', requireAgencyAccess('settings'), disconnectFlutterwave);
 const { initPaystackCharge, paystackCallback, paystackRecurringCron, handlePaystackWebhook } = require('./routes/paystack');
 app.post('/api/client/paystack/init', initPaystackCharge);
 app.get('/api/client/paystack/callback', paystackCallback);
@@ -1098,6 +1097,11 @@ app.get('/api/agency/:agencyId/clients/:clientId/calls/:callId', requireAgencyAc
       .single();
 
     if (error || !call) return res.status(404).json({ error: 'Call not found' });
+
+    // Recordings live in VAPI's private bucket, so the stored URL isn't directly
+    // playable. Resolve it to a fresh signed URL per request, the same way the
+    // client-side call detail does. Without this, agency playback 404s the audio.
+    if (call.recording_url) call.recording_url = await resolveVapiRecordingUrl(call.recording_url);
 
     console.log(`📞 Call detail loaded: ${callId} for client ${clientId}`);
     res.json({ call });
