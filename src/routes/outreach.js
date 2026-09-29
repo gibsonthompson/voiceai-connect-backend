@@ -10,6 +10,26 @@
 //          owns :agencyId + the 'outreach' Page Access key for staff. Two
 //          prefixes because templates and outreach are separate path roots.
 // ============================================================================
+
+// Returns the calendar date `days` days from "today in timeZone", as YYYY-MM-DD.
+// Follow-up dates must be computed in the LOGGER's timezone (sent by the browser),
+// not the server's UTC clock, or "1 day out" lands on the wrong calendar day (a
+// day early for positive-offset zones, a day late for late-night US logging).
+function addDaysInTz(days, timeZone) {
+  let y, m, d;
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timeZone || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
+    y = Number(parts.find(p => p.type === 'year').value);
+    m = Number(parts.find(p => p.type === 'month').value);
+    d = Number(parts.find(p => p.type === 'day').value);
+  } catch (_) {
+    const now = new Date();
+    y = now.getUTCFullYear(); m = now.getUTCMonth() + 1; d = now.getUTCDate();
+  }
+  const base = new Date(Date.UTC(y, m - 1, d));
+  base.setUTCDate(base.getUTCDate() + Number(days));
+  return base.toISOString().slice(0, 10);
+}
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
@@ -612,8 +632,8 @@ router.post('/:agencyId/outreach/log', async (req, res) => {
         .eq('agency_id', agencyId);
       const touches = count || 1;
       const days = touches <= 1 ? 1 : touches === 2 ? 3 : 7;
-      const followUp = new Date();
-      followUp.setDate(followUp.getDate() + days);
+      // tz comes from the browser (Intl timezone) so no per-agency config is needed.
+      const nextFollowUpDate = addDaysInTz(days, (req.body && req.body.tz) || 'UTC');
 
       const { data: leadRow } = await supabase
         .from('leads')
@@ -629,7 +649,7 @@ router.post('/:agencyId/outreach/log', async (req, res) => {
         last_outreach_type: type,
       };
       const closed = leadRow && (leadRow.status === 'won' || leadRow.status === 'lost');
-      if (!closed) leadUpdates.next_follow_up = followUp.toISOString().slice(0, 10);
+      if (!closed) leadUpdates.next_follow_up = nextFollowUpDate;
       // Promote an untouched lead to contacted; never downgrade a further-along one.
       if (leadRow && (leadRow.status === 'new' || !leadRow.status)) leadUpdates.status = 'contacted';
 
