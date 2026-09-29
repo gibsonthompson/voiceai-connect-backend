@@ -110,7 +110,6 @@ const { getAgencyPlans, generatePlanKey } = require('../lib/plans');
 // does not require this module back (no circular dependency).
 const { repriceMinuteItemsForAgency } = require('./stripe-connect');
 const paystack = require('../lib/paystack');
-const flutterwave = require('../lib/flutterwave');
 const { encrypt } = require('../lib/encryption');
 
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -182,6 +181,8 @@ function publicAgencyShape(agency) {
     company_tagline: agency.company_tagline,
     website_headline: agency.website_headline,
     website_subheadline: agency.website_subheadline,
+    signup_headline: agency.signup_headline,
+    signup_subtitle: agency.signup_subtitle,
     marketing_config: agency.marketing_config,
     marketing_template: agency.marketing_template || 'classic',
     // Custom nav links (external header/footer links defined by the agency)
@@ -501,6 +502,8 @@ async function getAgencySettings(req, res) {
         company_tagline: agency.company_tagline,
         website_headline: agency.website_headline,
         website_subheadline: agency.website_subheadline,
+        signup_headline: agency.signup_headline,
+        signup_subtitle: agency.signup_subtitle,
         marketing_config: agency.marketing_config,
         marketing_template: agency.marketing_template || 'classic',
         custom_nav_links: Array.isArray(agency.custom_nav_links) ? agency.custom_nav_links : [],
@@ -582,8 +585,6 @@ async function getAgencySettings(req, res) {
         allow_client_plan_changes: agency.allow_client_plan_changes === true,
         paystack_connected: agency.paystack_connected === true,
         paystack_currency: agency.paystack_currency || null,
-        flutterwave_connected: agency.flutterwave_connected === true,
-        flutterwave_currency: agency.flutterwave_currency || null,
         
         // Client trial card requirement (require_card_for_trial). Returned so
         // the Settings pricing tab can render and toggle it. The signup flow
@@ -719,6 +720,8 @@ async function updateAgencySettings(req, res) {
       'company_tagline',
       'website_headline',
       'website_subheadline',
+      'signup_headline',
+      'signup_subtitle',
       'marketing_config',
       'marketing_template',
       'marketing_site_enabled',
@@ -1579,74 +1582,6 @@ async function disconnectPaystack(req, res) {
   }
 }
 
-// Connect an agency's Flutterwave account: validate the secret key against
-// Flutterwave, then store it ENCRYPTED. The optional webhook secret hash (set by
-// the agency in their Flutterwave dashboard) is stored encrypted too, and used
-// later to verify incoming webhooks. Auth is enforced by requireAgencyAccess.
-async function connectFlutterwave(req, res) {
-  try {
-    const { agencyId } = req.params;
-    const { secret_key, webhook_hash, currency } = req.body || {};
-    const key = typeof secret_key === 'string' ? secret_key.trim() : '';
-    if (!key.startsWith('FLWSECK')) {
-      return res.status(400).json({ error: 'A Flutterwave secret key (starts with FLWSECK-) is required.' });
-    }
-    try {
-      await flutterwave.verifyKey(key);
-    } catch (e) {
-      return res.status(400).json({ error: 'Flutterwave rejected that key. Make sure you pasted the SECRET key (FLWSECK-...) from the right account.', detail: e.message });
-    }
-    const update = {
-      flutterwave_secret_key_encrypted: encrypt(key),
-      flutterwave_webhook_hash_encrypted: (typeof webhook_hash === 'string' && webhook_hash.trim()) ? encrypt(webhook_hash.trim()) : null,
-      flutterwave_currency: (typeof currency === 'string' && currency.trim()) ? currency.trim().toUpperCase() : null,
-      flutterwave_connected: true,
-    };
-    const { error } = await supabase.from('agencies').update(update).eq('id', agencyId);
-    if (error) { console.error('connectFlutterwave update error:', error.message); return res.status(500).json({ error: 'Failed to save Flutterwave connection.' }); }
-    return res.json({ success: true, connected: true, currency: update.flutterwave_currency });
-  } catch (e) {
-    console.error('\u274c connectFlutterwave error:', e.message);
-    return res.status(500).json({ error: 'Failed to connect Flutterwave.' });
-  }
-}
-
-// Disconnect Flutterwave. Guarded the same way as Paystack: refuse while clients
-// are still billed through Flutterwave (they'd silently stop being charged)
-// unless { force: true } is passed after moving them off.
-async function disconnectFlutterwave(req, res) {
-  try {
-    const { agencyId } = req.params;
-    const force = req.body && req.body.force === true;
-    if (!force) {
-      const { count } = await supabase
-        .from('clients')
-        .select('id', { count: 'exact', head: true })
-        .eq('agency_id', agencyId)
-        .eq('billing_mode', 'flutterwave')
-        .in('flutterwave_status', ['active', 'canceling', 'past_due']);
-      if (count && count > 0) {
-        return res.status(409).json({
-          error: 'active_clients',
-          activeClients: count,
-          message: `${count} client${count === 1 ? ' is' : 's are'} currently billed through Flutterwave. Move them to another billing method before disconnecting, or they will stop being charged.`,
-        });
-      }
-    }
-    const { error } = await supabase.from('agencies').update({
-      flutterwave_secret_key_encrypted: null,
-      flutterwave_webhook_hash_encrypted: null,
-      flutterwave_currency: null,
-      flutterwave_connected: false,
-    }).eq('id', agencyId);
-    if (error) return res.status(500).json({ error: 'Failed to disconnect Flutterwave.' });
-    return res.json({ success: true, connected: false });
-  } catch (e) {
-    console.error('\u274c disconnectFlutterwave error:', e.message);
-    return res.status(500).json({ error: 'Failed to disconnect Flutterwave.' });
-  }
-}
-
 module.exports = {
   getAgencyByHost,
   getAgencyByIdPublic,
@@ -1654,7 +1589,5 @@ module.exports = {
   updateAgencySettings,
   verifyAgencyDomain,
   connectPaystack,
-  disconnectPaystack,
-  connectFlutterwave,
-  disconnectFlutterwave
+  disconnectPaystack
 };
