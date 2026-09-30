@@ -262,13 +262,13 @@ function buildBriefingAssistant(ctx) {
     },
     voice: {
       provider: '11labs', voiceId: JARVIS_VOICE_ID, model: 'eleven_flash_v2_5',
-      stability: 0.5, similarityBoost: 0.75, style: 0.0, speed: 1.0, optimizeStreamingLatency: 2,
+      stability: 0.5, similarityBoost: 0.8, style: 0.2, speed: 0.9, optimizeStreamingLatency: 2,
     },
     startSpeakingPlan: {
-      waitSeconds: 0.4, smartEndpointingPlan: { provider: 'vapi' },
-      transcriptionEndpointingPlan: { onPunctuationSeconds: 0.2, onNoPunctuationSeconds: 1.0, onNumberSeconds: 0.4 },
+      waitSeconds: 0.7, smartEndpointingPlan: { provider: 'vapi' },
+      transcriptionEndpointingPlan: { onPunctuationSeconds: 0.4, onNoPunctuationSeconds: 1.5, onNumberSeconds: 0.5 },
     },
-    stopSpeakingPlan: { numWords: 2, voiceSeconds: 0.2, backoffSeconds: 1.0 },
+    stopSpeakingPlan: { numWords: 3, voiceSeconds: 0.3, backoffSeconds: 1.2 },
     firstMessage: first,
     recordingEnabled: false,
     maxDurationSeconds: 600,
