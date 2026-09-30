@@ -123,8 +123,8 @@ router.get('/:id', async (req, res) => {
     // 404 (which the client/preview reads as "Failed to load client data"). So try
     // the full select, and if it errors, log the real reason and retry without the
     // billing columns so the dashboard still loads.
-    const AGENCY_CORE = 'id, name, slug, primary_color, secondary_color, accent_color, logo_url, support_email, support_phone, website_theme, client_header_mode, price_starter, price_pro, price_growth, limit_starter, limit_pro, limit_growth, plan_starter_name, plan_pro_name, plan_growth_name, plan_features, plans, allow_client_branding, allow_client_plan_changes, marketing_domain, domain_verified';
-    const AGENCY_FULL = `${AGENCY_CORE}, paystack_currency, paystack_connected`;
+    const AGENCY_CORE = 'id, name, slug, primary_color, secondary_color, accent_color, logo_url, support_email, support_phone, website_theme, client_header_mode, price_starter, price_pro, price_growth, limit_starter, limit_pro, limit_growth, plan_starter_name, plan_pro_name, plan_growth_name, plan_features, plans, allow_client_branding, marketing_domain, domain_verified';
+    const AGENCY_FULL = `${AGENCY_CORE}, allow_client_plan_changes, paystack_currency, paystack_connected`;
     let { data: client, error } = await supabase
       .from('clients')
       .select(`*, agency:agencies!clients_agency_id_fkey ( ${AGENCY_FULL} )`)
