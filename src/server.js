@@ -1996,7 +1996,7 @@ app.use('/api/cron', usageReporterRoutes);
 // Guarded by CRON_SECRET inside the router. Schedule reconcile-telnyx daily as
 // the standing backstop for any release that could not confirm in-flight.
 app.use('/api/cron', numberCleanupRoutes);
-
+app.use('/api/cron', require('./routes/jarvis-briefing'));
 
 
 // ============================================================================
