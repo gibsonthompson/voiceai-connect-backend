@@ -93,6 +93,23 @@ function normalizePhone(phone) {
   return digits.length ? digits : null;
 }
 
+// Server-side reject for junk phone numbers (defense in depth behind the signup
+// form gate). A malformed phone silently breaks every downstream SMS: the
+// activation cron can't send, marks the agency complete, and they never hear
+// from us. Mirrors isValidPhone in the frontend lib/phone.ts.
+function isValidPhone(rawPhone, iso) {
+  let digits = String(rawPhone || '').replace(/\D/g, '');
+  if (!digits) return false;
+  if (/^(\d)\1+$/.test(digits)) return false; // all identical: 0000000, 5555555
+  const c = String(iso || 'US').toUpperCase();
+  if (c === 'US' || c === 'CA') {
+    if (digits.length === 11 && digits[0] === '1') digits = digits.slice(1);
+    // NANP: 10 digits, area code and exchange code both start 2-9
+    return /^[2-9]\d{2}[2-9]\d{2}\d{4}$/.test(digits);
+  }
+  return digits.length >= 6 && digits.length <= 14;
+}
+
 // Phone numbers allowed to bypass the soft duplicate check (internal testing).
 // Seeded with the platform's own number so signup testing never trips. Add more
 // via SIGNUP_PHONE_ALLOWLIST (comma-separated), any formatting is stripped.
@@ -430,6 +447,11 @@ async function handleAgencySignup(req, res) {
       });
     }
 
+    // Reject a malformed phone before it can poison downstream SMS.
+    if (phone && !isValidPhone(phone, country)) {
+      return res.status(400).json({ error: 'invalid_phone', message: 'Please enter a valid phone number.' });
+    }
+
     // Check for duplicate phone (soft: committed or very-recent accounts only,
     // allowlist bypass, fail-open).
     if (await phoneAlreadyInUse(phone)) {
@@ -668,6 +690,9 @@ async function handleAgencyOnboarding(req, res) {
           console.log(`📛 Agency name set: ${data.name} (slug: ${uniqueSlug})`);
         }
         if (data.phone !== undefined) {
+          if (data.phone && !isValidPhone(data.phone, data.country)) {
+            return res.status(400).json({ error: 'invalid_phone', message: 'Please enter a valid phone number.' });
+          }
           updateData.phone = data.phone || null;
         }
         if (data.referral_source !== undefined) {
