@@ -263,6 +263,7 @@ const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 // SUPPORT LINE ADDITION: Voice support webhook (shared number, dynamic agency context)
 const { handleSupportWebhook } = require('./webhooks/vapi-support-webhook');
 const { handleConciergeWebhook } = require('./webhooks/vapi-concierge-webhook');
+const { handleJarvisWebhook } = require('./webhooks/vapi-jarvis-webhook');
 
 const { 
   createAgencyCheckout, 
@@ -1857,6 +1858,7 @@ app.use('/api/admin', errorReportRoutes);
 app.use('/api/admin', require('./routes/admin-expenses'));
 app.use('/api/admin', require('./routes/admin-margin'));
 app.use('/api/admin', require('./routes/admin-support'));  
+app.use('/api/jarvis', require('./routes/jarvis-admin'));
 // ============================================================================
 // CRON ROUTES (Trial Expiration)
 // ============================================================================
@@ -2009,6 +2011,7 @@ app.post('/webhook/vapi-support', handleSupportWebhook);
 // CONCIERGE / DEMO LINE: the platform's own demo number (prospects evaluating VoiceAI Connect).
 // SDR entry AI + announced transfer to the home-services or agency demo. See vapi-concierge-webhook.js.
 app.post('/webhook/vapi-concierge', handleConciergeWebhook);
+app.post('/webhook/vapi-jarvis', handleJarvisWebhook);
 app.post('/webhook/telnyx-sms', express.raw({ type: '*/*', limit: '2mb' }), handleTelnyxSMSWebhook);
 app.post('/webhook/twilio-sms', express.urlencoded({ extended: false, limit: '2mb' }), handleTwilioSMSWebhook);
 
