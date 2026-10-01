@@ -258,6 +258,58 @@ router.post('/ideas/generate', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════
+// POST /api/yt/ideas
+// Manually create an idea — e.g. paste a script you wrote elsewhere. Title is
+// optional (derived from the first line of the script when blank). A pasted
+// script lands as status 'scripted' so it shows up ready to record.
+// ════════════════════════════════════════════════════════════════════════
+router.post('/ideas', async (req, res) => {
+  try {
+    const { title, script, pillar, hook, target_length, recording_mode, talking_points } = req.body || {};
+    const cleanScript = typeof script === 'string' ? script.trim() : '';
+    let cleanTitle = typeof title === 'string' ? title.trim().slice(0, 200) : '';
+
+    if (!cleanTitle && !cleanScript) {
+      return res.status(400).json({ error: 'A title or a script is required' });
+    }
+    if (!cleanTitle) {
+      const firstLine = cleanScript.split('\n').map(l => l.trim()).find(Boolean) || 'Pasted script';
+      cleanTitle = firstLine.slice(0, 200);
+    }
+
+    const validPillars = ['opportunity', 'proof', 'howto', 'industry', 'objection', 'comparison'];
+    const validModes = ['figured_something_out', 'showing_screen', 'telling_friend'];
+
+    const row = {
+      pillar: validPillars.includes(pillar) ? pillar : 'opportunity',
+      title: cleanTitle,
+      hook: typeof hook === 'string' ? hook : '',
+      talking_points: Array.isArray(talking_points) ? talking_points : [],
+      target_length: (typeof target_length === 'string' && target_length) ? target_length : '20-30s',
+      recording_mode: validModes.includes(recording_mode) ? recording_mode : 'telling_friend',
+      script: cleanScript || null,
+      status: cleanScript ? 'scripted' : 'idea',
+    };
+
+    const { data, error } = await supabase
+      .from('yt_content_ideas')
+      .insert(row)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Manual idea insert error:', error);
+      return res.status(500).json({ error: 'Failed to create idea', details: error.message });
+    }
+
+    res.json({ success: true, idea: data });
+  } catch (err) {
+    console.error('Manual idea create error:', err);
+    res.status(500).json({ error: 'Failed to create idea' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════
 // GET /api/yt/ideas
 // List all ideas with optional filters
 // ════════════════════════════════════════════════════════════════════════
