@@ -69,32 +69,95 @@ function ymd(dt) {
 }
 function addDays(dt, n) { return new Date(dt.getTime() + n * 86400000); }
 
+// Parse a spoken time to a 24-hour decimal. Accepts a number (9, 14.5) or a
+// clock string ("2pm", "2:30 pm", "14:30", "noon"). A bare hour with no am/pm
+// is read as afternoon, the usual intent, and anything before HQ's 6am start
+// would otherwise just be refused.
+function normalizeHour(hour, ampm) {
+  if (!isFinite(hour)) return NaN;
+  if (ampm == null && hour >= 1 && hour < items.SHS) hour += 12;
+  return hour;
+}
+function parseStartHour(v) {
+  if (v == null || v === '') return NaN;
+  if (typeof v === 'number') return normalizeHour(v, null);
+  const str = String(v).trim().toLowerCase();
+  if (str === 'noon' || str === 'midday') return 12;
+  if (str === 'midnight') return 0;
+  const m = str.match(/(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?/);
+  if (!m) return NaN;
+  let h = parseInt(m[1], 10);
+  const min = m[2] ? parseInt(m[2], 10) : 0;
+  const ampm = m[3] ? (m[3][0] === 'p' ? 'pm' : 'am') : null;
+  if (ampm === 'pm' && h < 12) h += 12;
+  else if (ampm === 'am' && h === 12) h = 0;
+  return normalizeHour(h + min / 60, ampm);
+}
+function parseDuration(v) {
+  if (v == null || v === '') return 1;
+  if (typeof v === 'number') return v > 0 ? v : 1;
+  const str = String(v).trim().toLowerCase();
+  const m = str.match(/(\d+(?:\.\d+)?)/);
+  let n = m ? parseFloat(m[1]) : 1;
+  if (/min/.test(str)) n = n / 60;
+  return (isFinite(n) && n > 0) ? n : 1;
+}
+const MONTHS = { january:0,february:1,march:2,april:3,may:4,june:5,july:6,august:7,september:8,october:9,november:10,december:11,jan:0,feb:1,mar:2,apr:3,jun:5,jul:6,aug:7,sep:8,sept:8,oct:9,nov:10,dec:11 };
+function dayResult(dt) { return { date: ymd(dt), dow: dt.getUTCDay() }; }
+
 const WEEKDAYS = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
 
-// Resolve a spoken day to { date:"YYYY-MM-DD", dow:0-6 } or null if unclear.
+// Resolve a spoken day to { date:"YYYY-MM-DD", dow:0-6 }, or null if a day was
+// given but could not be understood. An empty day defaults to today.
 function resolveDay(dayStr) {
   const raw = String(dayStr || '').trim().toLowerCase();
-  if (!raw) return null;
+  const today = nyTodayAnchor();
+  if (!raw) return dayResult(today);
 
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
     const [y, m, d] = raw.split('-').map(Number);
-    const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
-    return { date: ymd(dt), dow: dt.getUTCDay() };
+    return dayResult(new Date(Date.UTC(y, m - 1, d, 12)));
   }
+  if (/\b(today|tonight|this (morning|afternoon|evening)|right now)\b/.test(raw)) return dayResult(today);
+  if (/\btomorrow\b/.test(raw)) return dayResult(addDays(today, 1));
+  if (/day after tomorrow|overmorrow/.test(raw)) return dayResult(addDays(today, 2));
 
-  const today = nyTodayAnchor();
-  if (raw === 'today' || raw === 'tonight') return { date: ymd(today), dow: today.getUTCDay() };
-  if (raw === 'tomorrow') { const t = addDays(today, 1); return { date: ymd(t), dow: t.getUTCDay() }; }
-  if (raw === 'day after tomorrow' || raw === 'overmorrow') { const t = addDays(today, 2); return { date: ymd(t), dow: t.getUTCDay() }; }
+  const inDays = raw.match(/\bin (\d{1,2}) days?\b/);
+  if (inDays) return dayResult(addDays(today, parseInt(inDays[1], 10)));
 
   const cleaned = raw.replace(/^(this|next|on|coming)\s+/, '');
   for (const [name, dow] of Object.entries(WEEKDAYS)) {
     if (cleaned === name || cleaned === name.slice(0, 3)) {
-      let offset = (dow - today.getUTCDay() + 7) % 7; // 0 = today
+      let offset = (dow - today.getUTCDay() + 7) % 7;
       if (raw.startsWith('next ') && offset === 0) offset = 7;
-      const t = addDays(today, offset);
-      return { date: ymd(t), dow: t.getUTCDay() };
+      return dayResult(addDays(today, offset));
     }
+  }
+
+  // Month name + day: "october 2", "oct 2nd", or "2nd of october"
+  let md = raw.match(/\b([a-z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th)?\b/);
+  if (!md) { const r2 = raw.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+of\s+([a-z]{3,9})\b/); if (r2) md = [r2[0], r2[2], r2[1]]; }
+  if (md && MONTHS[md[1]] != null) {
+    const mon = MONTHS[md[1]]; const d = parseInt(md[2], 10); const y = today.getUTCFullYear();
+    let dt = new Date(Date.UTC(y, mon, d, 12));
+    if (ymd(dt) < ymd(today)) dt = new Date(Date.UTC(y + 1, mon, d, 12));
+    return dayResult(dt);
+  }
+  // Numeric M/D: "10/2" or "10-2"
+  const nd = raw.match(/^(\d{1,2})[\/\-](\d{1,2})$/);
+  if (nd) {
+    const mon = parseInt(nd[1], 10) - 1; const d = parseInt(nd[2], 10); const y = today.getUTCFullYear();
+    let dt = new Date(Date.UTC(y, mon, d, 12));
+    if (ymd(dt) < ymd(today)) dt = new Date(Date.UTC(y + 1, mon, d, 12));
+    return dayResult(dt);
+  }
+  // Ordinal alone: "the 15th" / "15th"
+  const od = raw.match(/^(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)$/);
+  if (od) {
+    const d = parseInt(od[1], 10); const y = today.getUTCFullYear(); const mon = today.getUTCMonth();
+    let dt = new Date(Date.UTC(y, mon, d, 12));
+    if (ymd(dt) < ymd(today)) dt = new Date(Date.UTC(y, mon + 1, d, 12));
+    return dayResult(dt);
   }
   return null;
 }
@@ -120,7 +183,7 @@ You are Gibson's personal secretary and right hand, on the phone with him. Warm,
 # What you handle for him (use these tools, never describe or narrate them)
 
 - Add a task: hq_add_task. If he names a business, pass it as the venture and it files under that business, otherwise General. Warmly confirm what you filed and where, like "Alright, that's on your list under VoiceAI Connect."
-- Book time: hq_book_slot. Pass the title, the day, the start time as a 24 hour decimal (nine a.m. is 9, two thirty p.m. is 14.5), and the length in hours (default one). It avoids conflicts and tells you the real time. Say it back gently, "You're set for nine," or "Nine was already taken, so I moved you to nine fifteen."
+- Book time: hq_book_slot. Pass the title, the day, and the time he said, however he said it (a clock time like two thirty in the afternoon is fine). It handles the conversion and conflicts and tells you the real time, so always say that back, "You're set for two thirty," or "Two was already taken, so I moved you to two fifteen." If he gives a time with no morning or evening, assume the natural one.
 - Reminders, notes, quick captures: hq_add_reminder, hq_add_note, hq_add_capture. Capture is for a raw thought he wants off his mind, note to keep something, reminder for a nudge.
 - Read back what is open: hq_list_tasks, for everything or one business.
 - Mark something done: hq_complete_task with what he said. It finds the closest open task.
@@ -152,12 +215,12 @@ function getJarvisTools() {
         text: { type: 'string', description: 'The task text' },
         venture: { type: 'string', description: 'The business this task is for, spoken as the caller said it. Omit for General.' },
       }, ['text']),
-    fn('hq_book_slot', 'Book a calendar event in HQ, avoiding conflicts.',
+    fn('hq_book_slot', 'Book a calendar event in HQ. Handles conflicts and 12/24 hour conversion itself.',
       {
         title: { type: 'string', description: 'What the event is' },
-        day: { type: 'string', description: 'The day: today, tomorrow, a weekday name, or YYYY-MM-DD' },
-        startHour: { type: 'number', description: 'Start time as a 24-hour decimal. 9 = 9am, 13.5 = 1:30pm, 14.25 = 2:15pm.' },
-        durationHours: { type: 'number', description: 'Length in hours. Default 1.' },
+        day: { type: 'string', description: 'When: today, tomorrow, a weekday, a date like "October 2" or "10/2", or YYYY-MM-DD. Defaults to today if omitted.' },
+        startHour: { type: 'string', description: 'The start time as the caller said it, e.g. "2:30pm", "9am", "noon", or a 24-hour number like "14.5". A bare hour with no am/pm is treated as afternoon.' },
+        durationHours: { type: 'number', description: 'Length in hours, 0.5 for 30 minutes. Default 1.' },
       }, ['title', 'day', 'startHour']),
     fn('hq_add_reminder', 'Add a reminder to HQ.',
       { text: { type: 'string', description: 'The reminder text' } }, ['text']),
@@ -257,13 +320,16 @@ async function tool_hq_book_slot(args) {
   if (!title) return 'What should I call that event?';
   const day = resolveDay(args.day);
   if (!day) return 'Which day should I book that for?';
-  const dur = Number(args.durationHours) || 1;
-  const start = Number(args.startHour);
+  const start = parseStartHour(args.startHour);
+  if (!isFinite(start)) return 'What time should I book that for?';
+  const dur = parseDuration(args.durationHours);
+  console.log(`📅 Jarvis book: "${title}" day=${day.date} start=${start} dur=${dur} (raw day=${JSON.stringify(args.day)}, raw start=${JSON.stringify(args.startHour)})`);
   const ranges = await hq.getOccupiedRanges(day.date, day.dow, null);
   const r = items.resolveBooking(start, dur, ranges);
-  if (!r.ok) return r.message;
+  if (!r.ok) { console.log('   booking refused:', r.reason, '-', r.message); return r.message; }
   const res = await hq.insertItem(items.buildEvent({ title, date: day.date, startHour: r.startHour, duration: dur }));
   if (!res.ok) return 'That did not save to HQ.';
+  console.log('   booked at', r.startHour);
   return r.message;
 }
 
