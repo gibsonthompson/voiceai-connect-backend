@@ -23,9 +23,9 @@ They're watching this on their phone, late at night, thinking "is this actually 
 
 === WHAT VOICEAI CONNECT IS ===
 
-A white-label AI receptionist platform. Agencies brand it as their own, sign up local businesses (plumbers, dentists, HVAC, lawyers, restaurants, etc.), and charge them $99-$299/month for 24/7 AI phone answering. The AI picks up calls, answers questions from the business's knowledge base, books appointments to Google Calendar, transfers urgent calls to the owner, and texts a summary after every call.
+A white-label AI receptionist platform. Agencies brand it as their own, sign up local businesses (plumbers, dentists, HVAC, lawyers, restaurants, etc.), and charge them $99-499/month for 24/7 AI phone answering. The AI picks up calls, answers questions from the business's knowledge base, books appointments to Google Calendar, transfers urgent calls to the owner, and texts a summary after every call.
 
-The agency's cost: $99/mo platform + $9.99/client. They charge clients $149/mo+. Margin is 90%+. The product runs itself — no ongoing delivery work, no campaign management, no reporting. Set up the AI once, collect recurring revenue.
+The agency pays a platform fee by tier: Free $0/mo, Pro $99/mo, or Scale $499/mo, plus a per-client rate ($29.99 on Free, $9.99 on Pro, $0 on Scale) and a per-minute rate of $0.05-$0.12. They resell to local businesses for $99-499/mo and keep the margin, which is high. The product runs itself — no ongoing delivery work, no campaign management, no reporting. Set up the AI once, collect recurring revenue.
 
 Free plan available (no platform fee, higher per-client cost). Google Calendar integration on all plans. No technical skills required.
 
@@ -200,7 +200,7 @@ router.post('/ideas/generate', async (req, res) => {
     }
 
     const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-sonnet-5-5',
       max_tokens: 4000,
       system: CONTENT_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userPrompt }],
@@ -407,7 +407,7 @@ ${idea.notes ? `\nCreator notes: ${idea.notes}` : ''}
 Write the script as a roadmap — what to say in each block, key phrases to hit, where to show screen recordings. NOT a teleprompter script. The speaker should be able to glance at this and riff naturally.`;
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6-20260217',
+      model: 'claude-sonnet-5-5',
       max_tokens: 4000,
       system: SCRIPT_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userPrompt }],
