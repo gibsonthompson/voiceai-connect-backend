@@ -113,8 +113,77 @@ const {
   formatPhoneE164,
   sendWelcomeSMS,
   sendClientSignupNotificationSMS,
+  sendPlatformNotificationSMS,
   isInternationalAgency
 } = require('../lib/notifications');
+const { alertError } = require('../lib/error-monitor');
+
+// ============================================================================
+// CLIENT SIGNUP FAILURE VISIBILITY
+// ----------------------------------------------------------------------------
+// Client signups used to fail silently: a sync-check rejection (bad phone,
+// duplicate email, agency inactive, billing, provisioning) returned an HTTP
+// error to the client and left NO trace for the platform owner. That is why a
+// failed signup could never be diagnosed after the fact. withSignupFailureAlert
+// wraps a signup handler so ANY 4xx/5xx response (or an unhandled throw) texts
+// the owner and records the reason to error_reports (admin Support > Errors),
+// without changing what the client receives. The SMS is gated on alertError's
+// own dedup/rate-limit, so a client retry loop can't spam the owner.
+// ============================================================================
+async function reportClientSignupFailure(req, statusCode, body) {
+  try {
+    const b = (req && req.body) || {};
+    const agencyId = b.agencyId || b.agency_id || (req && req.params && req.params.agencyId) || null;
+    const email = b.email || null;
+    const businessName = b.businessName || b.business_name || null;
+    const reason = (body && (body.message || body.error)) || `HTTP ${statusCode}`;
+    const errCode = (body && body.error) || `http_${statusCode}`;
+
+    let agencyName = 'Unknown agency';
+    if (agencyId) {
+      try {
+        const { data: a } = await supabase.from('agencies').select('name').eq('id', agencyId).single();
+        if (a && a.name) agencyName = a.name;
+      } catch (_) { /* best effort */ }
+    }
+
+    // Record to error_reports (dedup / rate-limited). Returns true when not suppressed.
+    const logged = await alertError(
+      'client_signup_failed',
+      new Error(`${agencyName}: ${reason}`),
+      { agency_id: agencyId, agency_name: agencyName, client_email: email, business_name: businessName, status_code: statusCode, error_code: errCode }
+    );
+
+    if (logged) {
+      try {
+        await sendPlatformNotificationSMS(
+          `Client signup FAILED\nAgency: ${agencyName}\nClient: ${businessName || email || 'unknown'}\nReason: ${reason}`
+        );
+      } catch (_) { /* SMS best effort */ }
+    }
+  } catch (_) { /* the alerter must never throw */ }
+}
+
+// Wrap a signup handler so every failure response fires reportClientSignupFailure
+// without altering the response the caller sends.
+function withSignupFailureAlert(handler) {
+  return async function (req, res) {
+    let statusCode = 200;
+    const origStatus = res.status.bind(res);
+    const origJson = res.json.bind(res);
+    res.status = function (code) { statusCode = code; return origStatus(code); };
+    res.json = function (payload) {
+      if (statusCode >= 400) reportClientSignupFailure(req, statusCode, payload).catch(() => {});
+      return origJson(payload);
+    };
+    try {
+      return await handler(req, res);
+    } catch (err) {
+      reportClientSignupFailure(req, 500, { error: 'server_error', message: err && err.message }).catch(() => {});
+      throw err;
+    }
+  };
+}
 
 // Import client limit checker from stripe-platform
 const { canAgencyAddClient } = require('./stripe-platform');
@@ -2101,6 +2170,7 @@ async function reprovisionStrandedClients({ dryRun = false, limit = 25 } = {}) {
 // ============================================================================
 module.exports = {
   handleClientSignup,
+  withSignupFailureAlert,
   provisionClient,
   handleAgencyAddClient,
   getClientProvisioningStatus,

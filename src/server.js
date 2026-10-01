@@ -212,7 +212,7 @@ try {
   });
 }
 
-const { handleClientSignup, provisionClient, handleAgencyAddClient, getClientProvisioningStatus, signupRateLimiter, reprovisionStrandedClients } = require('./routes/client-signup');
+const { handleClientSignup, provisionClient, handleAgencyAddClient, getClientProvisioningStatus, signupRateLimiter, reprovisionStrandedClients, withSignupFailureAlert } = require('./routes/client-signup');
 const clientRoutes = require('./routes/client');
 const { resolveVapiRecordingUrl } = require('./lib/vapi-recording');
 const { createApiKey, listApiKeys, revokeApiKey } = require('./routes/agency-api-keys');
@@ -263,7 +263,6 @@ const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 // SUPPORT LINE ADDITION: Voice support webhook (shared number, dynamic agency context)
 const { handleSupportWebhook } = require('./webhooks/vapi-support-webhook');
 const { handleConciergeWebhook } = require('./webhooks/vapi-concierge-webhook');
-const { handleJarvisWebhook } = require('./webhooks/vapi-jarvis-webhook');
 
 const { 
   createAgencyCheckout, 
@@ -1617,6 +1616,7 @@ app.use('/api/agency', byotRoutes);
 app.use('/api/agency', feedbackRoutes);
 app.use('/api/agency', supportRoutes);
 app.use('/api/agency', require('./routes/agency-support-requests'));
+app.use('/api/agency', require('./routes/support-thread').agencyRouter);
 app.use('/api/help', helpRoutes);
 app.use('/api/yt', ytContentRoutes);
 app.use('/api/agency', leadRoutes);
@@ -1642,7 +1642,7 @@ app.use('/api/agency', usageReportRoutes);
 // per hour. Embed widget makes this endpoint internet-exposed without auth,
 // so a bare-minimum throttle is needed before CAPTCHA / fraud detection.
 // Middleware is a no-op in non-production envs (NODE_ENV !== 'production').
-app.post('/api/client/signup', signupRateLimiter, handleClientSignup);
+app.post('/api/client/signup', signupRateLimiter, withSignupFailureAlert(handleClientSignup));
 app.post('/api/client/checkout', createClientCheckout);
 app.post('/api/client/portal', createClientPortal);
 // In-app plan switch for an active connected subscription. Swaps the sub item
@@ -1846,6 +1846,7 @@ app.get('/api/auth/google/callback', googleCallback);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin', adminCallsRoutes);
 app.use('/api/admin', adminAgencyDetail);
+app.use('/api/admin', require('./routes/support-thread').adminRouter);
 app.use('/api/admin', require('./routes/orphan-cleanup'));
 app.use('/api/admin', require('./routes/sms-number-assignment'));
 app.use('/api/admin', require('./routes/admin-impersonate'));
@@ -1858,7 +1859,6 @@ app.use('/api/admin', errorReportRoutes);
 app.use('/api/admin', require('./routes/admin-expenses'));
 app.use('/api/admin', require('./routes/admin-margin'));
 app.use('/api/admin', require('./routes/admin-support'));  
-app.use('/api/jarvis', require('./routes/jarvis-admin'));
 // ============================================================================
 // CRON ROUTES (Trial Expiration)
 // ============================================================================
@@ -1996,7 +1996,7 @@ app.use('/api/cron', usageReporterRoutes);
 // Guarded by CRON_SECRET inside the router. Schedule reconcile-telnyx daily as
 // the standing backstop for any release that could not confirm in-flight.
 app.use('/api/cron', numberCleanupRoutes);
-app.use('/api/cron', require('./routes/jarvis-briefing'));
+
 
 
 // ============================================================================
@@ -2011,7 +2011,6 @@ app.post('/webhook/vapi-support', handleSupportWebhook);
 // CONCIERGE / DEMO LINE: the platform's own demo number (prospects evaluating VoiceAI Connect).
 // SDR entry AI + announced transfer to the home-services or agency demo. See vapi-concierge-webhook.js.
 app.post('/webhook/vapi-concierge', handleConciergeWebhook);
-app.post('/webhook/vapi-jarvis', handleJarvisWebhook);
 app.post('/webhook/telnyx-sms', express.raw({ type: '*/*', limit: '2mb' }), handleTelnyxSMSWebhook);
 app.post('/webhook/twilio-sms', express.urlencoded({ extended: false, limit: '2mb' }), handleTwilioSMSWebhook);
 
