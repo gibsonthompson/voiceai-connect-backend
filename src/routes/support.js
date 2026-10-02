@@ -10,6 +10,7 @@ const express = require('express');
 const router = express.Router();
 const fetch = require('node-fetch');
 const { requireAgencyAccess } = require('./auth');
+const { supabase } = require('../lib/supabase');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 // Ownership guard: /support/chat proxies to the Anthropic API, so it must not
@@ -393,6 +394,21 @@ router.post('/:agencyId/support/chat', async (req, res) => {
 
     const data = await response.json();
     const reply = data.content?.[0]?.text || 'Sorry, I couldn\'t generate a response. Please try again.';
+
+    // Log the exchange for platform visibility (non-blocking, best-effort). The
+    // last user message is the question; reply is the answer. Tied to the agency
+    // so the admin agency-detail can surface what agencies ask the bot.
+    try {
+      const lastUser = [...messages].reverse().find((m) => m && m.role === 'user');
+      const question = lastUser ? String(lastUser.content || '').slice(0, 2000) : '';
+      if (question) {
+        supabase.from('support_bot_log').insert({
+          agency_id: req.params.agencyId || null,
+          question,
+          answer: String(reply).slice(0, 4000),
+        }).then(() => {}, () => {});
+      }
+    } catch (_) { /* logging never blocks the reply */ }
 
     res.json({ success: true, reply });
   } catch (error) {

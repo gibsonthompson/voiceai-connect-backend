@@ -281,7 +281,7 @@ router.post('/ideas', async (req, res) => {
     const validModes = ['figured_something_out', 'showing_screen', 'telling_friend'];
 
     const row = {
-      pillar: validPillars.includes(pillar) ? pillar : 'opportunity',
+      pillar: validPillars.includes(pillar) ? pillar : '', // pasted scripts carry no pillar label
       title: cleanTitle,
       hook: typeof hook === 'string' ? hook : '',
       talking_points: Array.isArray(talking_points) ? talking_points : [],

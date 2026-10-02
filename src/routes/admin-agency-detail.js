@@ -184,11 +184,27 @@ router.get('/agencies/:agencyId/expanded', requireAdmin, async (req, res) => {
       // agency_feedback table might not exist yet
     }
 
+    // Support-bot chats: what this agency has asked the in-dashboard AI support
+    // bot. Pure product signal, shows exactly where agencies get stuck.
+    let supportBotLog = [];
+    try {
+      const { data: bl } = await supabase
+        .from('support_bot_log')
+        .select('id, question, answer, created_at')
+        .eq('agency_id', agencyId)
+        .order('created_at', { ascending: false })
+        .limit(30);
+      supportBotLog = bl || [];
+    } catch (e) {
+      // support_bot_log table might not exist yet
+    }
+
     // ── Response ────────────────────────────────────────────────────────
     res.json({
       clients: clientList,
       support_requests: supportRequests,
       feedback,
+      support_bot_log: supportBotLog,
       billable_client_count: billableClients.length,
       sms_history: smsHistory,
       checklist: {
