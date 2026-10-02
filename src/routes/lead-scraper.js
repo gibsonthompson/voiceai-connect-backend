@@ -181,6 +181,12 @@ router.post('/search', async (req, res) => {
         const job = jobs.get(jobId);
         if (job) job.progress = progress;
       },
+      // Cancellation signal, checked inside the enrichment loops so a Stop (or a
+      // superseding search) actually halts the Google spend instead of orphaning it.
+      shouldCancel: () => {
+        const j = jobs.get(jobId);
+        return !j || j.status === 'cancelled' || j.status === 'superseded';
+      },
     };
 
     const runFn = source === "indeed"
@@ -190,9 +196,14 @@ router.post('/search', async (req, res) => {
     runFn()
       .then(async ({ leads, stats }) => {
         const job = jobs.get(jobId);
-        if (!job) return;
+        if (!job) return; // superseded entirely: discard, no charge
 
-        if (meteredAgency) {
+        const stopped = job.status === 'cancelled';
+
+        // A stopped search is not billed. Whatever was fetched before the Stop
+        // is a sunk cost; we don't charge the agency's monthly lead usage for a
+        // search they chose to abort.
+        if (meteredAgency && !stopped) {
           await incrementMonthlyLeadUsage(agencyId, leads.length);
           const newUsed = usedThisMonth + leads.length;
           if (stats) {
@@ -205,10 +216,14 @@ router.post('/search', async (req, res) => {
           }
         }
 
-        job.status = 'complete';
         job.leads = leads;
         job.stats = stats;
-        job.progress = { stage: 'done', message: 'Complete', percent: 100 };
+        if (stopped) {
+          job.progress = { stage: 'stopped', message: `Stopped. ${leads.length} found.`, percent: 100 };
+        } else {
+          job.status = 'complete';
+          job.progress = { stage: 'done', message: 'Complete', percent: 100 };
+        }
 
         console.log(`[LeadScraper] Job ${jobId} [${source}${findAll ? ':find_all' : ''}] complete, ${leads.length} leads`);
       })
@@ -239,6 +254,26 @@ router.get('/industries', (req, res) => {
   res.json({ industries });
 });
 
+
+// ============================================================================
+// POST /api/leads/search/cancel/:id  — Stop a running search.
+// Marks the job cancelled; the enrichment loops see it and halt within one
+// item, so the Google spend stops. Whatever leads were enriched so far are
+// kept, and the client is freed to start a new search.
+// ============================================================================
+router.post('/search/cancel/:id', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Search not found or already finished' });
+  const agencyId = (req.body && req.body.agencyId) || (req.query && req.query.agencyId);
+  if (agencyId && job.agencyId && job.agencyId !== agencyId) {
+    return res.status(403).json({ error: 'Not your search' });
+  }
+  if (job.status === 'running') {
+    job.status = 'cancelled';
+    job.progress = { stage: 'stopping', message: 'Stopping...', percent: (job.progress && job.progress.percent) || 0 };
+  }
+  res.json({ ok: true, status: job.status });
+});
 
 // ============================================================================
 // GET /api/leads/search/status/:id

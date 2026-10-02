@@ -213,7 +213,7 @@ async function runIndeedPipeline({ keywords, location, maxPages = 1, maxLeads = 
   return { leads, stats };
 }
 
-async function runGoogleMapsPipeline({ query, location, industry, maxPages = 1, maxLeads = 25, onProgress }) {
+async function runGoogleMapsPipeline({ query, location, industry, maxPages = 1, maxLeads = 25, onProgress, shouldCancel }) {
   const stats = {
     source: "google_maps", businessesFound: 0, uniqueCompanies: 0, enriched: 0,
     withPhone: 0, withEmail: 0, withWebsite: 0,
@@ -235,6 +235,7 @@ async function runGoogleMapsPipeline({ query, location, industry, maxPages = 1, 
 
   for (let i = 0; i < toEnrich.length; i++) {
     const biz = toEnrich[i];
+    if (shouldCancel && shouldCancel()) break;
     if (onProgress) {
       onProgress({
         stage: "enriching",
@@ -287,9 +288,10 @@ function mapsFallbackLead(biz) {
   };
 }
 
-async function enrichMapsBatch(businesses, batchSize, onBatch) {
+async function enrichMapsBatch(businesses, batchSize, onBatch, shouldCancel) {
   const leads = [];
   for (let i = 0; i < businesses.length; i += batchSize) {
+    if (shouldCancel && shouldCancel()) break;
     const batch = businesses.slice(i, i + batchSize);
     const settled = await Promise.all(batch.map(async (biz) => {
       try { return await enrichFromMapsSource(biz); }
@@ -304,7 +306,7 @@ async function enrichMapsBatch(businesses, batchSize, onBatch) {
   return leads;
 }
 
-async function runFindAllPipeline({ query, industry, location, maxLeads = 1000, onProgress }) {
+async function runFindAllPipeline({ query, industry, location, maxLeads = 1000, onProgress, shouldCancel }) {
   const stats = {
     source: "google_maps", findAll: true, businessesFound: 0, uniqueCompanies: 0, enriched: 0,
     withPhone: 0, withEmail: 0, withWebsite: 0,
@@ -338,6 +340,12 @@ async function runFindAllPipeline({ query, industry, location, maxLeads = 1000, 
     return { leads: [], stats };
   }
 
+  if (shouldCancel && shouldCancel()) {
+    stats.endTime = Date.now();
+    stats.durationSeconds = Math.round((stats.endTime - stats.startTime) / 1000);
+    return { leads: [], stats };
+  }
+
   const leads = await enrichMapsBatch(businesses, 6, (done, total) => {
     if (onProgress) {
       onProgress({
@@ -347,7 +355,7 @@ async function runFindAllPipeline({ query, industry, location, maxLeads = 1000, 
         current: done, total,
       });
     }
-  });
+  }, shouldCancel);
 
   for (const lead of leads) {
     stats.enriched++;
