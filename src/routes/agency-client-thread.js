@@ -126,6 +126,17 @@ agencyRouter.post('/:agencyId/support-requests/:id/reply', requireAgencyAccess('
           });
         }
       } catch (e) { console.error('client notify SMS failed (non-blocking):', e.message); }
+    } else if (request.contact && !/@/.test(request.contact) && request.contact.replace(/\D/g, '').length >= 10) {
+      // Visitor with a phone contact and no portal: text them the reply itself.
+      try {
+        await sendAndLogSMS({
+          phone: request.contact,
+          agencyId: req.params.agencyId,
+          recipientType: 'prospect',
+          messageType: 'agency_reply',
+          message: body,
+        });
+      } catch (e) { console.error('visitor reply SMS failed (non-blocking):', e.message); }
     }
 
     res.json({ success: true, message });
