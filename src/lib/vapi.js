@@ -2364,7 +2364,7 @@ async function createIndustryKnowledgeBase(businessName, industryKey, websiteKno
 // CREATE INDUSTRY ASSISTANT (Client-level)
 // FIXED: Warns when KB creation fails (assistant will have no knowledge base)
 // ============================================================================
-async function createIndustryAssistant(businessName, industry, knowledgeBaseData = null, ownerPhone = null, clientId = null, agencyId = null) {
+async function createIndustryAssistant(businessName, industry, knowledgeBaseData = null, ownerPhone = null, clientId = null, agencyId = null, client = null) {
   try {
     // If the client's industry is one the agency defined themselves (Scale
     // feature), use its stored knowledge base. Custom keys never match
