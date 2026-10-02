@@ -37,6 +37,22 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { sendAndLogSMS } = require('../lib/sms-logger');
 const { supabase } = require('../lib/supabase');
 
+// Best-effort logging of marketing FAQ-bot conversations (see widget_chat_log).
+// Never blocks or fails the chat/escalation response.
+async function logWidgetChat(sessionId, role, content) {
+  try {
+    if (!sessionId || typeof sessionId !== 'string') return;
+    if (!content || typeof content !== 'string' || !content.trim()) return;
+    await supabase.from('widget_chat_log').insert({
+      session_id: sessionId.slice(0, 100),
+      role,
+      content: content.trim().slice(0, 8000),
+    });
+  } catch (e) {
+    console.error('widget chat log failed (non-blocking):', e.message);
+  }
+}
+
 // Initialize Anthropic client
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -215,7 +231,7 @@ SUPPORT & FEEDBACK:
 // AI chatbot powered by Claude
 router.post('/chat', async (req, res) => {
   try {
-    const { message, history = [] } = req.body;
+    const { message, history = [], sessionId } = req.body;
 
     if (!message || typeof message !== 'string' || message.trim().length === 0) {
       return res.status(400).json({ error: 'Message is required' });
@@ -252,6 +268,10 @@ router.post('/chat', async (req, res) => {
       .join('\n');
 
     res.json({ response: assistantResponse });
+
+    // Log the exchange (fire-and-forget, non-blocking).
+    logWidgetChat(sessionId, 'user', message.trim());
+    logWidgetChat(sessionId, 'assistant', assistantResponse);
   } catch (err) {
     console.error('Support chat error:', err);
     res.status(500).json({ error: 'Failed to process message' });
@@ -273,7 +293,10 @@ router.post('/chat', async (req, res) => {
 //      from those fields.
 router.post('/message', async (req, res) => {
   try {
-    const { message, name, contact, conversationSummary } = req.body || {};
+    const { message, name, contact, conversationSummary, sessionId } = req.body || {};
+
+    // Flag the originating FAQ-bot session as escalated (non-blocking).
+    logWidgetChat(sessionId, 'escalation', `Escalated to support. Name: ${(typeof name === 'string' && name.trim()) || '(none)'} / Contact: ${(typeof contact === 'string' && contact.trim()) || '(none)'}`);
 
     // Pull identity from the auth token when present. generateToken mints
     // { userId, email, role, agencyId, clientId } (camelCase); fall back to

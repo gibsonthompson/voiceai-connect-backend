@@ -1853,6 +1853,7 @@ app.use('/api/admin', require('./routes/support-thread').adminRouter);
 app.use('/api/admin', require('./routes/orphan-cleanup'));
 app.use('/api/admin', require('./routes/sms-number-assignment'));
 app.use('/api/admin', require('./routes/admin-impersonate'));
+app.use('/api/admin', require('./routes/admin-widget-chats'));
 app.use('/api/admin', smsLogRoutes);
 app.use('/api/admin', smsTemplatesAdminRoutes);
 app.use('/api/admin', require('./routes/platform-inbox')); // agency SMS reply inbox
