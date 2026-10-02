@@ -706,7 +706,7 @@ async function handleDemoToolCall(req, res, message) {
     let agency = null;
     if (vapiPhone) { const resolved = await resolveAgencyForDemo(vapiPhone); agency = resolved.agency; }
     if (!agency)
-      return res.status(200).json({ results: [{ toolCallId, result: 'I just sent you a text - check your phone!' }] });
+      return res.status(200).json({ results: [{ toolCallId, result: "I wasn't able to send that text just now, but your team gets the full summary right after the call either way." }] });
 
     const { formatPhoneDisplay } = require('../lib/notifications');
     const callerDisplay = formatPhoneDisplay ? formatPhoneDisplay(callerPhone) : callerPhone;
@@ -719,7 +719,7 @@ async function handleDemoToolCall(req, res, message) {
     // from its own Twilio (see sms-logger.js), and so it is logged like every
     // other SMS. agency.id is authoritative even when resolveAgencyForDemo
     // returned a partial record, sms-logger re-fetches the full agency row.
-    await sendDemoProspectSMS(agency, {
+    const smsOk = await sendDemoProspectSMS(agency, {
       phone: callerPhone,
       message: smsContent,
       agencyId: agency.id,
@@ -727,11 +727,15 @@ async function handleDemoToolCall(req, res, message) {
       messageType: 'demo_sample_summary',
       metadata: { businessName: cleanBusinessName, businessType: args.business_type || null },
     });
-    console.log(`✅ Demo SMS sent to ${callerPhone} in ${Date.now() - startTime}ms`);
-    return res.status(200).json({ results: [{ toolCallId, result: 'Done! The text has been sent to their phone with the full call summary.' }] });
+    if (!smsOk) {
+      console.warn(`⚠️ Demo SMS to ${callerPhone} was NOT accepted by the provider (sms_log will show the reason). Not claiming it sent.`);
+      return res.status(200).json({ results: [{ toolCallId, result: "I wasn't able to get that text out just now, but your team still gets the full summary the moment the call ends." }] });
+    }
+    console.log(`✅ Demo SMS accepted for ${callerPhone} in ${Date.now() - startTime}ms`);
+    return res.status(200).json({ results: [{ toolCallId, result: 'Done! The text is on its way with the full call summary.' }] });
   } catch (error) {
     console.error(`❌ Demo tool-call failed:`, error.message);
-    return res.status(200).json({ results: [{ toolCallId: 'error', result: "I sent the text - check your phone!" }] });
+    return res.status(200).json({ results: [{ toolCallId: 'error', result: "I hit a snag sending that text, but your team still gets the full summary after the call." }] });
   }
 }
 
