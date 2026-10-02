@@ -1617,6 +1617,7 @@ app.use('/api/agency', feedbackRoutes);
 app.use('/api/agency', supportRoutes);
 app.use('/api/agency', require('./routes/agency-support-requests'));
 app.use('/api/agency', require('./routes/support-thread').agencyRouter);
+app.use('/api/agency', require('./routes/agency-client-thread').agencyRouter);
 app.use('/api/help', helpRoutes);
 app.use('/api/yt', ytContentRoutes);
 app.use('/api/agency', leadRoutes);
@@ -1686,6 +1687,7 @@ app.use('/api/client', staffMembersRoutes);
 app.use('/api/client', clientServicesRoutes);
 app.use('/api/client', toolConfigRoutes);
 app.use('/api/client', pwaTrackingRoutes);
+app.use('/api/client', require('./routes/agency-client-thread').clientRouter); // agency<->client threads (behind requireClientAccess above)
 app.use('/api/sms', smsRoutes);
 
 // ============================================================================
