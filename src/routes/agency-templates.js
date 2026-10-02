@@ -1593,6 +1593,7 @@ router.get('/:agencyId/ai-templates/industries', requireEnterprisePlan, async (r
           description: ci.description || '',
           icon: 'Sparkles',
           isCustom: true,
+          kb_status: ci.kb_status || 'ready',
           hasCustomTemplate: !!templateMap[ci.key],
           isActive: templateMap[ci.key]?.isActive ?? true,
           updatedAt: templateMap[ci.key]?.updatedAt || ci.created_at || null,
