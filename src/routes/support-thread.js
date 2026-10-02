@@ -269,4 +269,46 @@ agencyRouter.post('/:agencyId/platform-threads/:id/reply', requireAgencyAccess('
   }
 });
 
+// POST /api/agency/:agencyId/platform-threads — the agency STARTS a new thread
+// to the platform (reach out to admin from the inbox, not only reply). Creates a
+// support_request that lands in the admin Support queue, flagged unread.
+agencyRouter.post('/:agencyId/platform-threads', requireAgencyAccess('dashboard'), async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const body = clean(req.body && req.body.body, MAX_BODY);
+    if (!body) return res.status(400).json({ error: 'Message is required' });
+
+    let who = 'An agency';
+    try {
+      const { data: agency } = await supabase.from('agencies').select('name').eq('id', agencyId).single();
+      who = (agency && agency.name) || who;
+    } catch (_) { /* name is best-effort */ }
+
+    const { data: request, error } = await supabase
+      .from('support_requests')
+      .insert({
+        agency_id: agencyId,
+        user_type: 'agency',
+        display_name: who === 'An agency' ? null : who,
+        message: body,
+        source: 'inbox',
+        status: 'open',
+        admin_unread: 1,
+        last_reply_at: new Date().toISOString(),
+        last_sender: 'agency',
+      })
+      .select('*')
+      .single();
+    if (error) throw error;
+
+    try { await sendPlatformNotificationSMS(`New message from ${who}:\n\n${body.slice(0, 300)}`); }
+    catch (e) { console.error('platform new-thread SMS failed (non-blocking):', e.message); }
+
+    res.json({ success: true, request });
+  } catch (error) {
+    console.error('Agency platform-thread create error:', error.message);
+    res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
 module.exports = { adminRouter, agencyRouter };
