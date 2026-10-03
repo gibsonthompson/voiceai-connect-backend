@@ -263,6 +263,8 @@ const { handleVapiWebhook } = require('./webhooks/vapi-webhook');
 // SUPPORT LINE ADDITION: Voice support webhook (shared number, dynamic agency context)
 const { handleSupportWebhook } = require('./webhooks/vapi-support-webhook');
 const { handleConciergeWebhook } = require('./webhooks/vapi-concierge-webhook');
+// Jarvis / Secretary AI personal line (isolated from the receptionist).
+const { handleJarvisWebhook } = require('./webhooks/vapi-jarvis-webhook');
 
 const { 
   createAgencyCheckout, 
@@ -2052,6 +2054,11 @@ app.use('/api/cron', usageReporterRoutes);
 // the standing backstop for any release that could not confirm in-flight.
 app.use('/api/cron', numberCleanupRoutes);
 
+// Jarvis / Secretary AI line: provisioning/status (/api/jarvis) + the 10am
+// outbound daily briefing cron (/api/cron/jarvis-briefing).
+app.use('/api/jarvis', require('./routes/jarvis-admin'));
+app.use('/api/cron', require('./routes/jarvis-briefing'));
+
 
 
 // ============================================================================
@@ -2066,6 +2073,8 @@ app.post('/webhook/vapi-support', handleSupportWebhook);
 // CONCIERGE / DEMO LINE: the platform's own demo number (prospects evaluating VoiceAI Connect).
 // SDR entry AI + announced transfer to the home-services or agency demo. See vapi-concierge-webhook.js.
 app.post('/webhook/vapi-concierge', handleConciergeWebhook);
+// Jarvis / Secretary AI: Gibson's private HQ phone line (caller-ID gated inside).
+app.post('/webhook/vapi-jarvis', handleJarvisWebhook);
 app.post('/webhook/telnyx-sms', express.raw({ type: '*/*', limit: '2mb' }), handleTelnyxSMSWebhook);
 app.post('/webhook/twilio-sms', express.urlencoded({ extended: false, limit: '2mb' }), handleTwilioSMSWebhook);
 

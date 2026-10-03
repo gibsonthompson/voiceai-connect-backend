@@ -17,6 +17,9 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
+const { sendAndLogSMS } = require('../lib/sms-logger');
+// Same platform send-number the agency reply inbox uses.
+const PLATFORM_SMS_NUMBER = process.env.TELNYX_SMS_FROM_NUMBER || '+15054317109';
 
 router.get('/sms-log', async (req, res) => {
   try {
@@ -148,13 +151,20 @@ router.get('/sms-log/thread', async (req, res) => {
     const phone = String(req.query.phone || '').trim();
     if (!phone) return res.status(400).json({ error: 'phone is required' });
 
-    const { data, error } = await supabase
-      .from('sms_log')
-      .select('id, agency_id, recipient_phone, recipient_type, message_type, message_body, delivery_status, metadata, created_at')
-      .or(`recipient_phone.eq.${phone},metadata->>from.eq.${phone}`)
-      .order('created_at', { ascending: true })
-      .limit(500);
-    if (error) throw error;
+    // Two explicit, scoped queries, merged. Outbound messages store the person
+    // as recipient_phone; their inbound replies store it as metadata.from. The
+    // earlier single .or() with a JSON path silently matched nothing and
+    // returned the whole table, this is reliable and actually filters.
+    const FIELDS = 'id, agency_id, recipient_phone, recipient_type, message_type, message_body, delivery_status, metadata, created_at';
+    const [outRes, inRes] = await Promise.all([
+      supabase.from('sms_log').select(FIELDS).eq('recipient_phone', phone).order('created_at', { ascending: true }).limit(300),
+      supabase.from('sms_log').select(FIELDS).eq('metadata->>from', phone).order('created_at', { ascending: true }).limit(300),
+    ]);
+    if (outRes.error) throw outRes.error;
+    if (inRes.error) console.warn('sms-log thread inbound query warning:', inRes.error.message);
+    const byId = new Map();
+    for (const r of [...(outRes.data || []), ...(inRes.data || [])]) byId.set(r.id, r);
+    const data = [...byId.values()].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
     let agencyName = null;
     const agencyId = (data || []).map(r => r.agency_id).find(Boolean);
@@ -176,6 +186,58 @@ router.get('/sms-log/thread', async (req, res) => {
   } catch (err) {
     console.error('sms-log thread error:', err.message);
     res.status(500).json({ error: 'Failed to load conversation' });
+  }
+});
+
+// ============================================================================
+// POST /api/admin/sms-log/thread/reply  body { phone, message }
+// Send a reply to a number from the platform line, logged outbound so it shows
+// up in that number's thread. Lets admin answer a reply directly from Messaging
+// instead of texting from a phone.
+// ============================================================================
+router.post('/sms-log/thread/reply', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ error: 'No token' });
+    const jwt = require('jsonwebtoken');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || process.env.ADMIN_JWT_SECRET);
+    if (!decoded || decoded.role !== 'platform_admin') {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+
+    const phone = String((req.body && req.body.phone) || '').trim();
+    const message = String((req.body && req.body.message) || '').trim();
+    if (!phone) return res.status(400).json({ error: 'phone is required' });
+    if (!message) return res.status(400).json({ error: 'message is required' });
+    if (message.length > 1600) return res.status(400).json({ error: 'Message too long (max 1600)' });
+
+    // Best-effort: carry the agency this number belongs to onto the log row.
+    let agencyId = null;
+    try {
+      const { data } = await supabase
+        .from('sms_log').select('agency_id')
+        .eq('recipient_phone', phone).not('agency_id', 'is', null).limit(1);
+      agencyId = (data && data[0] && data[0].agency_id) || null;
+    } catch (e) { /* non-blocking */ }
+
+    const sent = await sendAndLogSMS({
+      phone,
+      message,
+      agencyId,
+      recipientType: 'agency_owner',
+      messageType: 'admin_reply',
+      from: PLATFORM_SMS_NUMBER,
+      metadata: { direction: 'outbound', admin_reply: true },
+    });
+    if (!sent) return res.status(500).json({ error: 'Failed to send SMS' });
+
+    res.json({
+      ok: true,
+      message: { id: `tmp-${Date.now()}`, body: message, direction: 'outbound', type: 'admin_reply', status: 'sent', created_at: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('sms-log thread reply error:', err.message);
+    res.status(500).json({ error: 'Failed to send reply' });
   }
 });
 
