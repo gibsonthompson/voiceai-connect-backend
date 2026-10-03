@@ -1561,10 +1561,61 @@ app.get('/api/agency/:agencyId/analytics', requireAgencyAccess('analytics'), asy
       revenueByMonth.push({ month: monthStr, amount: monthRevenue });
     }
 
-    console.log(`📊 Analytics loaded for agency ${agencyId}: ${activeClients} active, $${mrr/100} MRR`);
+    // ── OPERATIONAL METRICS (what the AI actually did) ──────────────────
+    // The revenue view above shows what the agency EARNS. This shows what
+    // they're selling: call volume, appointments booked, after-hours saves,
+    // spam blocked, and talk time, scoped to their clients. Counters are
+    // this-month (actionable); the chart is a 6-month trend. Same call-scoping
+    // pattern as the agency calls export.
+    const callStats = { callsThisMonth: 0, appointmentsBooked: 0, callsTransferred: 0, spamBlocked: 0, afterHoursCalls: 0, talkMinutes: 0 };
+    const callsByMonth = [];
+    let callsByClient = [];
+    if (clientIds.length > 0) {
+      const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+      const { data: callsData } = await supabase
+        .from('calls')
+        .select('client_id, created_at, call_status, is_spam, appointment_booked, transfer_status, duration_seconds')
+        .in('client_id', clientIds)
+        .gte('created_at', sixMonthsAgo.toISOString());
+      const calls = callsData || [];
+      const isSpam = (c) => c.is_spam || c.call_status === 'spam';
+      const isTransfer = (c) => c.transfer_status === 'transferred' || c.call_status === 'transferred';
+      const nameById = {};
+      clientList.forEach(c => { nameById[c.id] = c.business_name; });
+      const monthCounts = {};
+      const perClient = {};
+      for (const c of calls) {
+        const d = new Date(c.created_at);
+        const mk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        monthCounts[mk] = (monthCounts[mk] || 0) + 1; // 6-month trend (all calls)
+        const inThisMonth = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+        if (!inThisMonth) continue; // counters + leaderboard are this month
+        callStats.callsThisMonth++;
+        if (c.appointment_booked) callStats.appointmentsBooked++;
+        if (isTransfer(c)) callStats.callsTransferred++;
+        if (isSpam(c)) callStats.spamBlocked++;
+        else { const h = d.getHours(), day = d.getDay(); if (day === 0 || day === 6 || h < 8 || h >= 18) callStats.afterHoursCalls++; }
+        callStats.talkMinutes += Math.round((Number(c.duration_seconds) || 0) / 60);
+        if (!isSpam(c)) perClient[c.client_id] = (perClient[c.client_id] || 0) + 1;
+      }
+      for (let i = 5; i >= 0; i--) {
+        const md = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        const mk = `${md.getFullYear()}-${String(md.getMonth() + 1).padStart(2, '0')}`;
+        callsByMonth.push({ month: mk, count: monthCounts[mk] || 0 });
+      }
+      callsByClient = Object.entries(perClient)
+        .map(([id, count]) => ({ business_name: nameById[id] || 'Unknown', count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5);
+    }
+
+    console.log(`📊 Analytics loaded for agency ${agencyId}: ${activeClients} active, $${mrr/100} MRR, ${callStats.callsThisMonth} calls this month`);
 
     res.json({
       stats: { mrr, totalEarned, pendingPayout, activeClients, trialClients, totalClients },
+      callStats,
+      callsByMonth,
+      callsByClient,
       revenueByMonth,
       payments,
       clients: clientList,
