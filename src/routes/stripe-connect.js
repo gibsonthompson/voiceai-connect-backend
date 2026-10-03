@@ -2733,6 +2733,25 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
 // it instead of silently enabling nothing. provisionClient short-circuits if the
 // client is already provisioned, so a retried webhook won't double-buy in the
 // common sequential case; it runs fire-and-forget so the webhook stays fast.
+// Provision a client's number with a few retries + backoff. provisionClient is
+// idempotent (short-circuits if already provisioned), so a transient VAPI/Telnyx
+// failure shouldn't leave a PAID client with no number. Background runner, never
+// awaited by the webhook; a final failure alerts loudly for manual re-provision.
+async function provisionWithRetry(clientId, context, attempts = 3) {
+  const { provisionClient } = require('./client-signup');
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      await provisionClient(clientId);
+      console.log(`\u2705 Post-payment re-provision done for ${clientId} (attempt ${i}) [${context}]`);
+      return;
+    } catch (e) {
+      console.error(`\u26a0\ufe0f Post-payment re-provision attempt ${i}/${attempts} failed for ${clientId} [${context}]: ${e.message}`);
+      if (i < attempts) await new Promise((r) => setTimeout(r, i * 5000)); // 5s, 10s backoff
+    }
+  }
+  console.error(`\ud83d\udea8 Post-payment re-provision FAILED after ${attempts} attempts for ${clientId} [${context}] \u2014 client PAID but has NO number; manual re-provision needed (provisionClient is idempotent, safe to re-run).`);
+}
+
 async function ensureProvisionedOnReactivate(client, context) {
   if (client.vapi_phone_number && client.vapi_phone_id) {
     try { await enablePhoneNumber(client.vapi_phone_id); } catch (e) { console.error('Failed to enable phone:', e.message); }
@@ -2740,14 +2759,9 @@ async function ensureProvisionedOnReactivate(client, context) {
     return;
   }
   console.error(`🚨 Reactivating ${client.business_name} (${client.id}) with NO provisioned number [${context}] — re-provisioning to restore it.`);
-  try {
-    const { provisionClient } = require('./client-signup');
-    provisionClient(client.id)
-      .then(() => console.log(`✅ Reactivation re-provision done for ${client.id}`))
-      .catch((e) => console.error(`🚨 Reactivation re-provision FAILED for ${client.id}:`, e.message));
-  } catch (e) {
-    console.error(`🚨 Could not start reactivation re-provision for ${client.id}:`, e.message);
-  }
+  // Retry with backoff (idempotent) so a paid client is never stranded on a
+  // single transient failure. Background runner keeps the webhook fast.
+  provisionWithRetry(client.id, context);
 }
 
 async function handleClientSubscriptionUpdated(subscription, stripeAccountId) {

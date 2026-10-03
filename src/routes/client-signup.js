@@ -311,8 +311,8 @@ function planFeatureEnabled(agency, planType, key) {
 //  - dev/test bypass: NODE_ENV !== 'production' skips the limiter so local
 //    runs and integration tests don't trip on themselves.
 // ============================================================================
-const SIGNUP_RATE_LIMIT_MAX = 5;            // requests per window per IP
-const SIGNUP_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;  // 1 hour
+const SIGNUP_RATE_LIMIT_MAX = 15;           // requests per window per IP
+const SIGNUP_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;  // 15 min (was 1h; too slow to clear for legit testing/busy offices)
 const signupAttempts = new Map(); // ip -> { count, resetAt }
 
 // Periodic cleanup of expired buckets so the Map can't grow unbounded.
@@ -1169,7 +1169,7 @@ async function handleClientSignup(req, res) {
           message: getFriendlyProvisioningError(phoneError),
         });
       }
-      console.log(`✅ Phone provisioned (${phoneResult.provisioningMethod}): ${phoneResult.number}`);
+      console.log(`✅ Phone provisioned (${phoneResult?.provisioningMethod}): ${phoneResult.number}`);
 
       // Enable two-way SMS on the provisioned number (non-blocking)
       try { await enableSMSForNumber(phoneResult.number); } catch (e) { console.warn('⚠️ SMS enable failed:', e.message); }
@@ -1224,7 +1224,7 @@ async function handleClientSignup(req, res) {
       knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
       knowledge_base_data: templateKB,
       subscription_status: manualBilling ? 'manual' : 'trial',
-      trial_ends_at: manualBilling ? (trialDays > 0 ? trialEndsAt : null) : trialEndsAt,
+      trial_ends_at: manualBilling ? (trialDays > 0 ? trialEndsAt : null) : (trialEndsAt || new Date()),
       status: 'active',
       billing_mode: manualBilling ? 'manual' : 'connect',
       usage_resets_at: manualBilling ? manualUsageResetAt() : null,
@@ -1251,7 +1251,7 @@ async function handleClientSignup(req, res) {
         // BYOT: the number was bought on the agency's OWN Twilio, so the
         // release above cannot free it. Release it from the agency's Twilio
         // too. Only for byot-provisioned numbers; never throws.
-        if (phoneResult && phoneResult.provisioningMethod === 'byot') {
+        if (phoneResult && phoneResult?.provisioningMethod === 'byot') {
           try { await releaseBYOTNumber(agency, phoneResult.number); } catch (e) { console.warn('⚠️ BYOT release of conflicted number failed:', e.message); }
         }
         await cleanupVapiResources(createdAssistantId, createdQueryToolId, 'phone-collision');
@@ -1269,7 +1269,7 @@ async function handleClientSignup(req, res) {
       try { if (phoneResult) await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release after insert failure failed:', e.message); }
       // BYOT: also release from the agency's own Twilio (see note above);
       // only for byot-provisioned numbers, never throws.
-      if (phoneResult && phoneResult.provisioningMethod === 'byot') {
+      if (phoneResult && phoneResult?.provisioningMethod === 'byot') {
         try { await releaseBYOTNumber(agency, phoneResult.number); } catch (e) { console.warn('⚠️ BYOT release after insert failure failed:', e.message); }
       }
       throw clientError;
@@ -1279,7 +1279,7 @@ async function handleClientSignup(req, res) {
     createdAssistantId = null;
     createdQueryToolId = null;
 
-    console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult.provisioningMethod}, ${planType}, limit=${callLimit}, billing=${manualBilling ? 'manual' : 'connect'})`);
+    console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult?.provisioningMethod}, ${planType}, limit=${callLimit}, billing=${manualBilling ? 'manual' : 'connect'})`);
 
     // ── Update per-client billing for the agency (non-blocking) ─────
     // Fires for manual clients too: the agency still owes the platform per
@@ -1453,7 +1453,7 @@ async function handleClientSignup(req, res) {
       client: {
         id: newClient.id,
         business_name: newClient.business_name,
-        phone_number: phoneResult.number,
+        phone_number: phoneResult?.number || null,
         email: newClient.email,
         country: clientCountry,
         location: `${businessCity}, ${businessState}`,
@@ -1758,7 +1758,7 @@ async function handleAgencyAddClient(req, res) {
       });
     }
 
-    console.log(`✅ Phone provisioned (${phoneResult.provisioningMethod}): ${phoneResult.number}`);
+    console.log(`✅ Phone provisioned (${phoneResult?.provisioningMethod}): ${phoneResult.number}`);
 
     // Enable two-way SMS on the provisioned number (non-blocking)
     try { await enableSMSForNumber(phoneResult.number); } catch (e) { console.warn('⚠️ SMS enable failed:', e.message); }
@@ -1798,7 +1798,7 @@ async function handleAgencyAddClient(req, res) {
       knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
       knowledge_base_data: templateKB,
       subscription_status: manualBilling ? 'manual' : 'trial',
-      trial_ends_at: manualBilling ? (trialDays > 0 ? trialEndsAt : null) : trialEndsAt,
+      trial_ends_at: manualBilling ? (trialDays > 0 ? trialEndsAt : null) : (trialEndsAt || new Date()),
       status: 'active',
       billing_mode: manualBilling ? 'manual' : 'connect',
       usage_resets_at: manualBilling ? manualUsageResetAt() : null,
@@ -1807,7 +1807,7 @@ async function handleAgencyAddClient(req, res) {
       ...customFields,
       calls_this_month: 0,
       business_website: websiteUrl || null,
-      provisioning_method: phoneResult.provisioningMethod || 'platform',
+      provisioning_method: phoneResult?.provisioningMethod || 'platform',
       voice_routing: phoneResult.voiceRouting || 'vapi_direct',
       // Inherit nav defaults from agency
       nav_bg: agency.default_client_nav_bg || null,
@@ -1826,7 +1826,7 @@ async function handleAgencyAddClient(req, res) {
         // BYOT: the number was bought on the agency's OWN Twilio, so the
         // release above cannot free it. Release it from the agency's Twilio
         // too. Only for byot-provisioned numbers; never throws.
-        if (phoneResult && phoneResult.provisioningMethod === 'byot') {
+        if (phoneResult && phoneResult?.provisioningMethod === 'byot') {
           try { await releaseBYOTNumber(agency, phoneResult.number); } catch (e) { console.warn('⚠️ BYOT release of conflicted number failed:', e.message); }
         }
         await cleanupVapiResources(createdAssistantId, createdQueryToolId, 'phone-collision');
@@ -1844,7 +1844,7 @@ async function handleAgencyAddClient(req, res) {
       try { if (phoneResult) await fullyReleaseNumber(phoneResult.vapiPhoneId, phoneResult.number); } catch (e) { console.warn('⚠️ Release after insert failure failed:', e.message); }
       // BYOT: also release from the agency's own Twilio (see note above);
       // only for byot-provisioned numbers, never throws.
-      if (phoneResult && phoneResult.provisioningMethod === 'byot') {
+      if (phoneResult && phoneResult?.provisioningMethod === 'byot') {
         try { await releaseBYOTNumber(agency, phoneResult.number); } catch (e) { console.warn('⚠️ BYOT release after insert failure failed:', e.message); }
       }
       throw clientError;
@@ -1854,7 +1854,7 @@ async function handleAgencyAddClient(req, res) {
     createdAssistantId = null;
     createdQueryToolId = null;
 
-    console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult.provisioningMethod}, billing=${manualBilling ? 'manual' : 'connect'})`);
+    console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult?.provisioningMethod}, billing=${manualBilling ? 'manual' : 'connect'})`);
 
     // ── Update per-client billing for the agency (non-blocking) ─────
     // Fires for manual clients too: the agency still owes the platform per client.
@@ -1919,7 +1919,7 @@ async function handleAgencyAddClient(req, res) {
         trial_ends_at: newClient.trial_ends_at,
         subscription_status: manualBilling ? 'manual' : 'trial',
         plan_type: newClient.plan_type,
-        provisioning_method: phoneResult.provisioningMethod
+        provisioning_method: phoneResult?.provisioningMethod
       }
     });
 
@@ -2033,7 +2033,7 @@ async function provisionClient(clientId) {
       throw phoneError;
     }
 
-    console.log(`✅ Phone provisioned (${phoneResult.provisioningMethod}): ${phoneResult.number}`);
+    console.log(`✅ Phone provisioned (${phoneResult?.provisioningMethod}): ${phoneResult.number}`);
 
     // Enable two-way SMS on the provisioned number (non-blocking)
     try { await enableSMSForNumber(phoneResult.number); } catch (e) { console.warn('⚠️ SMS enable failed:', e.message); }
@@ -2048,7 +2048,7 @@ async function provisionClient(clientId) {
         knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
         knowledge_base_data: templateKB || client.knowledge_base_data || null,
         status: 'active',
-        provisioning_method: phoneResult.provisioningMethod || 'platform',
+        provisioning_method: phoneResult?.provisioningMethod || 'platform',
         voice_routing: phoneResult.voiceRouting || client.voice_routing || 'vapi_direct',
         // Inherit nav defaults if not already set
         nav_bg: client.nav_bg || agency.default_client_nav_bg || null,
@@ -2099,7 +2099,7 @@ async function provisionClient(clientId) {
       }
     }
     
-    console.log(`✅ Client provisioned (${phoneResult.provisioningMethod}): ${client.business_name}`);
+    console.log(`✅ Client provisioned (${phoneResult?.provisioningMethod}): ${client.business_name}`);
     return updatedClient;
     
   } catch (error) {

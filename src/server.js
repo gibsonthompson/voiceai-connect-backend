@@ -159,19 +159,23 @@ const corsOptions = {
     if (/\.vercel\.app$/.test(origin)) return callback(null, true);
 
     try {
-      const originHost = new URL(origin).hostname.replace('www.', '');
+      const originHost = new URL(origin).hostname.replace(/^www\./, '');
+      // Allow an agency's claimed custom domain even before DNS verification
+      // finishes. The site should not be CORS-blocked while verifying, and every
+      // API route is still auth-protected, so allowing the agency's own domain
+      // is low-risk. maybeSingle avoids a throw on 0 rows.
       const { data } = await supabase
         .from('agencies')
         .select('id')
         .eq('marketing_domain', originHost)
-        .eq('domain_verified', true)
-        .single();
+        .maybeSingle();
 
       if (data) return callback(null, true);
     } catch (err) {
       console.error('CORS domain check error:', err.message);
     }
 
+    console.warn('🚫 CORS blocked origin:', origin);
     callback(new Error('Not allowed by CORS'));
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
