@@ -1487,6 +1487,8 @@ For what you take, what's not allowed, dumpster sizes, rental periods, areas ser
 // ============================================================================
 // MIDDLEWARE: Check Enterprise Plan (with trial access)
 // ============================================================================
+const { getEffectivePlan } = require('../lib/plan-access');
+
 async function requireEnterprisePlan(req, res, next) {
   const { agencyId } = req.params;
   
@@ -1498,7 +1500,7 @@ async function requireEnterprisePlan(req, res, next) {
     }
     
     const isTrialing = ['trialing', 'trial'].includes(agency.subscription_status);
-    const effectivePlan = isTrialing ? 'scale' : agency.plan_type;
+    const effectivePlan = getEffectivePlan(agency);
     
     if (effectivePlan !== 'scale') {
       return res.status(403).json({ 
@@ -1531,7 +1533,7 @@ router.get('/:agencyId/ai-templates/check', async (req, res) => {
     }
     
     const isTrialing = ['trialing', 'trial'].includes(agency.subscription_status);
-    const effectivePlan = isTrialing ? 'scale' : agency.plan_type;
+    const effectivePlan = getEffectivePlan(agency);
     
     res.json({
       hasAccess: effectivePlan === 'scale',
@@ -1614,7 +1616,7 @@ router.get('/:agencyId/ai-templates/industries', requireEnterprisePlan, async (r
 // Scale-only gate (trial counts as Scale). Mirrors the custom-industries helper.
 function isScaleVoices(agency) {
   const isTrialing = ['trialing', 'trial'].includes(agency && agency.subscription_status);
-  const effectivePlan = isTrialing ? 'scale' : String((agency && agency.plan_type) || '').toLowerCase();
+  const effectivePlan = getEffectivePlan(agency);
   return effectivePlan === 'scale';
 }
 
@@ -1645,7 +1647,7 @@ router.post('/:agencyId/ai-templates/voices', requireEnterprisePlan, async (req,
     if (!voiceId) return res.status(400).json({ error: 'A voice ID is required.' });
 
     const { data: agency, error } = await supabase
-      .from('agencies').select('plan_type, subscription_status, custom_voices').eq('id', agencyId).single();
+      .from('agencies').select('plan_type, subscription_status, access_plan, custom_voices').eq('id', agencyId).single();
     if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
     if (!isScaleVoices(agency)) return res.status(403).json({ error: 'Custom voices are a Scale plan feature.', upgrade_required: true });
 

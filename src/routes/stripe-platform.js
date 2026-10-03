@@ -523,8 +523,14 @@ async function createAgencyCheckout(req, res) {
     // (no quantity allowed, Stripe rejects it on metered prices). The per-
     // client subscription item is added after subscription creation in the
     // checkout.session.completed webhook handler.
+    // Waived base fee (comped partner): charge the $0 platform price instead of
+    // the plan's, which keeps qty>=1 for Stripe Checkout. Per-client + minutes
+    // still bill from the real plan.
+    const basePlatformPrice = (agency.platform_fee_waived === true)
+      ? process.env.STRIPE_PRICE_FREE_PLATFORM
+      : planConfig.platformPrice;
     const lineItems = [
-      { price: planConfig.platformPrice, quantity: 1 },
+      { price: basePlatformPrice, quantity: 1 },
     ];
     if (planConfig.minutePrice) {
       lineItems.push({ price: planConfig.minutePrice });

@@ -61,7 +61,7 @@ async function getAgencyMonthlyReport(agencyId, opts = {}) {
 
   const { data: agency, error: agencyErr } = await supabase
     .from('agencies')
-    .select('id, name, email, support_email, plan_type, currency, display_currency, minute_pass_through, client_minute_rate_cents, price_starter, price_pro, price_growth, included_minutes_starter, included_minutes_pro, included_minutes_growth')
+    .select('id, name, email, support_email, plan_type, platform_fee_waived, currency, display_currency, minute_pass_through, client_minute_rate_cents, price_starter, price_pro, price_growth, included_minutes_starter, included_minutes_pro, included_minutes_growth')
     .eq('id', agencyId)
     .single();
 
@@ -173,7 +173,7 @@ async function getAgencyMonthlyReport(agencyId, opts = {}) {
   // in cents. billable_clients is the current active real-client count.
   const rates = getPlanRates(agency.plan_type);
   const billableClients = clients.filter(c => c.status === 'active').length;
-  const platformFeeCents = Math.round(rates.platformFee * 100);
+  const platformFeeCents = agency.platform_fee_waived ? 0 : Math.round(rates.platformFee * 100);
   const perClientRateCents = Math.round(rates.perClient * 100);
   const perMinuteRateCents = Math.round(rates.perMinute * 100);
   const clientChargeCents = Math.round(billableClients * rates.perClient * 100);

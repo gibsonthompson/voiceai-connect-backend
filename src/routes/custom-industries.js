@@ -38,10 +38,9 @@ router.use('/:agencyId/custom-industries', requireAgencyAccess());
 // Scale-only, matching the ai-templates gate: a trial counts as scale so it can
 // be evaluated during the trial; everyone else must be on the Scale plan. This
 // is the server-side enforcement; the UI lock alone is bypassable.
+const { getEffectivePlan } = require('../lib/plan-access');
 function isScale(agency) {
-  const isTrialing = ['trialing', 'trial'].includes(agency.subscription_status);
-  const effectivePlan = isTrialing ? 'scale' : String(agency.plan_type || '').toLowerCase();
-  return effectivePlan === 'scale';
+  return getEffectivePlan(agency) === 'scale';
 }
 
 function slugify(label) {
@@ -257,7 +256,7 @@ router.post('/:agencyId/custom-industries', async (req, res) => {
 
     const { data: agency, error } = await supabase
       .from('agencies')
-      .select('id, plan_type, subscription_status, custom_industries')
+      .select('id, plan_type, subscription_status, access_plan, custom_industries')
       .eq('id', agencyId).single();
     if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
 
