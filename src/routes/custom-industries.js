@@ -89,7 +89,7 @@ Rules:
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-6-20260217',
+      model: 'claude-sonnet-4-6',
       max_tokens: 3000,
       temperature: 0.4,
       messages: [{ role: 'user', content: prompt }],
@@ -161,15 +161,12 @@ router.post('/:agencyId/custom-industries', async (req, res) => {
     let key = base, n = 2;
     while (taken.has(key)) { key = `${base}_${n++}`; }
 
-    let knowledge_base;
-    try {
-      knowledge_base = await generateIndustryKB(label, description);
-    } catch (genErr) {
-      console.error('KB generation error:', genErr.message);
-      return res.status(502).json({ error: 'Could not generate the knowledge base right now. Please try again.' });
-    }
-
-    const industry = { key, label, description, knowledge_base, created_at: new Date().toISOString() };
+    // Create the industry immediately with a placeholder KB, then generate the
+    // knowledge base in the BACKGROUND. The Claude call runs longer than the
+    // gateway timeout, so awaiting it inside the request returns a 504. We
+    // respond right away and fill the KB in asynchronously (the host runs a
+    // persistent Node process, so the work continues after the response).
+    const industry = { key, label, description, knowledge_base: '', kb_status: 'generating', created_at: new Date().toISOString() };
     const { error: upErr } = await supabase
       .from('agencies').update({ custom_industries: [...existing, industry] }).eq('id', agencyId);
     if (upErr) {
@@ -177,6 +174,28 @@ router.post('/:agencyId/custom-industries', async (req, res) => {
       return res.status(500).json({ error: 'Could not save the custom industry' });
     }
     res.status(201).json({ industry });
+
+    // Background KB generation. Re-reads the array before writing so a concurrent
+    // add/delete isn't clobbered, and never throws into the already-sent response.
+    (async () => {
+      let kb = '';
+      let status = 'ready';
+      try {
+        kb = await generateIndustryKB(label, description);
+      } catch (genErr) {
+        console.error(`KB generation (background) failed for ${agencyId}/${key}:`, genErr.message);
+        status = 'failed';
+      }
+      try {
+        const { data: fresh } = await supabase.from('agencies').select('custom_industries').eq('id', agencyId).single();
+        const arr = Array.isArray(fresh && fresh.custom_industries) ? fresh.custom_industries : [];
+        const next = arr.map((c) => (c && c.key === key) ? { ...c, knowledge_base: kb || (c && c.knowledge_base) || '', kb_status: status } : c);
+        await supabase.from('agencies').update({ custom_industries: next }).eq('id', agencyId);
+        if (status === 'ready') console.log(`✅ Custom industry KB ready for ${agencyId}/${key}`);
+      } catch (e) {
+        console.error(`KB background persist failed for ${agencyId}/${key}:`, e.message);
+      }
+    })();
   } catch (e) {
     console.error('custom-industries create error:', e);
     res.status(500).json({ error: 'Server error' });

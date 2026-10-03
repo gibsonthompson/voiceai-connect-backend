@@ -201,7 +201,7 @@ async function resolveAgencyForDemo(phoneNumber) {
 
 function buildDisconnectedAssistantConfig(businessName) {
   return { assistant: {
-    model: { provider: 'openai', model: 'gpt-3.5-turbo', temperature: 0.1,
+    model: { provider: 'openai', model: 'gpt-4o-mini', temperature: 0.1,
       messages: [{ role: 'system', content: `Say: "We're sorry, the number for ${businessName || 'this business'} is no longer in service. Goodbye." Then end the call.` }],
       tools: [{ type: 'endCall' }] },
     voice: { provider: 'openai', voiceId: 'alloy' },
@@ -884,7 +884,7 @@ async function handleAssistantRequest(req, res, message) {
     const callLimit = client.monthly_call_limit ?? 50;
     if (callLimit !== -1 && currentCallCount >= callLimit) {
       return res.status(200).json({ assistant: {
-        model: { provider: 'openai', model: 'gpt-3.5-turbo', temperature: 0.1,
+        model: { provider: 'openai', model: 'gpt-4o-mini', temperature: 0.1,
           messages: [{ role: 'system', content: `Say: "Thank you for calling ${client.business_name}. We're currently unable to take your call. Goodbye." Then end the call.` }],
           tools: [{ type: 'endCall' }] },
         voice: { provider: 'openai', voiceId: 'alloy' },

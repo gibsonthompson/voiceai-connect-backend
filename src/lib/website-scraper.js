@@ -255,7 +255,7 @@ Return this JSON structure. Use null for any field you cannot find:
         "anthropic-version": "2023-06-01"
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6-20260217",
+        model: "claude-sonnet-4-6",
         max_tokens: 2000,
         temperature: 0.1,
         messages: [{ role: "user", content: prompt }]
