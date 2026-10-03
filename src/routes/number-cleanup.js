@@ -513,6 +513,27 @@ async function buildLiveAllowlist() {
     if (n) set.add(n);
   }
 
+  // Platform-provisioned numbers stored in platform_settings (NOT env vars):
+  // the Jarvis / Secretary line ('jarvis_config'.number), the support line
+  // ('support_line_number'), and any future platform number kept there. These
+  // are real, in-use platform lines, so without allowlisting them the sweep
+  // deleted them as orphans. This is exactly what kept wiping the Jarvis number
+  // from both Telnyx and VAPI. value is jsonb: a bare string for a plain number,
+  // or an object carrying a .number field (jarvis_config). Throws on query
+  // failure so the sweep aborts rather than delete against an incomplete list.
+  const { data: settings, error: setErr } = await supabase.from('platform_settings').select('value');
+  if (setErr) throw new Error(`allowlist platform_settings query failed: ${setErr.message}`);
+  for (const row of settings || []) {
+    const v = row && row.value;
+    const candidates = [];
+    if (typeof v === 'string') candidates.push(v);
+    else if (v && typeof v === 'object' && typeof v.number === 'string') candidates.push(v.number);
+    for (const cand of candidates) {
+      const n = normalizeE164(String(cand || '').trim());
+      if (n) set.add(n);
+    }
+  }
+
   return set;
 }
 
