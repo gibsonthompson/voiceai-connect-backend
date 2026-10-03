@@ -253,6 +253,17 @@ async function sendCallNotificationSMS(client, agency, callData) {
     // 10DLC campaign). Retry from the platform number so the owner still gets the
     // summary instead of nothing. The warning shows which clients need SMS setup.
     console.warn(`\u26a0\ufe0f Owner SMS from client number ${client.vapi_phone_number} failed; retrying from the platform number.`);
+    // Self-heal: the number wasn't on the Telnyx messaging profile / 10DLC
+    // campaign, so assign it now in the background. It is idempotent, and once it
+    // succeeds the NEXT owner SMS (and the AI's send_sms tool + Messages replies)
+    // send from the client's own number instead of falling back. Lazy require to
+    // avoid a circular import with vapi.js. Numbers not on Telnyx (VAPI-native /
+    // BYOT) will no-op here and keep using the platform fallback, which is right.
+    try {
+      require('./vapi').assignNumberForSMS(client.vapi_phone_number)
+        .then((r) => console.log(`\ud83d\udd27 SMS self-heal ${client.vapi_phone_number}: profile=${r.profileAssigned} campaign=${r.campaignAssigned}`))
+        .catch((e) => console.warn(`SMS self-heal failed for ${client.vapi_phone_number}:`, e.message));
+    } catch (e) { console.warn('SMS self-heal could not start:', e.message); }
     return _logSMS({ phone: client.owner_phone, message: smsMessage, from: null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_call_notification', metadata: { clientName: client.business_name, customerName, urgency, fallback: 'platform' } });
   }
   return sent;
