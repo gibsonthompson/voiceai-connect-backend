@@ -130,6 +130,70 @@ function buildCapture({ text } = {}) {
   return toRow('capture', data, null);
 }
 
+// goal. HQ normalizeGoals goal fields (pushed to the goal row; steps are
+// separate 'step' rows): id,title,why,cat,target,created,archived,mtime,del.
+// cat is 'business' or 'personal'.
+function buildGoal({ title, why = '', cat = 'business' } = {}) {
+  const ts = Date.now();
+  const c = /person/i.test(String(cat)) ? 'personal' : 'business';
+  const data = {
+    id: mid(),
+    title: String(title || '').trim(),
+    why: String(why || ''),
+    cat: c,
+    target: null,
+    created: ts,
+    mtime: ts,
+    archived: false,
+    del: false,
+  };
+  return toRow('goal', data, null);
+}
+
+// goal step. HQ normalizeGoals step fields: id,text,done,doneTs,onToday,ts,
+// pin,mtime,del,date,startHour,duration. parent is the goal id.
+function buildGoalStep({ text } = {}, goalId) {
+  const ts = Date.now();
+  const data = {
+    id: mid(),
+    text: String(text || '').trim(),
+    done: false,
+    doneTs: null,
+    onToday: false,
+    ts,
+    pin: 0,
+    mtime: ts,
+    del: false,
+    date: null,
+    startHour: null,
+    duration: 1,
+  };
+  return toRow('step', data, goalId);
+}
+
+// venture (business category). HQ normalizeVentures fields: id,name,ts,mtime,del.
+function buildVenture({ name } = {}) {
+  const ts = Date.now();
+  const data = { id: mid(), name: String(name || '').trim(), del: false, ts, mtime: ts };
+  return toRow('venture', data, null);
+}
+
+// project. HQ normalizeProjects fields: id,title,desc,links,ca,ts,mtime,del.
+function buildProject({ title, desc = '' } = {}) {
+  const ts = Date.now();
+  const data = {
+    id: mid(),
+    title: String(title || '').trim(),
+    desc: String(desc || ''),
+    links: [],
+    ca: ts,
+    ts,
+    mtime: ts,
+    del: false,
+  };
+  return toRow('project', data, null);
+}
+
 // ---------------------------------------------------------------------------
 // BOOKING  (ported exactly from HQ findFreeSlot)
 // ---------------------------------------------------------------------------
@@ -263,6 +327,21 @@ function matchVenture(spoken, known) {
   return bestScore >= 0.5 ? best : '';
 }
 
+// Generic fuzzy text score (0..1), used to match a spoken goal title to an
+// existing goal. Same spirit as matchVenture but general-purpose.
+function fuzzyScore(query, text) {
+  const q = norm(query);
+  const t = norm(text);
+  if (!q || !t) return 0;
+  if (t === q) return 1.0;
+  if (t.includes(q) || q.includes(t)) return 0.9;
+  const a = new Set(q.split(' ').filter(Boolean));
+  const b = new Set(t.split(' ').filter(Boolean));
+  let hits = 0;
+  for (const w of a) if (b.has(w)) hits++;
+  return (hits / Math.max(a.size, 1)) * 0.8;
+}
+
 module.exports = {
   SHS,
   SHE,
@@ -276,8 +355,13 @@ module.exports = {
   buildReminder,
   buildNote,
   buildCapture,
+  buildGoal,
+  buildGoalStep,
+  buildVenture,
+  buildProject,
   findFreeSlot,
   resolveBooking,
   fmtHour,
   matchVenture,
+  fuzzyScore,
 };

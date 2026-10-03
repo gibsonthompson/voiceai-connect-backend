@@ -111,6 +111,16 @@ async function listVentures() {
     .filter((n) => n && String(n).trim());
 }
 
+// Live, non-archived goals (kind='goal'), most recent first. Returns the id
+// and title so a spoken goal name can be fuzzy-matched when adding a step.
+async function listGoals() {
+  const rows = await listByKind('goal');
+  return rows
+    .filter((r) => !r.data.archived)
+    .map((r) => ({ id: r.id, title: r.data.title || '', ts: r.data.created || r.data.ts || 0 }))
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+}
+
 // Rebuild HQ's occupiedRanges for a date server-side: every busy [start,end)
 // block on that date from events (incl. recurring on the weekday), scheduled
 // movers, and scheduled goal steps. Skips done items, all-day events, and
@@ -197,6 +207,7 @@ module.exports = {
   listByKind,
   listOpenMovers,
   listVentures,
+  listGoals,
   getOccupiedRanges,
   completeMoverByFuzzy,
 };

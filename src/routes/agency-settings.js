@@ -198,6 +198,12 @@ function publicAgencyShape(agency) {
 
     // Plan type (for feature gating)
     plan_type: agency.plan_type,
+    // Billing settings the marketing templates use to stay truthful: hide
+    // "no credit card required" when a card is actually required, and show the
+    // real trial length instead of a hardcoded 7 days.
+    require_card_for_trial: agency.require_card_for_trial === true,
+    stripe_charges_enabled: agency.stripe_charges_enabled === true,
+    client_trial_days: agency.client_trial_days,
     subscription_status: agency.subscription_status,
     marketing_site_enabled: agency.marketing_site_enabled !== false,
 
