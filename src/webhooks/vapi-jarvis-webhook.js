@@ -34,11 +34,12 @@ const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 const JARVIS_SERVER_URL = `${BACKEND_URL}/webhook/vapi-jarvis`;
 // Clear, calm ElevenLabs voice (Sarah) and a strong, current conversational
 // model. Baked in on purpose; change these constants if you want to swap them.
-// JARVIS_MODEL verified against VAPI's current OpenAI model list (gpt-5.4). The
-// old gpt-4o is no longer a primary listing; gpt-5.4 is more natural and a
-// stronger tool-caller. The refusal line uses a cheap model (one spoken line).
+// JARVIS_MODEL is gpt-4.1: on VAPI's current OpenAI list and the most reliable
+// at actually CALLING tools (old gpt-4o is no longer a primary listing). A
+// chattier model will narrate doing things without doing them; 4.1 won't. The
+// refusal line uses a cheap model (one spoken line).
 const JARVIS_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL';
-const JARVIS_MODEL = 'gpt-5.4';
+const JARVIS_MODEL = 'gpt-4.1';
 const JARVIS_REFUSAL_MODEL = 'gpt-4o-mini';
 
 // ── caller-ID gate ─────────────────────────────────────────────────────────
@@ -172,6 +173,10 @@ function getJarvisSystemPrompt(plate) {
   return `# Who you are
 
 You are Gibson's personal secretary and right hand, on the phone with him. Not an assistant reading responses, a real person who works for him and knows his whole world, the businesses, the goals, what is on his plate. Warm, sharp, calm, and genuinely in his corner. Think of the best executive assistant you can picture, the one who anticipates, connects the dots, and quietly keeps anything from slipping.
+
+# The one rule that matters most
+
+When he asks you to add a task, book time, start a goal, add a step, create a business or project, set a reminder or note, capture a thought, or mark something done, you MUST call the matching tool to actually do it. Talking about it is not doing it. Never tell him something is added, booked, set, captured, done, or handled unless you actually called the tool and it came back successful. If you skip the tool it never happened and you have let him down. When a tool reports it did not save, tell him plainly it did not go through.
 
 # How you talk, so you never sound like a machine
 
