@@ -371,6 +371,42 @@ router.put('/:id/branding', requirePermissionIfAuthed('settings'), async (req, r
 });
 
 // ============================================================================
+// Resolve the custom ElevenLabs voices the client's agency has added, so clients
+// can select agency voices beyond the standard list.
+async function getClientAgencyCustomVoices(clientId) {
+  try {
+    const { data: client } = await supabase.from('clients').select('agency_id').eq('id', clientId).single();
+    if (!client || !client.agency_id) return [];
+    const { data: agency } = await supabase.from('agencies').select('custom_voices').eq('id', client.agency_id).single();
+    return Array.isArray(agency && agency.custom_voices) ? agency.custom_voices : [];
+  } catch { return []; }
+}
+
+// Shape an agency custom voice like a VOICE_OPTIONS entry for the client UI.
+function mapCustomVoice(v) {
+  return { id: v.id, name: v.name || 'Custom voice', gender: (v.gender === 'male' ? 'male' : 'female'), accent: '', style: '', description: 'Custom voice', previewUrl: v.previewUrl || '', recommended: false, custom: true };
+}
+
+// ============================================================================
+// GET /api/client/:id/voices - Voices this client can pick from: the standard
+// list plus any custom voices the agency added. Same shape as GET /api/voices.
+// ============================================================================
+router.get('/:id/voices', requirePermissionIfAuthed('ai_agent'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const customs = await getClientAgencyCustomVoices(id);
+    const all = [...VOICE_OPTIONS, ...customs.map(mapCustomVoice)];
+    const sortVoices = (voices) => voices.slice().sort((a, b) => {
+      if (a.recommended && !b.recommended) return -1;
+      if (!a.recommended && b.recommended) return 1;
+      return a.name.localeCompare(b.name);
+    });
+    const female = sortVoices(all.filter(v => v.gender === 'female'));
+    const male = sortVoices(all.filter(v => v.gender === 'male'));
+    res.json({ success: true, total: all.length, grouped: { female, male }, voices: all });
+  } catch (error) { console.error('Error fetching client voices:', error); res.status(500).json({ success: false, error: 'Server error' }); }
+});
+
 // GET /api/client/:id/voice - Get current voice
 // ============================================================================
 router.get('/:id/voice', requirePermissionIfAuthed('ai_agent'), async (req, res) => {
@@ -379,7 +415,8 @@ router.get('/:id/voice', requirePermissionIfAuthed('ai_agent'), async (req, res)
     const { data: client } = await supabase.from('clients').select('vapi_assistant_id, voice_id').eq('id', id).single();
     if (!client) return res.status(404).json({ success: false, error: 'Client not found' });
     if (client.voice_id) {
-      const voice = VOICE_OPTIONS.find(v => v.id === client.voice_id);
+      let voice = VOICE_OPTIONS.find(v => v.id === client.voice_id);
+      if (!voice) { const customs = await getClientAgencyCustomVoices(id); const cv = customs.find(v => v && v.id === client.voice_id); if (cv) voice = mapCustomVoice(cv); }
       return res.json({ success: true, voice_id: client.voice_id, voice });
     }
     if (client.vapi_assistant_id) {
@@ -416,8 +453,12 @@ router.put('/:id/voice', requirePermissionIfAuthed('ai_agent'), async (req, res)
     const { id } = req.params;
     const voiceId = req.body.voice_id || req.body.voiceId;
     if (!voiceId) return res.status(400).json({ success: false, error: 'voice_id required' });
-    const validVoice = VOICE_OPTIONS.find(v => v.id === voiceId);
-    if (!validVoice) return res.status(400).json({ success: false, error: 'Invalid voice ID' });
+    let validVoice = VOICE_OPTIONS.find(v => v.id === voiceId);
+    if (!validVoice) {
+      const customs = await getClientAgencyCustomVoices(id);
+      validVoice = customs.find(v => v && v.id === voiceId);
+      if (!validVoice) return res.status(400).json({ success: false, error: 'Invalid voice ID' });
+    }
 
     // 1. Persist to the DB first. This is what live calls actually read.
     const { data: updated, error: updateErr } = await supabase

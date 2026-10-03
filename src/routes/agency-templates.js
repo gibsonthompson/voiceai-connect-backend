@@ -1611,12 +1611,84 @@ router.get('/:agencyId/ai-templates/industries', requireEnterprisePlan, async (r
 // ============================================================================
 // GET /api/agency/:agencyId/ai-templates/voices
 // ============================================================================
-router.get('/:agencyId/ai-templates/voices', requireEnterprisePlan, (req, res) => {
-  res.json({ 
-    voices: ELEVENLABS_VOICES,
+// Scale-only gate (trial counts as Scale). Mirrors the custom-industries helper.
+function isScaleVoices(agency) {
+  const isTrialing = ['trialing', 'trial'].includes(agency && agency.subscription_status);
+  const effectivePlan = isTrialing ? 'scale' : String((agency && agency.plan_type) || '').toLowerCase();
+  return effectivePlan === 'scale';
+}
+
+// Voices available to this agency: the standard ElevenLabs list plus any custom
+// voices the agency has added (flagged so the UI can badge/delete them).
+router.get('/:agencyId/ai-templates/voices', requireEnterprisePlan, async (req, res) => {
+  const { agencyId } = req.params;
+  let custom = [];
+  try {
+    const { data: agency } = await supabase.from('agencies').select('custom_voices').eq('id', agencyId).single();
+    custom = Array.isArray(agency && agency.custom_voices) ? agency.custom_voices : [];
+  } catch (e) { /* fall back to presets only */ }
+  res.json({
+    voices: [...ELEVENLABS_VOICES, ...custom.map(v => ({ ...v, custom: true }))],
     provider: 'ElevenLabs',
     note: 'All voices are powered by ElevenLabs text-to-speech technology.'
   });
+});
+
+// POST add a custom ElevenLabs voice (Scale only). Validates the ID against the
+// connected ElevenLabs account and stores it on the agency.
+router.post('/:agencyId/ai-templates/voices', requireEnterprisePlan, async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const voiceId = String((req.body && req.body.voiceId) || '').trim();
+    let name = String((req.body && req.body.name) || '').trim().slice(0, 60);
+    let gender = ['male', 'female'].includes(req.body && req.body.gender) ? req.body.gender : null;
+    if (!voiceId) return res.status(400).json({ error: 'A voice ID is required.' });
+
+    const { data: agency, error } = await supabase
+      .from('agencies').select('plan_type, subscription_status, custom_voices').eq('id', agencyId).single();
+    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
+    if (!isScaleVoices(agency)) return res.status(403).json({ error: 'Custom voices are a Scale plan feature.', upgrade_required: true });
+
+    if (ELEVENLABS_VOICES.find(v => v.id === voiceId)) return res.status(400).json({ error: 'That voice is already in the standard list.' });
+    const existing = Array.isArray(agency.custom_voices) ? agency.custom_voices : [];
+    if (existing.find(v => v && v.id === voiceId)) return res.status(400).json({ error: "You've already added that voice." });
+    if (existing.length >= 20) return res.status(400).json({ error: 'You can add up to 20 custom voices.' });
+
+    let previewUrl = '';
+    try {
+      const r = await fetch(`https://api.elevenlabs.io/v1/voices/${encodeURIComponent(voiceId)}`, { headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY || '' } });
+      if (r.status === 400 || r.status === 404) {
+        return res.status(400).json({ error: "That voice ID wasn't found in the connected ElevenLabs account. Add or share the voice to the account the platform uses, then try again." });
+      }
+      if (r.ok) { const vd = await r.json(); if (!name) name = (vd && vd.name) || 'Custom voice'; previewUrl = (vd && vd.preview_url) || ''; if (!gender) { const g = String((vd && vd.labels && vd.labels.gender) || '').toLowerCase(); if (g === 'male' || g === 'female') gender = g; } }
+    } catch (e) { /* network hiccup: still add, just without a verified name/preview */ }
+    if (!name) name = 'Custom voice';
+    if (!gender) gender = 'female';
+
+    const voice = { id: voiceId, name, gender, previewUrl, custom: true, added_at: new Date().toISOString() };
+    const next = [...existing, voice];
+    await supabase.from('agencies').update({ custom_voices: next }).eq('id', agencyId);
+    res.json({ voice, voices: [...ELEVENLABS_VOICES, ...next.map(v => ({ ...v, custom: true }))] });
+  } catch (e) {
+    console.error('add custom voice error:', e.message);
+    res.status(500).json({ error: 'Failed to add the voice' });
+  }
+});
+
+// DELETE a custom voice.
+router.delete('/:agencyId/ai-templates/voices/:voiceId', requireEnterprisePlan, async (req, res) => {
+  try {
+    const { agencyId, voiceId } = req.params;
+    const { data: agency, error } = await supabase.from('agencies').select('custom_voices').eq('id', agencyId).single();
+    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
+    const existing = Array.isArray(agency.custom_voices) ? agency.custom_voices : [];
+    const next = existing.filter(v => v && v.id !== voiceId);
+    await supabase.from('agencies').update({ custom_voices: next }).eq('id', agencyId);
+    res.json({ voices: [...ELEVENLABS_VOICES, ...next.map(v => ({ ...v, custom: true }))] });
+  } catch (e) {
+    console.error('delete custom voice error:', e.message);
+    res.status(500).json({ error: 'Failed to remove the voice' });
+  }
 });
 
 // ============================================================================
@@ -1720,7 +1792,11 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
   const backendKey = resolved.backendKey;
   
   if (voice_id && !ELEVENLABS_VOICES.find(v => v.id === voice_id)) {
-    return res.status(400).json({ error: 'Invalid voice_id' });
+    const { data: agForVoice } = await supabase.from('agencies').select('custom_voices').eq('id', agencyId).single();
+    const customVoices = Array.isArray(agForVoice && agForVoice.custom_voices) ? agForVoice.custom_voices : [];
+    if (!customVoices.find(v => v && v.id === voice_id)) {
+      return res.status(400).json({ error: 'Invalid voice_id' });
+    }
   }
   
   const temp = parseFloat(temperature);
