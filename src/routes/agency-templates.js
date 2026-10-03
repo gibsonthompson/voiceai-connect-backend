@@ -1634,7 +1634,7 @@ async function resolveIndustryConfig(agencyId, industry) {
     const { data: ag } = await supabase.from('agencies').select('custom_industries').eq('id', agencyId).single();
     const ci = Array.isArray(ag && ag.custom_industries) ? ag.custom_industries.find((c) => c && c.key === industry) : null;
     if (ci) {
-      return { config: { key: ci.key, label: ci.label, description: ci.description || '', icon: 'Sparkles', kb_status: ci.kb_status || 'ready' }, backendKey: ci.key, isCustom: true };
+      return { config: { key: ci.key, label: ci.label, description: ci.description || '', icon: 'Sparkles', kb_status: ci.kb_status || 'ready', documents: (Array.isArray(ci.documents) ? ci.documents : []).map((d) => ({ id: d.id, name: d.name, uploaded_at: d.uploaded_at })) }, backendKey: ci.key, isCustom: true };
     }
   } catch (e) { console.warn('resolveIndustryConfig failed:', e.message); }
   return null;

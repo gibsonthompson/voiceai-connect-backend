@@ -138,6 +138,49 @@ Everything below is what you know about this ${label} business. Use it to answer
 ${kb}`;
 }
 
+const DOC_HEADER = '\n\n# Reference Documents\n\nThe business attached these documents for extra context. Use them alongside the knowledge base above.\n';
+
+// Extract plain text from an uploaded document. TXT/MD are native; PDF and DOCX
+// use optional libraries (pdf-parse / mammoth). A clear error is returned if the
+// library isn't installed, rather than crashing.
+async function extractDocText(contentType, filename, buffer) {
+  const name = String(filename || '').toLowerCase();
+  const ct = String(contentType || '').toLowerCase();
+  if (ct.startsWith('text/') || name.endsWith('.txt') || name.endsWith('.md')) {
+    return buffer.toString('utf-8').trim();
+  }
+  if (ct.includes('pdf') || name.endsWith('.pdf')) {
+    try { const pdfParse = require('pdf-parse'); const data = await pdfParse(buffer); return String(data.text || '').trim(); }
+    catch (e) { throw new Error('PDF support is not installed on the server yet. A plain text (.txt) or Word (.docx) file works in the meantime.'); }
+  }
+  if (ct.includes('wordprocessingml') || name.endsWith('.docx')) {
+    try { const mammoth = require('mammoth'); const r = await mammoth.extractRawText({ buffer }); return String(r.value || '').trim(); }
+    catch (e) { throw new Error('Word (.docx) support is not installed on the server yet. A plain text (.txt) or PDF file works in the meantime.'); }
+  }
+  throw new Error('Unsupported file type. Upload a PDF, Word (.docx), text (.txt), or Markdown (.md) file.');
+}
+
+// Rewrite ONLY the "# Reference Documents" section of the industry's saved
+// system prompt from the current documents list, preserving everything the
+// agency wrote above it (persona, knowledge base, and any of their own edits).
+// A no-op if the template hasn't been seeded yet (KB still generating).
+async function rebuildDocsSection(agencyId, key, documents) {
+  const { data: tpl } = await supabase
+    .from('agency_prompt_templates').select('system_prompt')
+    .eq('agency_id', agencyId).eq('industry', key).single();
+  if (!tpl) return; // template not seeded yet; docs will be folded in when it is
+  let prompt = String(tpl.system_prompt || '');
+  const markerIdx = prompt.indexOf('\n\n# Reference Documents\n');
+  if (markerIdx !== -1) prompt = prompt.slice(0, markerIdx).trimEnd();
+  const docs = Array.isArray(documents) ? documents : [];
+  if (docs.length) {
+    prompt = prompt.trimEnd() + DOC_HEADER + docs.map((d) => `## ${d.name}\n\n${d.text}`).join('\n\n');
+  }
+  await supabase.from('agency_prompt_templates')
+    .update({ system_prompt: prompt, updated_at: new Date().toISOString() })
+    .eq('agency_id', agencyId).eq('industry', key);
+}
+
 // GET list. Open to any plan so grandfathered industries still show after a
 // downgrade.
 router.get('/:agencyId/custom-industries', async (req, res) => {
@@ -284,6 +327,76 @@ router.delete('/:agencyId/custom-industries/:key', async (req, res) => {
   } catch (e) {
     console.error('custom-industries delete error:', e);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST attach a knowledge document to a custom industry. Extracts the text and
+// folds it into the industry's system prompt so the receptionist reads it.
+router.post('/:agencyId/custom-industries/:key/documents', async (req, res) => {
+  try {
+    const { agencyId, key } = req.params;
+    const dataUrl = (req.body && req.body.dataUrl) || '';
+    const name = String((req.body && req.body.name) || 'Document').trim().slice(0, 120) || 'Document';
+    const m = /^data:([^;]*);base64,(.+)$/s.exec(dataUrl);
+    if (!m) return res.status(400).json({ error: 'Expected a base64 document.' });
+    const buffer = Buffer.from(m[2], 'base64');
+    if (!buffer.length) return res.status(400).json({ error: 'That document appears to be empty.' });
+    if (buffer.length > 6 * 1024 * 1024) return res.status(400).json({ error: 'Document is too large (max 6MB).' });
+
+    const { data: agency, error } = await supabase
+      .from('agencies').select('plan_type, subscription_status, custom_industries').eq('id', agencyId).single();
+    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
+    if (!isScale(agency)) return res.status(403).json({ error: 'Scale plan required', upgrade_required: true });
+
+    const arr = Array.isArray(agency.custom_industries) ? agency.custom_industries : [];
+    const idx = arr.findIndex((c) => c && c.key === key);
+    if (idx === -1) return res.status(404).json({ error: 'Industry not found' });
+
+    let text;
+    try { text = await extractDocText(m[1] || '', name, buffer); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+    if (!text) return res.status(400).json({ error: "Couldn't read any text out of that document." });
+
+    const docs = Array.isArray(arr[idx].documents) ? arr[idx].documents : [];
+    if (docs.length >= 10) return res.status(400).json({ error: 'You can attach up to 10 documents per industry.' });
+
+    const doc = {
+      id: 'doc_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      name,
+      text: text.slice(0, 40000),
+      uploaded_at: new Date().toISOString(),
+    };
+    const nextDocs = [...docs, doc];
+    arr[idx] = { ...arr[idx], documents: nextDocs };
+    await supabase.from('agencies').update({ custom_industries: arr }).eq('id', agencyId);
+
+    await rebuildDocsSection(agencyId, key, nextDocs);
+    res.json({ documents: nextDocs.map((d) => ({ id: d.id, name: d.name, uploaded_at: d.uploaded_at })) });
+  } catch (e) {
+    console.error('custom-industry doc upload error:', e.message);
+    res.status(500).json({ error: 'Failed to attach the document' });
+  }
+});
+
+// DELETE a knowledge document from a custom industry.
+router.delete('/:agencyId/custom-industries/:key/documents/:docId', async (req, res) => {
+  try {
+    const { agencyId, key, docId } = req.params;
+    const { data: agency, error } = await supabase
+      .from('agencies').select('custom_industries').eq('id', agencyId).single();
+    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
+    const arr = Array.isArray(agency.custom_industries) ? agency.custom_industries : [];
+    const idx = arr.findIndex((c) => c && c.key === key);
+    if (idx === -1) return res.status(404).json({ error: 'Industry not found' });
+    const docs = Array.isArray(arr[idx].documents) ? arr[idx].documents : [];
+    const nextDocs = docs.filter((d) => d && d.id !== docId);
+    arr[idx] = { ...arr[idx], documents: nextDocs };
+    await supabase.from('agencies').update({ custom_industries: arr }).eq('id', agencyId);
+    await rebuildDocsSection(agencyId, key, nextDocs);
+    res.json({ documents: nextDocs.map((d) => ({ id: d.id, name: d.name, uploaded_at: d.uploaded_at })) });
+  } catch (e) {
+    console.error('custom-industry doc delete error:', e.message);
+    res.status(500).json({ error: 'Failed to remove the document' });
   }
 });
 
