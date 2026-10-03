@@ -129,4 +129,54 @@ router.get('/sms-log', async (req, res) => {
   }
 });
 
+// ============================================================================
+// GET /api/admin/sms-log/thread?phone=E164
+// Full conversation with one number, both directions, so admin can see the
+// context a reply was responding to. Outbound messages store the person as
+// recipient_phone; their inbound replies store it as metadata.from.
+// ============================================================================
+router.get('/sms-log/thread', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ error: 'No token' });
+    const jwt = require('jsonwebtoken');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || process.env.ADMIN_JWT_SECRET);
+    if (!decoded || decoded.role !== 'platform_admin') {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+
+    const phone = String(req.query.phone || '').trim();
+    if (!phone) return res.status(400).json({ error: 'phone is required' });
+
+    const { data, error } = await supabase
+      .from('sms_log')
+      .select('id, agency_id, recipient_phone, recipient_type, message_type, message_body, delivery_status, metadata, created_at')
+      .or(`recipient_phone.eq.${phone},metadata->>from.eq.${phone}`)
+      .order('created_at', { ascending: true })
+      .limit(500);
+    if (error) throw error;
+
+    let agencyName = null;
+    const agencyId = (data || []).map(r => r.agency_id).find(Boolean);
+    if (agencyId) {
+      const { data: ag } = await supabase.from('agencies').select('name').eq('id', agencyId).maybeSingle();
+      agencyName = ag?.name || null;
+    }
+
+    const messages = (data || []).map(r => ({
+      id: r.id,
+      body: r.message_body,
+      type: r.message_type,
+      direction: (r.metadata?.direction === 'inbound' || String(r.message_type || '').includes('inbound')) ? 'inbound' : 'outbound',
+      status: r.delivery_status,
+      created_at: r.created_at,
+    }));
+
+    res.json({ phone, agency_name: agencyName, messages });
+  } catch (err) {
+    console.error('sms-log thread error:', err.message);
+    res.status(500).json({ error: 'Failed to load conversation' });
+  }
+});
+
 module.exports = router;
