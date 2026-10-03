@@ -39,7 +39,7 @@ const fetch = require('node-fetch');
 const { supabase } = require('../lib/supabase');
 const { requirePermissionIfAuthed } = require('./auth');
 const { sendAndLogSMS } = require('../lib/sms-logger');
-const { isInternationalAgency, agencyHasByotCreds, sendViaAgencyTwilio } = require('../lib/notifications');
+const { isInternationalAgency, agencyHasByotCreds, sendViaAgencyTwilio, sendTelnyxSMS } = require('../lib/notifications');
 
 const crypto = require('crypto');
 
@@ -559,8 +559,12 @@ async function findAgencyByOwnerPhone(phone) {
   return d2 || null;
 }
 
-// Store the reply in sms_log (tagged inbound) and forward it to the platform
-// owner so a reply is never lost, even before anyone opens the admin inbox.
+// Store the reply in sms_log tagged inbound. That single row is the record, and
+// it shows in the admin Messaging log + the conversation view where it can be
+// replied to directly. The old "forward to owner" SMS was removed: it texted a
+// copy to the platform number and logged a second 'agency_reply_forward' row,
+// which showed up as a confusing duplicate of the same reply (and its thread
+// pointed at the owner's own number, not the sender's).
 async function handleAgencyReplyToPlatform(fromPhone, text) {
   const from = normalizePhone(fromPhone);
   const agency = await findAgencyByOwnerPhone(from);
@@ -577,17 +581,16 @@ async function handleAgencyReplyToPlatform(fromPhone, text) {
   } catch (err) {
     console.warn('Failed to log inbound agency reply:', err.message);
   }
-  const who = agency ? `${agency.name} (${from})` : `Unknown sender ${from}`;
+
+  // Heads-up ping to the platform owner's phone so a reply is noticed even
+  // before anyone opens the admin inbox. Uses the RAW Telnyx sender, not
+  // sendAndLogSMS, so it does NOT write a second sms_log row (that was the
+  // duplicate). Best-effort; never blocks or logs the reply itself.
   try {
-    await sendAndLogSMS({
-      phone: PLATFORM_OWNER_PHONE,
-      message: `Reply from ${who}:\n${text}`,
-      recipientType: 'admin',
-      messageType: 'agency_reply_forward',
-      from: PLATFORM_SMS_NUMBER,
-    });
+    const who = agency ? `${agency.name} (${from})` : `Unknown sender ${from}`;
+    await sendTelnyxSMS(PLATFORM_OWNER_PHONE, `Reply from ${who}:\n${text}`, PLATFORM_SMS_NUMBER);
   } catch (err) {
-    console.warn('Failed to forward agency reply to owner:', err.message);
+    console.warn('Owner reply ping failed (non-blocking):', err.message);
   }
 }
 
