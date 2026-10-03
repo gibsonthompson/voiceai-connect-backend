@@ -105,6 +105,28 @@ Rules:
   return text;
 }
 
+// Short, card-sized description of the industry (used when the agency leaves the
+// description blank, so the custom-industry card isn't bare). Best-effort: on any
+// failure returns '' and the card simply shows no description.
+async function generateIndustryDescription(label) {
+  if (!ANTHROPIC_API_KEY) return '';
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 60,
+        temperature: 0.4,
+        messages: [{ role: 'user', content: `In 6 to 12 words, describe what a "${label}" business does and the kinds of calls it handles, as a plain comma-separated phrase (for example: "Maintenance, cleanups, design and installs, free estimates"). No business name, no quotes, no trailing period, no preamble. Do not use the em dash character. Output only the phrase.` }],
+      }),
+    });
+    if (!res.ok) return '';
+    const data = await res.json();
+    return (((data.content && data.content[0] && data.content[0].text) || '').trim()).replace(/^["']|["']$/g, '').replace(/\.$/, '').slice(0, 300);
+  } catch { return ''; }
+}
+
 // Build a quality receptionist system prompt for a custom industry: a strong
 // persona with the AI-generated knowledge base embedded (built-in industries
 // embed their KB in the prompt the same way). {businessName} is filled per client.
@@ -262,6 +284,9 @@ router.post('/:agencyId/custom-industries', async (req, res) => {
         console.error(`KB generation (background) failed for ${agencyId}/${key}:`, genErr.message);
         status = 'failed';
       }
+      // Fill in a card description if the agency left it blank.
+      let genDesc = '';
+      if (!description) { genDesc = await generateIndustryDescription(label); }
       // On success, seed a real template (tailored prompt with the KB embedded)
       // so BOTH the editor and the live receptionist actually use the generated
       // knowledge instead of falling back to the generic default.
@@ -286,7 +311,7 @@ router.post('/:agencyId/custom-industries', async (req, res) => {
       try {
         const { data: fresh } = await supabase.from('agencies').select('custom_industries').eq('id', agencyId).single();
         const arr = Array.isArray(fresh && fresh.custom_industries) ? fresh.custom_industries : [];
-        const next = arr.map((c) => (c && c.key === key) ? { ...c, knowledge_base: kb || (c && c.knowledge_base) || '', kb_status: status } : c);
+        const next = arr.map((c) => (c && c.key === key) ? { ...c, knowledge_base: kb || (c && c.knowledge_base) || '', kb_status: status, description: (c && c.description) || genDesc || '' } : c);
         await supabase.from('agencies').update({ custom_industries: next }).eq('id', agencyId);
         if (status === 'ready') console.log(`✅ Custom industry KB ready for ${agencyId}/${key}`);
       } catch (e) {
