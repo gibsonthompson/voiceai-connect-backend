@@ -105,6 +105,39 @@ Rules:
   return text;
 }
 
+// Build a quality receptionist system prompt for a custom industry: a strong
+// persona with the AI-generated knowledge base embedded (built-in industries
+// embed their KB in the prompt the same way). {businessName} is filled per client.
+function buildCustomIndustryPrompt(label, kb) {
+  return `# Personality
+
+You are the AI receptionist for {businessName}, a ${label} business. You're warm, efficient, and genuinely helpful, like a great front-desk person who knows the business inside out.
+
+# Tone
+
+- Talk like a friendly human. Use contractions ("I'll", "we've", "that's"). Never sound robotic or scripted.
+- Keep it short, one or two sentences per turn.
+- One question at a time. Ask, listen, respond.
+- Speak phone numbers one digit at a time; speak dates as words.
+- Match the caller's energy, calm and direct if they're stressed, relaxed if they're casual.
+
+# Goal
+
+Figure out what the caller needs, answer what you can from the knowledge base below, and capture their details so the team can follow up or book them. You're the front door, get the basics and make sure someone follows up.
+
+# Transfer Rules
+
+- Transfer when the caller has an emergency, asks for a specific person by name, is upset, or needs something you can't resolve.
+- When transferring, say: "Sure, let me get you to someone who can help, one moment."
+- Never promise a firm price. Capture the details and let the team confirm pricing.
+
+# Knowledge Base
+
+Everything below is what you know about this ${label} business. Use it to answer questions, judge urgency, and know what details to collect.
+
+${kb}`;
+}
+
 // GET list. Open to any plan so grandfathered industries still show after a
 // downgrade.
 router.get('/:agencyId/custom-industries', async (req, res) => {
@@ -185,6 +218,27 @@ router.post('/:agencyId/custom-industries', async (req, res) => {
       } catch (genErr) {
         console.error(`KB generation (background) failed for ${agencyId}/${key}:`, genErr.message);
         status = 'failed';
+      }
+      // On success, seed a real template (tailored prompt with the KB embedded)
+      // so BOTH the editor and the live receptionist actually use the generated
+      // knowledge instead of falling back to the generic default.
+      if (status === 'ready' && kb) {
+        try {
+          await supabase.from('agency_prompt_templates').upsert({
+            agency_id: agencyId,
+            industry: key,
+            system_prompt: buildCustomIndustryPrompt(label, kb),
+            first_message: "Hello, you've reached {businessName}. How can I help you today?",
+            voice_id: 'XrExE9yKIg1WjnnlVkGX',
+            model: 'gpt-4o-mini',
+            temperature: 0.7,
+            voice_speed: 1,
+            is_active: true,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'agency_id,industry' });
+        } catch (seedErr) {
+          console.error(`Custom industry template seed failed for ${agencyId}/${key}:`, seedErr.message);
+        }
       }
       try {
         const { data: fresh } = await supabase.from('agencies').select('custom_industries').eq('id', agencyId).single();
