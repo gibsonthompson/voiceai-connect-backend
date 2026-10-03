@@ -160,7 +160,35 @@ Everything below is what you know about this ${label} business. Use it to answer
 ${kb}`;
 }
 
-const DOC_HEADER = '\n\n# Reference Documents\n\nThe business attached these documents for extra context. Use them alongside the knowledge base above.\n';
+const DOC_HEADER = '\n\n# Reference Documents\n\nThe business provided the material below as extra context about how they operate. Treat it as accurate for this business and use it alongside the knowledge base above when answering questions and triaging calls.\n';
+
+// Tidy an uploaded document's name for the prompt header: drop the extension and
+// separators so "Pool_Service_Info.pdf" reads as "Pool Service Info".
+function cleanDocName(name) {
+  const base = String(name || 'Document')
+    .replace(/\.[a-z0-9]{2,4}$/i, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return base || 'Document';
+}
+
+// Normalize extracted document text so it reads cleanly inside the prompt:
+// repair bullet artifacts (a marker stranded on its own line, odd glyphs),
+// collapse runaway whitespace and blank lines, and trim. Keeps the content,
+// drops the extractor noise. Idempotent, so re-running on clean text is safe.
+function cleanDocText(text) {
+  let t = String(text || '').replace(/\r\n?/g, '\n');
+  // A bullet marker alone on a line belongs to the line after it.
+  t = t.replace(/^[ \t]*(?:bullet|[•▪◦·‣*])[ \t]*\n[ \t]*/gim, '- ');
+  // A leading bullet glyph becomes a simple dash.
+  t = t.replace(/^[ \t]*[•▪◦·‣][ \t]+/gm, '- ');
+  // Collapse inner runs of spaces/tabs and strip trailing space per line.
+  t = t.split('\n').map((l) => l.replace(/[ \t]{2,}/g, ' ').replace(/[ \t]+$/, '')).join('\n');
+  // Collapse 3+ blank lines down to one.
+  t = t.replace(/\n{3,}/g, '\n\n');
+  return t.trim();
+}
 
 // Extract plain text from an uploaded document. TXT/MD are native; PDF and DOCX
 // use optional libraries (pdf-parse / mammoth). A clear error is returned if the
@@ -196,7 +224,7 @@ async function rebuildDocsSection(agencyId, key, documents) {
   if (markerIdx !== -1) prompt = prompt.slice(0, markerIdx).trimEnd();
   const docs = Array.isArray(documents) ? documents : [];
   if (docs.length) {
-    prompt = prompt.trimEnd() + DOC_HEADER + docs.map((d) => `## ${d.name}\n\n${d.text}`).join('\n\n');
+    prompt = prompt.trimEnd() + DOC_HEADER + docs.map((d) => `## ${cleanDocName(d.name)}\n\n${cleanDocText(d.text)}`).join('\n\n');
   }
   await supabase.from('agency_prompt_templates')
     .update({ system_prompt: prompt, updated_at: new Date().toISOString() })
