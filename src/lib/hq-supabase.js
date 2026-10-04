@@ -199,6 +199,26 @@ async function completeMoverByFuzzy(query) {
   return { matched: { id: best.id, text: best.text, venture: best.venture } };
 }
 
+// Fuzzy-match an open mover by spoken text and file it under a business
+// (set data.venture). Bumps mtime, leaves everything else alone. ventureName
+// is the already-resolved canonical business name. Returns the task or null.
+async function assignVentureByFuzzy(query, ventureName) {
+  const open = await listOpenMovers();
+  if (open.length === 0) return { matched: null, reason: 'no_open_tasks' };
+  let best = null;
+  let bestScore = 0;
+  for (const m of open) {
+    const sc = scoreMatch(query, m.text);
+    if (sc > bestScore) { bestScore = sc; best = m; }
+  }
+  if (!best || bestScore < 0.5) return { matched: null, reason: 'no_match' };
+  const now = Date.now();
+  const updated = { ...best.row, data: { ...best.row.data, venture: ventureName, mtime: now } };
+  const res = await upsertItems([updated]);
+  if (!res.ok) return { matched: null, reason: 'write_failed', error: res.error };
+  return { matched: { id: best.id, text: best.text, venture: ventureName } };
+}
+
 module.exports = {
   hqSupabase,
   isReady,
@@ -210,4 +230,5 @@ module.exports = {
   listGoals,
   getOccupiedRanges,
   completeMoverByFuzzy,
+  assignVentureByFuzzy,
 };

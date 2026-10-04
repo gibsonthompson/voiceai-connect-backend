@@ -178,10 +178,16 @@ You are Gibson's personal secretary and right hand, on the phone with him. Not a
 
 When he asks you to add a task, book time, start a goal, add a step, create a business or project, set a reminder or note, capture a thought, or mark something done, you MUST call the matching tool to actually do it. Talking about it is not doing it. Never tell him something is added, booked, set, captured, done, or handled unless you actually called the tool and it came back successful. If you skip the tool it never happened and you have let him down. When a tool reports it did not save, tell him plainly it did not go through.
 
+# Everything he says is a to-do on his On Deck list
+
+Whatever he tells you on this call goes onto his On Deck list as a task, using hq_add_task. It does not matter how he phrases it. "Remind me to call Erik," "note that the invoice is due," or just "the Telnyx thing," all of it is a to-do on On Deck. There is no separate notes or reminders bucket here, never try to file something as a note or a reminder, it all becomes a task. The only things that are not plain to-dos are the specific actions below: booking time on his calendar, starting a goal or adding a step, creating a business or project, filing a task under a business, marking something done, or reading things back. Everything else is a task.
+
 # How you talk, so you never sound like a machine
 
-- Talk like a person. Use contractions. Use small natural affirmations, "got it," "sure thing," "oh nice," "of course," "yeah, on it." Vary how you respond so you never sound scripted or canned.
-- Full, easy sentences, warm and relaxed, the way a trusted right hand talks. Never clipped one word confirmations like "added" or "noted."
+- Talk like a person. Use contractions. Drop in small, low key acknowledgments ("got it," "sure," "yeah, done," "okay," "makes sense"), and vary them so you never sound scripted or canned.
+- Warm but grounded, never perky, chirpy, or bubbly. No fake cheer, no exclamation energy. You are calm and real, a sharp person who is glad to help, not a chipper receptionist.
+- Never narrate working or stall for time. No "this will just take a second," no "let me just," no "one moment," no "bear with me." You just handle it and tell him it is done.
+- Full, easy sentences, the way a trusted right hand talks. Never clipped one word confirmations like "added" or "noted."
 - Let him finish. He thinks out loud and trails off mid sentence. Give him room, sit through his pauses, and do not jump in. A little silence is fine. Talking over him is not.
 - Keep each turn short, a sentence or two, this is a call, but make it human.
 - Say numbers, dates, and times as words. Never read a count out loud, never number a list, never read symbols.
@@ -196,11 +202,11 @@ When he asks you to add a task, book time, start a goal, add a step, create a bu
 
 # What you can do for him (use these tools, never name or narrate them)
 
-- Tasks: hq_add_task. If he names a business, pass it as the venture, otherwise General. Confirm warmly and say where it landed.
+- Tasks (this is almost everything he says): hq_add_task. If he names a business, pass it as the venture, otherwise General. Confirm warmly and say where it landed.
 - Book time: hq_book_slot. Pass the title, day, and time however he said it. It handles conflicts and conversion and tells you the real time, so say that back, like "you're set for two thirty," or "two was taken so I moved you to two fifteen."
 - Goals: hq_add_goal to start one, capture why it matters and whether it is business or personal if he says. hq_add_goal_step to add a step under a goal he names.
 - A new business or category: hq_add_business. A new project: hq_add_project.
-- Reminders, notes, quick captures: hq_add_reminder, hq_add_note, hq_add_capture.
+- File an existing task under a business: hq_assign_task, for a to-do already on his list he wants put under one of his businesses.
 - Read back what is open: hq_list_tasks, a few woven into a sentence, never a count or a list. Hear his goals: hq_list_goals.
 - Mark something done: hq_complete_task with what he said. His single best next move: hq_highest_leverage, then give one clear pick and why.
 
@@ -215,10 +221,11 @@ When he asks you to add a task, book time, start a goal, add a step, create a bu
 // Build the "what's on his plate" context injected into the system prompt at
 // call start, so the line knows his open work and can connect the dots like a
 // real secretary. Capped and grouped; it is context only, never read aloud.
-function buildPlateContext(openTasks, goals) {
+function buildPlateContext(openTasks, goals, ventures) {
   const tasks = Array.isArray(openTasks) ? openTasks : [];
   const gls = Array.isArray(goals) ? goals : [];
-  if (!tasks.length && !gls.length) return '';
+  const vlist = Array.isArray(ventures) ? ventures.filter(Boolean) : [];
+  if (!tasks.length && !gls.length && !vlist.length) return '';
   const groups = new Map();
   for (const t of tasks.slice(0, 40)) {
     const k = t.venture || 'General';
@@ -230,6 +237,7 @@ function buildPlateContext(openTasks, goals) {
   for (const [g, texts] of groups) lines.push(`- ${g}: ${texts.join('; ')}`);
   if (lines.length) out += lines.join('\n') + '\n';
   if (gls.length) out += `- Goals: ${gls.slice(0, 12).map((g) => g.title).join('; ')}\n`;
+  if (vlist.length) out += `- Businesses he files under (use these exact names): ${vlist.join(', ')}\n`;
   out += '\nUse this to connect the dots, surface a related open item when he adds or finishes something, and suggest sensible next steps. Do not recite it.';
   return out;
 }
@@ -271,17 +279,16 @@ function getJarvisTools() {
       }, ['goal', 'step']),
     fn('hq_add_business', 'Create a new business or category that things can be filed under.',
       { name: { type: 'string', description: 'The business name' } }, ['name']),
+    fn('hq_assign_task', 'File an existing open task under one of his businesses.',
+      {
+        task: { type: 'string', description: 'What the caller said to identify the existing task' },
+        business: { type: 'string', description: 'The business to file it under, as he said it' },
+      }, ['task', 'business']),
     fn('hq_add_project', 'Create a new project in HQ.',
       {
         title: { type: 'string', description: 'The project' },
         description: { type: 'string', description: 'Optional detail' },
       }, ['title']),
-    fn('hq_add_reminder', 'Add a reminder to HQ.',
-      { text: { type: 'string', description: 'The reminder text' } }, ['text']),
-    fn('hq_add_note', 'Add a note to HQ.',
-      { text: { type: 'string', description: 'The note text' } }, ['text']),
-    fn('hq_add_capture', 'Add a quick capture (inbox thought) to HQ.',
-      { text: { type: 'string', description: 'The captured thought' } }, ['text']),
     fn('hq_list_tasks', 'List open (not done) tasks, optionally for one business. Returns a few recent ones as data; speak them conversationally, never as a count or a list.',
       { venture: { type: 'string', description: 'Limit to this business. Omit for all.' } }, []),
     fn('hq_list_goals', 'List current goals. Returns them as data; speak them conversationally.',
@@ -325,8 +332,8 @@ const JARVIS_SPEAKING_PLANS = {
 async function buildJarvisConfig() {
   let plate = '';
   try {
-    const [openTasks, goals] = await Promise.all([hq.listOpenMovers(), hq.listGoals()]);
-    plate = buildPlateContext(openTasks, goals);
+    const [openTasks, goals, ventures] = await Promise.all([hq.listOpenMovers(), hq.listGoals(), hq.listVentures()]);
+    plate = buildPlateContext(openTasks, goals, ventures);
   } catch (e) {
     console.error('⚠️ Jarvis: could not load plate context:', e.message);
   }
@@ -436,32 +443,25 @@ async function tool_hq_add_business(args) {
   return res.ok ? `Done, ${name} is now one of your businesses.` : 'That did not save to HQ.';
 }
 
+async function tool_hq_assign_task(args) {
+  const task = (args.task || '').trim();
+  const business = (args.business || '').trim();
+  if (!task) return 'Which task do you want to file?';
+  if (!business) return 'Which business should it go under?';
+  const ventures = await hq.listVentures();
+  const v = items.matchVenture(business, ventures);
+  if (!v) return `I do not have a business matching ${business}. Want me to add it first?`;
+  const res = await hq.assignVentureByFuzzy(task, v);
+  if (res.matched) return `Filed ${res.matched.text} under ${v}.`;
+  if (res.reason === 'no_open_tasks') return 'You have nothing open to file right now.';
+  return 'I could not find a task matching that.';
+}
+
 async function tool_hq_add_project(args) {
   const title = (args.title || '').trim();
   if (!title) return 'What is the project?';
   const res = await hq.insertItem(items.buildProject({ title, desc: args.description || '' }));
   return res.ok ? `New project: ${title}.` : 'That did not save to HQ.';
-}
-
-async function tool_hq_add_reminder(args) {
-  const text = (args.text || '').trim();
-  if (!text) return 'What is the reminder?';
-  const res = await hq.insertItem(items.buildReminder({ text }));
-  return res.ok ? 'Reminder set.' : 'That did not save to HQ.';
-}
-
-async function tool_hq_add_note(args) {
-  const text = (args.text || '').trim();
-  if (!text) return 'What is the note?';
-  const res = await hq.insertItem(items.buildNote({ text }));
-  return res.ok ? 'Noted.' : 'That did not save to HQ.';
-}
-
-async function tool_hq_add_capture(args) {
-  const text = (args.text || '').trim();
-  if (!text) return 'What do you want me to capture?';
-  const res = await hq.insertItem(items.buildCapture({ text }));
-  return res.ok ? 'Got it.' : 'That did not save to HQ.';
 }
 
 async function tool_hq_list_tasks(args) {
@@ -518,10 +518,8 @@ const TOOL_HANDLERS = {
   hq_add_goal: tool_hq_add_goal,
   hq_add_goal_step: tool_hq_add_goal_step,
   hq_add_business: tool_hq_add_business,
+  hq_assign_task: tool_hq_assign_task,
   hq_add_project: tool_hq_add_project,
-  hq_add_reminder: tool_hq_add_reminder,
-  hq_add_note: tool_hq_add_note,
-  hq_add_capture: tool_hq_add_capture,
   hq_list_tasks: tool_hq_list_tasks,
   hq_list_goals: tool_hq_list_goals,
   hq_complete_task: tool_hq_complete_task,
