@@ -241,4 +241,66 @@ router.post('/sms-log/thread/reply', async (req, res) => {
   }
 });
 
+// GET /api/admin/sms-log/conversations
+// The SMS log grouped by contact, for the messaging UI's left pane. A contact's
+// phone is recipient_phone on outbound rows and metadata.from on inbound rows
+// (same split as /thread). Returns the latest message per contact, newest first.
+router.get('/sms-log/conversations', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ error: 'No token' });
+    const jwt = require('jsonwebtoken');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || process.env.ADMIN_JWT_SECRET);
+    if (!decoded || decoded.role !== 'platform_admin') {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+
+    const FIELDS = 'id, agency_id, recipient_phone, recipient_type, message_type, message_body, delivery_status, metadata, created_at';
+    const { data, error } = await supabase
+      .from('sms_log')
+      .select(FIELDS)
+      .order('created_at', { ascending: false })
+      .limit(3000);
+    if (error) return res.status(500).json({ error: error.message });
+
+    const convos = new Map();
+    for (const r of data || []) {
+      const inbound = (r.metadata?.direction === 'inbound' || String(r.message_type || '').includes('inbound'));
+      const phone = inbound ? (r.metadata?.from || null) : (r.recipient_phone || null);
+      if (!phone) continue;
+      const existing = convos.get(phone);
+      if (!existing) {
+        // First row seen for this phone is the latest (rows are desc by created_at).
+        convos.set(phone, {
+          phone,
+          agency_id: r.agency_id || null,
+          last_body: r.message_body || '',
+          last_at: r.created_at,
+          last_direction: inbound ? 'inbound' : 'outbound',
+          count: 1,
+        });
+      } else {
+        existing.count += 1;
+        if (!existing.agency_id && r.agency_id) existing.agency_id = r.agency_id;
+      }
+    }
+
+    const agencyIds = [...new Set([...convos.values()].map(c => c.agency_id).filter(Boolean))];
+    let agencyMap = {};
+    if (agencyIds.length) {
+      const { data: ags } = await supabase.from('agencies').select('id, name').in('id', agencyIds);
+      agencyMap = Object.fromEntries((ags || []).map(a => [a.id, a.name]));
+    }
+
+    const conversations = [...convos.values()]
+      .map(c => ({ ...c, agency_name: c.agency_id ? (agencyMap[c.agency_id] || null) : null }))
+      .sort((a, b) => new Date(b.last_at) - new Date(a.last_at));
+
+    res.json({ conversations });
+  } catch (err) {
+    console.error('sms-log conversations error:', err.message);
+    res.status(500).json({ error: 'Failed to load conversations' });
+  }
+});
+
 module.exports = router;
