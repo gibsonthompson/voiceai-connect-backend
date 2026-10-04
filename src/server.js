@@ -1666,6 +1666,8 @@ app.get('/api/domain-test', (req, res) => {
 setupProcessErrorHandlers();
 app.use('/api/agency', demoPhoneRoutes);
 app.use('/api/agency', customIndustriesRoutes);
+// Discount codes (Pro/Scale): agencies create codes their clients redeem at checkout.
+app.use('/api/agency', require('./routes/discount-codes'));
 app.use('/api/agency', testClientRoutes);
 app.use('/api/agency', agencyTemplatesRoutes);
 app.use('/api/agency', aiPlaygroundRoutes);

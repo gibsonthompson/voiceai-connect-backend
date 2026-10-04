@@ -1211,7 +1211,24 @@ async function disconnectConnectAccount(req, res) {
 //
 // Returns: { url } on success, throws on error. Caller handles errors.
 // ============================================================================
-async function createTrialCheckoutForSignup({ client, agency, plan, passwordToken, trialDays }) {
+// Create a Stripe coupon on the agency's CONNECTED account from a resolved
+// discount code's percent-off. waive_setup is handled separately (by skipping
+// the setup line item), so this returns null when there is no percent-off.
+async function createDiscountCoupon(agency, codeRecord) {
+  if (!codeRecord || !codeRecord.percent_off) return null;
+  const duration = codeRecord.duration === 'repeating' ? 'repeating' : (codeRecord.duration === 'once' ? 'once' : 'forever');
+  const params = {
+    percent_off: codeRecord.percent_off,
+    duration,
+    name: `${codeRecord.code} (${codeRecord.percent_off}% off)`,
+    metadata: { discount_code_id: codeRecord.id, agency_id: agency.id },
+  };
+  if (duration === 'repeating') params.duration_in_months = codeRecord.duration_months || 1;
+  const coupon = await stripe.coupons.create(params, { stripeAccount: agency.stripe_account_id });
+  return coupon.id;
+}
+
+async function createTrialCheckoutForSignup({ client, agency, plan, passwordToken, trialDays, discountCode }) {
   // Manual-billing clients never take a card and have no Stripe subscription.
   // The signup handler already skips this path for a manual client; this is the
   // hard backstop so a manual client can never be routed into a Stripe trial
@@ -1301,7 +1318,20 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
   // Checkout bills on the FIRST invoice only, which for a trialing subscription
   // is the invoice generated at trial end, so the fee lands with the first
   // month and never during the free trial.
-  const setupFeeItem = await buildSetupFeeLineItem(agency, plan, client);
+  // Optional discount code, re-validated here (not only in the UI). An invalid
+  // code fails the checkout with a clear message rather than silently charging
+  // full price.
+  let _discount = null, _couponId = null;
+  if (discountCode) {
+    const { resolveDiscountCode } = require('./discount-codes');
+    const r = await resolveDiscountCode(agency.id, discountCode);
+    if (r.error) return { error: `Discount code: ${r.error}` };
+    _discount = r.code;
+    _couponId = await createDiscountCoupon(agency, _discount);
+  }
+  const _waiveSetup = _discount && _discount.waive_setup === true;
+
+  const setupFeeItem = _waiveSetup ? null : await buildSetupFeeLineItem(agency, plan, client);
   if (setupFeeItem) lineItems.push(setupFeeItem);
 
   // Bill-during-trial (a true fee-free trial where the client still pays for
@@ -1319,7 +1349,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
 
   if (billMinutesDuringTrial) {
     const minutePriceForSchedule = await createConnectMinutePrice(agency, plan, client);
-    const setupFeeForSchedule = await buildSetupFeeLineItem(agency, plan, client);
+    const setupFeeForSchedule = _waiveSetup ? null : await buildSetupFeeLineItem(agency, plan, client);
     const setupSession = await stripe.checkout.sessions.create({
       customer: connectedCustomerId,
       mode: 'setup',
@@ -1336,6 +1366,8 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
         flat_price_id: price.id,
         minute_price_id: minutePriceForSchedule.id,
         ...(setupFeeForSchedule ? { setup_price_id: setupFeeForSchedule.price } : {}),
+        ...(_couponId ? { discount_coupon_id: _couponId } : {}),
+        ...(_discount ? { discount_code_id: _discount.id } : {}),
       },
     }, { stripeAccount: agency.stripe_account_id });
     console.log(`✅ Bill-during-trial setup checkout created for client ${client.id}: session ${setupSession.id}`);
@@ -1349,12 +1381,14 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     line_items: lineItems,
     success_url: successUrl,
     cancel_url: `${agencyUrl}/client/signup?canceled=true`,
+    ...(_couponId ? { discounts: [{ coupon: _couponId }] } : {}),
     metadata: {
       client_id: client.id,
       agency_id: agency.id,
       plan,
       call_limit: callLimits[plan].toString(),
       type: 'trial_signup', // distinguishes from upgrade-mode checkouts
+      ...(_discount ? { discount_code_id: _discount.id } : {}),
     },
     subscription_data: {
       // days=0 omits the trial entirely so Stripe charges immediately at
@@ -1479,7 +1513,18 @@ async function createClientCheckout(req, res) {
 
     // One-time setup fee (when set). No trial on this flow, so the one-time
     // line item is billed immediately on the first invoice at checkout.
-    const setupFeeItem = await buildSetupFeeLineItem(agency, plan, client);
+    // Optional discount code (re-validated server-side).
+    let _discount = null, _couponId = null;
+    if (req.body?.discount_code) {
+      const { resolveDiscountCode } = require('./discount-codes');
+      const r = await resolveDiscountCode(agency.id, req.body.discount_code);
+      if (r.error) return res.status(400).json({ error: `Discount code: ${r.error}` });
+      _discount = r.code;
+      _couponId = await createDiscountCoupon(agency, _discount);
+    }
+    const _waiveSetup = _discount && _discount.waive_setup === true;
+
+    const setupFeeItem = _waiveSetup ? null : await buildSetupFeeLineItem(agency, plan, client);
     if (setupFeeItem) upgradeLineItems.push(setupFeeItem);
 
     const session = await stripe.checkout.sessions.create({
@@ -1487,7 +1532,8 @@ async function createClientCheckout(req, res) {
       line_items: upgradeLineItems,
       success_url: `${agencyUrl}/client/dashboard?upgrade=success`,
       cancel_url: `${agencyUrl}/client/upgrade-required?canceled=true`,
-      metadata: { client_id, agency_id: agency.id, plan, call_limit: callLimits[plan].toString(), type: 'client_subscription' },
+      ...(_couponId ? { discounts: [{ coupon: _couponId }] } : {}),
+      metadata: { client_id, agency_id: agency.id, plan, call_limit: callLimits[plan].toString(), type: 'client_subscription', ...(_discount ? { discount_code_id: _discount.id } : {}) },
       subscription_data: { metadata: { client_id, agency_id: agency.id, plan } }
     }, { stripeAccount: agency.stripe_account_id });
 
@@ -2553,6 +2599,8 @@ async function handleBillDuringTrialScheduleSetup(session, stripeAccountId, clie
   const flatPriceId = session.metadata?.flat_price_id;
   const minutePriceId = session.metadata?.minute_price_id;
   const setupPriceId = session.metadata?.setup_price_id || null;
+  const discountCouponId = session.metadata?.discount_coupon_id || null;
+  const discountCodeId = session.metadata?.discount_code_id || null;
 
   if (!flatPriceId || !minutePriceId) {
     console.error('Bill-during-trial: missing price ids in metadata for client', clientId);
@@ -2589,6 +2637,7 @@ async function handleBillDuringTrialScheduleSetup(session, stripeAccountId, clie
   // phase-2 cycle, the schedule releases and the subscription continues on its
   // own as a normal flat+metered sub, so normal cancellation works from then on.
   const phase2 = { items: [{ price: flatPriceId, quantity: 1 }, { price: minutePriceId }], iterations: 1 };
+  if (discountCouponId) phase2.discounts = [{ coupon: discountCouponId }];
 
   let schedule;
   try {
@@ -2600,6 +2649,10 @@ async function handleBillDuringTrialScheduleSetup(session, stripeAccountId, clie
       phases: [phase1, phase2],
       metadata: { client_id: clientId, agency_id: client.agency_id, plan, type: 'bill_during_trial' },
     }, { stripeAccount: stripeAccountId });
+    if (discountCodeId) {
+      try { await supabase.rpc('increment_discount_redemption', { p_code_id: discountCodeId }); }
+      catch (ie) { console.warn('discount redemption increment failed:', ie.message); }
+    }
   } catch (e) {
     console.error('Bill-during-trial: failed to create subscription schedule:', e.message);
     return;
@@ -2650,6 +2703,13 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
   // their two-phase schedule instead of the normal subscription activation.
   if (session.mode === 'setup' || session.metadata?.type === 'trial_signup_schedule') {
     return await handleBillDuringTrialScheduleSetup(session, stripeAccountId, client);
+  }
+
+  // Record a discount-code redemption for subscription-mode checkouts (the
+  // schedule path records its own after the schedule is built).
+  if (session.metadata?.discount_code_id) {
+    try { await supabase.rpc('increment_discount_redemption', { p_code_id: session.metadata.discount_code_id }); }
+    catch (e) { console.warn('discount redemption increment failed:', e.message); }
   }
 
   const wasPendingPayment = client.subscription_status === 'pending_payment';

@@ -1368,7 +1368,14 @@ async function handleClientSignup(req, res) {
     if (cardRequired) {
       try {
         const { createTrialCheckoutForSignup } = require('./stripe-connect');
-        const checkout = await createTrialCheckoutForSignup({ client: newClient, agency, plan: planType, passwordToken, trialDays });
+        const checkout = await createTrialCheckoutForSignup({ client: newClient, agency, plan: planType, passwordToken, trialDays, discountCode: b.discount_code });
+        if (checkout && checkout.error) {
+          // An invalid discount code reached checkout (rare; the UI validates
+          // first). Roll back the just-created client so the prospect can retry
+          // cleanly rather than hitting "account already exists".
+          await supabase.from('clients').delete().eq('id', newClient.id);
+          return res.status(400).json({ error: checkout.error });
+        }
         cardRequiredCheckoutUrl = checkout.url;
 
         const { error: pendingErr } = await supabase
