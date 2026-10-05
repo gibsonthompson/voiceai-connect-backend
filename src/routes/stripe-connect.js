@@ -212,7 +212,9 @@ function customPricing(client) {
 
 async function buildSetupFeeLineItem(agency, plan, client, setupPct = 0) {
   const cp = customPricing(client);
-  const feeCents = cp && cp.setupCents !== null ? cp.setupCents : Number(agency.setup_fee_cents);
+  // Per-plan setup fee (setup_fee_<plan>_cents or the custom plan row), resolved
+  // the same way getPlan resolves the recurring price. Client custom fee wins.
+  const feeCents = (cp && cp.setupCents !== null) ? cp.setupCents : Number((getPlan(agency, plan) || {}).setup_fee_cents || 0);
   if (!(feeCents > 0)) return null;
   const chargeCents = setupPct > 0 ? Math.round(feeCents * (1 - setupPct / 100)) : feeCents;
   if (!(chargeCents > 0)) return null;
