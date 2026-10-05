@@ -697,4 +697,58 @@ router.get('/:agencyId/demo-calls/:callId', async (req, res) => {
   }
 });
 
+// ============================================================================
+// DEMO CUSTOMIZATION — voice override, custom greeting, and extra prompt
+// instructions (appended at call time; the core demo script is never exposed).
+// Guarded by the requireAgencyAccess on /:agencyId/demo-phone above.
+// ============================================================================
+router.get('/:agencyId/demo-phone/config', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('agencies')
+      .select('demo_voice_id, demo_greeting, demo_prompt_additions')
+      .eq('id', req.params.agencyId)
+      .single();
+    if (error) return res.status(500).json({ error: 'Failed to load demo config' });
+    res.json({
+      demo_voice_id: data.demo_voice_id || null,
+      demo_greeting: data.demo_greeting || '',
+      demo_prompt_additions: data.demo_prompt_additions || '',
+    });
+  } catch (e) {
+    console.error('demo-config GET error:', e.message);
+    res.status(500).json({ error: 'Failed to load demo config' });
+  }
+});
+
+router.put('/:agencyId/demo-phone/config', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const update = {};
+    if ('demo_voice_id' in body) {
+      const vid = body.demo_voice_id ? String(body.demo_voice_id).trim() : '';
+      if (vid) {
+        // Only accept a real, known voice. A bad id would make every demo call
+        // fail (VAPI rejects the voiceId), so reject it here rather than store it.
+        let known = true;
+        try { const { VOICE_OPTIONS } = require('./client'); if (Array.isArray(VOICE_OPTIONS)) known = VOICE_OPTIONS.some((v) => v.id === vid); } catch (_) {}
+        if (!known) return res.status(400).json({ error: 'That voice is not available' });
+        update.demo_voice_id = vid.slice(0, 100);
+      } else {
+        update.demo_voice_id = null;
+      }
+    }
+    if ('demo_greeting' in body) { const g = body.demo_greeting ? String(body.demo_greeting).trim().slice(0, 300) : ''; update.demo_greeting = g || null; }
+    if ('demo_prompt_additions' in body) { const a = body.demo_prompt_additions ? String(body.demo_prompt_additions).trim().slice(0, 1500) : ''; update.demo_prompt_additions = a || null; }
+    if (Object.keys(update).length === 0) return res.status(400).json({ error: 'Nothing to update' });
+    update.updated_at = new Date().toISOString();
+    const { error } = await supabase.from('agencies').update(update).eq('id', req.params.agencyId);
+    if (error) return res.status(500).json({ error: 'Failed to save demo config' });
+    res.json({ success: true });
+  } catch (e) {
+    console.error('demo-config PUT error:', e.message);
+    res.status(500).json({ error: 'Failed to save demo config' });
+  }
+});
+
 module.exports = router;
