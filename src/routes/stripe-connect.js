@@ -210,10 +210,12 @@ function customPricing(client) {
   };
 }
 
-async function buildSetupFeeLineItem(agency, plan, client) {
+async function buildSetupFeeLineItem(agency, plan, client, setupPct = 0) {
   const cp = customPricing(client);
   const feeCents = cp && cp.setupCents !== null ? cp.setupCents : Number(agency.setup_fee_cents);
   if (!(feeCents > 0)) return null;
+  const chargeCents = setupPct > 0 ? Math.round(feeCents * (1 - setupPct / 100)) : feeCents;
+  if (!(chargeCents > 0)) return null;
 
   const acct = agency.stripe_account_id;
   const currency = getCurrencyForCountry(agency.country || 'US');
@@ -226,7 +228,7 @@ async function buildSetupFeeLineItem(agency, plan, client) {
   const price = await stripe.prices.create(
     {
       product: product.id,
-      unit_amount: feeCents,
+      unit_amount: chargeCents,
       currency,
       // no `recurring` => one-time price; on a subscription-mode Checkout this
       // is billed on the first invoice only.
@@ -1330,8 +1332,9 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     _couponId = await createDiscountCoupon(agency, _discount);
   }
   const _waiveSetup = _discount && _discount.waive_setup === true;
+  const _setupPct = _waiveSetup ? 100 : (_discount && _discount.setup_fee_percent_off ? Number(_discount.setup_fee_percent_off) : 0);
 
-  const setupFeeItem = _waiveSetup ? null : await buildSetupFeeLineItem(agency, plan, client);
+  const setupFeeItem = _setupPct >= 100 ? null : await buildSetupFeeLineItem(agency, plan, client, _setupPct);
   if (setupFeeItem) lineItems.push(setupFeeItem);
 
   // Bill-during-trial (a true fee-free trial where the client still pays for
@@ -1349,7 +1352,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
 
   if (billMinutesDuringTrial) {
     const minutePriceForSchedule = await createConnectMinutePrice(agency, plan, client);
-    const setupFeeForSchedule = _waiveSetup ? null : await buildSetupFeeLineItem(agency, plan, client);
+    const setupFeeForSchedule = _setupPct >= 100 ? null : await buildSetupFeeLineItem(agency, plan, client, _setupPct);
     const setupSession = await stripe.checkout.sessions.create({
       customer: connectedCustomerId,
       mode: 'setup',
@@ -1557,8 +1560,9 @@ async function createClientCheckout(req, res) {
       _couponId = await createDiscountCoupon(agency, _discount);
     }
     const _waiveSetup = _discount && _discount.waive_setup === true;
+    const _setupPct = _waiveSetup ? 100 : (_discount && _discount.setup_fee_percent_off ? Number(_discount.setup_fee_percent_off) : 0);
 
-    const setupFeeItem = _waiveSetup ? null : await buildSetupFeeLineItem(agency, plan, client);
+    const setupFeeItem = _setupPct >= 100 ? null : await buildSetupFeeLineItem(agency, plan, client, _setupPct);
     if (setupFeeItem) upgradeLineItems.push(setupFeeItem);
 
     const session = await stripe.checkout.sessions.create({

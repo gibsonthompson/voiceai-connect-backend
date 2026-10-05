@@ -41,11 +41,15 @@ function validatePayload(body) {
 
   const percentOff = (body.percent_off === '' || body.percent_off == null) ? null : Number(body.percent_off);
   const waiveSetup = body.waive_setup === true;
+  const setupFeePercentOff = (body.setup_fee_percent_off === '' || body.setup_fee_percent_off == null) ? null : Number(body.setup_fee_percent_off);
+  if (setupFeePercentOff != null && (!Number.isFinite(setupFeePercentOff) || setupFeePercentOff < 1 || setupFeePercentOff > 100)) {
+    return { error: 'Setup fee percent off must be between 1 and 100' };
+  }
   if (percentOff != null && (!Number.isFinite(percentOff) || percentOff < 1 || percentOff > 100)) {
     return { error: 'Percent off must be between 1 and 100' };
   }
-  if (percentOff == null && !waiveSetup) {
-    return { error: 'Set a percent off, waive the setup fee, or both' };
+  if (percentOff == null && !waiveSetup && setupFeePercentOff == null) {
+    return { error: 'Set a monthly percent off, a setup fee discount, or both' };
   }
 
   const duration = ['once', 'forever', 'repeating'].includes(body.duration) ? body.duration : 'forever';
@@ -69,7 +73,7 @@ function validatePayload(body) {
     expiresAt = d.toISOString();
   }
 
-  return { value: { code, percent_off: percentOff, waive_setup: waiveSetup, duration, duration_months: durationMonths, max_redemptions: maxRedemptions, expires_at: expiresAt } };
+  return { value: { code, percent_off: percentOff, waive_setup: waiveSetup, setup_fee_percent_off: setupFeePercentOff, duration, duration_months: durationMonths, max_redemptions: maxRedemptions, expires_at: expiresAt } };
 }
 
 const isDup = (error) => error && (error.code === '23505' || /duplicate|unique/i.test(error.message || ''));
@@ -114,7 +118,7 @@ router.patch('/:agencyId/discount-codes/:id', requirePaidPlan, async (req, res) 
     const body = req.body || {};
     const patch = {};
     if (typeof body.active === 'boolean') patch.active = body.active;
-    const touchesFields = ['code', 'percent_off', 'waive_setup', 'duration', 'duration_months', 'max_redemptions', 'expires_at'].some((k) => k in body);
+    const touchesFields = ['code', 'percent_off', 'waive_setup', 'setup_fee_percent_off', 'duration', 'duration_months', 'max_redemptions', 'expires_at'].some((k) => k in body);
     if (touchesFields) {
       const v = validatePayload(body);
       if (v.error) return res.status(400).json({ error: v.error });
@@ -185,7 +189,7 @@ router.post('/discount-codes/validate', async (req, res) => {
     const r = await resolveDiscountCode(agency_id, code);
     if (r.error) return res.json({ valid: false, error: r.error });
     const c = r.code;
-    res.json({ valid: true, discount: { code: c.code, percent_off: c.percent_off, waive_setup: c.waive_setup, duration: c.duration, duration_months: c.duration_months } });
+    res.json({ valid: true, discount: { code: c.code, percent_off: c.percent_off, waive_setup: c.waive_setup, setup_fee_percent_off: c.setup_fee_percent_off, duration: c.duration, duration_months: c.duration_months } });
   } catch (e) {
     console.error('validate discount-code error:', e.message);
     res.status(500).json({ valid: false, error: 'Validation failed' });
