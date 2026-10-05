@@ -1388,19 +1388,20 @@ async function handleClientSignup(req, res) {
           console.log(`🔐 Card-required trial: client ${newClient.id} → pending_payment, checkout URL ready`);
         }
       } catch (checkoutErr) {
-        // Fall back to DB-only trial so signup doesn't break. Agency owner
-        // can troubleshoot Stripe Connect from logs.
-        console.error('❌ Failed to create trial checkout, falling back to no-card trial:', checkoutErr.message);
-        cardRequiredCheckoutUrl = null;
-        // This signup was deferred (no number, because a card was required). The
-        // fallback turns it into a no-card trial, so it now needs provisioning.
-        // provisionClient buys the number, builds the assistant, links the row and
-        // sends the welcome SMS, so the immediate welcome SMS below is skipped for
-        // this path (it is guarded on phoneResult, which stays null here).
-        if (!phoneResult) {
-          try { await provisionClient(newClient.id); }
-          catch (provErr) { console.error('❌ Fallback provisioning failed for deferred client:', provErr.message); }
-        }
+        // Card-required signup whose checkout could not be created. Do NOT fall
+        // back to a no-card trial: the agency explicitly requires a card, and a
+        // silent fallback would create a free client AND provision a real phone
+        // number at the agency's cost. Fail closed, roll back the just-created
+        // client (same as the invalid-discount path above) and return a clear
+        // message so the prospect can retry and the card requirement is never
+        // silently bypassed.
+        console.error('❌ Card-required checkout failed, rolling back signup:', checkoutErr.message);
+        try { await supabase.from('clients').delete().eq('id', newClient.id); }
+        catch (rbErr) { console.error('❌ Rollback after failed checkout also failed:', rbErr.message); }
+        return res.status(502).json({
+          error: 'checkout_failed',
+          message: "We couldn't start secure checkout to set up your card. Please try again in a moment. If this keeps happening, contact support.",
+        });
       }
     }
 
