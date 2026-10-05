@@ -193,6 +193,24 @@ const VOICES = {
 // Env-overridable ElevenLabs model. Default eleven_turbo_v2_5 (natural, fast).
 const ELEVEN_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_turbo_v2_5';
 
+// Env-overridable transcriber + LLM so the stack can be tuned without a deploy.
+// nova-3 (vs nova-2) improves accuracy on phone audio, accents, and multilingual.
+const DEEPGRAM_MODEL = process.env.DEEPGRAM_MODEL || 'nova-3';
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+// Appended to every receptionist prompt. Shifts delivery from "reading a script"
+// toward how a real receptionist actually talks on the phone (the single biggest
+// prompt lever for not sounding robotic).
+const NATURALNESS_GUIDANCE = `
+
+# Sound human
+- This is a live phone call, not writing. Use contractions and talk like a warm, competent receptionist, not a script.
+- Weave in the occasional natural thinking sound or light hesitation ("let me check," "one sec," "hmm, okay") sparingly, so it feels real, not constant.
+- While the caller is explaining something, give short acknowledgments so they know you're listening: "mm-hmm," "got it," "right."
+- Match their energy: a frustrated caller, slow down and acknowledge it; a rushed caller, be quick and direct; an upbeat caller, match the warmth.
+- Keep every turn to one or two sentences. Never read long paragraphs or robotic lists, ask one thing at a time.`;
+
+
 // INDUSTRY CONFIGURATIONS — Transfer-first, conversational prompts v4
 // ============================================================================
 const INDUSTRY_CONFIGS = {
@@ -2403,7 +2421,7 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       firstMessage = replacePlaceholders(customTemplate.first_message, businessName);
       voiceId = customTemplate.voice_id || config.voiceId;
       temperature = customTemplate.temperature || config.temperature;
-      modelId = customTemplate.model || 'gpt-4o-mini';
+      modelId = customTemplate.model || OPENAI_MODEL;
 
       if (customTemplate.knowledge_base_data) {
         const kb = customTemplate.knowledge_base_data;
@@ -2429,10 +2447,11 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       firstMessage = config.firstMessage(businessName);
       voiceId = config.voiceId;
       temperature = config.temperature;
-      modelId = 'gpt-4o-mini';
+      modelId = OPENAI_MODEL;
     }
 
     systemPrompt += SPAM_DETECTION_BLOCK;
+    systemPrompt += NATURALNESS_GUIDANCE;
 
     if (ownerPhone) {
       systemPrompt += TRANSFER_KEYWORDS_BLOCK;
@@ -2522,7 +2541,7 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
 
     const assistantConfig = {
       name: sanitizeAssistantName(businessName),
-      transcriber: { provider: 'deepgram', model: 'nova-2', language: 'multi' },
+      transcriber: { provider: 'deepgram', model: customTemplate?.transcriber_model || DEEPGRAM_MODEL, language: 'multi' },
       model: {
         provider: 'openai',
         model: modelId,
@@ -2531,7 +2550,7 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
         ...(queryToolId && { toolIds: [queryToolId] }),
         ...(tools.length > 0 && { tools })
       },
-      voice: { provider: '11labs', model: ELEVEN_MODEL, voiceId, stability: 0.4, similarityBoost: 0.75, useSpeakerBoost: true, ...(() => { const cs = Number(client?.voice_speed); const ts = Number(customTemplate?.voice_speed); const s = (cs >= 0.7 && cs <= 1.2) ? cs : ((ts >= 0.7 && ts <= 1.2) ? ts : null); return s ? { speed: s } : {}; })() },
+      voice: { provider: '11labs', model: customTemplate?.tts_model || ELEVEN_MODEL, voiceId, stability: 0.4, similarityBoost: 0.75, useSpeakerBoost: true, ...(() => { const cs = Number(client?.voice_speed); const ts = Number(customTemplate?.voice_speed); const s = (cs >= 0.7 && cs <= 1.2) ? cs : ((ts >= 0.7 && ts <= 1.2) ? ts : null); return s ? { speed: s } : {}; })() },
       startSpeakingPlan: {
         waitSeconds: 0.4,
         smartEndpointingPlan: { provider: 'vapi' },
@@ -2630,7 +2649,7 @@ async function createDemoAssistant(agencyName) {
 
     const assistantConfig = {
       name: `${agencyName.slice(0, 25)} Demo Assistant`,
-      transcriber: { provider: 'deepgram', model: 'nova-2', language: 'multi' },
+      transcriber: { provider: 'deepgram', model: DEEPGRAM_MODEL, language: 'multi' },
       model: {
         provider: 'openai',
         model: 'gpt-4o-mini',

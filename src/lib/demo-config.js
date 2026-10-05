@@ -38,6 +38,17 @@ const DEMO_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL';
 // eleven_multilingual_v2 for the highest quality, or eleven_flash_v2_5 for the
 // lowest latency.
 const ELEVEN_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_turbo_v2_5';
+// Appended to the demo prompt so the sales demo sounds as human as the real
+// receptionist (same guidance as the client prompts in lib/vapi.js).
+const DEMO_NATURALNESS = `
+
+# Sound human
+- This is a live phone call, not writing. Use contractions and talk like a warm, competent receptionist, not a script.
+- Weave in the occasional natural thinking sound or light hesitation ("let me check," "one sec," "hmm, okay") sparingly, so it feels real, not constant.
+- While the caller is explaining something, give short acknowledgments so they know you're listening: "mm-hmm," "got it," "right."
+- Match their energy: a frustrated caller, slow down and acknowledge it; a rushed caller, be quick and direct; an upbeat caller, match the warmth.
+- Keep every turn to one or two sentences. Never read long paragraphs or robotic lists, ask one thing at a time.`;
+
 const DEMO_VOICE_SETTINGS = {
   model: ELEVEN_MODEL,
   stability: 0.4,                    // Lower = more expressive/human (less flat)
@@ -94,7 +105,7 @@ const INDUSTRY_FIRST_MESSAGES = {
 
 const DEMO_TRANSCRIBER = {
   provider: 'deepgram',
-  model: 'nova-2',
+  model: process.env.DEEPGRAM_MODEL || 'nova-3',
   language: 'multi',
 };
 
@@ -510,7 +521,7 @@ function buildIndustryDemoConfig(industryKey, agency) {
   const systemPrompt = getDemoSystemPromptV3(agencyName, {
     skipSignupMention,
     knownIndustry: industryKey,
-  });
+  }) + DEMO_NATURALNESS;
 
   const firstMessageFn = INDUSTRY_FIRST_MESSAGES[industryKey];
   const firstMessage = firstMessageFn
@@ -551,7 +562,7 @@ function buildDemoDynamicConfig(agency) {
   const skipSignupMention = !!agency.demo_followup_sms_override;
   const _custom = applyDemoCustomization(agency, {
     voiceId: DEMO_VOICE_ID,
-    systemPrompt: getDemoSystemPromptV3(agencyName, { skipSignupMention }),
+    systemPrompt: getDemoSystemPromptV3(agencyName, { skipSignupMention }) + DEMO_NATURALNESS,
     firstMessage: getDemoFirstMessageV3(agencyName),
   });
 

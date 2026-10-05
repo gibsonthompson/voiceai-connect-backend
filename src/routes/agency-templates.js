@@ -1756,6 +1756,8 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         voice_id: voiceId,
         voice: voice || null,
         model: customTemplate?.model || 'gpt-4o-mini',
+        tts_model: customTemplate?.tts_model || 'eleven_turbo_v2_5',
+        transcriber_model: customTemplate?.transcriber_model || 'nova-3',
         temperature: customTemplate?.temperature || 0.7,
         voice_speed: customTemplate?.voice_speed ?? 1,
         knowledge_base_data: customTemplate?.knowledge_base_data || null,
@@ -1766,6 +1768,8 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         first_message: defaults.first_message,
         voice_id: defaults.voice_id,
         model: 'gpt-4o-mini',
+        tts_model: 'eleven_turbo_v2_5',
+        transcriber_model: 'nova-3',
         temperature: 0.7,
         voice_speed: 1,
       },
@@ -1784,7 +1788,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
 // ============================================================================
 router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (req, res) => {
   const { agencyId, industry } = req.params;
-  const { system_prompt, first_message, voice_id, temperature, is_active, model, knowledge_base_data, voice_speed } = req.body;
+  const { system_prompt, first_message, voice_id, temperature, is_active, model, knowledge_base_data, voice_speed, tts_model, transcriber_model } = req.body;
   
   const resolved = await resolveIndustryConfig(agencyId, industry);
   if (!resolved) {
@@ -1809,6 +1813,13 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
   const validModels = ['gpt-4o-mini', 'gpt-4.1-mini', 'gpt-4o'];
   const finalModel = validModels.includes(model) ? model : 'gpt-4o-mini';
 
+  // TTS + transcriber model, both restricted to Vapi-verified values so an
+  // agency can never save a string that would break their own calls.
+  const validTtsModels = ['eleven_v3', 'eleven_multilingual_v2', 'eleven_turbo_v2_5', 'eleven_flash_v2_5'];
+  const finalTtsModel = validTtsModels.includes(tts_model) ? tts_model : 'eleven_turbo_v2_5';
+  const validTranscribers = ['nova-3', 'nova-2'];
+  const finalTranscriber = validTranscribers.includes(transcriber_model) ? transcriber_model : 'nova-3';
+
   // Voice speed is optional; only store a value inside VAPI's supported 0.7-1.2
   // range, otherwise null (which falls back to the default 1.0 at call time).
   let finalSpeed = null;
@@ -1827,6 +1838,8 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         first_message,
         voice_id,
         model: finalModel,
+        tts_model: finalTtsModel,
+        transcriber_model: finalTranscriber,
         temperature: temp,
         voice_speed: finalSpeed,
         knowledge_base_data: knowledge_base_data || null,
