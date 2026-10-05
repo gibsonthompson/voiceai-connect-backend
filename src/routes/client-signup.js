@@ -1368,7 +1368,7 @@ async function handleClientSignup(req, res) {
     if (cardRequired) {
       try {
         const { createTrialCheckoutForSignup } = require('./stripe-connect');
-        const checkout = await createTrialCheckoutForSignup({ client: newClient, agency, plan: planType, passwordToken, trialDays, discountCode: b.discount_code });
+        const checkout = await createTrialCheckoutForSignup({ client: newClient, agency, plan: planType, passwordToken, trialDays, discountCode: req.body?.discount_code });
         if (checkout && checkout.error) {
           // An invalid discount code reached checkout (rare; the UI validates
           // first). Roll back the just-created client so the prospect can retry

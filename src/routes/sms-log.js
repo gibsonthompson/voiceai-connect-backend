@@ -266,6 +266,7 @@ router.get('/sms-log/conversations', async (req, res) => {
     const convos = new Map();
     for (const r of data || []) {
       const inbound = (r.metadata?.direction === 'inbound' || String(r.message_type || '').includes('inbound'));
+      if (r.recipient_type === 'admin') continue; // platform alerts/notifications belong in Alerts, not the messaging inbox
       const phone = inbound ? (r.metadata?.from || null) : (r.recipient_phone || null);
       if (!phone) continue;
       const existing = convos.get(phone);
