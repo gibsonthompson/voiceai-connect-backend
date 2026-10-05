@@ -592,4 +592,12 @@ async function handleJarvisWebhook(req, res) {
   }
 }
 
-module.exports = { handleJarvisWebhook };
+// Exported so the daily briefing (routes/jarvis-briefing.js) reuses the SAME
+// voice, pacing, model, and tools as the live line, and can never drift stale.
+module.exports = {
+  handleJarvisWebhook,
+  JARVIS_VOICE,
+  JARVIS_SPEAKING_PLANS,
+  JARVIS_MODEL,
+  getJarvisTools,
+};

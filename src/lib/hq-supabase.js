@@ -155,6 +155,41 @@ async function getOccupiedRanges(dateStr, dow, ignoreId) {
   return ranges;
 }
 
+// Today's schedule: events (incl. recurring on this weekday) plus scheduled,
+// not-done movers and goal steps on this date, as { title, startHour, allDay },
+// sorted all-day first then by time. Powers the "here's your day" lead-in.
+async function listScheduleForDate(dateStr, dow) {
+  if (!hqSupabase) return [];
+  const { data, error } = await hqSupabase
+    .from('hq_items')
+    .select('*')
+    .eq('user_key', HQ_USER_KEY)
+    .in('kind', ['event', 'mover', 'step'])
+    .eq('deleted', false);
+  if (error) { console.error('❌ HQ listScheduleForDate failed:', error.message); return []; }
+  const out = [];
+  for (const r of data || []) {
+    const d = r.data;
+    if (!d || d.del) continue;
+    if (r.kind === 'event') {
+      const onDate = d.date === dateStr || (d.recurring && d.recurDay === dow);
+      if (!onDate) continue;
+      if (d.allDay) { out.push({ title: d.title || 'event', startHour: null, allDay: true }); continue; }
+      if (d.startHour == null) continue;
+      out.push({ title: d.title || 'event', startHour: d.startHour, allDay: false });
+    } else {
+      if (d.done || d.date !== dateStr || d.startHour == null) continue;
+      out.push({ title: d.text || 'task', startHour: d.startHour, allDay: false });
+    }
+  }
+  out.sort((a, b) => {
+    if (a.allDay && !b.allDay) return -1;
+    if (b.allDay && !a.allDay) return 1;
+    return (a.startHour == null ? 0 : a.startHour) - (b.startHour == null ? 0 : b.startHour);
+  });
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // COMPLETE A TASK BY FUZZY TEXT
 // ---------------------------------------------------------------------------
@@ -231,4 +266,5 @@ module.exports = {
   getOccupiedRanges,
   completeMoverByFuzzy,
   assignVentureByFuzzy,
+  listScheduleForDate,
 };
