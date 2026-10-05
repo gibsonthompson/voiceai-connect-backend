@@ -1374,6 +1374,40 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     return { url: setupSession.url, sessionId: setupSession.id };
   }
 
+  // Setup fee + trial: charge the one-time setup fee UPFRONT in a payment-mode
+  // Checkout (so it shows as due today and is collected at signup), then build the
+  // trialing subscription on the webhook from the saved card. Stripe cannot charge
+  // a one-time fee upfront while a subscription is trialing in one subscription-
+  // mode session (the fee defers to trial end), so this is the two-part flow. Only
+  // fires when there is a real fee (setupFeeItem is null when waived or unset) and
+  // a trial; no-trial and no-fee signups fall through to the normal checkout below.
+  if (days > 0 && setupFeeItem) {
+    const minutePriceForSub = minutePassThroughActive(agency) ? await createConnectMinutePrice(agency, plan, client) : null;
+    const upfrontSession = await stripe.checkout.sessions.create({
+      customer: connectedCustomerId,
+      mode: 'payment',
+      payment_method_types: ['card'],
+      line_items: [{ price: setupFeeItem.price, quantity: 1 }],
+      payment_intent_data: { setup_future_usage: 'off_session' },
+      success_url: successUrl,
+      cancel_url: `${agencyUrl}/client/signup?canceled=true`,
+      metadata: {
+        client_id: client.id,
+        agency_id: agency.id,
+        plan,
+        call_limit: callLimits[plan].toString(),
+        type: 'trial_signup_setupfee',
+        trial_days: String(days),
+        flat_price_id: price.id,
+        ...(minutePriceForSub ? { minute_price_id: minutePriceForSub.id } : {}),
+        ...(_couponId ? { discount_coupon_id: _couponId } : {}),
+        ...(_discount ? { discount_code_id: _discount.id } : {}),
+      },
+    }, { stripeAccount: agency.stripe_account_id });
+    console.log(`✅ Upfront-setup-fee trial checkout created for client ${client.id}: session ${upfrontSession.id} (fee charged now, trialing sub built on webhook)`);
+    return { url: upfrontSession.url, sessionId: upfrontSession.id };
+  }
+
   const session = await stripe.checkout.sessions.create({
     customer: connectedCustomerId,
     mode: 'subscription',
@@ -2687,6 +2721,87 @@ async function handleBillDuringTrialScheduleSetup(session, stripeAccountId, clie
   await sendClientSubscriptionActivatedSMS(client, agency, plan);
 }
 
+// Upfront-setup-fee trial: the one-time setup fee was already charged in a
+// payment-mode Checkout (so it showed as due today). Here we build the trialing
+// subscription on the card saved via setup_future_usage, then provision the
+// client exactly like the other paths. Idempotent: Stripe can retry this event,
+// and the subscription-id guard makes a re-run a no-op.
+async function handleUpfrontSetupFeeTrialSetup(session, stripeAccountId, client) {
+  const clientId = client.id;
+  const plan = session.metadata?.plan || 'starter';
+  const callLimit = parseInt(session.metadata?.call_limit) || 50;
+
+  if (client.stripe_connected_subscription_id) {
+    console.log(`Upfront-setup-fee: client ${clientId} already has a subscription, skipping (idempotent)`);
+    return;
+  }
+
+  const flatPriceId = session.metadata?.flat_price_id;
+  const minutePriceId = session.metadata?.minute_price_id || null;
+  const discountCouponId = session.metadata?.discount_coupon_id || null;
+  const discountCodeId = session.metadata?.discount_code_id || null;
+  const days = parseInt(session.metadata?.trial_days) || 7;
+  if (!flatPriceId) { console.error('🚨 Upfront-setup-fee: missing flat_price_id in metadata for client', clientId); return; }
+
+  // Card saved on the payment intent via setup_future_usage.
+  let paymentMethodId = null;
+  try {
+    const pi = await stripe.paymentIntents.retrieve(session.payment_intent, { stripeAccount: stripeAccountId });
+    paymentMethodId = pi.payment_method;
+  } catch (e) { console.error('🚨 Upfront-setup-fee: failed to read payment intent:', e.message); }
+  if (!paymentMethodId) { console.error('🚨 Upfront-setup-fee: no saved payment method for client', clientId, '(setup fee was charged, subscription NOT created, manual follow-up needed)'); return; }
+
+  const customerId = session.customer;
+  try {
+    await stripe.customers.update(customerId, { invoice_settings: { default_payment_method: paymentMethodId } }, { stripeAccount: stripeAccountId });
+  } catch (e) { console.warn('Upfront-setup-fee: could not set default PM:', e.message); }
+
+  const items = [{ price: flatPriceId, quantity: 1 }];
+  if (minutePriceId) items.push({ price: minutePriceId });
+
+  let subscriptionId = null;
+  try {
+    const sub = await stripe.subscriptions.create({
+      customer: customerId,
+      items,
+      trial_period_days: days,
+      default_payment_method: paymentMethodId,
+      collection_method: 'charge_automatically',
+      ...(discountCouponId ? { discounts: [{ coupon: discountCouponId }] } : {}),
+      metadata: { client_id: clientId, agency_id: client.agency_id, plan, type: 'trial_signup_setupfee' },
+    }, { stripeAccount: stripeAccountId });
+    subscriptionId = sub.id;
+    if (discountCodeId) {
+      try { await supabase.rpc('increment_discount_redemption', { p_code_id: discountCodeId }); }
+      catch (ie) { console.warn('discount redemption increment failed:', ie.message); }
+    }
+  } catch (e) { console.error('🚨 Upfront-setup-fee: setup fee WAS charged but trialing subscription FAILED for client', clientId, '-', e.message, '(manual subscription creation needed; handler is idempotent on retry)'); return; }
+
+  const trialEndsAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+  const { error: updateError } = await supabase.from('clients').update({
+    subscription_status: 'trial',
+    plan_type: plan,
+    monthly_call_limit: callLimit,
+    stripe_connected_subscription_id: subscriptionId,
+    trial_ends_at: trialEndsAt,
+    status: 'active',
+    calls_this_month: 0,
+    minutes_this_period: 0,
+  }).eq('id', clientId);
+  if (updateError) { console.error('Upfront-setup-fee: failed to update client:', updateError); return; }
+
+  console.log(`✅ Upfront-setup-fee trial activated: ${client.business_name} (sub ${subscriptionId}, ${days}d trial, setup fee charged at signup)`);
+
+  try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
+  await ensureProvisionedOnReactivate(client, 'setupfee.trial.completed');
+
+  const agency = client.agencies;
+  if (client.subscription_status === 'pending_payment' && client.owner_phone && client.vapi_phone_number) {
+    try { await sendWelcomeSMS(client.owner_phone, client.business_name, client.vapi_phone_number, agency); } catch (e) { console.error('Deferred welcome SMS failed:', e.message); }
+  }
+  await sendClientSubscriptionActivatedSMS(client, agency, plan);
+}
+
 async function handleClientCheckoutCompleted(session, stripeAccountId) {
   console.log('Client checkout completed:', session.id);
 
@@ -2703,6 +2818,12 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
   // their two-phase schedule instead of the normal subscription activation.
   if (session.mode === 'setup' || session.metadata?.type === 'trial_signup_schedule') {
     return await handleBillDuringTrialScheduleSetup(session, stripeAccountId, client);
+  }
+
+  // Upfront-setup-fee trial: the setup fee was charged in a payment-mode Checkout;
+  // build the trialing subscription on the saved card here.
+  if (session.metadata?.type === 'trial_signup_setupfee') {
+    return await handleUpfrontSetupFeeTrialSetup(session, stripeAccountId, client);
   }
 
   // Record a discount-code redemption for subscription-mode checkouts (the
