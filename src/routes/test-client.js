@@ -105,10 +105,12 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
     const agencyCity = '';
     const agencyState = agencyPhone ? '' : 'GA';
 
-    // Step 1: Create VAPI assistant (general industry)
+    // Step 1: Create VAPI assistant. Defaults to plumbing: it's a concrete,
+    // high-intent vertical that produces a far sharper test receptionist than the
+    // generic 'home_services' catch-all, which is too broad to sound good.
     const assistant = await createIndustryAssistant(
       testBusinessName,
-      'home_services', // default test client industry
+      'plumbing', // default test client industry
       null,            // no knowledge base
       agencyPhone,
       null,            // no client ID yet
@@ -174,7 +176,7 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
           sunday: { open: '9:00 AM', close: '5:00 PM', closed: true },
         },
         email: agency.email,
-        industry: 'home_services',
+        industry: 'plumbing',
         vapi_assistant_id: assistant.id,
         vapi_phone_number: phoneNumber,
         vapi_phone_id: vapiPhoneId,
