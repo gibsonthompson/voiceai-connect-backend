@@ -272,6 +272,7 @@ const { handleJarvisWebhook } = require('./webhooks/vapi-jarvis-webhook');
 
 const { 
   createAgencyCheckout, 
+  createAgencySetupCheckout,
   createAgencyPortal,
   handlePlatformStripeWebhook,
   warnExpiringAgencyTrials
@@ -584,6 +585,7 @@ app.post('/api/agency/:agencyId/domain/verify', verifyAgencyDomain);
 // it only blocks an authenticated staff member who lacks 'billing'.
 app.post('/api/agency/checkout', requirePermissionIfAuthed('billing'), createAgencyCheckout);
 app.post('/api/agency/portal', requireAgencyAccessFromBody('billing'), createAgencyPortal);
+app.post('/api/agency/add-payment-method', requireAgencyAccessFromBody('billing'), createAgencySetupCheckout);
 // In-app plan switch (Pro <-> Scale) so agencies can upgrade without the Stripe
 // portal's cancel-only dead end. See routes/change-plan.js.
 app.post('/api/agency/change-plan', requireAgencyAccessFromBody('billing'), changeAgencyPlan);

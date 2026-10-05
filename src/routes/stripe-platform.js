@@ -712,8 +712,80 @@ async function handlePlatformStripeWebhook(req, res) {
 // WEBHOOK HANDLERS
 // ============================================================================
 
+// Free agencies add a card through a Stripe Checkout in 'setup' mode. We do NOT
+// persist stripe_customer_id when the session is created; it is saved here, only
+// after the card is actually on file, so canAgencyAddClient's gate never opens on
+// a customer with no payment source. Idempotent: Stripe can retry this event, and
+// re-saving the same customer id / default PM is harmless.
+async function handleAgencyCardSetupCompleted(session) {
+  const agencyId = session.metadata?.agency_id;
+  const customerId = typeof session.customer === 'string' ? session.customer : session.customer?.id;
+  if (!agencyId || !customerId) {
+    console.error('⚠️ Card setup completed but missing agency_id or customer id');
+    return;
+  }
+  // Make the just-added card the customer's default so future per-client invoices charge it.
+  try {
+    const siId = typeof session.setup_intent === 'string' ? session.setup_intent : session.setup_intent?.id;
+    if (siId) {
+      const si = await stripe.setupIntents.retrieve(siId);
+      if (si && si.payment_method) {
+        await stripe.customers.update(customerId, { invoice_settings: { default_payment_method: si.payment_method } });
+      }
+    }
+  } catch (e) { console.error('⚠️ Could not set default payment method after setup:', e.message); }
+  const { error } = await supabase.from('agencies').update({ stripe_customer_id: customerId }).eq('id', agencyId);
+  if (error) { console.error('⚠️ Failed to save stripe_customer_id after card setup:', error.message); return; }
+  console.log(`✅ Payment method added for agency ${agencyId} (customer ${customerId})`);
+}
+
+// POST /api/agency/add-payment-method  body { agency_id, successUrl?, cancelUrl? }
+// Starts a setup-mode Stripe Checkout so a Free agency can put a card on file,
+// which is what canAgencyAddClient requires before their first real client.
+async function createAgencySetupCheckout(req, res) {
+  try {
+    const { agency_id } = req.body;
+    if (!agency_id) return res.status(400).json({ error: 'agency_id is required' });
+    const { data: agency, error } = await supabase
+      .from('agencies').select('id, name, email, stripe_customer_id').eq('id', agency_id).single();
+    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
+
+    // Reuse an existing customer if the agency somehow has one; otherwise create
+    // one. Not persisted here on purpose (see handleAgencyCardSetupCompleted).
+    let customerId = agency.stripe_customer_id;
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: agency.email, name: agency.name,
+        metadata: { agency_id: agency.id, type: 'agency' },
+      });
+      customerId = customer.id;
+    }
+
+    const base = process.env.FRONTEND_URL;
+    const session = await stripe.checkout.sessions.create({
+      mode: 'setup',
+      customer: customerId,
+      payment_method_types: ['card'],
+      success_url: req.body.successUrl || `${base}/agency/settings?tab=billing&card_added=true`,
+      cancel_url: req.body.cancelUrl || `${base}/agency/settings?tab=billing`,
+      metadata: { agency_id: agency.id, purpose: 'agency_card_setup' },
+      setup_intent_data: { metadata: { agency_id: agency.id, purpose: 'agency_card_setup' } },
+    });
+    res.json({ url: session.url });
+  } catch (e) {
+    console.error('❌ Agency setup checkout error:', e.message);
+    res.status(500).json({ error: 'Could not start payment setup. Please try again.' });
+  }
+}
+
 async function handleAgencyCheckoutCompleted(session) {
   console.log('🎉 Agency checkout completed:', session.id);
+
+  // Setup-mode checkout (Free agency adding a card) carries no plan; handle + stop.
+  if (session.mode === 'setup' && session.metadata?.purpose === 'agency_card_setup') {
+    await handleAgencyCardSetupCompleted(session);
+    return;
+  }
 
   const agencyId = session.metadata?.agency_id;
   const plan = session.metadata?.plan;
@@ -1472,6 +1544,7 @@ const CANCELLATION_REASON_LABELS = {
 // ============================================================================
 module.exports = {
   createAgencyCheckout,
+  createAgencySetupCheckout,
   createAgencyPortal,
   handlePlatformStripeWebhook,
   warnExpiringAgencyTrials,
