@@ -190,6 +190,9 @@ const VOICES = {
 };
 
 // ============================================================================
+// Env-overridable ElevenLabs model. Default eleven_turbo_v2_5 (natural, fast).
+const ELEVEN_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_turbo_v2_5';
+
 // INDUSTRY CONFIGURATIONS — Transfer-first, conversational prompts v4
 // ============================================================================
 const INDUSTRY_CONFIGS = {
@@ -2528,7 +2531,7 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
         ...(queryToolId && { toolIds: [queryToolId] }),
         ...(tools.length > 0 && { tools })
       },
-      voice: { provider: '11labs', model: 'eleven_flash_v2_5', voiceId, ...(() => { const cs = Number(client?.voice_speed); const ts = Number(customTemplate?.voice_speed); const s = (cs >= 0.7 && cs <= 1.2) ? cs : ((ts >= 0.7 && ts <= 1.2) ? ts : null); return s ? { speed: s } : {}; })() },
+      voice: { provider: '11labs', model: ELEVEN_MODEL, voiceId, stability: 0.4, similarityBoost: 0.75, useSpeakerBoost: true, ...(() => { const cs = Number(client?.voice_speed); const ts = Number(customTemplate?.voice_speed); const s = (cs >= 0.7 && cs <= 1.2) ? cs : ((ts >= 0.7 && ts <= 1.2) ? ts : null); return s ? { speed: s } : {}; })() },
       startSpeakingPlan: {
         waitSeconds: 0.4,
         smartEndpointingPlan: { provider: 'vapi' },
@@ -2636,8 +2639,11 @@ async function createDemoAssistant(agencyName) {
       },
       voice: {
         provider: '11labs',
-        model: 'eleven_flash_v2_5',
-        voiceId: VOICES.sarah
+        model: ELEVEN_MODEL,
+        voiceId: VOICES.sarah,
+        stability: 0.4,
+        similarityBoost: 0.75,
+        useSpeakerBoost: true
       },
       startSpeakingPlan: {
         waitSeconds: 0.4,

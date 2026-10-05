@@ -1826,7 +1826,7 @@ app.get('/api/voices', (req, res) => {
 const _ttsFetch = require('node-fetch');
 const _ttsCrypto = require('crypto');
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const TTS_MODEL_ID = process.env.ELEVENLABS_TTS_MODEL || 'eleven_flash_v2_5';
+const TTS_MODEL_ID = process.env.ELEVENLABS_TTS_MODEL || 'eleven_turbo_v2_5';
 const _ttsCache = new Map();   // voiceId+hash -> mp3 Buffer
 const _ttsRate = new Map();    // ip -> [timestamps]
 const _TTS_CACHE_MAX = 200, _TTS_RATE_MAX = 40, _TTS_RATE_WINDOW = 60 * 1000;
@@ -1861,7 +1861,7 @@ app.post('/api/voices/preview', async (req, res) => {
         { method: 'POST',
           signal: _ttsController.signal,
           headers: { 'xi-api-key': ELEVENLABS_API_KEY, 'Content-Type': 'application/json', 'Accept': 'audio/mpeg' },
-          body: JSON.stringify({ text: clean, model_id: TTS_MODEL_ID, voice_settings: { stability: 0.5, similarity_boost: 0.75 } }) }
+          body: JSON.stringify({ text: clean, model_id: TTS_MODEL_ID, voice_settings: { stability: 0.4, similarity_boost: 0.75, use_speaker_boost: true } }) }
       );
     } finally {
       clearTimeout(_ttsTimeout);

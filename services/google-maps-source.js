@@ -14,31 +14,35 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 const PLACES_BASE = "https://maps.googleapis.com/maps/api/place";
 
 // Industry presets mapped to Google Places search queries
+// Single broad keyword per industry. Verbose multi-word phrases (e.g.
+// "plumber plumbing company") narrow the Places text search and returned ~half
+// the results of simply typing the industry. These match the breadth of a plain
+// keyword search so the preset tabs return as many businesses as a custom one.
 const INDUSTRY_QUERIES = {
-  dental: "dental office",
-  medical: "medical clinic doctor office",
-  veterinary: "veterinary clinic animal hospital",
-  legal: "law firm attorney office",
-  plumbing: "plumber plumbing company",
-  hvac: "hvac heating cooling company",
-  roofing: "roofing company",
-  electrical: "electrician electrical contractor",
-  landscaping: "landscaping company lawn care",
-  "pest_control": "pest control exterminator",
-  "real_estate": "real estate agency realtor office",
-  insurance: "insurance agency office",
-  accounting: "accounting firm cpa tax",
-  "beauty_salon": "hair salon beauty spa",
-  automotive: "auto repair mechanic shop",
-  chiropractic: "chiropractor chiropractic",
-  therapy: "therapy counseling therapist office",
-  optometry: "optometrist eye doctor",
-  "plastic_surgery": "plastic surgeon cosmetic surgery clinic",
-  "moving_storage": "moving company storage facility",
-  "property_management": "property management company",
-  "funeral": "funeral home mortuary",
-  "cleaning": "cleaning service janitorial",
-  towing: "towing company",
+  dental: "dentist",
+  medical: "medical clinic",
+  veterinary: "veterinarian",
+  legal: "law firm",
+  plumbing: "plumbing",
+  hvac: "hvac",
+  roofing: "roofing",
+  electrical: "electrical",
+  landscaping: "landscaping",
+  "pest_control": "pest control",
+  "real_estate": "real estate agent",
+  insurance: "insurance agency",
+  accounting: "accountant",
+  "beauty_salon": "hair salon",
+  automotive: "auto repair",
+  chiropractic: "chiropractor",
+  therapy: "therapist",
+  optometry: "optometrist",
+  "plastic_surgery": "plastic surgeon",
+  "moving_storage": "moving company",
+  "property_management": "property management",
+  "funeral": "funeral home",
+  "cleaning": "cleaning service",
+  towing: "towing",
 };
 
 const PLACES_SEARCHTEXT = "https://places.googleapis.com/v1/places:searchText";

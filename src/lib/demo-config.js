@@ -32,13 +32,20 @@ const DEMO_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL';
 // ── Shared ElevenLabs voice quality settings ──────────────────────────────
 // Applied to ALL demo calls. Previously bare { provider, voiceId } only.
 // See: https://docs.vapi.ai/voice-fallback-plan for VAPI ElevenLabs schema
+// Model is env-overridable so the voice can be tuned without a deploy. Default
+// eleven_turbo_v2_5 sounds far more natural/human than eleven_flash_v2_5 (which
+// sounds robotic) at a small latency cost. Set ELEVENLABS_TTS_MODEL to
+// eleven_multilingual_v2 for the highest quality, or eleven_flash_v2_5 for the
+// lowest latency.
+const ELEVEN_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_turbo_v2_5';
 const DEMO_VOICE_SETTINGS = {
-  model: 'eleven_flash_v2_5',     // Low-latency real-time model, best for phone calls
-  stability: 0.5,                    // Natural variation without erratic swings
+  model: ELEVEN_MODEL,
+  stability: 0.4,                    // Lower = more expressive/human (less flat)
   similarityBoost: 0.75,             // Clear without over-enunciation
-  style: 0.0,                        // ElevenLabs recommends 0 to avoid artifacts
+  style: 0.0,                        // 0 avoids artifacts
+  useSpeakerBoost: true,             // Adds presence/warmth
   speed: 0.9,                        // Slightly slower — natural phone pacing
-  optimizeStreamingLatency: 2,       // Default balance of quality vs speed
+  optimizeStreamingLatency: 2,
 };
 
 // Smart endpointing so demo calls don't eat VAPI's ~1.5s default turn wait.
