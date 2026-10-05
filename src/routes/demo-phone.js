@@ -49,6 +49,7 @@
 //          subscription gates inside the create route still run after it.
 // ============================================================================
 const express = require('express');
+const { resolveVapiRecordingUrl } = require('../lib/vapi-recording');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { provisionAgencyDemo, updateDemoAssistantName, fullyReleaseNumber, createDemoAssistant } = require('../lib/vapi');
@@ -688,6 +689,14 @@ router.get('/:agencyId/demo-calls/:callId', async (req, res) => {
 
     if (error || !call) {
       return res.status(404).json({ error: 'Demo call not found' });
+    }
+
+    // Vapi stores recordings in its own private R2 bucket; the stored URL isn't
+    // directly playable. Resolve it to a short-lived signed URL on this
+    // single-call fetch (same as the admin and client call drawers do).
+    if (call.recording_url) {
+      try { call.recording_url = await resolveVapiRecordingUrl(call.recording_url); }
+      catch (e) { console.warn('Demo recording resolve failed:', e.message); }
     }
 
     res.json({ success: true, call });

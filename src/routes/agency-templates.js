@@ -1489,6 +1489,24 @@ For what you take, what's not allowed, dumpster sizes, rental periods, areas ser
 // ============================================================================
 const { getEffectivePlan } = require('../lib/plan-access');
 
+// Custom voices are shared by the demo phone (pro+) and the AI Lab (Scale), so
+// the voice list/add/delete routes below are NOT Scale-gated like the template
+// CRUD routes. They load the agency (so req.agency is available) but don't
+// restrict by plan; the frontends only expose this UI to the right tiers. To
+// make custom voices Scale-only again, swap these three routes back to
+// requireEnterprisePlan.
+async function requireAgencyForVoices(req, res, next) {
+  try {
+    const agency = await getAgencyById(req.params.agencyId);
+    if (!agency) return res.status(404).json({ error: 'Agency not found' });
+    req.agency = agency;
+    next();
+  } catch (error) {
+    console.error('Voice access check error:', error);
+    res.status(500).json({ error: 'Failed to verify agency' });
+  }
+}
+
 async function requireEnterprisePlan(req, res, next) {
   const { agencyId } = req.params;
   
@@ -1622,7 +1640,7 @@ function isScaleVoices(agency) {
 
 // Voices available to this agency: the standard ElevenLabs list plus any custom
 // voices the agency has added (flagged so the UI can badge/delete them).
-router.get('/:agencyId/ai-templates/voices', requireEnterprisePlan, async (req, res) => {
+router.get('/:agencyId/ai-templates/voices', requireAgencyForVoices, async (req, res) => {
   const { agencyId } = req.params;
   let custom = [];
   try {
@@ -1638,7 +1656,7 @@ router.get('/:agencyId/ai-templates/voices', requireEnterprisePlan, async (req, 
 
 // POST add a custom ElevenLabs voice (Scale only). Validates the ID against the
 // connected ElevenLabs account and stores it on the agency.
-router.post('/:agencyId/ai-templates/voices', requireEnterprisePlan, async (req, res) => {
+router.post('/:agencyId/ai-templates/voices', requireAgencyForVoices, async (req, res) => {
   try {
     const { agencyId } = req.params;
     const voiceId = String((req.body && req.body.voiceId) || '').trim();
@@ -1678,7 +1696,7 @@ router.post('/:agencyId/ai-templates/voices', requireEnterprisePlan, async (req,
 });
 
 // DELETE a custom voice.
-router.delete('/:agencyId/ai-templates/voices/:voiceId', requireEnterprisePlan, async (req, res) => {
+router.delete('/:agencyId/ai-templates/voices/:voiceId', requireAgencyForVoices, async (req, res) => {
   try {
     const { agencyId, voiceId } = req.params;
     const { data: agency, error } = await supabase.from('agencies').select('custom_voices').eq('id', agencyId).single();
@@ -1817,7 +1835,7 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
   // agency can never save a string that would break their own calls.
   const validTtsModels = ['eleven_v3', 'eleven_multilingual_v2', 'eleven_turbo_v2_5', 'eleven_flash_v2_5'];
   const finalTtsModel = validTtsModels.includes(tts_model) ? tts_model : 'eleven_turbo_v2_5';
-  const validTranscribers = ['nova-3', 'nova-2'];
+  const validTranscribers = ['nova-3', 'nova-2', 'flux-general-multi'];
   const finalTranscriber = validTranscribers.includes(transcriber_model) ? transcriber_model : 'nova-3';
 
   // Voice speed is optional; only store a value inside VAPI's supported 0.7-1.2
