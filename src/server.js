@@ -186,7 +186,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 app.use((req, res, next) => {
-  if (req.originalUrl === '/webhook/stripe' || req.originalUrl === '/webhook/stripe-connect' || req.originalUrl === '/webhook/telnyx-sms' || req.originalUrl === '/webhook/telnyx-voice' || req.originalUrl === '/webhook/twilio-sms' || req.originalUrl === '/webhook/paystack') {
+  if (req.originalUrl === '/webhook/stripe' || req.originalUrl === '/webhook/stripe-connect' || req.originalUrl === '/webhook/telnyx-sms' || req.originalUrl === '/webhook/telnyx-voice' || req.originalUrl === '/webhook/twilio-sms' || req.originalUrl === '/webhook/paystack' || req.originalUrl === '/webhook/flutterwave') {
     next();
   } else {
     express.json({ limit: '10mb' })(req, res, next);
@@ -198,7 +198,7 @@ app.use((req, res, next) => {
 // ============================================================================
 
 const { handleAgencySignup, handleAgencyOnboarding } = require('./routes/agency-signup');
-const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySettings, verifyAgencyDomain, connectPaystack, disconnectPaystack } = require('./routes/agency-settings');
+const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySettings, verifyAgencyDomain, connectPaystack, disconnectPaystack, connectFlutterwave, disconnectFlutterwave } = require('./routes/agency-settings');
 const demoPhoneRoutes = require('./routes/demo-phone');
 const customIndustriesRoutes = require('./routes/custom-industries');
 const referralRoutes = require('./routes/referrals');
@@ -559,6 +559,16 @@ app.post('/api/client/paystack/init', initPaystackCharge);
 app.get('/api/client/paystack/callback', paystackCallback);
 app.post('/webhook/paystack', express.raw({ type: 'application/json' }), handlePaystackWebhook);
 app.post('/api/cron/paystack-recurring', paystackRecurringCron);
+
+// Flutterwave (parallel to Paystack; was fully defined but never mounted, so the
+// connect call 404'd — "Not found" — and payments/webhook were dead too).
+app.post('/api/agency/:agencyId/flutterwave/connect', requireAgencyAccess('settings'), connectFlutterwave);
+app.post('/api/agency/:agencyId/flutterwave/disconnect', requireAgencyAccess('settings'), disconnectFlutterwave);
+const { initFlutterwaveCharge, flutterwaveCallback, flutterwaveRecurringCron, handleFlutterwaveWebhook } = require('./routes/flutterwave');
+app.post('/api/client/flutterwave/init', initFlutterwaveCharge);
+app.get('/api/client/flutterwave/callback', flutterwaveCallback);
+app.post('/webhook/flutterwave', express.raw({ type: 'application/json' }), handleFlutterwaveWebhook);
+app.post('/api/cron/flutterwave-recurring', flutterwaveRecurringCron);
 app.get('/api/agency/:agencyId/api-keys', requireAgencyAccess('settings'), listApiKeys);
 app.post('/api/agency/:agencyId/api-keys', requireAgencyAccess('settings'), createApiKey);
 app.delete('/api/agency/:agencyId/api-keys/:keyId', requireAgencyAccess('settings'), revokeApiKey);
