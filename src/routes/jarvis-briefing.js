@@ -226,15 +226,39 @@ function buildBriefingAssistant(ctx) {
 
 // ── Outbound call ───────────────────────────────────────────────────────────
 
+// The Jarvis line, used as the outbound caller id. We match it against VAPI's
+// own phone numbers at call time so a changed number can never leave us calling
+// from a stale, released id (which is exactly what broke the outbound call).
+const JARVIS_NUMBER_LAST10 = '4708210165';
+
+async function resolveJarvisPhoneId() {
+  if (process.env.JARVIS_VAPI_PHONE_ID) return process.env.JARVIS_VAPI_PHONE_ID;
+  try {
+    const r = await fetch('https://api.vapi.ai/phone-number', {
+      headers: { Authorization: `Bearer ${process.env.VAPI_API_KEY}` },
+    });
+    const list = await r.json();
+    const match = (Array.isArray(list) ? list : []).find(
+      (p) => String(p.number || '').replace(/\D/g, '').endsWith(JARVIS_NUMBER_LAST10),
+    );
+    if (match && match.id) return match.id;
+  } catch (e) {
+    console.warn('\u26a0\ufe0f Jarvis phone id lookup failed:', e.message);
+  }
+  const cfg = await getPlatformSetting('jarvis_config').catch(() => null);
+  return (cfg && cfg.vapiPhoneId) || null;
+}
+
 async function placeBriefingCall(assistant) {
-  const cfg = await getPlatformSetting('jarvis_config');
-  if (!cfg || !cfg.vapiPhoneId) return { ok: false, error: 'Jarvis number not provisioned' };
-  const to = process.env.JARVIS_OUTBOUND_TO;
-  if (!to) return { ok: false, error: 'JARVIS_OUTBOUND_TO not set' };
+  const phoneId = await resolveJarvisPhoneId();
+  if (!phoneId) return { ok: false, error: 'Could not resolve the Jarvis phone id from VAPI' };
+  // Call his cell: the same number whitelisted for inbound, unless overridden.
+  const to = process.env.JARVIS_OUTBOUND_TO || process.env.JARVIS_ALLOWED_CALLER;
+  if (!to) return { ok: false, error: 'No outbound number (set JARVIS_OUTBOUND_TO or JARVIS_ALLOWED_CALLER)' };
   const res = await fetch('https://api.vapi.ai/call', {
     method: 'POST',
     headers: { Authorization: `Bearer ${process.env.VAPI_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ phoneNumberId: cfg.vapiPhoneId, customer: { number: to }, assistant }),
+    body: JSON.stringify({ phoneNumberId: phoneId, customer: { number: to }, assistant }),
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) return { ok: false, error: `VAPI call failed (HTTP ${res.status})`, detail: body };
