@@ -198,6 +198,11 @@ function publicAgencyShape(agency) {
 
     // Plan type (for feature gating)
     plan_type: agency.plan_type,
+    // Comp overrides. access_plan is a feature-tier override (a comped partner
+    // can sit on 'scale' features while plan_type/billing stays elsewhere); the
+    // frontend folds it into the effective plan so gated features unlock.
+    access_plan: agency.access_plan || null,
+    platform_fee_waived: agency.platform_fee_waived === true,
     // Billing settings the marketing templates use to stay truthful: hide
     // "no credit card required" when a card is actually required, and show the
     // real trial length instead of a hardcoded 7 days.
