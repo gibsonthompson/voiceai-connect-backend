@@ -687,6 +687,10 @@ router.get('/:agencyId/outreach/history', async (req, res) => {
   try {
     const { agencyId } = req.params;
     const { leadId, type, limit = 50, offset = 0 } = req.query;
+    // Empty-string params (?limit=&offset=) skip the defaults, so parseInt -> NaN
+    // and .range(NaN, NaN) makes PostgREST return 'Bad Request'. Coerce + clamp.
+    const _limit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const _offset = Math.max(parseInt(offset, 10) || 0, 0);
 
     let query = supabase
       .from('outreach_history')
@@ -705,12 +709,12 @@ router.get('/:agencyId/outreach/history', async (req, res) => {
       query = query.eq('type', type);
     }
 
-    query = query.range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
+    query = query.range(_offset, _offset + _limit - 1);
 
     const { data: history, error, count } = await query;
 
     if (error) {
-      console.error('Error fetching outreach history:', error);
+      console.error('Error fetching outreach history:', { message: error.message, details: error.details, hint: error.hint, code: error.code });
       return res.status(400).json({ error: error.message });
     }
 
