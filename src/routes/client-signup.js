@@ -1093,10 +1093,20 @@ async function handleClientSignup(req, res) {
 
     const existingClient = await getClientByEmail(email.toLowerCase(), agencyId);
     if (existingClient) {
-      return res.status(409).json({ 
-        error: 'Account already exists',
-        message: 'An account with this email already exists for this agency.'
-      });
+      // A pending_payment row is an abandoned or canceled card-required checkout.
+      // Card-required signups are NOT provisioned until payment, so this row has
+      // no phone, assistant, or subscription to tear down. Delete it so the
+      // prospect can retry cleanly (a fresh row + checkout is created below)
+      // instead of being blocked by "account already exists" after canceling.
+      if (existingClient.subscription_status === 'pending_payment') {
+        await supabase.from('clients').delete().eq('id', existingClient.id);
+        console.log(`🔁 Cleared abandoned pending_payment signup for ${email.toLowerCase()}, recreating`);
+      } else {
+        return res.status(409).json({ 
+          error: 'Account already exists',
+          message: 'An account with this email already exists for this agency.'
+        });
+      }
     }
 
     // PHASE 2A: Hash password if provided

@@ -1361,7 +1361,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
       mode: 'setup',
       payment_method_types: ['card'],
       success_url: successUrl,
-      cancel_url: `${agencyUrl}/client/signup?canceled=true`,
+      cancel_url: `${agencyUrl}/signup/plan?canceled=true`,
       metadata: {
         client_id: client.id,
         agency_id: agency.id,
@@ -1396,7 +1396,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
       line_items: [{ price: setupFeeItem.price, quantity: 1 }],
       payment_intent_data: { setup_future_usage: 'off_session' },
       success_url: successUrl,
-      cancel_url: `${agencyUrl}/client/signup?canceled=true`,
+      cancel_url: `${agencyUrl}/signup/plan?canceled=true`,
       metadata: {
         client_id: client.id,
         agency_id: agency.id,
@@ -1420,7 +1420,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     payment_method_types: ['card'],
     line_items: lineItems,
     success_url: successUrl,
-    cancel_url: `${agencyUrl}/client/signup?canceled=true`,
+    cancel_url: `${agencyUrl}/signup/plan?canceled=true`,
     ...(_couponId ? { discounts: [{ coupon: _couponId }] } : {}),
     metadata: {
       client_id: client.id,
@@ -3065,7 +3065,20 @@ async function handleClientPaymentSucceeded(invoice, stripeAccountId) {
   if (!client) { console.error('Client not found for payment:', invoice.customer); return; }
 
   // New period begins: reset both per-period counters.
-  await supabase.from('clients').update({ subscription_status: 'active', status: 'active', calls_this_month: 0, minutes_this_period: 0 }).eq('id', client.id);
+  //
+  // Do NOT demote a client who is still inside their trial window. A trialing
+  // subscription emits an initial invoice (a $0 trial invoice, or the setup-fee
+  // invoice) that Stripe marks paid, firing this handler at signup time. Writing
+  // 'active' here would flip the client out of trial the moment they sign up
+  // (leaving trial_ends_at set but subscription_status='active'), which is why
+  // the dashboard showed "Active" with no trial badge. Keep 'trial' until the
+  // trial window actually ends; the real post-trial invoice (trial_ends_at in
+  // the past, or a client that was never trialing) correctly lands on 'active'.
+  const stillTrialing = client.subscription_status === 'trial'
+    && client.trial_ends_at
+    && new Date(client.trial_ends_at).getTime() > Date.now();
+  const nextSubStatus = stillTrialing ? 'trial' : 'active';
+  await supabase.from('clients').update({ subscription_status: nextSubStatus, status: 'active', calls_this_month: 0, minutes_this_period: 0 }).eq('id', client.id);
 
   if (client.vapi_phone_id) {
     try { await enablePhoneNumber(client.vapi_phone_id); } catch (phoneError) { console.error('Failed to enable VAPI phone number:', phoneError.message); }
