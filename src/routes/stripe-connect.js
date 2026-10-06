@@ -1393,6 +1393,17 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
       : `a one-time ${_setupNetDisplay} setup fee`;
   }
 
+  // Monthly figure for the submit-button message. When a monthly code persists
+  // past the first invoice (forever/repeating), the ongoing price is discounted,
+  // so the message must match the order summary. A one-time ('once') code reverts
+  // after the first invoice, so the ongoing figure stays full price.
+  let _moDisplayEff = _moDisplay;
+  if (_discount && Number(_discount.percent_off) > 0 && _discount.duration !== 'once') {
+    const _netMo = Math.round(priceAmount * (1 - Number(_discount.percent_off) / 100));
+    try { _moDisplayEff = (_netMo / 100).toLocaleString('en-US', { style: 'currency', currency: (currency || 'usd').toUpperCase() }); }
+    catch { _moDisplayEff = `$${(_netMo / 100).toFixed(2)}`; }
+  }
+
   // The monthly coupon is scoped to the recurring products, so it can be applied
   // whenever it exists without ever discounting the setup-fee line. The setup fee
   // is already net-priced, so there is no separate setup coupon: the monthly
@@ -1455,9 +1466,9 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
         ? `Your card won't be charged during the free trial. When your ${days}-day trial ends, your first invoice adds ${_setupFeePhrase} on top of your plan.`
         : (days > 0
           ? (setupFeeItem
-            ? `Your one-time setup fee is due today. After your ${days}-day free trial, your plan continues at ${_moDisplay}/month.`
-            : `Your card won't be charged during the free trial. When your ${days}-day trial ends, your plan continues at ${_moDisplay}/month.`)
-          : `You'll be charged today to start your plan${setupFeeItem ? ', including the one-time setup fee' : ''}, then ${_moDisplay}/month after that.`) } },
+            ? `Your one-time setup fee is due today. After your ${days}-day free trial, your plan continues at ${_moDisplayEff}/month.`
+            : `Your card won't be charged during the free trial. When your ${days}-day trial ends, your plan continues at ${_moDisplayEff}/month.`)
+          : `You'll be charged today to start your plan${setupFeeItem ? ', including the one-time setup fee' : ''}, then ${_moDisplayEff}/month after that.`) } },
     ...(sessionDiscounts ? { discounts: sessionDiscounts } : {}),
     metadata: {
       client_id: client.id,
