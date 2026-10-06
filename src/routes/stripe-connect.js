@@ -1389,11 +1389,34 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
   // a trial; no-trial and no-fee signups fall through to the normal checkout below.
   if (days > 0 && setupFeeItem) {
     const minutePriceForSub = minutePassThroughActive(agency) ? await createConnectMinutePrice(agency, plan, client) : null;
+    // Show the setup-fee discount on the checkout rather than a silently lowered
+    // number: charge the FULL fee as the line item and apply the discount as a
+    // Stripe coupon, so the client sees "Setup fee $X, <CODE> -$Y, Total $Z".
+    // setupFeeItem is already pre-discounted, so only swap it when there is a
+    // partial (<100%) discount; full-price and fully-waived cases are unchanged.
+    let setupLineItemPrice = setupFeeItem.price;
+    let setupDiscounts;
+    if (_setupPct > 0 && _setupPct < 100) {
+      try {
+        const fullSetupItem = await buildSetupFeeLineItem(agency, plan, client, 0);
+        if (fullSetupItem) {
+          const setupCoupon = await stripe.coupons.create({
+            percent_off: _setupPct,
+            duration: 'once',
+            name: (_discount && _discount.code) ? `${_discount.code} (${_setupPct}% off setup)` : `${_setupPct}% off setup`,
+            metadata: { discount_code_id: _discount ? _discount.id : '', agency_id: agency.id, kind: 'setup_fee' },
+          }, { stripeAccount: agency.stripe_account_id });
+          setupLineItemPrice = fullSetupItem.price;
+          setupDiscounts = [{ coupon: setupCoupon.id }];
+        }
+      } catch (e) { console.warn('Setup-fee coupon display failed, using pre-discounted amount:', e.message); }
+    }
     const upfrontSession = await stripe.checkout.sessions.create({
       customer: connectedCustomerId,
       mode: 'payment',
       payment_method_types: ['card'],
-      line_items: [{ price: setupFeeItem.price, quantity: 1 }],
+      line_items: [{ price: setupLineItemPrice, quantity: 1 }],
+      ...(setupDiscounts ? { discounts: setupDiscounts } : {}),
       payment_intent_data: { setup_future_usage: 'off_session' },
       success_url: successUrl,
       cancel_url: `${agencyUrl}/signup/plan?canceled=true`,

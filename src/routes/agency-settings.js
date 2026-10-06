@@ -1301,6 +1301,11 @@ async function updateAgencySettings(req, res) {
           if (url.length > 500) {
             return res.status(400).json({ error: 'Nav link URLs must be 500 characters or fewer' });
           }
+          // Sentinel: a link flagged in the editor as "opens support chat". It
+          // opens the in-page support/FAQ bot instead of navigating, so it is
+          // stored verbatim and skips web-URL validation; the marketing
+          // templates intercept it.
+          if (url === '#support') { cleaned.push({ label, url: '#support' }); continue; }
           // Accept a bare domain by assuming https:// when no http(s):// scheme
           // is present, so an agency can type "yourmainsite.com" or
           // "www.yourmainsite.com" without the prefix. A value that already has
