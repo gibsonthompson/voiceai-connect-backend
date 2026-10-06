@@ -1265,7 +1265,16 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     growth: agency.limit_growth || 500,
   };
   const cpTrial = customPricing(client);
-  const priceAmount = cpTrial && cpTrial.baseCents > 0 ? cpTrial.baseCents : priceAmounts[plan];
+  // Base price + call limit resolve through getPlan: the plans-array JSONB is the
+  // source of truth the pricing editor writes to. Legacy price_<plan>/limit_<plan>
+  // columns are only a fallback for pre-migration agencies. (Before this, the
+  // price read price_pro while the editor wrote the array, so a $249 plan charged
+  // the $149 legacy default.)
+  const _planDef = getPlan(agency, plan);
+  const priceAmount = cpTrial && cpTrial.baseCents > 0
+    ? cpTrial.baseCents
+    : (_planDef && _planDef.price_cents != null ? _planDef.price_cents : priceAmounts[plan]);
+  const _planCallLimit = (_planDef && _planDef.call_limit != null) ? _planDef.call_limit : (callLimits[plan] || 50);
   if (!priceAmount) throw new Error(`Invalid plan: ${plan}`);
 
   const currency = getCurrencyForCountry(agency.country || 'US');
@@ -1354,6 +1363,23 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
   //    item on the webhook, so it lands on the FIRST invoice when the trial ends.
   const _deferSetup = !!setupFeeItem && setupFeeTiming === 'after_trial' && days > 0;
 
+  // Net setup fee after any discount, formatted like the monthly price, so the
+  // deferred (after_trial) message shows the exact amount that hits the first
+  // invoice instead of a vague "a one-time setup fee".
+  let _setupNetDisplay = '';
+  let _setupFeePhrase = 'a one-time setup fee';
+  if (setupFeeItem) {
+    const _net = Math.round(setupFeeItem.feeCents * (1 - (_setupPct || 0) / 100));
+    try { _setupNetDisplay = (_net / 100).toLocaleString('en-US', { style: 'currency', currency: (currency || 'usd').toUpperCase() }); }
+    catch { _setupNetDisplay = `$${(_net / 100).toFixed(2)}`; }
+    // Name the discount explicitly when the setup fee itself is discounted
+    // (setup_fee_percent_off on the code, which is separate from the monthly
+    // percent_off). _setupNetDisplay is already the post-discount amount.
+    _setupFeePhrase = _setupPct > 0
+      ? `a one-time setup fee of ${_setupNetDisplay} (${Math.round(_setupPct)}% off)`
+      : `a one-time ${_setupNetDisplay} setup fee`;
+  }
+
   // Stripe Checkout allows ONE coupon per session.
   let sessionDiscounts;
   if (setupFeeItem && !_deferSetup) {
@@ -1399,7 +1425,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
         client_id: client.id,
         agency_id: agency.id,
         plan,
-        call_limit: callLimits[plan].toString(),
+        call_limit: String(_planCallLimit),
         type: 'trial_signup_schedule',
         trial_days: String(days),
         flat_price_id: price.id,
@@ -1423,7 +1449,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     cancel_url: `${agencyUrl}/signup/plan?canceled=true`,
     custom_text: { submit: { message:
       _deferSetup
-        ? `Your card won't be charged during the free trial. When your ${days}-day trial ends, your first invoice is your plan (${_moDisplay}/month) plus a one-time setup fee.`
+        ? `Your card won't be charged during the free trial. When your ${days}-day trial ends, your first invoice adds ${_setupFeePhrase} on top of your plan.`
         : (days > 0
           ? (setupFeeItem
             ? `Your one-time setup fee is due today. After your ${days}-day free trial, your plan continues at ${_moDisplay}/month.`
@@ -1434,7 +1460,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
       client_id: client.id,
       agency_id: agency.id,
       plan,
-      call_limit: callLimits[plan].toString(),
+      call_limit: String(_planCallLimit),
       type: 'trial_signup', // distinguishes from upgrade-mode checkouts
       ...(_discount ? { discount_code_id: _discount.id } : {}),
       ...(_deferSetup ? { deferred_setup_fee_cents: String(setupFeeItem.feeCents), deferred_setup_fee_pct_off: String(_setupPct), ...(_discount && _discount.code ? { discount_code: _discount.code } : {}) } : {}),
@@ -1522,7 +1548,11 @@ async function createClientCheckout(req, res) {
     const priceAmounts = { starter: agency.price_starter || 9900, pro: agency.price_pro || 14900, growth: agency.price_growth || 29900 };
     const callLimits = { starter: agency.limit_starter || 50, pro: agency.limit_pro || 150, growth: agency.limit_growth || 500 };
     const cpChk = customPricing(client);
-    const priceAmount = cpChk && cpChk.baseCents > 0 ? cpChk.baseCents : priceAmounts[plan];
+    const _planDefChk = getPlan(agency, plan);
+    const priceAmount = cpChk && cpChk.baseCents > 0
+      ? cpChk.baseCents
+      : (_planDefChk && _planDefChk.price_cents != null ? _planDefChk.price_cents : priceAmounts[plan]);
+    const _planCallLimitChk = (_planDefChk && _planDefChk.call_limit != null) ? _planDefChk.call_limit : (callLimits[plan] || 50);
     if (!priceAmount) return res.status(400).json({ error: 'Invalid plan' });
 
     const currency = getCurrencyForCountry(agency.country || 'US');
@@ -1583,7 +1613,7 @@ async function createClientCheckout(req, res) {
       success_url: `${agencyUrl}/client/dashboard?upgrade=success`,
       cancel_url: `${agencyUrl}/client/upgrade-required?canceled=true`,
       ...(_couponId ? { discounts: [{ coupon: _couponId }] } : {}),
-      metadata: { client_id, agency_id: agency.id, plan, call_limit: callLimits[plan].toString(), type: 'client_subscription', ...(_discount ? { discount_code_id: _discount.id } : {}) },
+      metadata: { client_id, agency_id: agency.id, plan, call_limit: String(_planCallLimitChk), type: 'client_subscription', ...(_discount ? { discount_code_id: _discount.id } : {}) },
       subscription_data: { metadata: { client_id, agency_id: agency.id, plan } }
     }, { stripeAccount: agency.stripe_account_id });
 
