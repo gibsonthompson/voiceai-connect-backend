@@ -1269,6 +1269,12 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
   if (!priceAmount) throw new Error(`Invalid plan: ${plan}`);
 
   const currency = getCurrencyForCountry(agency.country || 'US');
+  let _moDisplay;
+  try { _moDisplay = (priceAmount / 100).toLocaleString('en-US', { style: 'currency', currency: (currency || 'usd').toUpperCase() }); }
+  catch { _moDisplay = `$${(priceAmount / 100).toFixed(2)}`; }
+  // Per-agency: 'upfront' charges the setup fee at signup, 'after_trial' bills it
+  // with the first invoice when the trial ends. Default 'upfront' (original behavior).
+  const setupFeeTiming = (agency.setup_fee_timing === 'after_trial') ? 'after_trial' : 'upfront';
 
   // Create customer on the connected account
   let connectedCustomerId = client.stripe_connected_customer_id;
@@ -1387,7 +1393,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
   // mode session (the fee defers to trial end), so this is the two-part flow. Only
   // fires when there is a real fee (setupFeeItem is null when waived or unset) and
   // a trial; no-trial and no-fee signups fall through to the normal checkout below.
-  if (days > 0 && setupFeeItem) {
+  if (days > 0 && setupFeeItem && setupFeeTiming === 'upfront') {
     const minutePriceForSub = minutePassThroughActive(agency) ? await createConnectMinutePrice(agency, plan, client) : null;
     // Show the setup-fee discount on the checkout rather than a silently lowered
     // number: charge the FULL fee as the line item and apply the discount as a
@@ -1418,6 +1424,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
       line_items: [{ price: setupLineItemPrice, quantity: 1 }],
       ...(setupDiscounts ? { discounts: setupDiscounts } : {}),
       payment_intent_data: { setup_future_usage: 'off_session' },
+      custom_text: { submit: { message: `This one-time setup fee is due today. After your ${days}-day free trial, your subscription continues at ${_moDisplay}/month.` } },
       success_url: successUrl,
       cancel_url: `${agencyUrl}/signup/plan?canceled=true`,
       metadata: {
@@ -1444,6 +1451,9 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     line_items: lineItems,
     success_url: successUrl,
     cancel_url: `${agencyUrl}/signup/plan?canceled=true`,
+    custom_text: { submit: { message: days > 0
+      ? `Your card won't be charged during the free trial. When your ${days}-day trial ends, your plan continues at ${_moDisplay}/month${setupFeeItem ? ', billed together with the one-time setup fee' : ''}.`
+      : `You'll be charged today to start your plan${setupFeeItem ? ', including the one-time setup fee' : ''}, then ${_moDisplay}/month after that.` } },
     ...(_couponId ? { discounts: [{ coupon: _couponId }] } : {}),
     metadata: {
       client_id: client.id,

@@ -195,6 +195,8 @@ function publicAgencyShape(agency) {
     // Signup/plan nav logo alignment (left | center | right). For agencies that
     // forward-link to the signup page from their own site and want just the logo.
     signup_logo_align: agency.signup_logo_align || 'left',
+    // Setup-fee timing: 'upfront' (charged at signup) | 'after_trial' (billed with first invoice).
+    setup_fee_timing: agency.setup_fee_timing || 'upfront',
 
     // Dashboard branding overrides (nav, bg, card, button colors)
     branding_overrides: agency.branding_overrides || null,
@@ -748,6 +750,7 @@ async function updateAgencySettings(req, res) {
       'website_theme',
       'logo_background_color',
       'signup_logo_align',
+      'setup_fee_timing',
       // Dashboard branding overrides (nav, bg, card, button colors)
       'branding_overrides',
       // Client dashboard settings
@@ -792,6 +795,10 @@ async function updateAgencySettings(req, res) {
     if (updates.allow_client_plan_changes !== undefined) updates.allow_client_plan_changes = updates.allow_client_plan_changes === true;
     if (updates.signup_logo_align !== undefined && !['left', 'center', 'right'].includes(updates.signup_logo_align)) {
       updates.signup_logo_align = 'left';
+    }
+
+    if (updates.setup_fee_timing !== undefined && !['upfront', 'after_trial'].includes(updates.setup_fee_timing)) {
+      updates.setup_fee_timing = 'upfront';
     }
 
     for (const key of allowedFields) {
