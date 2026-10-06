@@ -117,6 +117,7 @@ const {
 const {
   sendEmail,
   sendWelcomeSMS,
+  sendClientSignupNotificationSMS,
   sendClientTrialExpiredSMS,
   sendClientPaymentFailedSMS,
   sendClientSubscriptionActivatedSMS,
@@ -2719,10 +2720,23 @@ async function handleBillDuringTrialScheduleSetup(session, stripeAccountId, clie
 
   try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
   await ensureProvisionedOnReactivate(client, 'schedule.completed');
+  // Refresh the local client object from the DB after provisioning so the
+  // welcome + activated SMS reflect the real phone number and the just-written
+  // subscription status / trial end (the row was mutated above and by
+  // provisioning; the in-memory object was fetched before either).
+  try {
+    const { data: _fresh } = await supabase.from('clients')
+      .select('vapi_phone_number, phone_number, subscription_status, trial_ends_at, owner_name')
+      .eq('id', client.id).single();
+    if (_fresh) Object.assign(client, _fresh);
+  } catch (e) { console.warn('⚠️ Client refresh after provisioning failed:', e.message); }
 
   const agency = client.agencies;
   if (client.subscription_status === 'pending_payment' && client.owner_phone && client.vapi_phone_number) {
     try { await sendWelcomeSMS(client.owner_phone, client.business_name, client.vapi_phone_number, agency); } catch (e) { console.error('Deferred welcome SMS failed:', e.message); }
+  }
+  if (client.subscription_status === 'pending_payment') {
+    try { await sendClientSignupNotificationSMS(client, agency); } catch (e) { console.error('Deferred signup notification failed:', e.message); }
   }
   await sendClientSubscriptionActivatedSMS(client, agency, plan);
 }
@@ -2800,10 +2814,23 @@ async function handleUpfrontSetupFeeTrialSetup(session, stripeAccountId, client)
 
   try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
   await ensureProvisionedOnReactivate(client, 'setupfee.trial.completed');
+  // Refresh the local client object from the DB after provisioning so the
+  // welcome + activated SMS reflect the real phone number and the just-written
+  // subscription status / trial end (the row was mutated above and by
+  // provisioning; the in-memory object was fetched before either).
+  try {
+    const { data: _fresh } = await supabase.from('clients')
+      .select('vapi_phone_number, phone_number, subscription_status, trial_ends_at, owner_name')
+      .eq('id', client.id).single();
+    if (_fresh) Object.assign(client, _fresh);
+  } catch (e) { console.warn('⚠️ Client refresh after provisioning failed:', e.message); }
 
   const agency = client.agencies;
   if (client.subscription_status === 'pending_payment' && client.owner_phone && client.vapi_phone_number) {
     try { await sendWelcomeSMS(client.owner_phone, client.business_name, client.vapi_phone_number, agency); } catch (e) { console.error('Deferred welcome SMS failed:', e.message); }
+  }
+  if (client.subscription_status === 'pending_payment') {
+    try { await sendClientSignupNotificationSMS(client, agency); } catch (e) { console.error('Deferred signup notification failed:', e.message); }
   }
   await sendClientSubscriptionActivatedSMS(client, agency, plan);
 }
@@ -2882,6 +2909,16 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
   // Re-enable OR re-provision: if the number was released while the client was
   // inactive, restore it here so a reactivation never leaves them numberless.
   await ensureProvisionedOnReactivate(client, 'checkout.completed');
+  // Refresh the local client object from the DB after provisioning so the
+  // welcome + activated SMS reflect the real phone number and the just-written
+  // subscription status / trial end (the row was mutated above and by
+  // provisioning; the in-memory object was fetched before either).
+  try {
+    const { data: _fresh } = await supabase.from('clients')
+      .select('vapi_phone_number, phone_number, subscription_status, trial_ends_at, owner_name')
+      .eq('id', client.id).single();
+    if (_fresh) Object.assign(client, _fresh);
+  } catch (e) { console.warn('⚠️ Client refresh after provisioning failed:', e.message); }
 
   // Record payment if Stripe collected money on this session (not for trial signups, amount_total=0)
   if (session.amount_total > 0) {
@@ -2906,6 +2943,12 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
     } catch (e) {
       console.error('Failed to send deferred welcome SMS:', e.message);
     }
+  }
+
+  // Card-required signups: notify the platform owner NOW. This was deferred at
+  // signup time so we don't alert on signups that never complete checkout.
+  if (wasPendingPayment) {
+    try { await sendClientSignupNotificationSMS(client, agency); } catch (e) { console.error('Deferred signup notification failed:', e.message); }
   }
 
   // Always send the subscription-activated notification (this is a different

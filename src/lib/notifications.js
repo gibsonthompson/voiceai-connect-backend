@@ -290,8 +290,20 @@ async function sendClientPaymentFailedSMS(client, agency) {
 
 async function sendClientSubscriptionActivatedSMS(client, agency, plan) {
   const brandName = agency?.name || 'AI Receptionist';
-  const message = `✅ ${brandName} Subscription Active!\n\nHi ${client.owner_name || client.business_name}, your ${plan || 'Starter'} plan is now active!\n\nYour AI receptionist is answering calls 24/7 at:\n📞 ${formatPhoneDisplay(client.vapi_phone_number)}`;
-  return _logSMS({ phone: client.owner_phone, message, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_subscription_activated', metadata: { clientName: client.business_name, plan } });
+  const who = client.owner_name || client.business_name;
+  const planName = plan || 'Starter';
+  // Fall back to phone_number if vapi_phone_number is missing (same provisioned
+  // number, different column); both can legitimately hold the dialable number.
+  const phoneDisplay = formatPhoneDisplay(client.vapi_phone_number || client.phone_number);
+  const onTrial = client.subscription_status === 'trial' && client.trial_ends_at;
+  let message;
+  if (onTrial) {
+    const endDate = new Date(client.trial_ends_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+    message = `✅ ${brandName} Free Trial Started!\n\nHi ${who}, your ${planName} plan free trial is active through ${endDate}.\n\nYour AI receptionist is answering calls 24/7 at:\n📞 ${phoneDisplay}`;
+  } else {
+    message = `✅ ${brandName} Subscription Active!\n\nHi ${who}, your ${planName} plan is now active!\n\nYour AI receptionist is answering calls 24/7 at:\n📞 ${phoneDisplay}`;
+  }
+  return _logSMS({ phone: client.owner_phone, message, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_subscription_activated', metadata: { clientName: client.business_name, plan, onTrial: !!onTrial } });
 }
 
 async function sendSpamBlockedSMS(client, agency, callerPhone, spamReason) {

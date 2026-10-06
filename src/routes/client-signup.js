@@ -253,7 +253,14 @@ function manualUsageResetAt() {
 // status), so its number is always kept for the agency to keep invoicing.
 // ============================================================================
 function resolveClientTrialDays(agency) {
-  const n = Number(agency && agency.client_trial_days);
+  // Distinguish "unset" (null / undefined / '') from an explicit 0. A DB NULL
+  // reads as JS null, and Number(null) === 0 — which would silently mean
+  // "no trial" for any agency that never configured a trial length, even
+  // though the settings UI shows the documented default of 7 (client_trial_days
+  // ?? 7). Treat unset as the default 7; only an EXPLICIT 0 means no trial.
+  const raw = agency == null ? undefined : agency.client_trial_days;
+  if (raw === null || raw === undefined || raw === '') return 7;
+  const n = Number(raw);
   if (!Number.isFinite(n) || n < 0) return 7;
   return Math.min(Math.floor(n), 365);
 }
@@ -1434,8 +1441,16 @@ async function handleClientSignup(req, res) {
     // ============================================
     // STEP 9: NOTIFY PLATFORM OWNER (guarded)
     // ============================================
-    console.log('📱 Notifying platform owner...');
-    await sendClientSignupNotificationSMS(newClient, agency);
+    // Card-required signups: defer this to the Stripe webhook (after payment),
+    // so the platform owner is NOT alerted about signups that never complete
+    // checkout. No-card / manual clients are fully provisioned now, so they
+    // take the immediate-send path.
+    if (cardRequiredCheckoutUrl) {
+      console.log('📱 Signup notification deferred (card-required pending_payment); webhook will send after payment');
+    } else {
+      console.log('📱 Notifying platform owner...');
+      await sendClientSignupNotificationSMS(newClient, agency);
+    }
 
     // ============================================
     // RETURN SUCCESS
