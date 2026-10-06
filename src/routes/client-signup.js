@@ -1234,6 +1234,7 @@ async function handleClientSignup(req, res) {
       trial_ends_at: manualBilling ? (trialDays > 0 ? trialEndsAt : null) : (trialEndsAt || new Date()),
       status: 'active',
       billing_mode: manualBilling ? 'manual' : 'connect',
+      signup_discount_code: (req.body?.discount_code || '').trim().toUpperCase() || null,
       usage_resets_at: manualBilling ? manualUsageResetAt() : null,
       plan_type: planType,
       monthly_call_limit: callLimit,
