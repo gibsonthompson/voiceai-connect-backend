@@ -1403,7 +1403,11 @@ async function updateAgencySettings(req, res) {
     }
     
     sanitizedUpdates.updated_at = new Date().toISOString();
-    
+
+    if (sanitizedUpdates.setup_fee_timing !== undefined) {
+      console.log(`🔧 setup_fee_timing save: agency ${String(agencyId).slice(0, 8)} -> ${sanitizedUpdates.setup_fee_timing}`);
+    }
+
     const { data: agency, error } = await supabase
       .from('agencies')
       .update(sanitizedUpdates)
@@ -1413,10 +1417,17 @@ async function updateAgencySettings(req, res) {
     
     if (error) {
       console.error('❌ Update error:', error);
+      // A missing column (e.g. the setup_fee_timing migration was never run) is a
+      // common cause. Surface it explicitly instead of a generic 500 so it is not
+      // mistaken for a silent "save didn't stick".
+      if (error.code === 'PGRST204' || /column .*does not exist|could not find the .*column/i.test(error.message || '')) {
+        return res.status(400).json({ error: `Save failed: a database column is missing (${error.message}). A pending migration has not been run.` });
+      }
       return res.status(500).json({ error: 'Failed to update settings' });
     }
-    
-    console.log('✅ Agency settings updated:', agency.name);
+
+    console.log('✅ Agency settings updated:', agency.name,
+      sanitizedUpdates.setup_fee_timing !== undefined ? `| setup_fee_timing persisted as: ${agency.setup_fee_timing}` : '');
 
     // If the per-minute rate or any plan's included minutes changed, re-point
     // existing clients' metered items to a fresh price at the new values.
