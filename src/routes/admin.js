@@ -1469,6 +1469,18 @@ router.get('/support-requests', requireAdmin, async (req, res) => {
     const { data: requests, error, count } = await query;
     if (error) throw error;
 
+    // Fill display_name with the real agency name when the row doesn't carry one
+    // (most agency requests/feedback have a null display_name).
+    if (requests && requests.length) {
+      const agencyIds = [...new Set(requests.filter(r => r.agency_id && !r.display_name).map(r => r.agency_id))];
+      if (agencyIds.length) {
+        const { data: ags } = await supabase.from('agencies').select('id, name').in('id', agencyIds);
+        const nameById = {};
+        (ags || []).forEach(a => { nameById[a.id] = a.name; });
+        requests.forEach(r => { if (r.agency_id && !r.display_name && nameById[r.agency_id]) r.display_name = nameById[r.agency_id]; });
+      }
+    }
+
     // Whole-table status counts for the tab badges.
     const { data: allRows } = await supabase.from('support_requests').select('status');
     const counts = { open: 0, in_progress: 0, resolved: 0, total: 0 };

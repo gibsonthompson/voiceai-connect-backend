@@ -155,14 +155,15 @@ const adminRouter = express.Router();
 adminRouter.get('/agency-threads/:agencyId', requireAdmin, async (req, res) => {
   try {
     const { agencyId } = req.params;
-    const { data: agency } = await supabase.from('agencies').select('id, name, email, owner_name').eq('id', agencyId).single();
-    if (!agency) return res.status(404).json({ error: 'Agency not found' });
+    // agencies has no owner_name column (only clients do) — selecting it errored
+    // and 404'd the whole thread. Select only columns that exist.
+    const { data: agency } = await supabase.from('agencies').select('id, name, email').eq('id', agencyId).maybeSingle();
     const t = await buildAgencyThread(agencyId);
     if (t.request_ids.length) {
       await supabase.from('support_requests').update({ admin_unread: 0 }).eq('agency_id', agencyId).gt('admin_unread', 0);
       await supabase.from('support_thread_messages').update({ read_by_admin: true }).in('request_id', t.request_ids).eq('sender', 'agency').eq('read_by_admin', false);
     }
-    res.json({ agency, thread: t.thread, latest_request_id: t.latest_request_id, open: t.open });
+    res.json({ agency: agency || { id: agencyId, name: null }, thread: t.thread, latest_request_id: t.latest_request_id, request_ids: t.request_ids, open: t.open });
   } catch (error) {
     console.error('Admin agency-thread load error:', error.message);
     res.status(500).json({ error: 'Failed to load agency thread' });
