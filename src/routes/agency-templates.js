@@ -1833,6 +1833,11 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
 
   // TTS + transcriber model, both restricted to Vapi-verified values so an
   // agency can never save a string that would break their own calls.
+  // ElevenLabs models Vapi actually accepts. Eleven v4 / v4 Turbo are NOT here:
+  // Vapi doesn't support them yet (v4 streams only over ElevenLabs' Text-to-
+  // Dialogue WebSocket, which Vapi hasn't adopted). When Vapi adds it, append
+  // 'eleven_v4_turbo' below (one line) and drop `comingSoon` on the matching
+  // option in the AI Lab template editor — that's the whole switch-on.
   const validTtsModels = ['eleven_v3', 'eleven_multilingual_v2', 'eleven_turbo_v2_5', 'eleven_flash_v2_5'];
   const finalTtsModel = validTtsModels.includes(tts_model) ? tts_model : 'eleven_turbo_v2_5';
   const validTranscribers = ['nova-3', 'nova-2', 'flux-general-multi'];
