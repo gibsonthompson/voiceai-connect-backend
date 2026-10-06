@@ -2719,6 +2719,7 @@ async function handleBillDuringTrialScheduleSetup(session, stripeAccountId, clie
   console.log(`✅ Bill-during-trial activated via schedule: ${client.business_name} (sub ${subscriptionId})`);
 
   try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
+  const wasPendingPayment = client.subscription_status === 'pending_payment';
   await ensureProvisionedOnReactivate(client, 'schedule.completed');
   // Refresh the local client object from the DB after provisioning so the
   // welcome + activated SMS reflect the real phone number and the just-written
@@ -2732,10 +2733,10 @@ async function handleBillDuringTrialScheduleSetup(session, stripeAccountId, clie
   } catch (e) { console.warn('⚠️ Client refresh after provisioning failed:', e.message); }
 
   const agency = client.agencies;
-  if (client.subscription_status === 'pending_payment' && client.owner_phone && client.vapi_phone_number) {
+  if (wasPendingPayment && client.owner_phone && client.vapi_phone_number) {
     try { await sendWelcomeSMS(client.owner_phone, client.business_name, client.vapi_phone_number, agency); } catch (e) { console.error('Deferred welcome SMS failed:', e.message); }
   }
-  if (client.subscription_status === 'pending_payment') {
+  if (wasPendingPayment) {
     try { await sendClientSignupNotificationSMS(client, agency); } catch (e) { console.error('Deferred signup notification failed:', e.message); }
   }
   await sendClientSubscriptionActivatedSMS(client, agency, plan);
@@ -2813,6 +2814,7 @@ async function handleUpfrontSetupFeeTrialSetup(session, stripeAccountId, client)
   console.log(`✅ Upfront-setup-fee trial activated: ${client.business_name} (sub ${subscriptionId}, ${days}d trial, setup fee charged at signup)`);
 
   try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
+  const wasPendingPayment = client.subscription_status === 'pending_payment';
   await ensureProvisionedOnReactivate(client, 'setupfee.trial.completed');
   // Refresh the local client object from the DB after provisioning so the
   // welcome + activated SMS reflect the real phone number and the just-written
@@ -2826,10 +2828,10 @@ async function handleUpfrontSetupFeeTrialSetup(session, stripeAccountId, client)
   } catch (e) { console.warn('⚠️ Client refresh after provisioning failed:', e.message); }
 
   const agency = client.agencies;
-  if (client.subscription_status === 'pending_payment' && client.owner_phone && client.vapi_phone_number) {
+  if (wasPendingPayment && client.owner_phone && client.vapi_phone_number) {
     try { await sendWelcomeSMS(client.owner_phone, client.business_name, client.vapi_phone_number, agency); } catch (e) { console.error('Deferred welcome SMS failed:', e.message); }
   }
-  if (client.subscription_status === 'pending_payment') {
+  if (wasPendingPayment) {
     try { await sendClientSignupNotificationSMS(client, agency); } catch (e) { console.error('Deferred signup notification failed:', e.message); }
   }
   await sendClientSubscriptionActivatedSMS(client, agency, plan);
