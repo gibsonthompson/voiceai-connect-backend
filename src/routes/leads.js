@@ -545,18 +545,25 @@ router.get('/:agencyId/leads/follow-up-queue', async (req, res) => {
       return res.json({ queue: [], summary: { overdue: 0, due_today: 0, upcoming: 0, total: 0 } });
     }
 
-    // 2. Get all outreach history for these leads
+    // 2. Get all outreach history for these leads. Chunk the lead_id filter:
+    // a scraping-heavy agency can have hundreds of active leads, and a single
+    // .in('lead_id', [all of them]) builds a URL too long for PostgREST, which
+    // rejects it with a generic "Bad Request". Batches of 100 keep each URL small.
     const leadIds = leads.map(l => l.id);
-    const { data: allHistory, error: historyError } = await supabase
-      .from('outreach_history')
-      .select('lead_id, type, sent_at, template_id')
-      .eq('agency_id', agencyId)
-      .in('lead_id', leadIds)
-      .order('sent_at', { ascending: true });
-
-    if (historyError) {
-      console.error('Error fetching outreach history:', historyError);
-      return res.status(400).json({ error: historyError.message });
+    const _chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
+    let allHistory = [];
+    for (const ids of _chunk(leadIds, 100)) {
+      const { data, error: historyError } = await supabase
+        .from('outreach_history')
+        .select('lead_id, type, sent_at, template_id')
+        .eq('agency_id', agencyId)
+        .in('lead_id', ids)
+        .order('sent_at', { ascending: true });
+      if (historyError) {
+        console.error('Error fetching outreach history:', { message: historyError.message, details: historyError.details, hint: historyError.hint, code: historyError.code });
+        return res.status(400).json({ error: historyError.message });
+      }
+      if (data) allHistory = allHistory.concat(data);
     }
 
     // 3. Get all sequence templates for this agency
