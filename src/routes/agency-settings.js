@@ -192,6 +192,9 @@ function publicAgencyShape(agency) {
     // Theme settings
     website_theme: agency.website_theme,
     logo_background_color: agency.logo_background_color,
+    // Signup/plan nav logo alignment (left | center | right). For agencies that
+    // forward-link to the signup page from their own site and want just the logo.
+    signup_logo_align: agency.signup_logo_align || 'left',
 
     // Dashboard branding overrides (nav, bg, card, button colors)
     branding_overrides: agency.branding_overrides || null,
@@ -744,6 +747,7 @@ async function updateAgencySettings(req, res) {
       // Theme settings
       'website_theme',
       'logo_background_color',
+      'signup_logo_align',
       // Dashboard branding overrides (nav, bg, card, button colors)
       'branding_overrides',
       // Client dashboard settings
@@ -786,6 +790,10 @@ async function updateAgencySettings(req, res) {
     const sanitizedUpdates = {};
     if (updates.bill_minutes_during_trial !== undefined) updates.bill_minutes_during_trial = updates.bill_minutes_during_trial === true;
     if (updates.allow_client_plan_changes !== undefined) updates.allow_client_plan_changes = updates.allow_client_plan_changes === true;
+    if (updates.signup_logo_align !== undefined && !['left', 'center', 'right'].includes(updates.signup_logo_align)) {
+      updates.signup_logo_align = 'left';
+    }
+
     for (const key of allowedFields) {
       if (updates[key] !== undefined) {
         sanitizedUpdates[key] = updates[key];
