@@ -1219,7 +1219,7 @@ async function disconnectConnectAccount(req, res) {
 // Create a Stripe coupon on the agency's CONNECTED account from a resolved
 // discount code's percent-off. waive_setup is handled separately (by skipping
 // the setup line item), so this returns null when there is no percent-off.
-async function createDiscountCoupon(agency, codeRecord) {
+async function createDiscountCoupon(agency, codeRecord, applyToProducts = null) {
   if (!codeRecord || !codeRecord.percent_off) return null;
   const duration = codeRecord.duration === 'repeating' ? 'repeating' : (codeRecord.duration === 'once' ? 'once' : 'forever');
   const params = {
@@ -1229,6 +1229,13 @@ async function createDiscountCoupon(agency, codeRecord) {
     metadata: { discount_code_id: codeRecord.id, agency_id: agency.id },
   };
   if (duration === 'repeating') params.duration_in_months = codeRecord.duration_months || 1;
+  // Scope the monthly discount to specific products (the plan + metered minutes)
+  // so it can't also discount a one-time setup-fee line in the same session.
+  // Stripe allows one coupon per session; the setup fee carries its own discount
+  // in its net price, so the monthly coupon must stay off it.
+  if (Array.isArray(applyToProducts) && applyToProducts.length > 0) {
+    params.applies_to = { products: applyToProducts };
+  }
   const coupon = await stripe.coupons.create(params, { stripeAccount: agency.stripe_account_id });
   return coupon.id;
 }
@@ -1329,9 +1336,13 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
   // The metered item accrues nothing during the trial because the meter event
   // in usage-tracker is gated on the client not being in trial.
   const lineItems = [{ price: price.id, quantity: 1 }];
+  // Products the MONTHLY discount may touch: the flat plan and the metered
+  // minutes. The one-time setup fee is deliberately excluded (see below).
+  const _recurringProductIds = [product.id];
   if (minutePassThroughActive(agency)) {
     const minutePrice = await createConnectMinutePrice(agency, plan, client);
     lineItems.push({ price: minutePrice.id }); // metered, no quantity
+    _recurringProductIds.push(minutePrice.product);
   }
 
   // One-time setup fee (when set). A one-time line item on a subscription-mode
@@ -1347,13 +1358,15 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     const r = await resolveDiscountCode(agency.id, discountCode);
     if (r.error) return { error: `Discount code: ${r.error}` };
     _discount = r.code;
-    _couponId = await createDiscountCoupon(agency, _discount);
+    _couponId = await createDiscountCoupon(agency, _discount, _recurringProductIds);
   }
   const _waiveSetup = _discount && _discount.waive_setup === true;
   const _setupPct = _waiveSetup ? 100 : (_discount && _discount.setup_fee_percent_off ? Number(_discount.setup_fee_percent_off) : 0);
 
-  // Setup fee, built at FULL price (null only when the plan has no fee).
-  const setupFeeItem = await buildSetupFeeLineItem(agency, plan, client, 0);
+  // Setup fee, built at its NET (post-discount) price so its discount lives in the
+  // price, independent of the monthly coupon. null when the plan has no fee OR the
+  // fee is fully waived (100% off) -> in that case it is simply never charged.
+  const setupFeeItem = await buildSetupFeeLineItem(agency, plan, client, _setupPct);
 
   // Timing:
   //  - 'upfront' (or no trial): the setup fee is a LINE ITEM in this checkout, so
@@ -1380,23 +1393,13 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
       : `a one-time ${_setupNetDisplay} setup fee`;
   }
 
-  // Stripe Checkout allows ONE coupon per session.
-  let sessionDiscounts;
+  // The monthly coupon is scoped to the recurring products, so it can be applied
+  // whenever it exists without ever discounting the setup-fee line. The setup fee
+  // is already net-priced, so there is no separate setup coupon: the monthly
+  // discount and the setup discount are fully independent now.
+  const sessionDiscounts = _couponId ? [{ coupon: _couponId }] : undefined;
   if (setupFeeItem && !_deferSetup) {
     lineItems.push({ price: setupFeeItem.price, quantity: 1 });
-    if (_couponId) {
-      sessionDiscounts = [{ coupon: _couponId }];
-    } else if (_setupPct > 0) {
-      const setupCoupon = await stripe.coupons.create({
-        percent_off: _setupPct, duration: 'once',
-        name: (_discount && _discount.code) ? `${_discount.code} (setup fee)` : 'Setup fee discount',
-        applies_to: { products: [setupFeeItem.productId] },
-        metadata: { discount_code_id: _discount ? _discount.id : '', agency_id: agency.id, kind: 'setup_fee' },
-      }, { stripeAccount: agency.stripe_account_id });
-      sessionDiscounts = [{ coupon: setupCoupon.id }];
-    }
-  } else if (_couponId) {
-    sessionDiscounts = [{ coupon: _couponId }];
   }
 
   // Bill-during-trial (a true fee-free trial where the client still pays for
@@ -1585,9 +1588,11 @@ async function createClientCheckout(req, res) {
 
     // Flat base item, plus the metered minute item when pass-through is active.
     const upgradeLineItems = [{ price: price.id, quantity: 1 }];
+    const _recurringProductIdsChk = [product.id];
     if (minutePassThroughActive(agency)) {
       const minutePrice = await createConnectMinutePrice(agency, plan, client);
       upgradeLineItems.push({ price: minutePrice.id }); // metered, no quantity
+      _recurringProductIdsChk.push(minutePrice.product);
     }
 
     // One-time setup fee (when set). No trial on this flow, so the one-time
@@ -1599,7 +1604,7 @@ async function createClientCheckout(req, res) {
       const r = await resolveDiscountCode(agency.id, req.body.discount_code);
       if (r.error) return res.status(400).json({ error: `Discount code: ${r.error}` });
       _discount = r.code;
-      _couponId = await createDiscountCoupon(agency, _discount);
+      _couponId = await createDiscountCoupon(agency, _discount, _recurringProductIdsChk);
     }
     const _waiveSetup = _discount && _discount.waive_setup === true;
     const _setupPct = _waiveSetup ? 100 : (_discount && _discount.setup_fee_percent_off ? Number(_discount.setup_fee_percent_off) : 0);
