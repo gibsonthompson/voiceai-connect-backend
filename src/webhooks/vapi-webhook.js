@@ -374,6 +374,31 @@ async function handleDemoCall(agency, message, industryKey = null) {
   // call id; also harvest the same tool call from the end-of-call payload so a
   // cache miss (restart, scale-out) still recovers a clean name.
   const callId = call.id || null;
+
+  // Idempotency. VAPI re-delivers end-of-call-report when the handler is slow to
+  // return 200 (this one runs AI summary + SMS work first). A duplicate delivery
+  // would send a SECOND prospect follow-up text - and because the cached business
+  // name expires between deliveries, the retry sends the GENERIC variant, so the
+  // prospect gets two near-identical texts. Guard twice: a fast in-memory check
+  // for a same-instance re-delivery, then a persistent demo_calls lookup that
+  // also covers a restart or a different instance.
+  if (demoFollowupAlreadySeen(callId)) {
+    console.log(`↩️ Duplicate demo end-of-call-report for call ${callId} (same instance) - skipping`);
+    return { duplicate: true };
+  }
+  if (callId) {
+    const { data: _priorDemo } = await supabase
+      .from('demo_calls')
+      .select('id')
+      .eq('vapi_call_id', callId)
+      .limit(1)
+      .maybeSingle();
+    if (_priorDemo) {
+      console.log(`↩️ Duplicate demo end-of-call-report for call ${callId} (already saved) - skipping`);
+      return { duplicate: true };
+    }
+  }
+
   const cachedToolInfo = getDemoToolInfo(callId) || {};
   const artifactToolArgs = extractDemoToolCallArgs(message) || {};
   const toolArgs = { ...artifactToolArgs, ...cachedToolInfo };
@@ -658,6 +683,20 @@ function hasDemoSmsSent(callId) {
   if (_demoSmsSent.get(callId)) return true;
   _demoSmsSent.set(callId, Date.now());
   for (const [k, v] of _demoSmsSent) { if (Date.now() - v > 5 * 60 * 1000) _demoSmsSent.delete(k); }
+  return false;
+}
+
+// Fast same-instance guard for the END-OF-CALL demo follow-up (separate from the
+// mid-call sample guard above). Check-and-set: the first end-of-call-report for a
+// call marks it and returns false; a VAPI re-delivery on this instance returns
+// true so the follow-up is not sent twice. The persistent demo_calls lookup in
+// handleDemoCall backstops this across restarts and other instances.
+const _demoFollowupSeen = new Map();
+function demoFollowupAlreadySeen(callId) {
+  if (!callId) return false;
+  if (_demoFollowupSeen.get(callId)) return true;
+  _demoFollowupSeen.set(callId, Date.now());
+  for (const [k, v] of _demoFollowupSeen) { if (Date.now() - v > 10 * 60 * 1000) _demoFollowupSeen.delete(k); }
   return false;
 }
 
