@@ -240,7 +240,7 @@ async function buildSetupFeeLineItem(agency, plan, client, setupPct = 0) {
     { stripeAccount: acct }
   );
 
-  return { price: price.id, quantity: 1 };
+  return { price: price.id, quantity: 1, productId: product.id, feeCents };
 }
 
 // ============================================================================
@@ -1343,8 +1343,35 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
   const _waiveSetup = _discount && _discount.waive_setup === true;
   const _setupPct = _waiveSetup ? 100 : (_discount && _discount.setup_fee_percent_off ? Number(_discount.setup_fee_percent_off) : 0);
 
-  const setupFeeItem = _setupPct >= 100 ? null : await buildSetupFeeLineItem(agency, plan, client, _setupPct);
-  if (setupFeeItem) lineItems.push(setupFeeItem);
+  // Setup fee, built at FULL price (null only when the plan has no fee).
+  const setupFeeItem = await buildSetupFeeLineItem(agency, plan, client, 0);
+
+  // Timing:
+  //  - 'upfront' (or no trial): the setup fee is a LINE ITEM in this checkout, so
+  //    Stripe charges it at signup, shown with any discount as a coupon on that line.
+  //  - 'after_trial' (with a trial): NOT a line item (a one-time line item charges
+  //    up front); instead it's flagged in metadata and added as a PENDING invoice
+  //    item on the webhook, so it lands on the FIRST invoice when the trial ends.
+  const _deferSetup = !!setupFeeItem && setupFeeTiming === 'after_trial' && days > 0;
+
+  // Stripe Checkout allows ONE coupon per session.
+  let sessionDiscounts;
+  if (setupFeeItem && !_deferSetup) {
+    lineItems.push({ price: setupFeeItem.price, quantity: 1 });
+    if (_couponId) {
+      sessionDiscounts = [{ coupon: _couponId }];
+    } else if (_setupPct > 0) {
+      const setupCoupon = await stripe.coupons.create({
+        percent_off: _setupPct, duration: 'once',
+        name: (_discount && _discount.code) ? `${_discount.code} (setup fee)` : 'Setup fee discount',
+        applies_to: { products: [setupFeeItem.productId] },
+        metadata: { discount_code_id: _discount ? _discount.id : '', agency_id: agency.id, kind: 'setup_fee' },
+      }, { stripeAccount: agency.stripe_account_id });
+      sessionDiscounts = [{ coupon: setupCoupon.id }];
+    }
+  } else if (_couponId) {
+    sessionDiscounts = [{ coupon: _couponId }];
+  }
 
   // Bill-during-trial (a true fee-free trial where the client still pays for
   // their own minutes). Stripe waives ALL charges, metered included, during a
@@ -1386,63 +1413,6 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     return { url: setupSession.url, sessionId: setupSession.id };
   }
 
-  // Setup fee + trial: charge the one-time setup fee UPFRONT in a payment-mode
-  // Checkout (so it shows as due today and is collected at signup), then build the
-  // trialing subscription on the webhook from the saved card. Stripe cannot charge
-  // a one-time fee upfront while a subscription is trialing in one subscription-
-  // mode session (the fee defers to trial end), so this is the two-part flow. Only
-  // fires when there is a real fee (setupFeeItem is null when waived or unset) and
-  // a trial; no-trial and no-fee signups fall through to the normal checkout below.
-  if (days > 0 && setupFeeItem && setupFeeTiming === 'upfront') {
-    const minutePriceForSub = minutePassThroughActive(agency) ? await createConnectMinutePrice(agency, plan, client) : null;
-    // Show the setup-fee discount on the checkout rather than a silently lowered
-    // number: charge the FULL fee as the line item and apply the discount as a
-    // Stripe coupon, so the client sees "Setup fee $X, <CODE> -$Y, Total $Z".
-    // setupFeeItem is already pre-discounted, so only swap it when there is a
-    // partial (<100%) discount; full-price and fully-waived cases are unchanged.
-    let setupLineItemPrice = setupFeeItem.price;
-    let setupDiscounts;
-    if (_setupPct > 0 && _setupPct < 100) {
-      try {
-        const fullSetupItem = await buildSetupFeeLineItem(agency, plan, client, 0);
-        if (fullSetupItem) {
-          const setupCoupon = await stripe.coupons.create({
-            percent_off: _setupPct,
-            duration: 'once',
-            name: (_discount && _discount.code) ? `${_discount.code} (${_setupPct}% off setup)` : `${_setupPct}% off setup`,
-            metadata: { discount_code_id: _discount ? _discount.id : '', agency_id: agency.id, kind: 'setup_fee' },
-          }, { stripeAccount: agency.stripe_account_id });
-          setupLineItemPrice = fullSetupItem.price;
-          setupDiscounts = [{ coupon: setupCoupon.id }];
-        }
-      } catch (e) { console.warn('Setup-fee coupon display failed, using pre-discounted amount:', e.message); }
-    }
-    const upfrontSession = await stripe.checkout.sessions.create({
-      customer: connectedCustomerId,
-      mode: 'payment',
-      payment_method_types: ['card'],
-      line_items: [{ price: setupLineItemPrice, quantity: 1 }],
-      ...(setupDiscounts ? { discounts: setupDiscounts } : {}),
-      payment_intent_data: { setup_future_usage: 'off_session' },
-      custom_text: { submit: { message: `This one-time setup fee is due today. After your ${days}-day free trial, your subscription continues at ${_moDisplay}/month.` } },
-      success_url: successUrl,
-      cancel_url: `${agencyUrl}/signup/plan?canceled=true`,
-      metadata: {
-        client_id: client.id,
-        agency_id: agency.id,
-        plan,
-        call_limit: callLimits[plan].toString(),
-        type: 'trial_signup_setupfee',
-        trial_days: String(days),
-        flat_price_id: price.id,
-        ...(minutePriceForSub ? { minute_price_id: minutePriceForSub.id } : {}),
-        ...(_couponId ? { discount_coupon_id: _couponId } : {}),
-        ...(_discount ? { discount_code_id: _discount.id } : {}),
-      },
-    }, { stripeAccount: agency.stripe_account_id });
-    console.log(`✅ Upfront-setup-fee trial checkout created for client ${client.id}: session ${upfrontSession.id} (fee charged now, trialing sub built on webhook)`);
-    return { url: upfrontSession.url, sessionId: upfrontSession.id };
-  }
 
   const session = await stripe.checkout.sessions.create({
     customer: connectedCustomerId,
@@ -1451,10 +1421,15 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     line_items: lineItems,
     success_url: successUrl,
     cancel_url: `${agencyUrl}/signup/plan?canceled=true`,
-    custom_text: { submit: { message: days > 0
-      ? `Your card won't be charged during the free trial. When your ${days}-day trial ends, your plan continues at ${_moDisplay}/month${setupFeeItem ? ', billed together with the one-time setup fee' : ''}.`
-      : `You'll be charged today to start your plan${setupFeeItem ? ', including the one-time setup fee' : ''}, then ${_moDisplay}/month after that.` } },
-    ...(_couponId ? { discounts: [{ coupon: _couponId }] } : {}),
+    custom_text: { submit: { message:
+      _deferSetup
+        ? `Your card won't be charged during the free trial. When your ${days}-day trial ends, your first invoice is your plan (${_moDisplay}/month) plus a one-time setup fee.`
+        : (days > 0
+          ? (setupFeeItem
+            ? `Your one-time setup fee is due today. After your ${days}-day free trial, your plan continues at ${_moDisplay}/month.`
+            : `Your card won't be charged during the free trial. When your ${days}-day trial ends, your plan continues at ${_moDisplay}/month.`)
+          : `You'll be charged today to start your plan${setupFeeItem ? ', including the one-time setup fee' : ''}, then ${_moDisplay}/month after that.`) } },
+    ...(sessionDiscounts ? { discounts: sessionDiscounts } : {}),
     metadata: {
       client_id: client.id,
       agency_id: agency.id,
@@ -1462,6 +1437,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
       call_limit: callLimits[plan].toString(),
       type: 'trial_signup', // distinguishes from upgrade-mode checkouts
       ...(_discount ? { discount_code_id: _discount.id } : {}),
+      ...(_deferSetup ? { deferred_setup_fee_cents: String(setupFeeItem.feeCents), deferred_setup_fee_pct_off: String(_setupPct), ...(_discount && _discount.code ? { discount_code: _discount.code } : {}) } : {}),
     },
     subscription_data: {
       // days=0 omits the trial entirely so Stripe charges immediately at
@@ -2918,6 +2894,40 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
       console.error('Failed to retrieve subscription for status check:', subErr.message);
       // Fall back to assuming active so we don't block activation
     }
+  }
+
+  // Deferred setup fee (setup_fee_timing = 'after_trial'): add it as a PENDING
+  // invoice item on the subscription so it bills with the FIRST invoice when the
+  // trial ends, not up front. Done HERE (after the subscription exists) so it does
+  // not trigger an immediate invoice. Idempotent: Stripe retries this webhook, so
+  // skip if a pending setup-fee item already exists for this customer.
+  if (session.subscription && Number(session.metadata?.deferred_setup_fee_cents) > 0) {
+    try {
+      const feeCents = Number(session.metadata.deferred_setup_fee_cents);
+      const pctOff = Number(session.metadata.deferred_setup_fee_pct_off) || 0;
+      const curr = session.currency || getCurrencyForCountry(client.agencies?.country || 'US');
+      const existing = await stripe.invoiceItems.list({ customer: session.customer, pending: true, limit: 100 }, { stripeAccount: stripeAccountId });
+      const already = (existing.data || []).some(ii => ii.metadata && ii.metadata.kind === 'setup_fee' && ii.metadata.client_id === clientId);
+      if (!already) {
+        await stripe.invoiceItems.create({
+          customer: session.customer, subscription: session.subscription,
+          amount: feeCents, currency: curr, description: 'One-time setup fee',
+          metadata: { kind: 'setup_fee', client_id: clientId },
+        }, { stripeAccount: stripeAccountId });
+        const discCents = pctOff > 0 ? Math.round(feeCents * (pctOff / 100)) : 0;
+        if (discCents > 0) {
+          await stripe.invoiceItems.create({
+            customer: session.customer, subscription: session.subscription,
+            amount: -discCents, currency: curr,
+            description: session.metadata.discount_code ? `Setup fee discount (${session.metadata.discount_code})` : 'Setup fee discount',
+            metadata: { kind: 'setup_fee_discount', client_id: clientId },
+          }, { stripeAccount: stripeAccountId });
+        }
+        console.log(`💳 Deferred setup fee queued for client ${clientId}: ${feeCents}c (${pctOff}% off) -> first invoice at trial end`);
+      } else {
+        console.log(`↩️ Deferred setup fee already queued for client ${clientId}, skipping (webhook retry)`);
+      }
+    } catch (e) { console.error('Failed to queue deferred setup fee:', e.message); }
   }
 
   const isTrialing = subStatus === 'trialing' && subTrialEnd;
