@@ -50,12 +50,18 @@ router.post('/:agencyId/feedback', async (req, res) => {
       return res.status(404).json({ error: 'Agency not found' });
     }
 
-    // Save to database
+    // Feedback is now a support_request (kind='feedback') so it inherits the
+    // full two-way thread system: the admin can reply, the agency sees the
+    // reply, and it lives in the same per-agency conversation as support.
     const { data: feedback, error: insertError } = await supabase
-      .from('agency_feedback')
+      .from('support_requests')
       .insert({
         agency_id: agencyId,
         message: message.trim(),
+        kind: 'feedback',
+        source: 'feedback',
+        user_type: 'agency',
+        status: 'open',
       })
       .select()
       .single();
@@ -85,10 +91,14 @@ router.get('/:agencyId/feedback', async (req, res) => {
   try {
     const { agencyId } = req.params;
 
+    // Feedback now lives in support_requests (kind='feedback'); read from there
+    // so the agency sees their current feedback (and it stays in sync with the
+    // inbox thread where the admin replies).
     const { data, error } = await supabase
-      .from('agency_feedback')
+      .from('support_requests')
       .select('id, message, created_at')
       .eq('agency_id', agencyId)
+      .eq('kind', 'feedback')
       .order('created_at', { ascending: false })
       .limit(20);
 

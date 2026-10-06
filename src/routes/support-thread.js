@@ -100,10 +100,74 @@ function buildThread(request, messages) {
   return [...seed, ...messages];
 }
 
+// Merge EVERY one of an agency's requests (support + feedback) into a single
+// chronological conversation: each request's seed (tagged with its kind, and
+// the client name when it references a specific client) plus all thread
+// messages, sorted by time. One running thread per agency so neither side hunts
+// ticket to ticket. New replies attach to the most recent request.
+async function buildAgencyThread(agencyId) {
+  const { data: requests } = await supabase
+    .from('support_requests').select('*')
+    .eq('agency_id', agencyId)
+    .order('created_at', { ascending: true });
+  const reqs = requests || [];
+  const ids = reqs.map((r) => r.id);
+  let msgs = [];
+  if (ids.length) {
+    const { data } = await supabase
+      .from('support_thread_messages')
+      .select('id, request_id, sender, body, created_at')
+      .in('request_id', ids)
+      .order('created_at', { ascending: true });
+    msgs = data || [];
+  }
+  const clientIds = [...new Set(reqs.map((r) => r.client_id).filter(Boolean))];
+  const clientNames = {};
+  if (clientIds.length) {
+    const { data: clients } = await supabase.from('clients').select('id, business_name').in('id', clientIds);
+    (clients || []).forEach((c) => { clientNames[c.id] = c.business_name; });
+  }
+  const stream = [];
+  for (const r of reqs) {
+    if (r.message) {
+      stream.push({
+        id: `seed-${r.id}`, request_id: r.id, sender: 'agency', body: r.message,
+        created_at: r.created_at, seed: true, kind: r.kind || 'support',
+        client_name: r.client_id ? (clientNames[r.client_id] || null) : null,
+      });
+    }
+  }
+  for (const m of msgs) {
+    stream.push({ id: m.id, request_id: m.request_id, sender: m.sender, body: m.body, created_at: m.created_at, seed: false });
+  }
+  stream.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+  const latest = reqs.length ? reqs[reqs.length - 1] : null;
+  return { thread: stream, latest_request_id: latest ? latest.id : null, request_ids: ids, open: reqs.some((r) => r.status !== 'resolved') };
+}
+
 // ---------------------------------------------------------------------------
 // ADMIN ROUTER
 // ---------------------------------------------------------------------------
 const adminRouter = express.Router();
+
+// Merged per-agency conversation for the admin inbox: all of an agency's support
+// + feedback as one thread. Opening clears the admin's unread across them all.
+adminRouter.get('/agency-threads/:agencyId', requireAdmin, async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const { data: agency } = await supabase.from('agencies').select('id, name, email, owner_name').eq('id', agencyId).single();
+    if (!agency) return res.status(404).json({ error: 'Agency not found' });
+    const t = await buildAgencyThread(agencyId);
+    if (t.request_ids.length) {
+      await supabase.from('support_requests').update({ admin_unread: 0 }).eq('agency_id', agencyId).gt('admin_unread', 0);
+      await supabase.from('support_thread_messages').update({ read_by_admin: true }).in('request_id', t.request_ids).eq('sender', 'agency').eq('read_by_admin', false);
+    }
+    res.json({ agency, thread: t.thread, latest_request_id: t.latest_request_id, open: t.open });
+  } catch (error) {
+    console.error('Admin agency-thread load error:', error.message);
+    res.status(500).json({ error: 'Failed to load agency thread' });
+  }
+});
 
 adminRouter.get('/support-requests/:id/thread', requireAdmin, async (req, res) => {
   try {
@@ -189,7 +253,7 @@ agencyRouter.get('/:agencyId/platform-threads', requireAgencyAccess('dashboard')
     const { agencyId } = req.params;
     const { data, error } = await supabase
       .from('support_requests')
-      .select('id, message, status, source, created_at, last_reply_at, last_sender, agency_unread')
+      .select('id, message, status, source, kind, created_at, last_reply_at, last_sender, agency_unread')
       .eq('agency_id', agencyId)
       .order('last_reply_at', { ascending: false, nullsFirst: false })
       .order('created_at', { ascending: false })
@@ -308,6 +372,23 @@ agencyRouter.post('/:agencyId/platform-threads', requireAgencyAccess('dashboard'
   } catch (error) {
     console.error('Agency platform-thread create error:', error.message);
     res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+// The agency's single running conversation with the platform (all their support
+// + feedback as one thread). Opening clears the agency's unread.
+agencyRouter.get('/:agencyId/platform-thread', requireAgencyAccess('dashboard'), async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const t = await buildAgencyThread(agencyId);
+    if (t.request_ids.length) {
+      await supabase.from('support_requests').update({ agency_unread: 0 }).eq('agency_id', agencyId).gt('agency_unread', 0);
+      await supabase.from('support_thread_messages').update({ read_by_agency: true }).in('request_id', t.request_ids).eq('sender', 'admin').eq('read_by_agency', false);
+    }
+    res.json({ thread: t.thread, latest_request_id: t.latest_request_id, open: t.open });
+  } catch (error) {
+    console.error('Agency platform-thread load error:', error.message);
+    res.status(500).json({ error: 'Failed to load thread' });
   }
 });
 
