@@ -1774,7 +1774,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         voice_id: voiceId,
         voice: voice || null,
         model: customTemplate?.model || 'gpt-4o-mini',
-        tts_model: customTemplate?.tts_model || 'eleven_turbo_v2_5',
+        tts_model: customTemplate?.tts_model || 'eleven_flash_v2_5',
         transcriber_model: customTemplate?.transcriber_model || 'nova-3',
         temperature: customTemplate?.temperature || 0.7,
         voice_speed: customTemplate?.voice_speed ?? 1,
@@ -1786,7 +1786,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         first_message: defaults.first_message,
         voice_id: defaults.voice_id,
         model: 'gpt-4o-mini',
-        tts_model: 'eleven_turbo_v2_5',
+        tts_model: 'eleven_flash_v2_5',
         transcriber_model: 'nova-3',
         temperature: 0.7,
         voice_speed: 1,
@@ -1838,8 +1838,8 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
   // Dialogue WebSocket, which Vapi hasn't adopted). When Vapi adds it, append
   // 'eleven_v4_turbo' below (one line) and drop `comingSoon` on the matching
   // option in the AI Lab template editor — that's the whole switch-on.
-  const validTtsModels = ['eleven_v3', 'eleven_multilingual_v2', 'eleven_turbo_v2_5', 'eleven_flash_v2_5'];
-  const finalTtsModel = validTtsModels.includes(tts_model) ? tts_model : 'eleven_turbo_v2_5';
+  const validTtsModels = ['eleven_flash_v2_5', 'eleven_multilingual_v2', 'eleven_v3'];
+  const finalTtsModel = validTtsModels.includes(tts_model) ? tts_model : 'eleven_flash_v2_5';
   const validTranscribers = ['nova-3', 'nova-2', 'flux-general-multi'];
   const finalTranscriber = validTranscribers.includes(transcriber_model) ? transcriber_model : 'nova-3';
 
