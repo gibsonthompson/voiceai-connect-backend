@@ -614,6 +614,11 @@ async function getAgencySettings(req, res) {
         // Returned so the Payments tab can render the trial-length picker.
         // Governs Connect signups only (resolveClientTrialDays); manual ignores it.
         client_trial_days: agency.client_trial_days ?? 7,
+        // Setup-fee timing + signup logo alignment. These are written via the
+        // allowlist but MUST also be returned here, or the owner's settings page
+        // re-seeds to the default after save and the UI appears to revert.
+        setup_fee_timing: agency.setup_fee_timing || 'upfront',
+        signup_logo_align: agency.signup_logo_align || 'left',
         
         // Demo phone (auto-provisioned per agency via VAPI)
         demo_phone_number: agency.demo_phone_number || null,
