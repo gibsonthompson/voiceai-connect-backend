@@ -13,7 +13,8 @@
  * - Indeed page count detection (stops early if no more pages)
  */
 
-const puppeteer = require("puppeteer-extra");
+const { addExtra } = require("puppeteer-extra");
+const puppeteer = addExtra(require("puppeteer-core"));
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 puppeteer.use(StealthPlugin());
 
@@ -272,7 +273,7 @@ async function scrapeIndeed({ keywords, location, maxPages = 1 }) {
 
     browser = await puppeteer.launch({
       headless: "new",
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH || '/usr/bin/google-chrome-stable',
       args: [
         ...proxyArgs,
         "--no-sandbox",
