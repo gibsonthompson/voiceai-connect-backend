@@ -29,6 +29,8 @@
 const { verifyVapiWebhook } = require('../lib/vapi-webhook-auth');
 const hq = require('../lib/hq-supabase');
 const items = require('../lib/hq-items');
+const news = require('../lib/briefing-news');
+const core = require('../lib/briefing-core');
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 const JARVIS_SERVER_URL = `${BACKEND_URL}/webhook/vapi-jarvis`;
@@ -209,6 +211,8 @@ Whatever he tells you on this call goes onto his On Deck list as a task, using h
 - File an existing task under a business: hq_assign_task, for a to-do already on his list he wants put under one of his businesses.
 - Read back what is open: hq_list_tasks, a few woven into a sentence, never a count or a list. Hear his goals: hq_list_goals.
 - Mark something done: hq_complete_task with what he said. His single best next move: hq_highest_leverage, then give one clear pick and why.
+- Look something up: research_topic, when he asks about a news event or wants to know more about something in the moment. Pull it and tell him conversationally, in his words.
+- Give him today's briefing: hq_todays_briefing, when he asks for his rundown or briefing. Read it to him naturally.
 
 # The little things
 
@@ -297,6 +301,10 @@ function getJarvisTools() {
       { query: { type: 'string', description: 'What the caller said to identify the task' } }, ['query']),
     fn('hq_highest_leverage', 'Return open tasks with age and business so you can pick the single highest-leverage move.',
       {}, []),
+    fn('research_topic', 'Look up current information or news on something the caller asks about, so you can tell him more in real time.',
+      { query: { type: 'string', description: 'What to look up, e.g. a news event or topic he mentioned' } }, ['query']),
+    fn('hq_todays_briefing', "Assemble and deliver today's full briefing on demand: his calendar, top move, weather, and AI, local, and politics news. Use when he asks for his briefing or rundown.",
+      {}, []),
     { type: 'endCall' },
   ];
 }
@@ -306,13 +314,16 @@ function getJarvisTools() {
 const JARVIS_VOICE = {
   provider: '11labs',
   voiceId: JARVIS_VOICE_ID,
-  model: 'eleven_turbo_v2_5', // more expressive than flash, still low latency
-  stability: 0.4,             // lower = warmer, less monotone and robotic
+  // Most expressive model VAPI supports for REAL-TIME calls. Eleven v3 sounds
+  // better but measures ~750ms before it speaks (ElevenLabs says do not use it
+  // for conversation), which on a phone call is a long dead beat every turn.
+  model: 'eleven_multilingual_v2',
+  stability: 0.45,            // lower = warmer, less monotone and robotic
   similarityBoost: 0.85,
-  style: 0.4,                 // a little more natural inflection
+  style: 0.4,                 // natural inflection
   useSpeakerBoost: true,
-  speed: 0.95,
-  optimizeStreamingLatency: 2,
+  speed: 0.98,
+  optimizeStreamingLatency: 3,
 };
 
 // Turn-taking: responds a little quicker than before but still holds through
@@ -512,6 +523,29 @@ async function tool_hq_highest_leverage() {
   return JSON.stringify({ openCount: open.length, tasks });
 }
 
+async function tool_research_topic(args) {
+  const q = (args.query || '').trim();
+  if (!q) return 'What do you want me to look up?';
+  const list = await news.gatherTopic([q, q + ' news', q + ' latest'], 4, 10);
+  if (!list.length) return "I couldn't find anything recent on that.";
+  const summary = await news.summarize(
+    `Gibson asked you to look up and tell him more about: "${q}". In two to four spoken sentences give him the substance of what is going on, specific and factual, like you just read the coverage. If there is little out there, say so plainly.`,
+    list, 420,
+  );
+  return summary || 'I found some coverage but could not pull it together clearly.';
+}
+
+async function tool_hq_todays_briefing() {
+  try {
+    const ctx = await core.assembleBriefing();
+    const text = await core.renderBriefingText(ctx);
+    return text || 'I could not put your briefing together right now.';
+  } catch (e) {
+    console.error('❌ hq_todays_briefing failed:', e.message);
+    return 'I could not put your briefing together right now.';
+  }
+}
+
 const TOOL_HANDLERS = {
   hq_add_task: tool_hq_add_task,
   hq_book_slot: tool_hq_book_slot,
@@ -524,6 +558,8 @@ const TOOL_HANDLERS = {
   hq_list_goals: tool_hq_list_goals,
   hq_complete_task: tool_hq_complete_task,
   hq_highest_leverage: tool_hq_highest_leverage,
+  research_topic: tool_research_topic,
+  hq_todays_briefing: tool_hq_todays_briefing,
 };
 
 async function runTool(name, args) {
@@ -584,7 +620,15 @@ async function handleJarvisWebhook(req, res) {
     if (message.type === 'assistant-request') return handleAssistantRequest(req, res, message);
     if (message.type === 'tool-calls' || message.type === 'function-call') return handleToolCalls(req, res, message);
 
-    // end-of-call-report and everything else: nothing to persist here.
+    // Log how each call ended so briefing/line outcomes show up in the backend
+    // logs (the conversation itself runs on VAPI; this is our window into it).
+    if (message.type === 'end-of-call-report') {
+      const ended = message.endedReason || (message.call && message.call.endedReason) || 'unknown';
+      const summary = message.summary ? ` | ${String(message.summary).slice(0, 200)}` : '';
+      console.log(`📞 Jarvis call ended: ${ended}${summary}`);
+      return res.status(200).json({ received: true });
+    }
+
     return res.status(200).json({ received: true });
   } catch (e) {
     console.error('❌ Jarvis webhook error:', e.message, e.stack);
