@@ -452,6 +452,7 @@ async function getAgencySettings(req, res) {
           onboarding_step: agency.onboarding_step,
           client_header_mode: agency.client_header_mode || 'agency_name',
           allow_client_branding: agency.allow_client_branding || false,
+          hide_client_billing: agency.hide_client_billing === true,
           custom_features: Array.isArray(agency.custom_features) ? agency.custom_features : [],
           feature_overrides: (agency.feature_overrides && typeof agency.feature_overrides === 'object') ? agency.feature_overrides : {},
           calendar_enabled_plans: agency.calendar_enabled_plans || ['pro', 'growth'],
@@ -535,6 +536,7 @@ async function getAgencySettings(req, res) {
         // Client dashboard settings
         client_header_mode: agency.client_header_mode || 'agency_name',
         allow_client_branding: agency.allow_client_branding || false,
+        hide_client_billing: agency.hide_client_billing === true,
           custom_features: Array.isArray(agency.custom_features) ? agency.custom_features : [],
           feature_overrides: (agency.feature_overrides && typeof agency.feature_overrides === 'object') ? agency.feature_overrides : {},
         
@@ -600,6 +602,7 @@ async function getAgencySettings(req, res) {
         // (validated to connect|manual there).
         client_billing_mode: agency.client_billing_mode || 'connect',
         allow_client_plan_changes: agency.allow_client_plan_changes === true,
+        hide_client_billing: agency.hide_client_billing === true,
         paystack_connected: agency.paystack_connected === true,
         paystack_currency: agency.paystack_currency || null,
         flutterwave_connected: agency.flutterwave_connected === true,
@@ -761,6 +764,9 @@ async function updateAgencySettings(req, res) {
       // Client dashboard settings
       'client_header_mode',
       'allow_client_branding',
+      // Hide all billing/subscription UI from the client dashboard (for
+      // white-glove / manual-billing agencies that bill clients themselves).
+      'hide_client_billing',
       // Let clients change their own plan (self-serve upgrade via Stripe)
       'allow_client_plan_changes',
       // Client plan feature gating
@@ -798,6 +804,7 @@ async function updateAgencySettings(req, res) {
     const sanitizedUpdates = {};
     if (updates.bill_minutes_during_trial !== undefined) updates.bill_minutes_during_trial = updates.bill_minutes_during_trial === true;
     if (updates.allow_client_plan_changes !== undefined) updates.allow_client_plan_changes = updates.allow_client_plan_changes === true;
+    if (updates.hide_client_billing !== undefined) updates.hide_client_billing = updates.hide_client_billing === true;
     if (updates.signup_logo_align !== undefined && !['left', 'center', 'right'].includes(updates.signup_logo_align)) {
       updates.signup_logo_align = 'left';
     }
