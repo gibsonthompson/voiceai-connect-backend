@@ -13,8 +13,43 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CALENDAR_CLIENT_SECRET || proces
 const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://myvoiceaiconnect.com';
 
-const SCOPES = 'https://www.googleapis.com/auth/calendar.events';
+// openid + email so the token response carries the connected account's email
+// (shown on the card so the client can confirm the right account is linked).
+const SCOPES = 'openid email https://www.googleapis.com/auth/calendar.events';
 const REDIRECT_URI = `${BACKEND_URL}/api/auth/google-calendar/callback`;
+
+// Pull the connected Google account's email. We request openid+email, so the
+// token response carries an id_token (a JWT) whose payload holds the email; we
+// decode that payload directly (no signature check needed, it came straight
+// from Google's token endpoint over TLS). If it is missing for any reason, fall
+// back to the userinfo endpoint. Returns null on failure, which is non-blocking:
+// the calendar connection still works, the card just omits the email line.
+function emailFromIdToken(idToken) {
+  try {
+    const payload = String(idToken).split('.')[1];
+    if (!payload) return null;
+    const json = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    return json.email || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchGoogleEmail(tokens) {
+  const fromId = tokens && tokens.id_token ? emailFromIdToken(tokens.id_token) : null;
+  if (fromId) return fromId;
+  if (!tokens || !tokens.access_token) return null;
+  try {
+    const r = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${tokens.access_token}` },
+    });
+    if (!r.ok) return null;
+    const info = await r.json();
+    return info.email || null;
+  } catch (e) {
+    return null;
+  }
+}
 
 // After OAuth, send the client back to the SAME origin they started on. The
 // client's session lives in origin-scoped localStorage, so bouncing them to a
@@ -178,6 +213,9 @@ router.get('/callback', async (req, res) => {
 
     console.log('✅ Google Calendar tokens received for client:', clientId);
 
+    // Which Google account did they connect? Non-blocking: null if unavailable.
+    const googleEmail = await fetchGoogleEmail(tokens);
+
     // Store tokens in client record
     const { error: updateError } = await supabase
       .from('clients')
@@ -187,6 +225,7 @@ router.get('/callback', async (req, res) => {
         google_refresh_token: tokens.refresh_token || null,
         google_token_expires_at: expiresAt,
         google_calendar_id: 'primary',
+        google_calendar_email: googleEmail,
         updated_at: new Date().toISOString(),
       })
       .eq('id', clientId);
@@ -281,6 +320,7 @@ router.post('/disconnect', async (req, res) => {
         google_refresh_token: null,
         google_token_expires_at: null,
         google_calendar_id: null,
+        google_calendar_email: null,
         updated_at: new Date().toISOString(),
       })
       .eq('id', clientId);
@@ -323,7 +363,7 @@ router.get('/status/:clientId', async (req, res) => {
 
     const { data: client, error } = await supabase
       .from('clients')
-      .select('google_calendar_connected, google_token_expires_at')
+      .select('google_calendar_connected, google_token_expires_at, google_calendar_email')
       .eq('id', clientId)
       .single();
 
@@ -339,6 +379,7 @@ router.get('/status/:clientId', async (req, res) => {
       token_valid: client.google_token_expires_at
         ? new Date(client.google_token_expires_at) > new Date()
         : false,
+      email: client.google_calendar_email || null,
       plan_allowed: planCheck.allowed,
       plan_message: planCheck.allowed ? null : planCheck.reason,
     });
