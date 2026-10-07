@@ -1006,8 +1006,23 @@ app.get('/api/agency/:agencyId/clients', requireAgencyAccess('clients'), async (
       return res.status(400).json({ error: error.message });
     }
 
-    console.log(`📋 Fetched ${(clients || []).length} clients for agency ${agencyId}`);
-    res.json({ clients: clients || [] });
+    // Enrich each client with a backend-owned effective monthly price: the plans-
+    // array price (custom wins) with any signup discount code applied to the
+    // ongoing monthly. One source of truth for the dashboard and analytics.
+    const { effectiveMonthlyCents } = require('./lib/plans');
+    const { data: agencyRow } = await supabase.from('agencies').select('*').eq('id', agencyId).single();
+    const codesByName = {};
+    if (agencyRow) {
+      const { data: codes } = await supabase.from('discount_codes').select('code, percent_off, duration, duration_months').eq('agency_id', agencyId);
+      for (const dc of (codes || [])) codesByName[String(dc.code || '').toUpperCase()] = dc;
+    }
+    const enriched = (clients || []).map((c) => {
+      const dc = c.signup_discount_code ? codesByName[String(c.signup_discount_code).toUpperCase()] : null;
+      const p = agencyRow ? effectiveMonthlyCents(c, agencyRow, dc) : { base_cents: 0, effective_cents: 0, discount: null };
+      return { ...c, base_price_cents: p.base_cents, effective_price_cents: p.effective_cents, price_discount: p.discount };
+    });
+    console.log(`📋 Fetched ${enriched.length} clients for agency ${agencyId}`);
+    res.json({ clients: enriched });
   } catch (error) {
     console.error('Error fetching agency clients:', error);
     res.status(500).json({ error: 'Server error' });
@@ -1032,6 +1047,23 @@ app.get('/api/agency/:agencyId/clients/:clientId', requireAgencyAccess('clients'
       .single();
 
     if (error || !client) return res.status(404).json({ error: 'Client not found' });
+
+    // Effective monthly price (plans-array + custom + any signup discount code).
+    try {
+      const { effectiveMonthlyCents } = require('./lib/plans');
+      const { data: agencyRow } = await supabase.from('agencies').select('*').eq('id', agencyId).single();
+      let dc = null;
+      if (agencyRow && client.signup_discount_code) {
+        const { data: code } = await supabase.from('discount_codes').select('code, percent_off, duration, duration_months').eq('agency_id', agencyId).ilike('code', client.signup_discount_code).maybeSingle();
+        dc = code || null;
+      }
+      if (agencyRow) {
+        const p = effectiveMonthlyCents(client, agencyRow, dc);
+        client.base_price_cents = p.base_cents;
+        client.effective_price_cents = p.effective_cents;
+        client.price_discount = p.discount;
+      }
+    } catch (e) { console.warn('effective price enrich failed:', e.message); }
 
     // Attach the primary client login (username = email, plus any agency-set
     // visible password) so the client page can show and manage credentials.

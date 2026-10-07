@@ -123,11 +123,35 @@ function generatePlanKey(name, existingKeys = []) {
   return key;
 }
 
+// Effective monthly price for a client, in cents. The plan's price comes from the
+// plans array (getPlan); a custom-priced client wins over that. A signup discount
+// code is applied to the ONGOING monthly only when it persists (forever/repeating);
+// a 'once' code cuts just the first charge, so the ongoing stays full. Returns base,
+// effective, and the applied discount so callers can show "$249 ($124.50 with CODE)".
+// Shared so the client list/detail endpoints and analytics all agree on one number.
+function effectiveMonthlyCents(client, agency, discountCode = null) {
+  if (client && client.pricing_mode === 'custom' && client.custom_price_cents != null) {
+    const v = Number(client.custom_price_cents) || 0;
+    return { base_cents: v, effective_cents: v, discount: null };
+  }
+  const plan = getPlan(agency, client && client.plan_type);
+  const base = plan && plan.price_cents != null ? Number(plan.price_cents) : 0;
+  const pct = discountCode && Number(discountCode.percent_off) > 0 ? Number(discountCode.percent_off) : 0;
+  const ongoingDiscounted = pct > 0 && discountCode.duration !== 'once';
+  const effective = ongoingDiscounted ? Math.round(base * (1 - pct / 100)) : base;
+  return {
+    base_cents: base,
+    effective_cents: effective,
+    discount: pct > 0 ? { code: discountCode.code, percent_off: pct, duration: discountCode.duration } : null,
+  };
+}
+
 module.exports = {
   LEGACY_KEYS,
   getAgencyPlans,
   getVisiblePlans,
   getPlan,
+  effectiveMonthlyCents,
   validPlanKeys,
   generatePlanKey,
   normalizePlan,
