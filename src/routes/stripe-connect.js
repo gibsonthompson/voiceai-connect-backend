@@ -1621,7 +1621,12 @@ async function createClientCheckout(req, res) {
     const _setupPct = _waiveSetup ? 100 : (_discount && _discount.setup_fee_percent_off ? Number(_discount.setup_fee_percent_off) : 0);
 
     const setupFeeItem = _setupPct >= 100 ? null : await buildSetupFeeLineItem(agency, plan, client, _setupPct);
-    if (setupFeeItem) upgradeLineItems.push(setupFeeItem);
+    // buildSetupFeeLineItem returns internal bookkeeping fields (productId,
+    // feeCents) alongside the Stripe fields. Push ONLY the Stripe-valid fields
+    // into line_items, otherwise Stripe rejects the whole session with
+    // "Received unknown parameters: productId, feeCents". The signup checkout
+    // path (createTrialCheckoutForSignup) already sanitizes the same way.
+    if (setupFeeItem) upgradeLineItems.push({ price: setupFeeItem.price, quantity: 1 });
 
     const session = await stripe.checkout.sessions.create({
       customer: connectedCustomerId, mode: 'subscription', payment_method_types: ['card'],
