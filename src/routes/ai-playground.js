@@ -9,11 +9,21 @@
 //          notification phone (redirecting their call alerts). requireAgencyAccess
 //          enforces valid token + caller owns :agencyId. The per-route
 //          `.eq('agency_id', agencyId)` scoping stays as defense in depth.
+// UPDATED: 2026-10-07 — VOICE PIPELINE OPTIONS: ai-details now returns the
+//          per-client pipeline fields on the `assistant` object so the AI Lab can
+//          seed the new controls (provider, transcriber, flux, endpointing,
+//          denoising). model/temperature/voiceProvider now prefer the clients
+//          columns (what live calls actually use) over the static VAPI assistant.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { requireAgencyAccess } = require('./auth');
+
+// Platform defaults mirrored for display seeding (kept in sync with
+// assistant-config-builder.js). Used only to seed the UI when a client has not
+// chosen a value yet.
+const DEFAULT_LLM_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
 
 // ----------------------------------------------------------------------------
 // OWNERSHIP GUARD — covers /:agencyId/ai-playground and everything under it.
@@ -89,14 +99,24 @@ router.get('/:agencyId/ai-playground/clients/:clientId/ai-details', async (req, 
           assistantDetails = {
             id: raw.id,
             name: raw.name || null,
-            model: raw.model?.model || 'gpt-4o-mini',
+            // model/temperature/voiceProvider prefer the clients columns, which
+            // are what buildDynamicAssistantConfig uses for LIVE calls. The static
+            // VAPI assistant is only the fallback (test call / crash fallback).
+            model: client.llm_model || raw.model?.model || DEFAULT_LLM_MODEL,
             voice: client.voice_id || raw.voice?.voiceId || '',
             speed: client.voice_speed ?? raw.voice?.speed ?? 1,
-            voiceProvider: raw.voice?.provider || '11labs',
+            voiceProvider: client.voice_provider || raw.voice?.provider || '11labs',
             firstMessage: raw.firstMessage || '',
             systemPrompt,
             systemPromptLength: systemPrompt.length,
-            temperature: raw.model?.temperature ?? 0.7,
+            temperature: client.temperature ?? raw.model?.temperature ?? 0.7,
+            // ── voice pipeline (added 2026-10-07) ──
+            transcriberMode: client.transcriber_mode || 'nova',
+            fluxLanguage: client.flux_language || 'multi',
+            fluxEotThreshold: client.flux_eot_threshold ?? 0.6,
+            fluxEotTimeoutMs: client.flux_eot_timeout_ms ?? 3000,
+            endpointingProvider: client.endpointing_provider || 'vapi',
+            backgroundDenoising: !(client.tool_config && client.tool_config.backgroundDenoising === false),
             tools: (raw.model?.tools || []).map(t => {
               if (t.type === 'transferCall') return 'transferCall';
               return t.function?.name || t.type || 'unknown';

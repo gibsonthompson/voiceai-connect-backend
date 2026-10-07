@@ -340,9 +340,28 @@ async function updateKnowledgeBase(req, res) {
     console.log('📦 Structured fields present:', Object.keys(mergedData).filter(k => mergedData[k] && String(mergedData[k]).trim()));
 
     // ========================================
-    // 3. PULL the current live KB document and old file id.
+    // 3. BASE the new document on the cached KB content (the DB column the
+    //    dashboard reads), not a live VAPI read. Reading VAPI on every save
+    //    added several seconds. The cache is kept populated on all build/scrape
+    //    paths and self-healed by the kb-document endpoint, so it is normally
+    //    present. ONLY if it is empty do we fall back to a live VAPI read, so we
+    //    never rebuild from the generic industry doc (and lose scraped website
+    //    content) when VAPI actually has a real document. The common path does
+    //    no VAPI call. The old file id (for cleanup) is fetched in the
+    //    background re-provision.
     // ========================================
-    const { doc: currentDoc, oldFileId } = await fetchCurrentKbDoc(client);
+    let currentDoc = client.knowledge_base_content || null;
+    if (!currentDoc || !currentDoc.trim()) {
+      try {
+        const fetched = await fetchCurrentKbDoc(client);
+        if (fetched.doc && fetched.doc.trim()) {
+          currentDoc = fetched.doc;
+          console.log('ℹ️ Cache empty; recovered base document from VAPI');
+        }
+      } catch (e) {
+        console.warn('⚠️ Cache empty and VAPI read failed; will rebuild from industry doc:', e.message);
+      }
+    }
     const oldToolId = client.vapi_query_tool_id || null;
 
     // ========================================
@@ -377,35 +396,17 @@ async function updateKnowledgeBase(req, res) {
     console.log('📝 New KB document length:', newDoc.length, 'chars');
 
     // ========================================
-    // 5. UPLOAD new file + CREATE new query tool (the live call path).
-    // ========================================
-    const newFileId = await uploadKbFile(newDoc, client.business_name);
-    const newToolId = await createQueryTool(newFileId, client.business_name);
-    if (!newToolId) {
-      throw new Error('Failed to create knowledge base query tool');
-    }
-    console.log(`🔧 New query tool created: ${newToolId}`);
-
-    // ========================================
-    // 6. Point the static assistant at the new tool (non-fatal).
-    // ========================================
-    if (client.vapi_assistant_id) {
-      try {
-        await swapToolOnAssistant(client.vapi_assistant_id, newToolId);
-      } catch (e) {
-        console.warn('⚠️ Static assistant tool swap failed (non-fatal):', e.message);
-      }
-    }
-
-    // ========================================
-    // 7. PERSIST. vapi_query_tool_id is what the dynamic call path reads.
-    //    knowledge_base_content is the cached assembled doc the "What Your AI
-    //    Knows" card reads. knowledge_base_data is the structured editable copy.
+    // 5. PERSIST the assembled doc + structured copy and RESPOND NOW.
+    //    knowledge_base_content is the cached doc the "What Your AI Knows" card
+    //    reads, and knowledge_base_data is the structured editable copy, so
+    //    saving these is what the dashboard needs to reflect the change. The
+    //    slow part (re-uploading the file to VAPI, creating a new query tool and
+    //    re-pointing the assistant: several sequential VAPI calls) runs in the
+    //    background after we respond, so the save feels instant.
     // ========================================
     const { error: updateError } = await supabase
       .from('clients')
       .update({
-        vapi_query_tool_id: newToolId,
         knowledge_base_content: newDoc,
         knowledge_base_data: mergedData,
         knowledge_base_updated_at: new Date().toISOString(),
@@ -415,27 +416,64 @@ async function updateKnowledgeBase(req, res) {
 
     if (updateError) {
       console.error('❌ Database update error:', updateError);
-      // The new tool/file are live in VAPI but the DB still points at the old
-      // tool. Clean up the new orphan so we don't leak it, leave the client on
-      // its previous (working) tool.
-      cleanupOldVapiKb(newToolId, newFileId, oldToolId).catch(() => {});
       throw new Error('Failed to save knowledge base to database');
     }
 
-    console.log('✅ Database updated, client now points at new query tool');
+    console.log('✅ Content saved, responding now; VAPI re-provision continues in background');
 
-    // ========================================
-    // 8. Best-effort cleanup of the previous tool + file.
-    // ========================================
-    cleanupOldVapiKb(oldToolId, oldFileId, newToolId).catch(() => {});
-
-    console.log('📚 ====== UPDATE COMPLETE ======');
-    console.log('');
-
-    return res.json({
+    res.json({
       success: true,
       message: 'Knowledge base updated successfully',
     });
+
+    // ========================================
+    // 6. BACKGROUND: re-provision VAPI so the live call path uses the new doc.
+    //    Upload the new file, create a fresh query tool, swap it onto the
+    //    assistant, then persist vapi_query_tool_id (what the dynamic call path
+    //    reads) and clean up the old tool + file. Failures here are logged, not
+    //    surfaced: the content is already saved, and the next save retries. If
+    //    this never runs, the client keeps its previous working tool.
+    // ========================================
+    (async () => {
+      try {
+        let oldFileId = null;
+        try { ({ oldFileId } = await fetchCurrentKbDoc(client)); } catch (e) { /* best-effort */ }
+
+        const newFileId = await uploadKbFile(newDoc, client.business_name);
+        const newToolId = await createQueryTool(newFileId, client.business_name);
+        if (!newToolId) throw new Error('Failed to create knowledge base query tool');
+        console.log(`🔧 New query tool created: ${newToolId}`);
+
+        if (client.vapi_assistant_id) {
+          try {
+            await swapToolOnAssistant(client.vapi_assistant_id, newToolId);
+          } catch (e) {
+            console.warn('⚠️ Static assistant tool swap failed (non-fatal):', e.message);
+          }
+        }
+
+        const { error: toolErr } = await supabase
+          .from('clients')
+          .update({ vapi_query_tool_id: newToolId })
+          .eq('id', clientId);
+
+        if (toolErr) {
+          console.error('❌ Failed to persist new query tool id:', toolErr);
+          // Clean up the new orphan so we don't leak it; keep the old tool live.
+          cleanupOldVapiKb(newToolId, newFileId, oldToolId).catch(() => {});
+          return;
+        }
+
+        console.log('✅ Client now points at new query tool');
+        cleanupOldVapiKb(oldToolId, oldFileId, newToolId).catch(() => {});
+        console.log('📚 ====== BACKGROUND RE-PROVISION COMPLETE ======');
+        console.log('');
+      } catch (e) {
+        console.error('❌ Background KB re-provision failed:', e.message);
+      }
+    })();
+
+    return;
 
   } catch (error) {
     console.error('❌ Knowledge base update error:', error);

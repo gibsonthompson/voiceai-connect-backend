@@ -61,6 +61,23 @@
 //          now speaks only when NO custom greeting is set. Previously the
 //          welcome-back line overrode the custom greeting for known callers, so
 //          a client who set a greeting never heard it on repeat calls.
+// UPDATED: 2026-10-07 — VOICE PIPELINE OPTIONS: the dynamic builder now honors
+//          per-client AI Lab choices for the whole pipeline, not just voice:
+//            - LLM model: default is now full gpt-4.1 (env OPENAI_MODEL); the
+//              per-client model (client.llm_model) and temperature
+//              (client.temperature) now reach LIVE calls, not just test calls.
+//            - TTS provider: ElevenLabs flash v2.5 (default) OR Cartesia
+//              sonic-3.5, via client.voice_provider (buildVoice).
+//            - Transcriber: nova multi (default) OR Deepgram Flux with native
+//              end-of-turn, via client.transcriber_mode + flux_* (buildTranscriber).
+//            - Endpointing: VAPI (default) OR LiveKit, via
+//              client.endpointing_provider (buildStartSpeakingPlan); dropped
+//              entirely when Flux is on.
+//            - Krisp background denoising: ON by default
+//              (tool_config.backgroundDenoising).
+//          All per-client; platform defaults are env-overridable. Helpers are
+//          exported so routes/client-prompt.js patches the static assistant with
+//          the same shape (test call == live call).
 // ============================================================================
 
 const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, TRANSFER_KEYWORDS_BLOCK, VOICES,
@@ -75,6 +92,26 @@ try {
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 
+// ============================================================================
+// VOICE-PIPELINE MODEL PINS & TURN-TAKING DEFAULTS  (added 2026-10-07)
+// Platform-wide defaults ONLY. Per-client selections made in the AI Lab take
+// precedence (see the overrides inside buildDynamicAssistantConfig); these are
+// the fallback when a client has made no choice. Every value is env-overridable
+// so the whole fleet can be moved without touching code.
+//
+// NOTE — fleet-wide change: DEFAULT_LLM_MODEL is now the full gpt-4.1 (was
+// gpt-4o-mini). Any client with no agency-template model and no per-client model
+// now runs on 4.1. Set OPENAI_MODEL to roll the fleet back/forward.
+// ============================================================================
+const DEFAULT_LLM_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
+const DEFAULT_NOVA_MODEL = process.env.DEEPGRAM_MODEL || 'nova-2';
+const CARTESIA_TTS_MODEL = process.env.CARTESIA_TTS_MODEL || 'sonic-3.5';
+const ELEVENLABS_TTS_MODEL = 'eleven_flash_v2_5';
+const FLUX_MODEL_MULTI = 'flux-general-multi';   // Deepgram Flux EN+ES
+const FLUX_MODEL_EN = 'flux-general-en';         // Deepgram Flux English-only
+const FLUX_EOT_THRESHOLD_DEFAULT = 0.6;          // lower = snappier end-of-turn
+const FLUX_EOT_TIMEOUT_MS_DEFAULT = 3000;        // hard cap before Flux ends turn
+
 const DEFAULT_TOOL_CONFIG = {
   callerRecognition: true,
   spamDetection: true,
@@ -84,6 +121,11 @@ const DEFAULT_TOOL_CONFIG = {
   speechTimeout: true,
   speechTimeoutSeconds: 12,
   transferFallbackToMessage: true,
+  // Krisp background-speech denoising. ON by default (biggest real-world phone
+  // turn-taking win: strips background voices/noise so the transcriber only
+  // hears the caller). Set tool_config.backgroundDenoising=false per client to
+  // disable. This is a fleet-wide default change as of 2026-10-07.
+  backgroundDenoising: true,
 };
 
 const LANGUAGE_DETECTION_BLOCK = `
@@ -1192,6 +1234,75 @@ function resolveHandoff(client, toolConfig) {
 // ============================================================================
 // MAIN: Build complete VAPI assistant config
 // ============================================================================
+// ============================================================================
+// VOICE PIPELINE HELPERS  (added 2026-10-07)
+// Real calls are built here, so anything not emitted in buildDynamicAssistantConfig
+// never reaches a live call. These helpers turn the per-client AI Lab choices
+// (persisted to clients columns) into the VAPI transcriber / voice / endpointing
+// blocks, falling back to the platform defaults above. They are exported so the
+// static-assistant PATCH in routes/client-prompt.js builds the SAME shape, which
+// keeps the AI Lab "Start Test Call" faithful to what real callers get.
+// ============================================================================
+
+// True when the client is on Deepgram Flux (model-native end-of-turn) instead of
+// nova. Flux owns endpointing, so the smart/transcription endpointing plans are
+// dropped when it is on (they fight Flux's own EoT).
+function isUsingFlux(client) {
+  return (client.transcriber_mode || 'nova') === 'flux';
+}
+
+// Deepgram transcriber block. Nova (default) keeps language:'multi' (EN+ES).
+// Flux is English-oriented: 'flux-general-multi' covers EN+ES, 'flux-general-en'
+// is English-only. eotThreshold / eotTimeoutMs are per-client adjustments set in
+// the AI Lab, each bounded to a safe range.
+function buildTranscriber(client) {
+  if (isUsingFlux(client)) {
+    const lang = client.flux_language === 'en' ? 'en' : 'multi';
+    const model = lang === 'en' ? FLUX_MODEL_EN : FLUX_MODEL_MULTI;
+    let eot = Number(client.flux_eot_threshold);
+    if (!(eot >= 0.5 && eot <= 1.0)) eot = FLUX_EOT_THRESHOLD_DEFAULT;
+    let eotMs = Number(client.flux_eot_timeout_ms);
+    if (!(eotMs >= 500 && eotMs <= 30000)) eotMs = FLUX_EOT_TIMEOUT_MS_DEFAULT;
+    return { provider: 'deepgram', model, eotThreshold: eot, eotTimeoutMs: eotMs };
+  }
+  return { provider: 'deepgram', model: DEFAULT_NOVA_MODEL, language: 'multi' };
+}
+
+// TTS voice block. ElevenLabs (default) uses flash v2.5 and honors voice speed.
+// Cartesia uses sonic-3.5 and has no speed field on VAPI. voiceId holds the
+// provider-appropriate id (an ElevenLabs id OR a Cartesia id), picked in the AI Lab.
+function buildVoice(client, voiceId, voiceSpeed) {
+  const provider = client.voice_provider === 'cartesia' ? 'cartesia' : '11labs';
+  if (provider === 'cartesia') {
+    return { provider: 'cartesia', model: CARTESIA_TTS_MODEL, voiceId };
+  }
+  const speedOk = Number(voiceSpeed) >= 0.7 && Number(voiceSpeed) <= 1.2;
+  return { provider: '11labs', model: ELEVENLABS_TTS_MODEL, voiceId, ...(speedOk ? { speed: Number(voiceSpeed) } : {}) };
+}
+
+// startSpeakingPlan — how long VAPI waits before the assistant responds.
+// - Flux: it owns end-of-turn, so emit only waitSeconds and let Flux decide.
+// - Nova + LiveKit endpointing: LiveKit smart endpointing (English-oriented; keep
+//   Spanish-heavy clients on VAPI).
+// - Nova + VAPI (default): VAPI smart endpointing + punctuation plan (multi-safe).
+function buildStartSpeakingPlan(client) {
+  if (isUsingFlux(client)) {
+    return { waitSeconds: 0.4 };
+  }
+  if (client.endpointing_provider === 'livekit') {
+    return { waitSeconds: 0.4, smartEndpointingPlan: { provider: 'livekit', waitFunction: '200 + 8000 * x' } };
+  }
+  return {
+    waitSeconds: 0.4,
+    smartEndpointingPlan: { provider: 'vapi' },
+    transcriptionEndpointingPlan: {
+      onPunctuationSeconds: 0.2,
+      onNoPunctuationSeconds: 1.0,
+      onNumberSeconds: 0.4,
+    },
+  };
+}
+
 async function buildDynamicAssistantConfig(client, agency, callerContext) {
   const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
   const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
@@ -1241,7 +1352,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
 
   let voiceId = config.voiceId;
   let temperature = config.temperature;
-  let modelId = 'gpt-4o-mini';
+  let modelId = DEFAULT_LLM_MODEL;
   let voiceSpeed;
 
   if (agency?.id && supabase) {
@@ -1278,6 +1389,17 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   // only inside VAPI's supported 0.7-1.2 range.
   if (client.voice_speed) voiceSpeed = client.voice_speed;
 
+  // Client's own model + temperature (set in the AI Lab) take final precedence,
+  // so a per-client model/temperature choice reaches LIVE calls. Previously the
+  // per-client Model/Temperature controls only patched the static assistant,
+  // which live calls never use, so they affected test calls alone. (Cascade:
+  // industry default -> agency template -> per-client.)  [added 2026-10-07]
+  if (client.llm_model) modelId = client.llm_model;
+  if (client.temperature != null && !isNaN(Number(client.temperature))) {
+    const t = Number(client.temperature);
+    if (t >= 0 && t <= 2) temperature = t;
+  }
+
   const systemPrompt = await buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook, handoff);
   const firstMessage = buildFirstMessage(client.business_name, industryKey, callerContext, isAfterHours, toolConfig, hipaaMode, client.greeting_message);
   const tools = buildTools(client, toolConfig, isAfterHours, canAutoBook, handoff, transferTo);
@@ -1293,11 +1415,9 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
 
   const assistantConfig = {
     name: sanitizeAssistantName(client.business_name),
-    transcriber: {
-      provider: 'deepgram',
-      model: 'nova-2',
-      language: 'multi',
-    },
+    // Transcriber: nova (multi, default) or Deepgram Flux (model-native EoT),
+    // per the client's AI Lab choice. See buildTranscriber.
+    transcriber: buildTranscriber(client),
     model: {
       provider: 'openai',
       model: modelId,
@@ -1306,21 +1426,13 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
       ...(toolIds.length > 0 && { toolIds }),
       ...(tools.length > 0 && { tools }),
     },
-    // Real-time TTS model (~75ms first audio). Without an explicit model, VAPI
-    // falls back to a slower ElevenLabs default; flash v2.5 is the live-call model.
-    voice: { provider: '11labs', model: 'eleven_flash_v2_5', voiceId, ...(Number(voiceSpeed) >= 0.7 && Number(voiceSpeed) <= 1.2 ? { speed: Number(voiceSpeed) } : {}) },
-    // Latency: smart endpointing. VAPI's default no-punctuation wait is ~1.5s per
-    // turn; this replaces it. Provider 'vapi' (NOT 'livekit') because the transcriber
-    // runs language:'multi' and LiveKit smart endpointing is English-only.
-    startSpeakingPlan: {
-      waitSeconds: 0.4,
-      smartEndpointingPlan: { provider: 'vapi' },
-      transcriptionEndpointingPlan: {
-        onPunctuationSeconds: 0.2,
-        onNoPunctuationSeconds: 1.0,
-        onNumberSeconds: 0.4,
-      },
-    },
+    // Real-time TTS. ElevenLabs flash v2.5 (~75ms first audio, honors speed) or
+    // Cartesia sonic-3.5, per the client's AI Lab choice. See buildVoice.
+    voice: buildVoice(client, voiceId, voiceSpeed),
+    // Latency: smart endpointing. Replaces VAPI's ~1.5s no-punctuation default.
+    // Flux owns end-of-turn (waitSeconds only); nova uses VAPI (multi-safe) or
+    // LiveKit smart endpointing. See buildStartSpeakingPlan.
+    startSpeakingPlan: buildStartSpeakingPlan(client),
     // Barge-in: let the caller interrupt quickly, but not so eagerly that
     // background noise cuts the assistant off.
     stopSpeakingPlan: {
@@ -1328,6 +1440,12 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
       voiceSeconds: 0.2,
       backoffSeconds: 1.0,
     },
+    // Krisp background-speech denoising. ON unless the client disabled it. Strips
+    // background voices/noise before the transcriber, the biggest real-world
+    // phone turn-taking win. (tool_config.backgroundDenoising === false to disable.)
+    ...(toolConfig.backgroundDenoising !== false
+      ? { backgroundSpeechDenoisingPlan: { smartDenoisingPlan: { enabled: true } } }
+      : {}),
     firstMessage,
     recordingEnabled: hipaaMode ? false : true,
     serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
@@ -1343,6 +1461,13 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
 // ============================================================================
 module.exports = {
   buildDynamicAssistantConfig,
+  // Voice-pipeline helpers (exported 2026-10-07) so the static-assistant PATCH in
+  // routes/client-prompt.js produces the same transcriber/voice/endpointing shape
+  // as live calls, keeping the AI Lab test call faithful.
+  isUsingFlux,
+  buildTranscriber,
+  buildVoice,
+  buildStartSpeakingPlan,
   buildSystemPrompt,
   buildFirstMessage,
   buildCallerContextBlock,
