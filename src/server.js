@@ -1535,13 +1535,13 @@ app.get('/api/agency/:agencyId/analytics', requireAgencyAccess('analytics'), asy
 
     const { data: agency } = await supabase
       .from('agencies')
-      .select('price_starter, price_pro, price_growth')
+      .select('*')
       .eq('id', agencyId)
       .single();
 
     const { data: clients, error: clientsError } = await supabase
       .from('clients')
-      .select('id, business_name, plan_type, subscription_status, status, created_at, is_test_client, trial_ends_at, billing_mode, paystack_status, paystack_next_charge_at, flutterwave_status, flutterwave_next_charge_at')
+      .select('id, business_name, email, industry, plan_type, pricing_mode, custom_price_cents, signup_discount_code, subscription_status, status, created_at, is_test_client, trial_ends_at, billing_mode, paystack_status, paystack_next_charge_at, flutterwave_status, flutterwave_next_charge_at')
       .eq('agency_id', agencyId)
       .order('created_at', { ascending: false });
 
@@ -1557,15 +1557,19 @@ app.get('/api/agency/:agencyId/analytics', requireAgencyAccess('analytics'), asy
     const trialClients = realClients.filter(c => c.subscription_status === 'trial' || c.subscription_status === 'trialing').length;
     const totalClients = realClients.length;
 
+    // Effective monthly price per client (plans-array + custom + any signup
+    // discount), shared with the client list so the numbers agree. One code pull.
+    const { effectiveMonthlyCents } = require('./lib/plans');
+    const _codesByName = {};
+    {
+      const { data: _codes } = await supabase.from('discount_codes').select('code, percent_off, duration, duration_months').eq('agency_id', agencyId);
+      for (const dc of (_codes || [])) _codesByName[String(dc.code || '').toUpperCase()] = dc;
+    }
+    const priceFor = (c) => effectiveMonthlyCents(c, agency || {}, c.signup_discount_code ? _codesByName[String(c.signup_discount_code).toUpperCase()] : null);
+
     let mrr = 0;
     realClients.forEach(client => {
-      if (client.subscription_status === 'active') {
-        switch (client.plan_type) {
-          case 'starter': mrr += agency?.price_starter || 4900; break;
-          case 'pro': mrr += agency?.price_pro || 9900; break;
-          case 'growth': mrr += agency?.price_growth || 14900; break;
-        }
-      }
+      if (client.subscription_status === 'active') mrr += (priceFor(client).effective_cents || 0);
     });
 
     // Only query payments for real (non-test) clients
@@ -1678,11 +1682,11 @@ app.get('/api/agency/:agencyId/analytics', requireAgencyAccess('analytics'), asy
       else if (st === 'manual') billing.counts.manual++;
       else if (st === 'trial' || st === 'trialing') {
         billing.counts.trial++;
-        billing.trials.push({ business_name: c.business_name, trial_ends_at: c.trial_ends_at, days_left: daysUntil(c.trial_ends_at), billing_mode: c.billing_mode });
+        billing.trials.push({ id: c.id, business_name: c.business_name, email: c.email, industry: c.industry, plan_type: c.plan_type, effective_price_cents: priceFor(c).effective_cents, trial_ends_at: c.trial_ends_at, days_left: daysUntil(c.trial_ends_at), billing_mode: c.billing_mode });
       }
       else if (st === 'trial_expired' || st === 'expired') billing.counts.trialExpired++;
-      else if (st === 'pending_payment' || st === 'pending') { billing.counts.pendingPayment++; billing.pendingPayment.push({ business_name: c.business_name, created_at: c.created_at, billing_mode: c.billing_mode, days_waiting: Math.abs(daysUntil(c.created_at) || 0) }); }
-      else if (st === 'past_due' || st === 'manual_suspended') { billing.counts.pastDue++; billing.pastDue.push({ business_name: c.business_name, billing_mode: c.billing_mode }); }
+      else if (st === 'pending_payment' || st === 'pending') { billing.counts.pendingPayment++; billing.pendingPayment.push({ id: c.id, business_name: c.business_name, email: c.email, industry: c.industry, plan_type: c.plan_type, effective_price_cents: priceFor(c).effective_cents, created_at: c.created_at, billing_mode: c.billing_mode, days_waiting: Math.abs(daysUntil(c.created_at) || 0) }); }
+      else if (st === 'past_due' || st === 'manual_suspended') { billing.counts.pastDue++; billing.pastDue.push({ id: c.id, business_name: c.business_name, email: c.email, industry: c.industry, plan_type: c.plan_type, effective_price_cents: priceFor(c).effective_cents, billing_mode: c.billing_mode }); }
       else if (st === 'canceled' || st === 'cancelled' || st === 'agency_canceled') billing.counts.canceled++;
 
       if (st === 'active') {
