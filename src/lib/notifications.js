@@ -272,7 +272,7 @@ async function sendCallNotificationSMS(client, agency, callData) {
 async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency) {
   const brandName = agency?.name || 'VoiceAI Connect';
   const message = `🎉 Welcome to ${brandName}!\nYour AI receptionist for ${businessName} is ready!\n📞 Your AI Phone: ${formatPhoneDisplay(aiPhoneNumber)}`;
-  return _logSMS({ phone, message, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_welcome', metadata: { businessName } });
+  return _logSMS({ phone, message, from: aiPhoneNumber || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_welcome', metadata: { businessName } });
 }
 
 async function sendClientTrialExpiredSMS(client, agency) {
@@ -307,7 +307,10 @@ async function sendClientSubscriptionActivatedSMS(client, agency, plan) {
   } else {
     message = `${brandName} Subscription Active!\n\nHi ${who}, your ${planName} plan is now active!${phoneLine}`;
   }
-  return _logSMS({ phone: client.owner_phone, message, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_subscription_activated', metadata: { clientName: client.business_name, plan, onTrial: !!onTrial } });
+  // Send from the client's own AI number (white-label + recognizable to the
+  // owner), not the platform number. Falls back to the platform number when the
+  // client has no provisioned number yet.
+  return _logSMS({ phone: client.owner_phone, message, from: client.vapi_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_subscription_activated', metadata: { clientName: client.business_name, plan, onTrial: !!onTrial } });
 }
 
 async function sendSpamBlockedSMS(client, agency, callerPhone, spamReason) {

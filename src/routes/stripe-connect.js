@@ -2535,14 +2535,14 @@ async function reconcileClientSubscriptions({ dryRun = false } = {}) {
 
     // MISSING (resource_missing) is AMBIGUOUS and must never trigger a release.
     // It usually means a stale subscription id or a changed connected account,
-    // not a real cancel — and releasing a paying client's number is irreversible
+    // not a real cancel - and releasing a paying client's number is irreversible
     // external harm (it's on their Google Business, signage, socials, website).
     // A genuine cancel arrives as a RETRIEVED 'canceled'/'incomplete_expired'
     // status (Stripe keeps canceled subs retrievable), handled by the terminal
     // branch below. So on missing we do NOTHING destructive: skip and flag loudly
     // for manual review. This is the guard that a wrongful teardown lacked.
     if (missing) {
-      console.error(`🚨 Reconcile: subscription ${client.stripe_connected_subscription_id} NOT FOUND on account ${acct} for paying client ${client.business_name} (${client.id}). NOT releasing — manual review needed (likely stale sub id or wrong connected account).`);
+      console.error(`🚨 Reconcile: subscription ${client.stripe_connected_subscription_id} NOT FOUND on account ${acct} for paying client ${client.business_name} (${client.id}). NOT releasing - manual review needed (likely stale sub id or wrong connected account).`);
       results.push({ client_id: client.id, business_name: client.business_name, db_status: client.subscription_status, stripe_status: 'missing', action: 'skipped_missing_needs_review' });
       skipped++;
       continue;
@@ -2780,26 +2780,11 @@ async function handleBillDuringTrialScheduleSetup(session, stripeAccountId, clie
 
   try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
   const wasPendingPayment = client.subscription_status === 'pending_payment';
-  await ensureProvisionedOnReactivate(client, 'schedule.completed');
-  // Refresh the local client object from the DB after provisioning so the
-  // welcome + activated SMS reflect the real phone number and the just-written
-  // subscription status / trial end (the row was mutated above and by
-  // provisioning; the in-memory object was fetched before either).
-  try {
-    const { data: _fresh } = await supabase.from('clients')
-      .select('vapi_phone_number, phone_number, subscription_status, trial_ends_at, owner_name')
-      .eq('id', client.id).single();
-    if (_fresh) Object.assign(client, _fresh);
-  } catch (e) { console.warn('⚠️ Client refresh after provisioning failed:', e.message); }
-
   const agency = client.agencies;
-  if (wasPendingPayment && client.owner_phone && client.vapi_phone_number) {
-    try { await sendWelcomeSMS(client.owner_phone, client.business_name, client.vapi_phone_number, agency); } catch (e) { console.error('Deferred welcome SMS failed:', e.message); }
-  }
-  if (wasPendingPayment) {
-    try { await sendClientSignupNotificationSMS(client, agency); } catch (e) { console.error('Deferred signup notification failed:', e.message); }
-  }
-  await sendClientSubscriptionActivatedSMS(client, agency, plan);
+  // Provision the number first, then send the welcome + activated texts from the
+  // client's own AI number once it is live (see provisionThenNotify). This closes
+  // the race where the texts went out before the number was bought.
+  await provisionThenNotify(client, agency, plan, wasPendingPayment, 'schedule.completed');
 }
 
 // Upfront-setup-fee trial: the one-time setup fee was already charged in a
@@ -2875,26 +2860,10 @@ async function handleUpfrontSetupFeeTrialSetup(session, stripeAccountId, client)
 
   try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
   const wasPendingPayment = client.subscription_status === 'pending_payment';
-  await ensureProvisionedOnReactivate(client, 'setupfee.trial.completed');
-  // Refresh the local client object from the DB after provisioning so the
-  // welcome + activated SMS reflect the real phone number and the just-written
-  // subscription status / trial end (the row was mutated above and by
-  // provisioning; the in-memory object was fetched before either).
-  try {
-    const { data: _fresh } = await supabase.from('clients')
-      .select('vapi_phone_number, phone_number, subscription_status, trial_ends_at, owner_name')
-      .eq('id', client.id).single();
-    if (_fresh) Object.assign(client, _fresh);
-  } catch (e) { console.warn('⚠️ Client refresh after provisioning failed:', e.message); }
-
   const agency = client.agencies;
-  if (wasPendingPayment && client.owner_phone && client.vapi_phone_number) {
-    try { await sendWelcomeSMS(client.owner_phone, client.business_name, client.vapi_phone_number, agency); } catch (e) { console.error('Deferred welcome SMS failed:', e.message); }
-  }
-  if (wasPendingPayment) {
-    try { await sendClientSignupNotificationSMS(client, agency); } catch (e) { console.error('Deferred signup notification failed:', e.message); }
-  }
-  await sendClientSubscriptionActivatedSMS(client, agency, plan);
+  // Provision the number first, then send the welcome + activated texts from the
+  // client's own AI number once it is live (see provisionThenNotify).
+  await provisionThenNotify(client, agency, plan, wasPendingPayment, 'setupfee.trial.completed');
 }
 
 async function handleClientCheckoutCompleted(session, stripeAccountId) {
@@ -3002,20 +2971,6 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
   // Update agency per-client billing
   try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
 
-  // Re-enable OR re-provision: if the number was released while the client was
-  // inactive, restore it here so a reactivation never leaves them numberless.
-  await ensureProvisionedOnReactivate(client, 'checkout.completed');
-  // Refresh the local client object from the DB after provisioning so the
-  // welcome + activated SMS reflect the real phone number and the just-written
-  // subscription status / trial end (the row was mutated above and by
-  // provisioning; the in-memory object was fetched before either).
-  try {
-    const { data: _fresh } = await supabase.from('clients')
-      .select('vapi_phone_number, phone_number, subscription_status, trial_ends_at, owner_name')
-      .eq('id', client.id).single();
-    if (_fresh) Object.assign(client, _fresh);
-  } catch (e) { console.warn('⚠️ Client refresh after provisioning failed:', e.message); }
-
   // Record payment if Stripe collected money on this session (not for trial signups, amount_total=0)
   if (session.amount_total > 0) {
     await supabase.from('payments').insert({
@@ -3029,32 +2984,16 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
   }
 
   const agency = client.agencies;
-
-  // Card-required trial signups: send the welcome SMS NOW since it was
-  // deferred at signup time (we didn't know if they'd complete checkout).
-  if (wasPendingPayment && client.owner_phone && client.vapi_phone_number) {
-    try {
-      await sendWelcomeSMS(client.owner_phone, client.business_name, client.vapi_phone_number, agency);
-      console.log('✅ Deferred welcome SMS sent to', client.owner_phone);
-    } catch (e) {
-      console.error('Failed to send deferred welcome SMS:', e.message);
-    }
-  }
-
-  // Card-required signups: notify the platform owner NOW. This was deferred at
-  // signup time so we don't alert on signups that never complete checkout.
-  if (wasPendingPayment) {
-    try { await sendClientSignupNotificationSMS(client, agency); } catch (e) { console.error('Deferred signup notification failed:', e.message); }
-  }
-
-  // Always send the subscription-activated notification (this is a different
-  // message from the welcome SMS and goes to the client either way).
-  await sendClientSubscriptionActivatedSMS(client, agency, plan);
+  // Provision the number first (if it was not bought yet), then send the welcome
+  // + activated texts from the client's own AI number once it is live. This
+  // closes the race where the activation text went out ~15s before the number
+  // existed, so it showed no number and came from the platform number.
+  await provisionThenNotify(client, agency, plan, wasPendingPayment, 'checkout.completed');
 }
 
 // Reactivation must never leave a client active with no number. If they still
 // hold their number, re-enable it (idempotent). If it was RELEASED while they
-// were inactive (e.g. a teardown fired during an SCA-delayed checkout — the bug
+// were inactive (e.g. a teardown fired during an SCA-delayed checkout - the bug
 // that stranded Searchvista active with a null number), re-provision to restore
 // it instead of silently enabling nothing. provisionClient short-circuits if the
 // client is already provisioned, so a retried webhook won't double-buy in the
@@ -3063,31 +3002,65 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
 // idempotent (short-circuits if already provisioned), so a transient VAPI/Telnyx
 // failure shouldn't leave a PAID client with no number. Background runner, never
 // awaited by the webhook; a final failure alerts loudly for manual re-provision.
-async function provisionWithRetry(clientId, context, attempts = 3) {
+async function provisionWithRetry(clientId, context, attempts = 3, afterProvision = null) {
   const { provisionClient } = require('./client-signup');
   for (let i = 1; i <= attempts; i++) {
     try {
       await provisionClient(clientId);
-      console.log(`\u2705 Post-payment re-provision done for ${clientId} (attempt ${i}) [${context}]`);
+      console.log(`✅ Post-payment re-provision done for ${clientId} (attempt ${i}) [${context}]`);
+      if (afterProvision) { try { await afterProvision(); } catch (eh) { console.error(`afterProvision hook failed for ${clientId} [${context}]:`, eh.message); } }
       return;
     } catch (e) {
-      console.error(`\u26a0\ufe0f Post-payment re-provision attempt ${i}/${attempts} failed for ${clientId} [${context}]: ${e.message}`);
+      console.error(`⚠️ Post-payment re-provision attempt ${i}/${attempts} failed for ${clientId} [${context}]: ${e.message}`);
       if (i < attempts) await new Promise((r) => setTimeout(r, i * 5000)); // 5s, 10s backoff
     }
   }
-  console.error(`\ud83d\udea8 Post-payment re-provision FAILED after ${attempts} attempts for ${clientId} [${context}] \u2014 client PAID but has NO number; manual re-provision needed (provisionClient is idempotent, safe to re-run).`);
+  console.error(`🚨 Post-payment re-provision FAILED after ${attempts} attempts for ${clientId} [${context}] - client PAID but has NO number; manual re-provision needed (provisionClient is idempotent, safe to re-run).`);
+  // Even after a final failure, still fire the activation text so the client
+  // learns they are active; the number line is simply omitted when none exists.
+  if (afterProvision) { try { await afterProvision(); } catch (eh) { console.error(`afterProvision hook (post-failure) failed for ${clientId} [${context}]:`, eh.message); } }
 }
 
-async function ensureProvisionedOnReactivate(client, context) {
+async function ensureProvisionedOnReactivate(client, context, afterProvision = null) {
   if (client.vapi_phone_number && client.vapi_phone_id) {
     try { await enablePhoneNumber(client.vapi_phone_id); } catch (e) { console.error('Failed to enable phone:', e.message); }
     if (client.vapi_assistant_id) { try { await enableAssistant(client.vapi_assistant_id); } catch (e) { console.error('Failed to enable assistant:', e.message); } }
-    return;
+    return { provisionedInline: true };
   }
-  console.error(`🚨 Reactivating ${client.business_name} (${client.id}) with NO provisioned number [${context}] — re-provisioning to restore it.`);
+  console.error(`🚨 Reactivating ${client.business_name} (${client.id}) with NO provisioned number [${context}] - re-provisioning to restore it.`);
   // Retry with backoff (idempotent) so a paid client is never stranded on a
-  // single transient failure. Background runner keeps the webhook fast.
-  provisionWithRetry(client.id, context);
+  // single transient failure. Background runner keeps the webhook fast; the
+  // activation text fires from afterProvision once the number is live.
+  provisionWithRetry(client.id, context, 3, afterProvision);
+  return { provisionedInline: false };
+}
+
+// Ensure the client's number is provisioned, THEN send the welcome +
+// subscription-activated texts from the client's own AI number. If the number
+// is already present we send immediately; if we had to (re)provision it, the
+// texts fire once the number is live (provisionWithRetry's afterProvision hook),
+// so they always include the real number and come from it, instead of going out
+// ~15s too early from the platform number (the old race).
+async function provisionThenNotify(client, agency, plan, wasPendingPayment, context) {
+  const sendTexts = async () => {
+    let c = client;
+    try {
+      const { data: _f } = await supabase.from('clients')
+        .select('vapi_phone_number, phone_number, subscription_status, trial_ends_at, owner_name, owner_phone, business_name')
+        .eq('id', client.id).single();
+      if (_f) c = Object.assign({}, client, _f);
+    } catch (e) { console.warn('⚠️ Client refresh before activation texts failed:', e.message); }
+    if (wasPendingPayment && c.owner_phone && c.vapi_phone_number) {
+      try { await sendWelcomeSMS(c.owner_phone, c.business_name, c.vapi_phone_number, agency); console.log('✅ Deferred welcome SMS sent to', c.owner_phone); }
+      catch (e) { console.error('Failed to send deferred welcome SMS:', e.message); }
+    }
+    if (wasPendingPayment) {
+      try { await sendClientSignupNotificationSMS(c, agency); } catch (e) { console.error('Deferred signup notification failed:', e.message); }
+    }
+    try { await sendClientSubscriptionActivatedSMS(c, agency, plan); } catch (e) { console.error('Activated SMS failed:', e.message); }
+  };
+  const prov = await ensureProvisionedOnReactivate(client, context, sendTexts);
+  if (prov && prov.provisionedInline) { await sendTexts(); }
 }
 
 async function handleClientSubscriptionUpdated(subscription, stripeAccountId) {
@@ -3504,7 +3477,7 @@ module.exports = {
   handleConnectStripeWebhook,
   expireTrials,
   reconcileClientSubscriptions, // self-heal DB rows vs real Stripe status
-  releaseClientResources,       // teardown (number + VAPI) — reused by client delete
+  releaseClientResources,       // teardown (number + VAPI) - reused by client delete
   // Client-facing per-minute billing (agency charges its client per minute)
   minutePassThroughActive,      // resolver: is per-minute billing live for this agency
   ensureConnectMinuteMeter,     // create/reuse the voice_minutes meter on the connected account
