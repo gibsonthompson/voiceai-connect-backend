@@ -295,13 +295,17 @@ async function sendClientSubscriptionActivatedSMS(client, agency, plan) {
   // Fall back to phone_number if vapi_phone_number is missing (same provisioned
   // number, different column); both can legitimately hold the dialable number.
   const phoneDisplay = formatPhoneDisplay(client.vapi_phone_number || client.phone_number);
+  // Only mention the number when one is actually provisioned. A client can be
+  // activated before the number is assigned, and without this guard the message
+  // printed the literal "null" where the number should be.
+  const phoneLine = phoneDisplay ? `\n\nYour AI receptionist is answering calls 24/7 at:\n📞 ${phoneDisplay}` : '';
   const onTrial = client.subscription_status === 'trial' && client.trial_ends_at;
   let message;
   if (onTrial) {
     const endDate = new Date(client.trial_ends_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-    message = `✅ ${brandName} Free Trial Started!\n\nHi ${who}, your ${planName} plan free trial is active through ${endDate}.\n\nYour AI receptionist is answering calls 24/7 at:\n📞 ${phoneDisplay}`;
+    message = `${brandName} Free Trial Started!\n\nHi ${who}, your ${planName} plan free trial is active through ${endDate}.${phoneLine}`;
   } else {
-    message = `✅ ${brandName} Subscription Active!\n\nHi ${who}, your ${planName} plan is now active!\n\nYour AI receptionist is answering calls 24/7 at:\n📞 ${phoneDisplay}`;
+    message = `${brandName} Subscription Active!\n\nHi ${who}, your ${planName} plan is now active!${phoneLine}`;
   }
   return _logSMS({ phone: client.owner_phone, message, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_subscription_activated', metadata: { clientName: client.business_name, plan, onTrial: !!onTrial } });
 }
