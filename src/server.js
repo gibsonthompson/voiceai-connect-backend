@@ -1030,6 +1030,25 @@ app.get('/api/agency/:agencyId/clients', requireAgencyAccess('clients'), async (
 });
 
 app.post('/api/agency/:agencyId/clients/add', requireAgencyAccess('clients'), handleAgencyAddClient);
+
+// Log that the agency reached out to a client (from the analytics outreach modal),
+// so the list can show "reached out Nd ago" and nobody gets double-contacted.
+app.post('/api/agency/:agencyId/clients/:clientId/log-contact', requireAgencyAccess('clients'), async (req, res) => {
+  try {
+    const { agencyId, clientId } = req.params;
+    const now = new Date().toISOString();
+    const { error } = await supabase
+      .from('clients')
+      .update({ last_contacted_at: now })
+      .eq('id', clientId)
+      .eq('agency_id', agencyId);
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ success: true, last_contacted_at: now });
+  } catch (e) {
+    console.error('log-contact error:', e.message);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
 app.get('/api/agency/:agencyId/clients/provisioning-status/:jobId', requireAgencyAccess('clients'), getClientProvisioningStatus);
 
 app.use('/api/agency', clientPromptRoutes);
@@ -1541,7 +1560,7 @@ app.get('/api/agency/:agencyId/analytics', requireAgencyAccess('analytics'), asy
 
     const { data: clients, error: clientsError } = await supabase
       .from('clients')
-      .select('id, business_name, email, industry, plan_type, pricing_mode, custom_price_cents, signup_discount_code, subscription_status, status, created_at, is_test_client, trial_ends_at, billing_mode, paystack_status, paystack_next_charge_at, flutterwave_status, flutterwave_next_charge_at')
+      .select('id, business_name, email, industry, plan_type, pricing_mode, custom_price_cents, signup_discount_code, subscription_status, status, created_at, is_test_client, trial_ends_at, billing_mode, last_contacted_at, paystack_status, paystack_next_charge_at, flutterwave_status, flutterwave_next_charge_at')
       .eq('agency_id', agencyId)
       .order('created_at', { ascending: false });
 
@@ -1685,8 +1704,8 @@ app.get('/api/agency/:agencyId/analytics', requireAgencyAccess('analytics'), asy
         billing.trials.push({ id: c.id, business_name: c.business_name, email: c.email, industry: c.industry, plan_type: c.plan_type, effective_price_cents: priceFor(c).effective_cents, trial_ends_at: c.trial_ends_at, days_left: daysUntil(c.trial_ends_at), billing_mode: c.billing_mode });
       }
       else if (st === 'trial_expired' || st === 'expired') billing.counts.trialExpired++;
-      else if (st === 'pending_payment' || st === 'pending') { billing.counts.pendingPayment++; billing.pendingPayment.push({ id: c.id, business_name: c.business_name, email: c.email, industry: c.industry, plan_type: c.plan_type, effective_price_cents: priceFor(c).effective_cents, created_at: c.created_at, billing_mode: c.billing_mode, days_waiting: Math.abs(daysUntil(c.created_at) || 0) }); }
-      else if (st === 'past_due' || st === 'manual_suspended') { billing.counts.pastDue++; billing.pastDue.push({ id: c.id, business_name: c.business_name, email: c.email, industry: c.industry, plan_type: c.plan_type, effective_price_cents: priceFor(c).effective_cents, billing_mode: c.billing_mode }); }
+      else if (st === 'pending_payment' || st === 'pending') { billing.counts.pendingPayment++; billing.pendingPayment.push({ id: c.id, business_name: c.business_name, email: c.email, industry: c.industry, plan_type: c.plan_type, effective_price_cents: priceFor(c).effective_cents, created_at: c.created_at, billing_mode: c.billing_mode, last_contacted_at: c.last_contacted_at, days_waiting: Math.abs(daysUntil(c.created_at) || 0) }); }
+      else if (st === 'past_due' || st === 'manual_suspended') { billing.counts.pastDue++; billing.pastDue.push({ id: c.id, business_name: c.business_name, email: c.email, industry: c.industry, plan_type: c.plan_type, effective_price_cents: priceFor(c).effective_cents, billing_mode: c.billing_mode, last_contacted_at: c.last_contacted_at }); }
       else if (st === 'canceled' || st === 'cancelled' || st === 'agency_canceled') billing.counts.canceled++;
 
       if (st === 'active') {
