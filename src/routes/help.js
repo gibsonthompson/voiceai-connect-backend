@@ -408,12 +408,11 @@ router.post('/message', async (req, res) => {
     if (SUPPORT_PHONE) {
       try {
         const whoLabel = isProspect ? 'Prospect' : (userType === 'client' ? 'Client' : 'Agency');
+        // No preview; just a heads-up to go handle it in the admin dashboard.
         const smsBody = [
-          isProspect ? '📞 VoiceAI Callback Request' : '🆘 VoiceAI Support Request',
+          isProspect ? '📞 New callback request' : '🆘 New support request',
           `${whoLabel}: ${displayName}`,
-          `Contact: ${userEmail}`,
-          `Message: ${cleanMessage.substring(0, 600)}`,
-          `Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}`,
+          'Check your admin dashboard to view and reply.',
         ].join('\n');
 
         await sendAndLogSMS({

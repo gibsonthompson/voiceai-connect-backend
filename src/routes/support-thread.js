@@ -1,5 +1,5 @@
 // ============================================================================
-// SUPPORT THREADS — two-way platform <-> agency messaging on support_requests
+// SUPPORT THREADS - two-way platform <-> agency messaging on support_requests
 // ----------------------------------------------------------------------------
 // support_requests is the agency -> platform channel (admin Support queue). Its
 // `message` column is the agency's original note (the thread seed). Every reply
@@ -67,7 +67,7 @@ function requireAdmin(req, res, next) {
   }
 }
 
-// Lazy notification senders — a missing module must never break a reply.
+// Lazy notification senders - a missing module must never break a reply.
 let sendAndLogSMS = async () => {};
 let sendPlatformNotificationSMS = async () => {};
 try { ({ sendAndLogSMS } = require('../lib/sms-logger')); } catch (e) { /* SMS disabled */ }
@@ -155,7 +155,7 @@ const adminRouter = express.Router();
 adminRouter.get('/agency-threads/:agencyId', requireAdmin, async (req, res) => {
   try {
     const { agencyId } = req.params;
-    // agencies has no owner_name column (only clients do) — selecting it errored
+    // agencies has no owner_name column (only clients do) - selecting it errored
     // and 404'd the whole thread. Select only columns that exist.
     const { data: agency } = await supabase.from('agencies').select('id, name, email').eq('id', agencyId).maybeSingle();
     const t = await buildAgencyThread(agencyId);
@@ -324,7 +324,7 @@ agencyRouter.post('/:agencyId/platform-threads/:id/reply', requireAgencyAccess('
     try {
       const { data: agency } = await supabase.from('agencies').select('name').eq('id', agencyId).single();
       const who = (agency && agency.name) || 'An agency';
-      await sendPlatformNotificationSMS(`Reply from ${who}:\n\n${body.slice(0, 300)}`);
+      await sendPlatformNotificationSMS(`New reply from ${who} in admin messaging. Check your admin dashboard.`);
     } catch (e) { console.error('platform reply SMS failed (non-blocking):', e.message); }
 
     res.json({ success: true, message });
@@ -334,7 +334,7 @@ agencyRouter.post('/:agencyId/platform-threads/:id/reply', requireAgencyAccess('
   }
 });
 
-// POST /api/agency/:agencyId/platform-threads — the agency STARTS a new thread
+// POST /api/agency/:agencyId/platform-threads - the agency STARTS a new thread
 // to the platform (reach out to admin from the inbox, not only reply). Creates a
 // support_request that lands in the admin Support queue, flagged unread.
 agencyRouter.post('/:agencyId/platform-threads', requireAgencyAccess('dashboard'), async (req, res) => {
@@ -366,7 +366,7 @@ agencyRouter.post('/:agencyId/platform-threads', requireAgencyAccess('dashboard'
       .single();
     if (error) throw error;
 
-    try { await sendPlatformNotificationSMS(`New message from ${who}:\n\n${body.slice(0, 300)}`); }
+    try { await sendPlatformNotificationSMS(`New message from ${who} in admin messaging. Check your admin dashboard.`); }
     catch (e) { console.error('platform new-thread SMS failed (non-blocking):', e.message); }
 
     res.json({ success: true, request });

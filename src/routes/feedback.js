@@ -1,7 +1,7 @@
 // ============================================================================
 // AGENCY FEEDBACK ROUTES
 //
-// UPDATED: 2026-09-17 — SECURITY: added a top-of-router ownership guard. Both
+// UPDATED: 2026-09-17 - SECURITY: added a top-of-router ownership guard. Both
 //          routes are scoped by :agencyId but had no ownership check, so an
 //          authenticated agency could read another agency's feedback history or
 //          submit feedback in their name. requireAgencyAccess enforces valid
@@ -13,7 +13,7 @@ const { supabase } = require('../lib/supabase');
 const { requireAgencyAccess } = require('./auth');
 
 // ----------------------------------------------------------------------------
-// OWNERSHIP GUARD — covers /:agencyId/feedback (GET + POST).
+// OWNERSHIP GUARD - covers /:agencyId/feedback (GET + POST).
 // ----------------------------------------------------------------------------
 router.use('/:agencyId/feedback', requireAgencyAccess());
 
@@ -21,7 +21,7 @@ let sendPlatformNotificationSMS;
 try {
   ({ sendPlatformNotificationSMS } = require('../lib/notifications'));
 } catch (err) {
-  console.warn('notifications module not found — feedback SMS disabled');
+  console.warn('notifications module not found - feedback SMS disabled');
   sendPlatformNotificationSMS = async () => {};
 }
 
@@ -71,10 +71,10 @@ router.post('/:agencyId/feedback', async (req, res) => {
       return res.status(500).json({ error: 'Failed to save feedback' });
     }
 
-    // SMS notification to platform owner
+    // SMS notification to platform owner. No preview; just a heads-up to go
+    // read it in the admin dashboard.
     try {
-      const truncated = message.trim().substring(0, 300);
-      await sendPlatformNotificationSMS(`Feedback from ${agency.name}:\n\n${truncated}`);
+      await sendPlatformNotificationSMS(`New feedback from ${agency.name}. Check your admin dashboard.`);
     } catch (smsErr) {
       console.error('Failed to send feedback SMS:', smsErr);
     }
