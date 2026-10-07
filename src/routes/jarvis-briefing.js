@@ -51,6 +51,14 @@ const JARVIS_SERVER_URL = `${BACKEND_URL}/webhook/vapi-jarvis`;
 const core = require('../lib/briefing-core');
 const { assembleBriefing, renderBriefingText, etHour } = core;
 
+function requireSecret(req, res, next) {
+  const secret = req.headers['x-cron-secret'];
+  if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+}
+
 function briefingQASystemPrompt(ctx) {
   const context = { schedule: ctx.schedule, openTasks: ctx.openTasks, goal: ctx.goal };
   return `# Who you are

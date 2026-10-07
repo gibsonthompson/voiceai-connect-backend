@@ -17,14 +17,6 @@ const WX_LAT = 33.9562;
 const WX_LON = -83.9880;
 const WX_PLACE = 'Lawrenceville';
 
-function requireSecret(req, res, next) {
-  const secret = req.headers['x-cron-secret'];
-  if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  next();
-}
-
 // Current hour in America/New_York (0-23), DST-correct.
 function etHour() {
   const h = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false, hourCycle: 'h23' }).format(new Date());
