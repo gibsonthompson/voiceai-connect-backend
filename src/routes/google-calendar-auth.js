@@ -16,6 +16,36 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'https://myvoiceaiconnect.com';
 const SCOPES = 'https://www.googleapis.com/auth/calendar.events';
 const REDIRECT_URI = `${BACKEND_URL}/api/auth/google-calendar/callback`;
 
+// After OAuth, send the client back to the SAME origin they started on. The
+// client's session lives in origin-scoped localStorage, so bouncing them to a
+// different host (e.g. the slug subdomain when they started on the agency's
+// custom domain) drops their token and logs them out. The initiating page
+// passes its origin as ?return=, we carry it through the OAuth state, and we
+// validate it here against the agency's own hosts before trusting it, so this
+// can never become an open redirect.
+function allowedReturnHosts(agency) {
+  const hosts = new Set(['myvoiceaiconnect.com', 'www.myvoiceaiconnect.com']);
+  if (agency && agency.slug) hosts.add(`${agency.slug}.myvoiceaiconnect.com`);
+  if (agency && agency.domain_verified && agency.marketing_domain) {
+    const md = String(agency.marketing_domain).replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
+    const bare = md.replace(/^www\./, '');
+    hosts.add(bare);
+    hosts.add(`www.${bare}`);
+  }
+  return hosts;
+}
+
+function safeReturnUrl(returnTo, agency) {
+  if (!returnTo) return null;
+  let u;
+  try { u = new URL(returnTo); } catch (e) { return null; }
+  if (u.protocol !== 'https:') return null;
+  if (!allowedReturnHosts(agency).has(u.host.toLowerCase())) return null;
+  // Only client pages; drop any query/hash the caller tacked on.
+  const path = (u.pathname && u.pathname.startsWith('/client')) ? u.pathname : '/client/ai-agent';
+  return `${u.protocol}//${u.host}${path}`;
+}
+
 // ============================================================================
 // PLAN GATING
 // Google Calendar is a CORE feature now, included on every plan. This used to
@@ -44,7 +74,7 @@ async function checkPlanAccess(clientId) {
 
 // ============================================================================
 // GET /api/auth/google-calendar/connect
-// Initiates OAuth flow — called from client dashboard
+// Initiates OAuth flow - called from client dashboard
 // ============================================================================
 router.get('/connect', async (req, res) => {
   try {
@@ -59,15 +89,18 @@ router.get('/connect', async (req, res) => {
       return res.status(500).json({ error: 'Google Calendar not configured' });
     }
 
-    // Plan gating — does this client's plan include calendar?
+    // Plan gating - does this client's plan include calendar?
     const planCheck = await checkPlanAccess(clientId);
     if (!planCheck.allowed) {
       console.log(`🚫 Calendar access denied for client ${clientId}: ${planCheck.reason}`);
       return res.redirect(`${FRONTEND_URL}/client/settings?error=plan_upgrade_required`);
     }
 
-    // Store clientId in state param so we get it back in callback
-    const state = Buffer.from(JSON.stringify({ clientId })).toString('base64url');
+    // Store clientId AND the origin to return to in state, so the callback can
+    // send the client back to the same host they started on (session survives).
+    // Falls back to the Referer header when the caller did not pass ?return=.
+    const returnTo = req.query.return || req.headers.referer || '';
+    const state = Buffer.from(JSON.stringify({ clientId, returnTo })).toString('base64url');
 
     const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     authUrl.searchParams.set('client_id', GOOGLE_CLIENT_ID);
@@ -88,7 +121,7 @@ router.get('/connect', async (req, res) => {
 
 // ============================================================================
 // GET /api/auth/google-calendar/callback
-// Handles Google's OAuth redirect — exchanges code for tokens
+// Handles Google's OAuth redirect - exchanges code for tokens
 // Then triggers VAPI assistant update to add calendar tools
 // ============================================================================
 router.get('/callback', async (req, res) => {
@@ -107,10 +140,11 @@ router.get('/callback', async (req, res) => {
     }
 
     // Decode state to get clientId
-    let clientId;
+    let clientId, returnTo;
     try {
       const stateDecoded = JSON.parse(Buffer.from(state, 'base64url').toString());
       clientId = stateDecoded.clientId;
+      returnTo = stateDecoded.returnTo;
     } catch (e) {
       console.error('❌ Failed to decode state:', e);
       return res.redirect(`${redirectBase}/client/settings?error=calendar_failed`);
@@ -165,7 +199,7 @@ router.get('/callback', async (req, res) => {
     // Get client's VAPI assistant ID to add calendar tools
     const { data: client } = await supabase
       .from('clients')
-      .select('vapi_assistant_id, agency_id, agencies(slug)')
+      .select('vapi_assistant_id, agency_id, agencies(slug, marketing_domain, domain_verified)')
       .eq('id', clientId)
       .single();
 
@@ -181,10 +215,19 @@ router.get('/callback', async (req, res) => {
         })
         .catch(err => console.error('❌ VAPI update error (non-blocking):', err));
     } else {
-      console.warn(`⚠️ No VAPI assistant found for client ${clientId} — calendar tools not added`);
+      console.warn(`⚠️ No VAPI assistant found for client ${clientId} - calendar tools not added`);
     }
 
-    // Determine redirect URL based on agency slug
+    // Prefer returning the client to the exact origin they started on, so their
+    // session (origin-scoped localStorage) survives and they are not logged out.
+    // Only when there is no valid return do we fall back to the slug subdomain.
+    const safeReturn = safeReturnUrl(returnTo, client?.agencies);
+    if (safeReturn) {
+      console.log(`✅ Google Calendar connected for client: ${clientId} (returning to ${safeReturn})`);
+      return res.redirect(`${safeReturn}?success=calendar_connected`);
+    }
+
+    // Determine fallback redirect URL based on agency slug
     if (client?.agencies?.slug) {
       redirectBase = `https://${client.agencies.slug}.myvoiceaiconnect.com`;
     }
@@ -199,7 +242,7 @@ router.get('/callback', async (req, res) => {
 
 // ============================================================================
 // POST /api/auth/google-calendar/disconnect
-// Disconnects Google Calendar — revokes token, clears DB, removes VAPI tools
+// Disconnects Google Calendar - revokes token, clears DB, removes VAPI tools
 // ============================================================================
 router.post('/disconnect', async (req, res) => {
   try {
