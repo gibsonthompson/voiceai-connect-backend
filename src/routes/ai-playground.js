@@ -11,9 +11,9 @@
 //          `.eq('agency_id', agencyId)` scoping stays as defense in depth.
 // UPDATED: 2026-10-07 — VOICE PIPELINE OPTIONS: ai-details now returns the
 //          per-client pipeline fields on the `assistant` object so the AI Lab can
-//          seed the new controls (provider, transcriber, flux, endpointing,
-//          denoising). model/temperature/voiceProvider now prefer the clients
-//          columns (what live calls actually use) over the static VAPI assistant.
+//          seed the new controls (transcriber, flux, endpointing, denoising).
+//          model/temperature now prefer the clients columns (what live calls
+//          actually use) over the static VAPI assistant.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -99,13 +99,12 @@ router.get('/:agencyId/ai-playground/clients/:clientId/ai-details', async (req, 
           assistantDetails = {
             id: raw.id,
             name: raw.name || null,
-            // model/temperature/voiceProvider prefer the clients columns, which
+            // model/temperature prefer the clients columns, which
             // are what buildDynamicAssistantConfig uses for LIVE calls. The static
             // VAPI assistant is only the fallback (test call / crash fallback).
             model: client.llm_model || raw.model?.model || DEFAULT_LLM_MODEL,
             voice: client.voice_id || raw.voice?.voiceId || '',
             speed: client.voice_speed ?? raw.voice?.speed ?? 1,
-            voiceProvider: client.voice_provider || raw.voice?.provider || '11labs',
             firstMessage: raw.firstMessage || '',
             systemPrompt,
             systemPromptLength: systemPrompt.length,

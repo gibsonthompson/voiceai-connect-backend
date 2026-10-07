@@ -1815,10 +1815,7 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
   const industryConfig = resolved.config;
   const backendKey = resolved.backendKey;
   
-  // Cartesia voice ids are free-form (not in the ElevenLabs library), so skip the
-  // ElevenLabs voice_id validation when the Cartesia engine is selected. [2026-10-07]
-  const isCartesiaEngine = typeof tts_model === 'string' && tts_model.startsWith('sonic');
-  if (!isCartesiaEngine && voice_id && !ELEVENLABS_VOICES.find(v => v.id === voice_id)) {
+  if (voice_id && !ELEVENLABS_VOICES.find(v => v.id === voice_id)) {
     const { data: agForVoice } = await supabase.from('agencies').select('custom_voices').eq('id', agencyId).single();
     const customVoices = Array.isArray(agForVoice && agForVoice.custom_voices) ? agForVoice.custom_voices : [];
     if (!customVoices.find(v => v && v.id === voice_id)) {
@@ -1837,13 +1834,12 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
 
   // TTS + transcriber model, both restricted to Vapi-verified values so an
   // agency can never save a string that would break their own calls.
-  // ElevenLabs models Vapi actually accepts, plus Cartesia 'sonic-3.5' (added
-  // 2026-10-07 — the builder maps a 'sonic*' tts_model to the Cartesia provider).
-  // Eleven v4 / v4 Turbo are NOT here: Vapi doesn't support them yet (v4 streams
-  // only over ElevenLabs' Text-to-Dialogue WebSocket, which Vapi hasn't adopted).
-  // When Vapi adds it, append 'eleven_v4_turbo' below (one line) and drop
-  // `comingSoon` on the matching option in the AI Lab template editor.
-  const validTtsModels = ['eleven_flash_v2_5', 'eleven_multilingual_v2', 'eleven_v3', 'sonic-3.5'];
+  // ElevenLabs models Vapi actually accepts. Eleven v4 / v4 Turbo are NOT here:
+  // Vapi doesn't support them yet (v4 streams only over ElevenLabs' Text-to-
+  // Dialogue WebSocket, which Vapi hasn't adopted). When Vapi adds it, append
+  // 'eleven_v4_turbo' below (one line) and drop `comingSoon` on the matching
+  // option in the AI Lab template editor.
+  const validTtsModels = ['eleven_flash_v2_5', 'eleven_multilingual_v2', 'eleven_v3'];
   const finalTtsModel = validTtsModels.includes(tts_model) ? tts_model : 'eleven_flash_v2_5';
   // 'flux-general-en' (English-only Flux) added 2026-10-07 alongside the EN+ES multi.
   const validTranscribers = ['nova-3', 'nova-2', 'flux-general-multi', 'flux-general-en'];

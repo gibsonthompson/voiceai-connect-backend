@@ -14,7 +14,6 @@
 //          persists the per-client pipeline choices surfaced in the AI Lab:
 //            - llm_model      -> clients.llm_model      (+ VAPI model.model)
 //            - temperature    -> clients.temperature    (+ VAPI model.temperature)
-//            - voice_provider -> clients.voice_provider (+ VAPI voice.provider)
 //            - transcriber_mode / flux_language / flux_eot_threshold /
 //              flux_eot_timeout_ms / endpointing_provider -> clients columns
 //            - background_denoising -> clients.tool_config.backgroundDenoising
@@ -41,7 +40,6 @@ const VAPI_API_KEY = process.env.VAPI_API_KEY;
 // Allowed values for the pipeline enums (mirror the AI Lab dropdowns + the
 // buildDynamicAssistantConfig expectations). Kept permissive for llm_model so a
 // newly enabled model id is not rejected before the dropdown is updated.
-const ALLOWED_VOICE_PROVIDERS = ['11labs', 'cartesia'];
 const ALLOWED_TRANSCRIBER_MODES = ['nova', 'flux'];
 const ALLOWED_FLUX_LANGUAGES = ['en', 'multi'];
 const ALLOWED_ENDPOINTING = ['vapi', 'livekit'];
@@ -110,7 +108,7 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     const {
       system_prompt, first_message, voice_id, model, temperature, call_mode, transfer_phone, speed,
       // ── voice pipeline (added 2026-10-07) ──
-      voice_provider, transcriber_mode, flux_language, flux_eot_threshold,
+      transcriber_mode, flux_language, flux_eot_threshold,
       flux_eot_timeout_ms, endpointing_provider, background_denoising,
     } = req.body;
 
@@ -125,10 +123,6 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     const hasSpeed = typeof speed === 'number' && speed >= 0.7 && speed <= 1.2;
 
     // ── voice pipeline field detection + validation ──
-    const hasVoiceProvider = typeof voice_provider === 'string' && voice_provider.length > 0;
-    if (hasVoiceProvider && !ALLOWED_VOICE_PROVIDERS.includes(voice_provider)) {
-      return res.status(400).json({ success: false, error: `Invalid voice_provider. Allowed: ${ALLOWED_VOICE_PROVIDERS.join(', ')}` });
-    }
     const hasTranscriberMode = typeof transcriber_mode === 'string' && transcriber_mode.length > 0;
     if (hasTranscriberMode && !ALLOWED_TRANSCRIBER_MODES.includes(transcriber_mode)) {
       return res.status(400).json({ success: false, error: `Invalid transcriber_mode. Allowed: ${ALLOWED_TRANSCRIBER_MODES.join(', ')}` });
@@ -159,7 +153,7 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     }
     const hasDenoising = typeof background_denoising === 'boolean';
 
-    const needsPipelinePatch = hasVoiceProvider || hasTranscriberMode || hasFluxLang || hasFluxEot || hasFluxEotMs || hasEndpointing || hasDenoising;
+    const needsPipelinePatch = hasTranscriberMode || hasFluxLang || hasFluxEot || hasFluxEotMs || hasEndpointing || hasDenoising;
 
     // Validate prompt length
     if (typeof system_prompt === 'string' && system_prompt.trim().length > 0 && system_prompt.trim().length < 10) {
@@ -174,7 +168,7 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     // correctly for the static-assistant PATCH + the tool_config merge).
     const { data: client, error } = await supabase
       .from('clients')
-      .select('id, vapi_assistant_id, business_name, voice_id, voice_speed, voice_provider, transcriber_mode, flux_language, flux_eot_threshold, flux_eot_timeout_ms, endpointing_provider, tool_config')
+      .select('id, vapi_assistant_id, business_name, voice_id, voice_speed, transcriber_mode, flux_language, flux_eot_threshold, flux_eot_timeout_ms, endpointing_provider, tool_config')
       .eq('id', clientId)
       .eq('agency_id', agencyId)
       .single();
@@ -189,7 +183,6 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     const mergedClient = {
       voice_id: hasVoice ? voice_id.trim() : client.voice_id,
       voice_speed: hasSpeed ? speed : client.voice_speed,
-      voice_provider: hasVoiceProvider ? voice_provider : client.voice_provider,
       transcriber_mode: hasTranscriberMode ? transcriber_mode : client.transcriber_mode,
       flux_language: hasFluxLang ? flux_language : client.flux_language,
       flux_eot_threshold: hasFluxEot ? fluxEotVal : client.flux_eot_threshold,
@@ -208,7 +201,7 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     // fallback). Live calls are built fresh by buildDynamicAssistantConfig,
     // but we keep the static assistant in sync so a test call is faithful.
     // ====================================================================
-    const needsVoicePatch = hasVoice || hasSpeed || hasVoiceProvider;
+    const needsVoicePatch = hasVoice || hasSpeed;
     const needsVapiPatch = hasPrompt || hasGreeting || needsVoicePatch || hasModel || hasTemp || hasTransferPhone || needsPipelinePatch;
 
     if (needsVapiPatch) {
@@ -290,10 +283,9 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
         patchPayload.firstMessage = first_message.trim();
       }
 
-      // --- voice (provider / voiceId / speed) ---
-      // Rebuilt from the merged state via the shared builder helper so a provider
-      // switch (e.g. to Cartesia) replaces the whole voice block rather than
-      // leaving stale ElevenLabs fields behind.
+      // --- voice (voiceId / speed) ---
+      // Rebuilt from the merged state via the shared builder helper so the VAPI
+      // voice block matches what live calls produce.
       if (needsVoicePatch) {
         patchPayload.voice = buildVoice(mergedClient, finalVoiceId, finalSpeed);
       }
@@ -331,7 +323,6 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     if (hasSpeed) supabaseUpdate.voice_speed = speed;
     if (hasModel) supabaseUpdate.llm_model = model.trim();
     if (hasTemp) supabaseUpdate.temperature = temperature;
-    if (hasVoiceProvider) supabaseUpdate.voice_provider = voice_provider;
     if (hasTranscriberMode) supabaseUpdate.transcriber_mode = transcriber_mode;
     if (hasFluxLang) supabaseUpdate.flux_language = flux_language;
     if (hasFluxEot) supabaseUpdate.flux_eot_threshold = fluxEotVal;
@@ -359,7 +350,6 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     if (hasCallMode) updated.call_mode = call_mode;
     if (hasTransferPhone) updated.transfer_phone = transfer_phone.trim();
     if (hasSpeed) updated.speed = speed;
-    if (hasVoiceProvider) updated.voice_provider = voice_provider;
     if (hasTranscriberMode) updated.transcriber_mode = transcriber_mode;
     if (hasFluxLang) updated.flux_language = flux_language;
     if (hasFluxEot) updated.flux_eot_threshold = fluxEotVal;

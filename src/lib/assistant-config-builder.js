@@ -66,8 +66,9 @@
 //            - LLM model: default is now full gpt-4.1 (env OPENAI_MODEL); the
 //              per-client model (client.llm_model) and temperature
 //              (client.temperature) now reach LIVE calls, not just test calls.
-//            - TTS provider: ElevenLabs flash v2.5 (default) OR Cartesia
-//              sonic-3.5, via client.voice_provider (buildVoice).
+//            - TTS: ElevenLabs flash v2.5 (honors the template's ElevenLabs
+//              model override, e.g. eleven_v3). (Cartesia was evaluated and
+//              dropped: marginal gain, weaker EN+ES, and no in-app voice library.)
 //            - Transcriber: nova multi (default) OR Deepgram Flux with native
 //              end-of-turn, via client.transcriber_mode + flux_* (buildTranscriber).
 //            - Endpointing: VAPI (default) OR LiveKit, via
@@ -111,7 +112,6 @@ const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 // ============================================================================
 const DEFAULT_LLM_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
 const DEFAULT_NOVA_MODEL = process.env.DEEPGRAM_MODEL || 'nova-2';
-const CARTESIA_TTS_MODEL = process.env.CARTESIA_TTS_MODEL || 'sonic-3.5';
 const ELEVENLABS_TTS_MODEL = 'eleven_flash_v2_5';
 const FLUX_MODEL_MULTI = 'flux-general-multi';   // Deepgram Flux EN+ES
 const FLUX_MODEL_EN = 'flux-general-en';         // Deepgram Flux English-only
@@ -1279,18 +1279,13 @@ function buildTranscriber(client, novaModelOverride) {
   return { provider: 'deepgram', model: novaModel, language: 'multi' };
 }
 
-// TTS voice block. ElevenLabs (default) uses flash v2.5 and honors voice speed.
-// Cartesia uses sonic-3.5 and has no speed field on VAPI. voiceId holds the
-// provider-appropriate id (an ElevenLabs id OR a Cartesia id), picked in the AI Lab.
+// TTS voice block. ElevenLabs flash v2.5 (default), honoring voice speed.
+// (The `client` arg is kept for signature stability with callers; the voice
+// provider is ElevenLabs platform-wide.)
 //
 // ttsModelOverride (optional): a specific ElevenLabs model from the agency
-// template (e.g. 'eleven_v3'). Honored only for the ElevenLabs provider; Cartesia
-// always uses CARTESIA_TTS_MODEL. Falls back to ELEVENLABS_TTS_MODEL (flash v2.5).
+// template (e.g. 'eleven_v3'). Falls back to ELEVENLABS_TTS_MODEL (flash v2.5).
 function buildVoice(client, voiceId, voiceSpeed, ttsModelOverride) {
-  const provider = client.voice_provider === 'cartesia' ? 'cartesia' : '11labs';
-  if (provider === 'cartesia') {
-    return { provider: 'cartesia', model: CARTESIA_TTS_MODEL, voiceId };
-  }
   const model = (typeof ttsModelOverride === 'string' && ttsModelOverride.startsWith('eleven')) ? ttsModelOverride : ELEVENLABS_TTS_MODEL;
   const speedOk = Number(voiceSpeed) >= 0.7 && Number(voiceSpeed) <= 1.2;
   return { provider: '11labs', model, voiceId, ...(speedOk ? { speed: Number(voiceSpeed) } : {}) };
@@ -1374,7 +1369,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   // being saved by the AI Lab template editor but NEVER read here, so the Voice
   // engine + Speech recognition selectors did nothing on live calls. Now read
   // and fed into the pipeline below (client overrides still win).  [2026-10-07]
-  let tplTtsModel;          // 'eleven_*' | 'sonic-3.5'
+  let tplTtsModel;          // 'eleven_*' (a specific ElevenLabs model)
   let tplTranscriberModel;  // 'nova-3' | 'nova-2' | 'flux-general-multi' | 'flux-general-en'
 
   if (agency?.id && supabase) {
@@ -1429,23 +1424,20 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   // transcriber_model); the client stores provider/mode. Normalize both into one
   // shape (pipeClient) plus the specific model overrides, then hand to the
   // shared helpers so live calls, the AI Lab, and the static assistant agree.
-  const tplVoiceProvider = tplTtsModel ? (tplTtsModel.startsWith('sonic') ? 'cartesia' : '11labs') : undefined;
   const tplElevenModel = (tplTtsModel && tplTtsModel.startsWith('eleven')) ? tplTtsModel : undefined;
   const tplKind = tplTranscriberModel ? (tplTranscriberModel.startsWith('flux') ? 'flux' : 'nova') : undefined;
   const tplFluxLang = tplTranscriberModel === 'flux-general-en' ? 'en' : (tplKind === 'flux' ? 'multi' : undefined);
   const tplNovaModel = tplKind === 'nova' ? tplTranscriberModel : undefined;
 
   const pipeClient = {
-    voice_provider: client.voice_provider || tplVoiceProvider,          // undefined -> helper defaults to 11labs
     transcriber_mode: client.transcriber_mode || tplKind,              // undefined -> helper defaults to nova
     flux_language: client.flux_language || tplFluxLang,
     flux_eot_threshold: client.flux_eot_threshold,
     flux_eot_timeout_ms: client.flux_eot_timeout_ms,
     endpointing_provider: client.endpointing_provider,
   };
-  // ElevenLabs model override: honor the template's specific model only when the
-  // effective provider is ElevenLabs; a Cartesia override always uses sonic-3.5.
-  const resolvedTtsModel = (pipeClient.voice_provider === 'cartesia') ? undefined : tplElevenModel;
+  // Honor the template's specific ElevenLabs model (e.g. eleven_v3) when set.
+  const resolvedTtsModel = tplElevenModel;
   const resolvedNovaModel = tplNovaModel;
 
   const systemPrompt = await buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook, handoff);
@@ -1475,10 +1467,9 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
       ...(toolIds.length > 0 && { toolIds }),
       ...(tools.length > 0 && { tools }),
     },
-    // Real-time TTS. ElevenLabs flash v2.5 (~75ms first audio, honors speed) or
-    // Cartesia sonic-3.5. pipeClient merges the industry template under the
-    // per-client choice; resolvedTtsModel honors a template ElevenLabs model pick
-    // (e.g. eleven_v3). See buildVoice.
+    // Real-time TTS. ElevenLabs flash v2.5 (~75ms first audio, honors speed).
+    // resolvedTtsModel honors a template ElevenLabs model pick (e.g. eleven_v3).
+    // See buildVoice.
     voice: buildVoice(pipeClient, voiceId, voiceSpeed, resolvedTtsModel),
     // Latency: smart endpointing. Replaces VAPI's ~1.5s no-punctuation default.
     // Flux owns end-of-turn (waitSeconds only); nova uses VAPI (multi-safe) or
