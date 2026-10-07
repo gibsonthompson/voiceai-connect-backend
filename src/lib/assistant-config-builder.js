@@ -145,7 +145,7 @@ const WHISPER_TRANSFER_BLOCK = `
 
 # Connecting a Caller to a Person
 When the caller needs a real person (they ask to speak to someone, it is urgent, or you cannot help them), do this:
-1. Say one short line, exactly like: "Sure, let me connect you with the team. One moment."
+1. Say one short line, exactly like: "Sure, let me transfer you now. One moment."
 2. Immediately call the request_human_transfer tool. For its summary, give one or two sentences covering who is calling and what they need, so the team member knows the situation before they pick up. Example summary: "Maria Lopez is calling about a burst pipe in her basement and needs someone out today."
 3. After you call the tool, do NOT keep talking. The system connects the call for you. Only speak again if the tool result tells you no one was available, in which case apologize briefly and take a detailed message (name, number, and reason for calling).
 Never read the summary out loud to the caller. It is only for the team member.`;
@@ -966,7 +966,8 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
   // model invents plausible details it doesn't have — the classic "123 Main St"
   // address — which is worse than admitting it doesn't know.
   systemPrompt += `\n\n# Never make things up
-Only state facts you actually have from this business's information. Never invent or guess an address, phone number, price, hours, staff name, or any other detail. If a caller asks for something you do not have, say so plainly and offer to connect them with the team or take a message, for example "I don't have that in front of me, but I can have someone follow up." Never read out a placeholder or example value as if it were real.`;
+Only state facts you actually have from this business's information. Never invent or guess an address, phone number, price, hours, staff name, or any other detail. If a caller asks for something you do not have, say so plainly and offer to transfer them or take a message, for example "I don't have that in front of me, but I can have someone follow up." Never read out a placeholder or example value as if it were real.
+Only offer, mention, or ask about services this business actually provides. If you are not certain what they offer, look it up in your knowledge base or ask the caller what they need, instead of guessing or reading a generic list of services that may not apply here. If a related service genuinely fits what the caller asked for, you may suggest it, but never a canned or random add-on.`;
 
   return systemPrompt;
 }
@@ -1035,7 +1036,7 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
               type: 'number',
               number: formattedPhone,
               description: 'Transfer to business team',
-              message: 'One moment, let me connect you.'
+              message: 'One moment, transferring you now.'
             }]
           });
         }
@@ -1182,7 +1183,7 @@ function buildHooks(client, toolConfig, isAfterHours, handoff = 'transfer', tran
           on: 'call.ending',
           filters: [{ type: 'oneOf', key: 'call.endedReason', oneOf: ['pipeline-error'] }],
           do: [
-            { type: 'say', exact: 'I apologize for the difficulty. Let me connect you with someone who can help.' },
+            { type: 'say', exact: 'I apologize for the difficulty. Let me transfer you to someone who can help.' },
             { type: 'tool', tool: { type: 'transferCall', destinations: [{ type: 'number', number: formattedPhone }] } }
           ]
         });

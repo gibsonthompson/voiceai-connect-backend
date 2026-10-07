@@ -224,7 +224,7 @@ You are the receptionist for ${businessName}, a home services company. You're fr
 
 # Goal
 
-Find out what the caller needs, collect the details the team needs to help, and make sure someone follows up. You're the front door. When something is beyond you, hand the caller off to the team.
+Find out what the caller needs, collect the details the team needs to help, and make sure someone follows up. You're the front door. When something is beyond you, hand the caller off to the team. If a related service we offer naturally fits what they need, you can mention it, but only when it genuinely fits.
 
 # Taking a service request
 
@@ -401,7 +401,7 @@ You are the host for ${businessName}. You're warm, upbeat, and welcoming, and yo
 
 # Goal
 
-Handle reservation and takeout requests by collecting the details, answer menu and hours questions from what you know, and hand off anything else to the team.
+Handle reservation and takeout requests by collecting the details, answer menu and hours questions from what you know, and hand off anything else to the team. If something we offer pairs naturally with their order, you can mention it, but only when it genuinely fits.
 
 # Taking a reservation or takeout order
 
@@ -439,7 +439,7 @@ You are the receptionist for ${businessName}, a salon and spa. You're warm and u
 
 # Goal
 
-Help callers book a new appointment by collecting their info, and hand off to the team for everything else.
+Help callers book a new appointment by collecting their info, and hand off to the team for everything else. If a related service we offer pairs naturally with what they're booking, you can suggest it, but only when it genuinely fits.
 
 # Booking a new appointment
 
@@ -481,7 +481,7 @@ You are the phone assistant for ${businessName}, a retail store. You're helpful 
 
 # Goal
 
-Answer product and store questions from what you know, collect info for orders or callbacks, and hand off anything complex to the team.
+Answer product and store questions from what you know, collect info for orders or callbacks, and hand off anything complex to the team. If a related item we carry naturally fits what they're after, you can mention it, but only when it genuinely fits.
 
 # Handling product inquiries
 
@@ -691,7 +691,7 @@ You are the service assistant for ${businessName}, an auto shop. You're friendly
 
 # Goal
 
-Collect the info for a new service appointment, and hand off to the shop for everything else, especially anything that sounds like a safety issue.
+Collect the info for a new service appointment, and hand off to the shop for everything else, especially anything that sounds like a safety issue. If a related service we offer makes sense alongside what they're bringing the vehicle in for, you can mention it, but only when it genuinely fits.
 
 # Taking a service request
 
@@ -1161,7 +1161,7 @@ If the caller says any of the following, transfer them immediately — no questi
 - "speak with someone" / "get me someone" / "talk to a human" / "real agent"
 - "I want to talk to a person" / "can I speak with a human" / "transfer me"
 
-Say something natural like "Sure, let me connect you with someone." Then call the transferCall tool immediately. Do not ask why, do not try to help first.`;
+Say something natural like "Sure, let me transfer you now." Then call the transferCall tool immediately. Do not ask why, do not try to help first.`;
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -1433,7 +1433,7 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
             type: 'number',
             number: formattedPhone,
             description: 'Transfer to business owner',
-            message: 'One moment, let me connect you.'
+            message: 'One moment, transferring you now.'
           }]
         });
       }
@@ -1470,7 +1470,7 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
           }],
           do: [{
             type: 'say',
-            exact: 'I apologize for the difficulty. Let me connect you with someone who can help.'
+            exact: 'I apologize for the difficulty. Let me transfer you to someone who can help.'
           }, {
             type: 'tool',
             tool: {
