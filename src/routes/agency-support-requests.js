@@ -314,20 +314,48 @@ router.post('/support-requests/intake', async (req, res) => {
     // A not-signed-in client messaging from their agency's login page comes in
     // tagged source 'client_login', so the inbox shows it as a client (not a
     // website prospect) with its own "Login page" source.
+    //
+    // user_type / source may be guarded by CHECK constraints that differ
+    // between environments, so we insert defensively: try the richest row
+    // first, then degrade to the fully proven marketing combo
+    // (user_type 'prospect' + source 'marketing_site' + client_id null) so a
+    // login-page message is never lost to a constraint mismatch. The inbox
+    // labels login-page items by whichever of source/user_type survives.
     const isClientLogin = source === 'client_login';
-    const { error } = await supabase.from('agency_support_requests').insert({
+    const base = {
       agency_id: agency.id,
       client_id: null,
-      user_type: isClientLogin ? 'client' : 'prospect',
       requester_name: nm || null,
       contact: ct,
       message: body,
-      source: isClientLogin ? 'client_login' : 'marketing_site',
       status: 'new',
-    });
+    };
 
-    if (error) {
-      console.error('Marketing support-request insert failed:', error.message);
+    const attempts = isClientLogin
+      ? [
+          { ...base, user_type: 'client', source: 'client_login' },
+          { ...base, user_type: 'prospect', source: 'client_login' },
+          { ...base, user_type: 'prospect', source: 'marketing_site' },
+        ]
+      : [{ ...base, user_type: 'prospect', source: 'marketing_site' }];
+
+    let error = null;
+    let inserted = false;
+    for (const row of attempts) {
+      const result = await supabase.from('agency_support_requests').insert(row);
+      if (!result.error) {
+        inserted = true;
+        error = null;
+        break;
+      }
+      error = result.error;
+      console.error(
+        `support-request intake insert failed (user_type=${row.user_type}, source=${row.source}):`,
+        result.error.message
+      );
+    }
+
+    if (!inserted) {
       return res.status(500).json({ error: 'Failed to send message' });
     }
 
