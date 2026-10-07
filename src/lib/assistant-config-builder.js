@@ -66,25 +66,20 @@
 //            - LLM model: default is now full gpt-4.1 (env OPENAI_MODEL); the
 //              per-client model (client.llm_model) and temperature
 //              (client.temperature) now reach LIVE calls, not just test calls.
-//            - TTS: ElevenLabs flash v2.5 (honors the template's ElevenLabs
-//              model override, e.g. eleven_v3). (Cartesia was evaluated and
-//              dropped: marginal gain, weaker EN+ES, and no in-app voice library.)
-//            - Transcriber: nova multi (default) OR Deepgram Flux with native
-//              end-of-turn, via client.transcriber_mode + flux_* (buildTranscriber).
-//            - Endpointing: VAPI (default) OR LiveKit, via
-//              client.endpointing_provider (buildStartSpeakingPlan); dropped
-//              entirely when Flux is on.
+//            - TTS: ElevenLabs flash v2.5, honoring the chosen ElevenLabs model
+//              (client.tts_model, e.g. eleven_v3). (Cartesia was evaluated and
+//              dropped: marginal gain, weaker EN+ES, no in-app voice library.)
+//            - Transcriber: a single model string (client.transcriber_model):
+//              'nova-*' (multi EN+ES) or 'flux-*' (Deepgram Flux, native
+//              end-of-turn with internal defaults). No endpointing/EoT knobs.
 //            - Krisp background denoising: ON by default
 //              (tool_config.backgroundDenoising).
-//          All per-client; platform defaults are env-overridable. Helpers are
-//          exported so routes/client-prompt.js patches the static assistant with
-//          the same shape (test call == live call).
-//          ALSO fixed a pre-existing gap: the per-industry template's tts_model
-//          (voice engine) and transcriber_model (nova/flux) were saved by the AI
-//          Lab template editor but never read here, so they did nothing on live
-//          calls. They are now read and feed the pipeline as the per-industry
-//          default, with per-client choices overriding. Cascade per field:
-//          industry default -> agency template -> per-client.
+//          Also fixed a pre-existing gap: the per-industry template's tts_model
+//          and transcriber_model were saved by the AI Lab template editor but
+//          never read here, so they did nothing on live calls. Now read and fed
+//          into the pipeline. Cascade per field: platform default -> agency
+//          template -> per-client. Helpers are exported so routes/client-prompt.js
+//          patches the static assistant with the same shape (test == live).
 // ============================================================================
 
 const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, TRANSFER_KEYWORDS_BLOCK, VOICES,
@@ -111,12 +106,10 @@ const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 // now runs on 4.1. Set OPENAI_MODEL to roll the fleet back/forward.
 // ============================================================================
 const DEFAULT_LLM_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
-const DEFAULT_NOVA_MODEL = process.env.DEEPGRAM_MODEL || 'nova-2';
+const DEFAULT_TRANSCRIBER_MODEL = process.env.DEEPGRAM_MODEL || 'nova-2';  // Deepgram STT default
 const ELEVENLABS_TTS_MODEL = 'eleven_flash_v2_5';
-const FLUX_MODEL_MULTI = 'flux-general-multi';   // Deepgram Flux EN+ES
-const FLUX_MODEL_EN = 'flux-general-en';         // Deepgram Flux English-only
-const FLUX_EOT_THRESHOLD_DEFAULT = 0.6;          // lower = snappier end-of-turn
-const FLUX_EOT_TIMEOUT_MS_DEFAULT = 3000;        // hard cap before Flux ends turn
+const FLUX_EOT_THRESHOLD_DEFAULT = 0.6;   // Flux end-of-turn sensitivity (sane default, not user-facing)
+const FLUX_EOT_TIMEOUT_MS_DEFAULT = 3000; // Flux hard cap before it ends the turn
 
 const DEFAULT_TOOL_CONFIG = {
   callerRecognition: true,
@@ -1241,67 +1234,44 @@ function resolveHandoff(client, toolConfig) {
 // MAIN: Build complete VAPI assistant config
 // ============================================================================
 // ============================================================================
-// VOICE PIPELINE HELPERS  (added 2026-10-07)
+// VOICE PIPELINE HELPERS  (added 2026-10-07, simplified)
 // Real calls are built here, so anything not emitted in buildDynamicAssistantConfig
-// never reaches a live call. These helpers turn the per-client AI Lab choices
-// (persisted to clients columns) into the VAPI transcriber / voice / endpointing
-// blocks, falling back to the platform defaults above. They are exported so the
-// static-assistant PATCH in routes/client-prompt.js builds the SAME shape, which
-// keeps the AI Lab "Start Test Call" faithful to what real callers get.
+// never reaches a live call. The pipeline is driven by two simple model strings
+// chosen in the AI Lab: an ElevenLabs tts model and a Deepgram transcriber model
+// ('nova-*' or 'flux-*'). Flux's end-of-turn is handled with sane internal
+// defaults (not user-facing). Exported so routes/client-prompt.js patches the
+// static assistant with the SAME shape, keeping "Start Test Call" faithful.
 // ============================================================================
 
-// True when the client is on Deepgram Flux (model-native end-of-turn) instead of
-// nova. Flux owns endpointing, so the smart/transcription endpointing plans are
-// dropped when it is on (they fight Flux's own EoT).
-function isUsingFlux(client) {
-  return (client.transcriber_mode || 'nova') === 'flux';
+function isFluxModel(m) {
+  return typeof m === 'string' && m.startsWith('flux');
 }
 
-// Deepgram transcriber block. Nova (default) keeps language:'multi' (EN+ES).
-// Flux is English-oriented: 'flux-general-multi' covers EN+ES, 'flux-general-en'
-// is English-only. eotThreshold / eotTimeoutMs are per-client adjustments set in
-// the AI Lab, each bounded to a safe range.
-//
-// novaModelOverride (optional): a specific Deepgram nova model from the agency
-// template (e.g. 'nova-3'). Honored only for nova; flux ignores it. Falls back
-// to DEFAULT_NOVA_MODEL.
-function buildTranscriber(client, novaModelOverride) {
-  if (isUsingFlux(client)) {
-    const lang = client.flux_language === 'en' ? 'en' : 'multi';
-    const model = lang === 'en' ? FLUX_MODEL_EN : FLUX_MODEL_MULTI;
-    let eot = Number(client.flux_eot_threshold);
-    if (!(eot >= 0.5 && eot <= 1.0)) eot = FLUX_EOT_THRESHOLD_DEFAULT;
-    let eotMs = Number(client.flux_eot_timeout_ms);
-    if (!(eotMs >= 500 && eotMs <= 30000)) eotMs = FLUX_EOT_TIMEOUT_MS_DEFAULT;
-    return { provider: 'deepgram', model, eotThreshold: eot, eotTimeoutMs: eotMs };
+// Deepgram transcriber block from a model string. Nova keeps language:'multi'
+// (EN+ES). Flux owns end-of-turn, so it gets the internal eot defaults instead.
+function buildTranscriber(transcriberModel) {
+  const m = transcriberModel || DEFAULT_TRANSCRIBER_MODEL;
+  if (isFluxModel(m)) {
+    return { provider: 'deepgram', model: m, eotThreshold: FLUX_EOT_THRESHOLD_DEFAULT, eotTimeoutMs: FLUX_EOT_TIMEOUT_MS_DEFAULT };
   }
-  const novaModel = (typeof novaModelOverride === 'string' && novaModelOverride.startsWith('nova')) ? novaModelOverride : DEFAULT_NOVA_MODEL;
-  return { provider: 'deepgram', model: novaModel, language: 'multi' };
+  return { provider: 'deepgram', model: m, language: 'multi' };
 }
 
-// TTS voice block. ElevenLabs flash v2.5 (default), honoring voice speed.
-// (The `client` arg is kept for signature stability with callers; the voice
-// provider is ElevenLabs platform-wide.)
-//
-// ttsModelOverride (optional): a specific ElevenLabs model from the agency
-// template (e.g. 'eleven_v3'). Falls back to ELEVENLABS_TTS_MODEL (flash v2.5).
-function buildVoice(client, voiceId, voiceSpeed, ttsModelOverride) {
-  const model = (typeof ttsModelOverride === 'string' && ttsModelOverride.startsWith('eleven')) ? ttsModelOverride : ELEVENLABS_TTS_MODEL;
+// ElevenLabs TTS voice block, honoring voice speed. ttsModel is a specific
+// ElevenLabs model (e.g. eleven_v3); falls back to flash v2.5.
+function buildVoice(voiceId, voiceSpeed, ttsModel) {
+  const model = (typeof ttsModel === 'string' && ttsModel.startsWith('eleven')) ? ttsModel : ELEVENLABS_TTS_MODEL;
   const speedOk = Number(voiceSpeed) >= 0.7 && Number(voiceSpeed) <= 1.2;
   return { provider: '11labs', model, voiceId, ...(speedOk ? { speed: Number(voiceSpeed) } : {}) };
 }
 
 // startSpeakingPlan — how long VAPI waits before the assistant responds.
-// - Flux: it owns end-of-turn, so emit only waitSeconds and let Flux decide.
-// - Nova + LiveKit endpointing: LiveKit smart endpointing (English-oriented; keep
-//   Spanish-heavy clients on VAPI).
-// - Nova + VAPI (default): VAPI smart endpointing + punctuation plan (multi-safe).
-function buildStartSpeakingPlan(client) {
-  if (isUsingFlux(client)) {
+// Flux owns end-of-turn (waitSeconds only); nova uses VAPI smart endpointing +
+// punctuation plan (multi-safe).
+function buildStartSpeakingPlan(transcriberModel) {
+  const m = transcriberModel || DEFAULT_TRANSCRIBER_MODEL;
+  if (isFluxModel(m)) {
     return { waitSeconds: 0.4 };
-  }
-  if (client.endpointing_provider === 'livekit') {
-    return { waitSeconds: 0.4, smartEndpointingPlan: { provider: 'livekit', waitFunction: '200 + 8000 * x' } };
   }
   return {
     waitSeconds: 0.4,
@@ -1369,8 +1339,9 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   // being saved by the AI Lab template editor but NEVER read here, so the Voice
   // engine + Speech recognition selectors did nothing on live calls. Now read
   // and fed into the pipeline below (client overrides still win).  [2026-10-07]
-  let tplTtsModel;          // 'eleven_*' (a specific ElevenLabs model)
-  let tplTranscriberModel;  // 'nova-3' | 'nova-2' | 'flux-general-multi' | 'flux-general-en'
+  let tplTtsModel;             // 'eleven_*' (a specific ElevenLabs model)
+  let tplTranscriberModel;     // 'nova-3' | 'nova-2' | 'flux-general-multi' | 'flux-general-en'
+  let tplBackgroundDenoising;  // boolean | undefined (per-industry Krisp default)
 
   if (agency?.id && supabase) {
     try {
@@ -1380,7 +1351,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
       if (effectivePlan === 'scale') {
         const { data: template } = await supabase
           .from('agency_prompt_templates')
-          .select('voice_id, temperature, model, voice_speed, tts_model, transcriber_model')
+          .select('voice_id, temperature, model, voice_speed, tts_model, transcriber_model, background_denoising')
           .eq('agency_id', agency.id)
           .eq('industry', industryKey)
           .eq('is_active', true)
@@ -1393,6 +1364,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
           voiceSpeed = template.voice_speed || voiceSpeed;
           tplTtsModel = template.tts_model || tplTtsModel;
           tplTranscriberModel = template.transcriber_model || tplTranscriberModel;
+          if (template.background_denoising != null) tplBackgroundDenoising = template.background_denoising;
         }
       }
     } catch { /* Use defaults */ }
@@ -1419,26 +1391,16 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     if (t >= 0 && t <= 2) temperature = t;
   }
 
-  // ── Resolve the voice/transcriber pipeline: industry-template default, then
-  // per-client override. The template stores model-id strings (tts_model,
-  // transcriber_model); the client stores provider/mode. Normalize both into one
-  // shape (pipeClient) plus the specific model overrides, then hand to the
-  // shared helpers so live calls, the AI Lab, and the static assistant agree.
-  const tplElevenModel = (tplTtsModel && tplTtsModel.startsWith('eleven')) ? tplTtsModel : undefined;
-  const tplKind = tplTranscriberModel ? (tplTranscriberModel.startsWith('flux') ? 'flux' : 'nova') : undefined;
-  const tplFluxLang = tplTranscriberModel === 'flux-general-en' ? 'en' : (tplKind === 'flux' ? 'multi' : undefined);
-  const tplNovaModel = tplKind === 'nova' ? tplTranscriberModel : undefined;
-
-  const pipeClient = {
-    transcriber_mode: client.transcriber_mode || tplKind,              // undefined -> helper defaults to nova
-    flux_language: client.flux_language || tplFluxLang,
-    flux_eot_threshold: client.flux_eot_threshold,
-    flux_eot_timeout_ms: client.flux_eot_timeout_ms,
-    endpointing_provider: client.endpointing_provider,
-  };
-  // Honor the template's specific ElevenLabs model (e.g. eleven_v3) when set.
-  const resolvedTtsModel = tplElevenModel;
-  const resolvedNovaModel = tplNovaModel;
+  // ── Resolve the pipeline: per-client choice first, then industry template,
+  // then platform default. Two simple model strings drive everything.
+  const ttsModelEff = client.tts_model || tplTtsModel || undefined;                    // undefined -> flash
+  const transcriberModelEff = client.transcriber_model || tplTranscriberModel || DEFAULT_TRANSCRIBER_MODEL;
+  // Krisp denoising: client's own setting wins, else the industry template's,
+  // else ON by default.
+  const clientDenoise = client.tool_config && client.tool_config.backgroundDenoising;
+  const denoisingOn = (clientDenoise != null) ? (clientDenoise !== false)
+    : (tplBackgroundDenoising != null) ? (tplBackgroundDenoising !== false)
+    : true;
 
   const systemPrompt = await buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook, handoff);
   const firstMessage = buildFirstMessage(client.business_name, industryKey, callerContext, isAfterHours, toolConfig, hipaaMode, client.greeting_message);
@@ -1455,10 +1417,9 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
 
   const assistantConfig = {
     name: sanitizeAssistantName(client.business_name),
-    // Transcriber: nova (multi, default) or Deepgram Flux (model-native EoT).
-    // pipeClient merges the industry template under the per-client choice;
-    // resolvedNovaModel honors a template nova-3/nova-2 pick. See buildTranscriber.
-    transcriber: buildTranscriber(pipeClient, resolvedNovaModel),
+    // Transcriber: Deepgram nova (multi, default) or Flux (model-native EoT),
+    // from the effective transcriber model string. See buildTranscriber.
+    transcriber: buildTranscriber(transcriberModelEff),
     model: {
       provider: 'openai',
       model: modelId,
@@ -1467,14 +1428,12 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
       ...(toolIds.length > 0 && { toolIds }),
       ...(tools.length > 0 && { tools }),
     },
-    // Real-time TTS. ElevenLabs flash v2.5 (~75ms first audio, honors speed).
-    // resolvedTtsModel honors a template ElevenLabs model pick (e.g. eleven_v3).
-    // See buildVoice.
-    voice: buildVoice(pipeClient, voiceId, voiceSpeed, resolvedTtsModel),
-    // Latency: smart endpointing. Replaces VAPI's ~1.5s no-punctuation default.
-    // Flux owns end-of-turn (waitSeconds only); nova uses VAPI (multi-safe) or
-    // LiveKit smart endpointing. See buildStartSpeakingPlan.
-    startSpeakingPlan: buildStartSpeakingPlan(pipeClient),
+    // Real-time TTS. ElevenLabs flash v2.5 (~75ms first audio, honors speed),
+    // or the effective ElevenLabs model (e.g. eleven_v3). See buildVoice.
+    voice: buildVoice(voiceId, voiceSpeed, ttsModelEff),
+    // Latency: smart endpointing. Flux owns end-of-turn (waitSeconds only);
+    // nova uses VAPI smart endpointing + punctuation plan. See buildStartSpeakingPlan.
+    startSpeakingPlan: buildStartSpeakingPlan(transcriberModelEff),
     // Barge-in: let the caller interrupt quickly, but not so eagerly that
     // background noise cuts the assistant off.
     stopSpeakingPlan: {
@@ -1482,10 +1441,10 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
       voiceSeconds: 0.2,
       backoffSeconds: 1.0,
     },
-    // Krisp background-speech denoising. ON unless the client disabled it. Strips
-    // background voices/noise before the transcriber, the biggest real-world
-    // phone turn-taking win. (tool_config.backgroundDenoising === false to disable.)
-    ...(toolConfig.backgroundDenoising !== false
+    // Krisp background-speech denoising. Strips background voices/noise before the
+    // transcriber, the biggest real-world phone turn-taking win. denoisingOn is
+    // resolved above (client -> industry template -> default ON).
+    ...(denoisingOn
       ? { backgroundSpeechDenoisingPlan: { smartDenoisingPlan: { enabled: true } } }
       : {}),
     firstMessage,
@@ -1506,7 +1465,7 @@ module.exports = {
   // Voice-pipeline helpers (exported 2026-10-07) so the static-assistant PATCH in
   // routes/client-prompt.js produces the same transcriber/voice/endpointing shape
   // as live calls, keeping the AI Lab test call faithful.
-  isUsingFlux,
+  isFluxModel,
   buildTranscriber,
   buildVoice,
   buildStartSpeakingPlan,

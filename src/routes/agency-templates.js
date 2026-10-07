@@ -1778,6 +1778,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         transcriber_model: customTemplate?.transcriber_model || 'nova-3',
         temperature: customTemplate?.temperature || 0.7,
         voice_speed: customTemplate?.voice_speed ?? 1,
+        background_denoising: customTemplate?.background_denoising ?? true,
         knowledge_base_data: customTemplate?.knowledge_base_data || null,
         updated_at: customTemplate?.updated_at || null,
       },
@@ -1790,6 +1791,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         transcriber_model: 'nova-3',
         temperature: 0.7,
         voice_speed: 1,
+        background_denoising: true,
       },
       placeholders: [
         { variable: '{businessName}', description: 'The client\'s business name (auto-filled)' },
@@ -1806,7 +1808,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
 // ============================================================================
 router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (req, res) => {
   const { agencyId, industry } = req.params;
-  const { system_prompt, first_message, voice_id, temperature, is_active, model, knowledge_base_data, voice_speed, tts_model, transcriber_model } = req.body;
+  const { system_prompt, first_message, voice_id, temperature, is_active, model, knowledge_base_data, voice_speed, tts_model, transcriber_model, background_denoising } = req.body;
   
   const resolved = await resolveIndustryConfig(agencyId, industry);
   if (!resolved) {
@@ -1845,6 +1847,9 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
   const validTranscribers = ['nova-3', 'nova-2', 'flux-general-multi', 'flux-general-en'];
   const finalTranscriber = validTranscribers.includes(transcriber_model) ? transcriber_model : 'nova-3';
 
+  // Krisp background denoising (per-industry default). Defaults ON when omitted.
+  const finalDenoising = (typeof background_denoising === 'boolean') ? background_denoising : true;
+
   // Voice speed is optional; only store a value inside VAPI's supported 0.7-1.2
   // range, otherwise null (which falls back to the default 1.0 at call time).
   let finalSpeed = null;
@@ -1867,6 +1872,7 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         transcriber_model: finalTranscriber,
         temperature: temp,
         voice_speed: finalSpeed,
+        background_denoising: finalDenoising,
         knowledge_base_data: knowledge_base_data || null,
         is_active: is_active !== false,
         updated_at: new Date().toISOString(),

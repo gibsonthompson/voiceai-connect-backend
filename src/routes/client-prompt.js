@@ -10,19 +10,18 @@
 //          call transfers). requireAgencyAccess('clients') enforces valid token
 //          + caller owns :agencyId. The per-query `.eq('agency_id', agencyId)`
 //          scoping stays as defense in depth.
-// UPDATED: 2026-10-07 — VOICE PIPELINE OPTIONS: the PUT now also accepts and
-//          persists the per-client pipeline choices surfaced in the AI Lab:
-//            - llm_model      -> clients.llm_model      (+ VAPI model.model)
-//            - temperature    -> clients.temperature    (+ VAPI model.temperature)
-//            - transcriber_mode / flux_language / flux_eot_threshold /
-//              flux_eot_timeout_ms / endpointing_provider -> clients columns
+// UPDATED: 2026-10-07 — VOICE PIPELINE OPTIONS (simplified): the PUT now also
+//          accepts and persists the per-client pipeline choices surfaced in the
+//          AI Lab, mirroring the per-industry template fields exactly:
+//            - llm_model         -> clients.llm_model         (+ VAPI model.model)
+//            - temperature       -> clients.temperature       (+ VAPI model.temperature)
+//            - tts_model         -> clients.tts_model         (+ VAPI voice)
+//            - transcriber_model -> clients.transcriber_model (+ VAPI transcriber)
 //            - background_denoising -> clients.tool_config.backgroundDenoising
 //          These columns are what buildDynamicAssistantConfig reads at call time,
 //          so this is the write side of the live-call pipeline. The same values
 //          are also PATCHed onto the STATIC assistant (via the exported builder
-//          helpers) so the AI Lab "Start Test Call" matches live calls exactly.
-//          model + temperature previously went to VAPI only; they now also land
-//          in clients columns so live calls honor the per-client choice.
+//          helpers) so the AI Lab "Start Test Call" matches live calls.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
@@ -37,12 +36,10 @@ const {
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 
-// Allowed values for the pipeline enums (mirror the AI Lab dropdowns + the
-// buildDynamicAssistantConfig expectations). Kept permissive for llm_model so a
-// newly enabled model id is not rejected before the dropdown is updated.
-const ALLOWED_TRANSCRIBER_MODES = ['nova', 'flux'];
-const ALLOWED_FLUX_LANGUAGES = ['en', 'multi'];
-const ALLOWED_ENDPOINTING = ['vapi', 'livekit'];
+// Allowed pipeline values (mirror the AI Lab dropdowns). llm_model is kept
+// permissive so a newly enabled model id is not rejected before the dropdown ships.
+const ALLOWED_TTS_MODELS = ['eleven_flash_v2_5', 'eleven_multilingual_v2', 'eleven_v3'];
+const ALLOWED_TRANSCRIBER_MODELS = ['nova-3', 'nova-2', 'flux-general-multi', 'flux-general-en'];
 
 // ----------------------------------------------------------------------------
 // OWNERSHIP GUARD — covers GET/PUT /:agencyId/clients/:clientId/prompt and
@@ -108,8 +105,7 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     const {
       system_prompt, first_message, voice_id, model, temperature, call_mode, transfer_phone, speed,
       // ── voice pipeline (added 2026-10-07) ──
-      transcriber_mode, flux_language, flux_eot_threshold,
-      flux_eot_timeout_ms, endpointing_provider, background_denoising,
+      tts_model, transcriber_model, background_denoising,
     } = req.body;
 
     // Detect which fields were provided
@@ -123,37 +119,17 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     const hasSpeed = typeof speed === 'number' && speed >= 0.7 && speed <= 1.2;
 
     // ── voice pipeline field detection + validation ──
-    const hasTranscriberMode = typeof transcriber_mode === 'string' && transcriber_mode.length > 0;
-    if (hasTranscriberMode && !ALLOWED_TRANSCRIBER_MODES.includes(transcriber_mode)) {
-      return res.status(400).json({ success: false, error: `Invalid transcriber_mode. Allowed: ${ALLOWED_TRANSCRIBER_MODES.join(', ')}` });
+    const hasTtsModel = typeof tts_model === 'string' && tts_model.length > 0;
+    if (hasTtsModel && !ALLOWED_TTS_MODELS.includes(tts_model)) {
+      return res.status(400).json({ success: false, error: `Invalid tts_model. Allowed: ${ALLOWED_TTS_MODELS.join(', ')}` });
     }
-    const hasFluxLang = typeof flux_language === 'string' && flux_language.length > 0;
-    if (hasFluxLang && !ALLOWED_FLUX_LANGUAGES.includes(flux_language)) {
-      return res.status(400).json({ success: false, error: `Invalid flux_language. Allowed: ${ALLOWED_FLUX_LANGUAGES.join(', ')}` });
-    }
-    const hasFluxEot = flux_eot_threshold !== undefined && flux_eot_threshold !== null && flux_eot_threshold !== '';
-    let fluxEotVal = null;
-    if (hasFluxEot) {
-      fluxEotVal = Number(flux_eot_threshold);
-      if (isNaN(fluxEotVal) || fluxEotVal < 0.5 || fluxEotVal > 1.0) {
-        return res.status(400).json({ success: false, error: 'flux_eot_threshold must be between 0.5 and 1.0' });
-      }
-    }
-    const hasFluxEotMs = flux_eot_timeout_ms !== undefined && flux_eot_timeout_ms !== null && flux_eot_timeout_ms !== '';
-    let fluxEotMsVal = null;
-    if (hasFluxEotMs) {
-      fluxEotMsVal = Number(flux_eot_timeout_ms);
-      if (isNaN(fluxEotMsVal) || fluxEotMsVal < 500 || fluxEotMsVal > 30000) {
-        return res.status(400).json({ success: false, error: 'flux_eot_timeout_ms must be between 500 and 30000' });
-      }
-    }
-    const hasEndpointing = typeof endpointing_provider === 'string' && endpointing_provider.length > 0;
-    if (hasEndpointing && !ALLOWED_ENDPOINTING.includes(endpointing_provider)) {
-      return res.status(400).json({ success: false, error: `Invalid endpointing_provider. Allowed: ${ALLOWED_ENDPOINTING.join(', ')}` });
+    const hasTranscriberModel = typeof transcriber_model === 'string' && transcriber_model.length > 0;
+    if (hasTranscriberModel && !ALLOWED_TRANSCRIBER_MODELS.includes(transcriber_model)) {
+      return res.status(400).json({ success: false, error: `Invalid transcriber_model. Allowed: ${ALLOWED_TRANSCRIBER_MODELS.join(', ')}` });
     }
     const hasDenoising = typeof background_denoising === 'boolean';
 
-    const needsPipelinePatch = hasTranscriberMode || hasFluxLang || hasFluxEot || hasFluxEotMs || hasEndpointing || hasDenoising;
+    const needsPipelinePatch = hasTtsModel || hasTranscriberModel || hasDenoising;
 
     // Validate prompt length
     if (typeof system_prompt === 'string' && system_prompt.trim().length > 0 && system_prompt.trim().length < 10) {
@@ -164,11 +140,11 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
       return res.status(400).json({ success: false, error: 'At least one field required' });
     }
 
-    // Fetch client (incl. current pipeline state so partial updates merge
-    // correctly for the static-assistant PATCH + the tool_config merge).
+    // Fetch client (incl. current pipeline state so partial updates build the
+    // static-assistant PATCH + the tool_config merge from the full post-update state).
     const { data: client, error } = await supabase
       .from('clients')
-      .select('id, vapi_assistant_id, business_name, voice_id, voice_speed, transcriber_mode, flux_language, flux_eot_threshold, flux_eot_timeout_ms, endpointing_provider, tool_config')
+      .select('id, vapi_assistant_id, business_name, voice_id, voice_speed, tts_model, transcriber_model, tool_config')
       .eq('id', clientId)
       .eq('agency_id', agencyId)
       .single();
@@ -177,21 +153,11 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Client not found' });
     }
 
-    // Merge incoming changes over the current client row so helper-built blocks
-    // (transcriber/voice/endpointing) reflect the full post-update state even on
-    // a partial PUT. Denoising state is resolved separately below.
-    const mergedClient = {
-      voice_id: hasVoice ? voice_id.trim() : client.voice_id,
-      voice_speed: hasSpeed ? speed : client.voice_speed,
-      transcriber_mode: hasTranscriberMode ? transcriber_mode : client.transcriber_mode,
-      flux_language: hasFluxLang ? flux_language : client.flux_language,
-      flux_eot_threshold: hasFluxEot ? fluxEotVal : client.flux_eot_threshold,
-      flux_eot_timeout_ms: hasFluxEotMs ? fluxEotMsVal : client.flux_eot_timeout_ms,
-      endpointing_provider: hasEndpointing ? endpointing_provider : client.endpointing_provider,
-    };
-    const finalVoiceId = mergedClient.voice_id || '';
-    const finalSpeed = mergedClient.voice_speed;
-    // Resolved denoising on/off (default ON when never set).
+    // Effective post-update values for the static-assistant PATCH.
+    const finalVoiceId = (hasVoice ? voice_id.trim() : client.voice_id) || '';
+    const finalSpeed = hasSpeed ? speed : client.voice_speed;
+    const finalTtsModel = hasTtsModel ? tts_model : client.tts_model;
+    const finalTranscriberModel = hasTranscriberModel ? transcriber_model : client.transcriber_model;
     const denoisingOn = hasDenoising
       ? background_denoising === true
       : ((client.tool_config && client.tool_config.backgroundDenoising) !== false);
@@ -201,8 +167,8 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     // fallback). Live calls are built fresh by buildDynamicAssistantConfig,
     // but we keep the static assistant in sync so a test call is faithful.
     // ====================================================================
-    const needsVoicePatch = hasVoice || hasSpeed;
-    const needsVapiPatch = hasPrompt || hasGreeting || needsVoicePatch || hasModel || hasTemp || hasTransferPhone || needsPipelinePatch;
+    const needsVoicePatch = hasVoice || hasSpeed || hasTtsModel;
+    const needsVapiPatch = hasPrompt || hasGreeting || needsVoicePatch || hasModel || hasTemp || hasTransferPhone || hasTranscriberModel || hasDenoising;
 
     if (needsVapiPatch) {
       if (!client.vapi_assistant_id) {
@@ -245,7 +211,6 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
           if (formattedPhone) {
             const transferIdx = tools.findIndex(t => t.type === 'transferCall');
             if (transferIdx !== -1) {
-              // Update existing transferCall tool destination
               const existingTool = { ...tools[transferIdx] };
               if (existingTool.destinations && existingTool.destinations.length > 0) {
                 existingTool.destinations = existingTool.destinations.map(d => ({
@@ -262,7 +227,6 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
               }
               tools[transferIdx] = existingTool;
             } else {
-              // No transferCall tool exists — add one
               tools.push({
                 type: 'transferCall',
                 destinations: [{
@@ -283,17 +247,19 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
         patchPayload.firstMessage = first_message.trim();
       }
 
-      // --- voice (voiceId / speed) ---
-      // Rebuilt from the merged state via the shared builder helper so the VAPI
-      // voice block matches what live calls produce.
+      // --- voice (voiceId / speed / tts model) — rebuilt via the shared helper ---
       if (needsVoicePatch) {
-        patchPayload.voice = buildVoice(mergedClient, finalVoiceId, finalSpeed);
+        patchPayload.voice = buildVoice(finalVoiceId, finalSpeed, finalTtsModel);
       }
 
-      // --- transcriber + endpointing (rebuilt together from merged state) ---
-      if (needsPipelinePatch) {
-        patchPayload.transcriber = buildTranscriber(mergedClient);
-        patchPayload.startSpeakingPlan = buildStartSpeakingPlan(mergedClient);
+      // --- transcriber + endpointing, rebuilt from the effective transcriber model ---
+      if (hasTranscriberModel) {
+        patchPayload.transcriber = buildTranscriber(finalTranscriberModel);
+        patchPayload.startSpeakingPlan = buildStartSpeakingPlan(finalTranscriberModel);
+      }
+
+      // --- Krisp background denoising ---
+      if (hasDenoising) {
         patchPayload.backgroundSpeechDenoisingPlan = { smartDenoisingPlan: { enabled: denoisingOn } };
       }
 
@@ -313,8 +279,7 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
 
     // ====================================================================
     // SUPABASE — persist everything the live-call builder reads. model +
-    // temperature now land here too (previously VAPI-only) so live calls honor
-    // the per-client choice, not just the test call.
+    // temperature land here too (not VAPI-only) so live calls honor the choice.
     // ====================================================================
     const supabaseUpdate = {};
     if (hasPrompt) supabaseUpdate.system_prompt = system_prompt.trim();
@@ -323,17 +288,13 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     if (hasSpeed) supabaseUpdate.voice_speed = speed;
     if (hasModel) supabaseUpdate.llm_model = model.trim();
     if (hasTemp) supabaseUpdate.temperature = temperature;
-    if (hasTranscriberMode) supabaseUpdate.transcriber_mode = transcriber_mode;
-    if (hasFluxLang) supabaseUpdate.flux_language = flux_language;
-    if (hasFluxEot) supabaseUpdate.flux_eot_threshold = fluxEotVal;
-    if (hasFluxEotMs) supabaseUpdate.flux_eot_timeout_ms = fluxEotMsVal;
-    if (hasEndpointing) supabaseUpdate.endpointing_provider = endpointing_provider;
+    if (hasTtsModel) supabaseUpdate.tts_model = tts_model;
+    if (hasTranscriberModel) supabaseUpdate.transcriber_model = transcriber_model;
 
     // Background denoising is a key inside the tool_config jsonb, not a column.
     // Read-merge-write so other tool_config keys are preserved.
     if (hasDenoising) {
-      const mergedToolConfig = { ...(client.tool_config || {}), backgroundDenoising: background_denoising === true };
-      supabaseUpdate.tool_config = mergedToolConfig;
+      supabaseUpdate.tool_config = { ...(client.tool_config || {}), backgroundDenoising: background_denoising === true };
     }
 
     if (Object.keys(supabaseUpdate).length > 0) {
@@ -350,11 +311,8 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     if (hasCallMode) updated.call_mode = call_mode;
     if (hasTransferPhone) updated.transfer_phone = transfer_phone.trim();
     if (hasSpeed) updated.speed = speed;
-    if (hasTranscriberMode) updated.transcriber_mode = transcriber_mode;
-    if (hasFluxLang) updated.flux_language = flux_language;
-    if (hasFluxEot) updated.flux_eot_threshold = fluxEotVal;
-    if (hasFluxEotMs) updated.flux_eot_timeout_ms = fluxEotMsVal;
-    if (hasEndpointing) updated.endpointing_provider = endpointing_provider;
+    if (hasTtsModel) updated.tts_model = tts_model;
+    if (hasTranscriberModel) updated.transcriber_model = transcriber_model;
     if (hasDenoising) updated.background_denoising = background_denoising === true;
 
     console.log(`✅ AI config updated for ${client.business_name} (${clientId}): ${Object.keys(updated).join(', ')}`);
@@ -421,7 +379,6 @@ router.post('/:agencyId/clients/:clientId/prompt/reset', async (req, res) => {
 // ============================================================================
 function formatPhoneForTransfer(phone) {
   if (!phone) return null;
-  // Already E.164
   if (phone.startsWith('+') && phone.length >= 11) return phone;
   const digits = phone.replace(/\D/g, '');
   if (digits.length === 10) return `+1${digits}`;

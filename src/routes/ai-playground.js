@@ -11,7 +11,7 @@
 //          `.eq('agency_id', agencyId)` scoping stays as defense in depth.
 // UPDATED: 2026-10-07 — VOICE PIPELINE OPTIONS: ai-details now returns the
 //          per-client pipeline fields on the `assistant` object so the AI Lab can
-//          seed the new controls (transcriber, flux, endpointing, denoising).
+//          seed the new controls (voice engine, speech recognition, denoising).
 //          model/temperature now prefer the clients columns (what live calls
 //          actually use) over the static VAPI assistant.
 // ============================================================================
@@ -110,11 +110,8 @@ router.get('/:agencyId/ai-playground/clients/:clientId/ai-details', async (req, 
             systemPromptLength: systemPrompt.length,
             temperature: client.temperature ?? raw.model?.temperature ?? 0.7,
             // ── voice pipeline (added 2026-10-07) ──
-            transcriberMode: client.transcriber_mode || 'nova',
-            fluxLanguage: client.flux_language || 'multi',
-            fluxEotThreshold: client.flux_eot_threshold ?? 0.6,
-            fluxEotTimeoutMs: client.flux_eot_timeout_ms ?? 3000,
-            endpointingProvider: client.endpointing_provider || 'vapi',
+            ttsModel: client.tts_model || raw.voice?.model || 'eleven_flash_v2_5',
+            transcriberModel: client.transcriber_model || 'nova-2',
             backgroundDenoising: !(client.tool_config && client.tool_config.backgroundDenoising === false),
             tools: (raw.model?.tools || []).map(t => {
               if (t.type === 'transferCall') return 'transferCall';
