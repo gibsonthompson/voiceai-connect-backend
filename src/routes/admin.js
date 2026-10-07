@@ -183,6 +183,63 @@ router.get('/dashboard', requireAdmin, async (req, res) => {
 });
 
 // ============================================================================
+// BILLING & TRIAL OVERVIEW (platform view of the AGENCIES, not their clients)
+// ----------------------------------------------------------------------------
+// Who's paying, who's on the free tier, whose trial is about to expire, who
+// signed up but never paid, who's overdue, and which paying agencies renew next.
+// One slim agency pull, bucketed in priority order so the counts don't overlap.
+// Separate from /api/agency/:id/analytics billing, which is about an agency's
+// own CLIENTS.
+// ============================================================================
+router.get('/billing-overview', requireAdmin, async (req, res) => {
+  try {
+    const { data: agencies, error } = await supabase
+      .from('agencies')
+      .select('id, name, email, plan_type, subscription_status, status, created_at, trial_ends_at, current_period_end')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+
+    const DAY_MS = 86400000;
+    const daysUntil = (d) => d ? Math.ceil((new Date(d).getTime() - Date.now()) / DAY_MS) : null;
+    const daysSince = (d) => d ? Math.max(0, Math.floor((Date.now() - new Date(d).getTime()) / DAY_MS)) : 0;
+
+    const counts = { paying: 0, free: 0, trialing: 0, trialExpired: 0, pendingPayment: 0, pastDue: 0, canceled: 0 };
+    const nearExpiringTrials = [], pendingPayment = [], pastDue = [], freeAgencies = [], upcomingRenewals = [];
+
+    for (const a of (agencies || [])) {
+      const sub = a.subscription_status, st = a.status, plan = a.plan_type;
+      const trialLeft = daysUntil(a.trial_ends_at);
+      const trialActive = (sub === 'trial' || sub === 'trialing') && (trialLeft == null || trialLeft >= 0);
+
+      let bucket;
+      if (sub === 'past_due') bucket = 'pastDue';
+      else if (st === 'pending_payment' || sub === 'pending') bucket = 'pendingPayment';
+      else if (sub === 'trial' || sub === 'trialing') bucket = trialActive ? 'trialing' : 'trialExpired';
+      else if (sub === 'active') bucket = (plan === 'pro' || plan === 'scale') ? 'paying' : 'free';
+      else if (sub === 'expired' || sub === 'canceled' || st === 'suspended') bucket = 'canceled';
+      else bucket = 'free';
+      counts[bucket]++;
+
+      if (bucket === 'trialing') nearExpiringTrials.push({ name: a.name, email: a.email, plan_type: plan, trial_ends_at: a.trial_ends_at, days_left: trialLeft });
+      else if (bucket === 'pendingPayment') pendingPayment.push({ name: a.name, email: a.email, created_at: a.created_at, days_waiting: daysSince(a.created_at) });
+      else if (bucket === 'pastDue') pastDue.push({ name: a.name, email: a.email, plan_type: plan });
+      else if (bucket === 'free') freeAgencies.push({ name: a.name, email: a.email, created_at: a.created_at, days_since: daysSince(a.created_at) });
+      else if (bucket === 'paying' && a.current_period_end) upcomingRenewals.push({ name: a.name, plan_type: plan, current_period_end: a.current_period_end, days_until: daysUntil(a.current_period_end) });
+    }
+    nearExpiringTrials.sort((a, b) => (a.days_left == null ? 9999 : a.days_left) - (b.days_left == null ? 9999 : b.days_left));
+    pendingPayment.sort((a, b) => (b.days_waiting || 0) - (a.days_waiting || 0));
+    freeAgencies.sort((a, b) => (b.days_since || 0) - (a.days_since || 0));
+    upcomingRenewals.sort((a, b) => (a.days_until == null ? 9999 : a.days_until) - (b.days_until == null ? 9999 : b.days_until));
+
+    console.log(`Admin billing overview: ${counts.paying} paying, ${counts.trialing} trialing, ${counts.pendingPayment} pending, ${counts.pastDue} overdue`);
+    res.json({ counts, nearExpiringTrials, pendingPayment, pastDue, freeAgencies, upcomingRenewals });
+  } catch (error) {
+    console.error('Admin billing-overview error:', error.message);
+    res.status(500).json({ error: 'Failed to load billing overview' });
+  }
+});
+
+// ============================================================================
 // LIST ALL AGENCIES - Enriched with aggregate counts from all tables
 // ----------------------------------------------------------------------------
 // The agency fetch (with its status/plan/search filters and pagination) is

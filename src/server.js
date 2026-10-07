@@ -1509,7 +1509,7 @@ app.get('/api/agency/:agencyId/analytics', requireAgencyAccess('analytics'), asy
 
     const { data: clients, error: clientsError } = await supabase
       .from('clients')
-      .select('id, business_name, plan_type, subscription_status, status, created_at, is_test_client')
+      .select('id, business_name, plan_type, subscription_status, status, created_at, is_test_client, trial_ends_at, billing_mode, paystack_status, paystack_next_charge_at, flutterwave_status, flutterwave_next_charge_at')
       .eq('agency_id', agencyId)
       .order('created_at', { ascending: false });
 
@@ -1629,8 +1629,46 @@ app.get('/api/agency/:agencyId/analytics', requireAgencyAccess('analytics'), asy
 
     console.log(`📊 Analytics loaded for agency ${agencyId}: ${activeClients} active, $${mrr/100} MRR, ${callStats.callsThisMonth} calls this month`);
 
+    // Client billing & trial breakdown: who pays, who's on trial (+ end date),
+    // who signed up but never paid, who's overdue, and when each pays next.
+    // Real (non-test) clients only. 'connect' = Stripe (exact next-charge lives on
+    // the Stripe subscription, so we surface the billing day-of-month instead).
+    const DAY_MS = 86400000;
+    const daysUntil = (d) => d ? Math.ceil((new Date(d).getTime() - Date.now()) / DAY_MS) : null;
+    const dayOfMonth = (d) => d ? new Date(d).getUTCDate() : null;
+    const billing = {
+      counts: { active: 0, manual: 0, trial: 0, trialExpired: 0, pendingPayment: 0, pastDue: 0, canceled: 0 },
+      trials: [], pendingPayment: [], pastDue: [], upcomingCharges: [],
+    };
+    for (const c of realClients) {
+      const st = c.subscription_status;
+      if (st === 'active') billing.counts.active++;
+      else if (st === 'manual') billing.counts.manual++;
+      else if (st === 'trial' || st === 'trialing') {
+        billing.counts.trial++;
+        billing.trials.push({ business_name: c.business_name, trial_ends_at: c.trial_ends_at, days_left: daysUntil(c.trial_ends_at), billing_mode: c.billing_mode });
+      }
+      else if (st === 'trial_expired' || st === 'expired') billing.counts.trialExpired++;
+      else if (st === 'pending_payment' || st === 'pending') { billing.counts.pendingPayment++; billing.pendingPayment.push({ business_name: c.business_name, created_at: c.created_at, billing_mode: c.billing_mode, days_waiting: Math.abs(daysUntil(c.created_at) || 0) }); }
+      else if (st === 'past_due' || st === 'manual_suspended') { billing.counts.pastDue++; billing.pastDue.push({ business_name: c.business_name, billing_mode: c.billing_mode }); }
+      else if (st === 'canceled' || st === 'cancelled' || st === 'agency_canceled') billing.counts.canceled++;
+
+      if (st === 'active') {
+        let next = null, provider = null, bday = null;
+        if (c.billing_mode === 'paystack') { next = c.paystack_next_charge_at; provider = 'Paystack'; }
+        else if (c.billing_mode === 'flutterwave') { next = c.flutterwave_next_charge_at; provider = 'Flutterwave'; }
+        else if (c.billing_mode === 'manual') { provider = 'Manual'; }
+        else { provider = 'Stripe'; bday = dayOfMonth(c.trial_ends_at || c.created_at); }
+        billing.upcomingCharges.push({ business_name: c.business_name, provider, next_charge_at: next, days_until: daysUntil(next), billing_day: next ? dayOfMonth(next) : bday });
+      }
+    }
+    billing.trials.sort((a, b) => new Date(a.trial_ends_at || '2999-01-01') - new Date(b.trial_ends_at || '2999-01-01'));
+    billing.pendingPayment.sort((a, b) => b.days_waiting - a.days_waiting);
+    billing.upcomingCharges.sort((a, b) => (a.days_until == null ? 999 : a.days_until) - (b.days_until == null ? 999 : b.days_until));
+
     res.json({
       stats: { mrr, totalEarned, pendingPayout, activeClients, trialClients, totalClients },
+      billing,
       callStats,
       callsByMonth,
       callsByClient,
