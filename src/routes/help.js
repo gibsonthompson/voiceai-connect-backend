@@ -293,7 +293,7 @@ router.post('/chat', async (req, res) => {
 //      from those fields.
 router.post('/message', async (req, res) => {
   try {
-    const { message, name, contact, email, agencyId: bodyAgencyIdRaw, conversationSummary, sessionId } = req.body || {};
+    const { message, name, contact, conversationSummary, sessionId } = req.body || {};
 
     // Flag the originating FAQ-bot session as escalated (non-blocking).
     logWidgetChat(sessionId, 'escalation', `Escalated to support. Name: ${(typeof name === 'string' && name.trim()) || '(none)'} / Contact: ${(typeof contact === 'string' && contact.trim()) || '(none)'}`);
@@ -325,13 +325,7 @@ router.post('/message', async (req, res) => {
     // by the /api/widget/escalate forwarder. Contact is required upstream.
     const trimmedName = typeof name === 'string' ? name.trim() : '';
     const trimmedContact = typeof contact === 'string' ? contact.trim() : '';
-    const bodyEmail = typeof email === 'string' ? email.trim() : '';
-    const bodyAgencyId = (typeof bodyAgencyIdRaw === 'string' && bodyAgencyIdRaw.trim()) ? bodyAgencyIdRaw.trim() : null;
-    // Unauthenticated client contacting their agency from the white-label login
-    // page: no valid token, but a real agencyId + email in the body. Routed to
-    // that agency's owner and attributed to the agency (not a platform prospect).
-    const isAgencyAnon = !hasToken && !!bodyAgencyId;
-    const isProspect = !hasToken && !isAgencyAnon && (trimmedName.length > 0 || trimmedContact.length > 0);
+    const isProspect = !hasToken && (trimmedName.length > 0 || trimmedContact.length > 0);
 
     // Compose the effective message. For a prospect we fold the typed message
     // and the chat transcript into one body and tag it so it is unmistakable in
@@ -362,34 +356,7 @@ router.post('/message', async (req, res) => {
     // Derive identity fields for the record and SMS.
     let userType;
     let displayName;
-    let agencyNotifyPhone = null;
-    if (isAgencyAnon) {
-      // Not-signed-in client contacting their agency. Validate the agency and
-      // grab its owner contact so the message routes to them, not the platform.
-      if (!bodyEmail && !trimmedContact) {
-        return res.status(400).json({ error: 'Please include your email so we can reply.' });
-      }
-      let ag = null;
-      try {
-        const { data } = await supabase
-          .from('agencies')
-          .select('name, phone, email')
-          .eq('id', bodyAgencyId)
-          .single();
-        ag = data || null;
-      } catch {
-        // non-blocking
-      }
-      if (!ag) {
-        return res.status(400).json({ error: 'We could not identify this business. Please try again.' });
-      }
-      agencyId = bodyAgencyId;
-      clientId = null;
-      userType = 'client';
-      displayName = trimmedName || ag.name || 'Client (not signed in)';
-      userEmail = bodyEmail || trimmedContact || 'Unknown';
-      agencyNotifyPhone = ag.phone || null;
-    } else if (isProspect) {
+    if (isProspect) {
       // Keep user_type at a proven-safe value so a queue-table enum/CHECK
       // constraint can never reject the insert; the prospect is identified by
       // the message tag above and the SMS label below.
@@ -436,16 +403,13 @@ router.post('/message', async (req, res) => {
       console.error('support_requests insert threw (non-blocking):', dbErr.message);
     }
 
-    // 2) Text the recipient. For a not-signed-in client contacting their agency
-    //    from the login page, that's the agency owner (falling back to the
-    //    platform if the agency has no number on file). Everyone else → platform.
+    // 2) Text the platform owner.
     let smsSent = false;
-    const smsTarget = isAgencyAnon ? (agencyNotifyPhone || SUPPORT_PHONE) : SUPPORT_PHONE;
-    if (smsTarget) {
+    if (SUPPORT_PHONE) {
       try {
-        const whoLabel = isAgencyAnon ? 'Client (not signed in)' : isProspect ? 'Prospect' : (userType === 'client' ? 'Client' : 'Agency');
+        const whoLabel = isProspect ? 'Prospect' : (userType === 'client' ? 'Client' : 'Agency');
         const smsBody = [
-          isProspect ? '📞 VoiceAI Callback Request' : isAgencyAnon ? '🆘 A client needs help signing in' : '🆘 VoiceAI Support Request',
+          isProspect ? '📞 VoiceAI Callback Request' : '🆘 VoiceAI Support Request',
           `${whoLabel}: ${displayName}`,
           `Contact: ${userEmail}`,
           `Message: ${cleanMessage.substring(0, 600)}`,
@@ -453,19 +417,19 @@ router.post('/message', async (req, res) => {
         ].join('\n');
 
         await sendAndLogSMS({
-          phone: smsTarget,
+          phone: SUPPORT_PHONE,
           message: smsBody,
           agencyId: agencyId,
-          recipientType: isAgencyAnon ? 'agency' : 'admin',
+          recipientType: 'admin',
           messageType: 'support_escalation',
-          metadata: { name: displayName, contact: userEmail, userType: isAgencyAnon ? 'client_login' : isProspect ? 'prospect' : userType },
+          metadata: { name: displayName, contact: userEmail, userType: isProspect ? 'prospect' : userType },
         });
         smsSent = true;
       } catch (smsErr) {
         console.error('Support escalation SMS failed (non-blocking):', smsErr.message);
       }
     } else {
-      console.error('No support phone available (support request still saved to queue)');
+      console.error('SUPPORT_PHONE_NUMBER not configured (support request still saved to queue)');
     }
 
     // Success as long as the request was captured somewhere.

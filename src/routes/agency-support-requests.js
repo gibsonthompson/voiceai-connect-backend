@@ -278,7 +278,7 @@ router.post('/:agencyId/support-requests/from-client', async (req, res) => {
 // ============================================================================
 router.post('/support-requests/intake', async (req, res) => {
   try {
-    const { agencyId, host, name, contact, message, conversationSummary } = req.body || {};
+    const { agencyId, host, name, contact, message, conversationSummary, source } = req.body || {};
 
     let agency = null;
     if (agencyId && UUID_RE.test(agencyId)) {
@@ -311,14 +311,18 @@ router.post('/support-requests/intake', async (req, res) => {
     if (!body) body = '(Contact request - no message provided)';
     body = body.slice(0, MAX_MESSAGE);
 
+    // A not-signed-in client messaging from their agency's login page comes in
+    // tagged source 'client_login', so the inbox shows it as a client (not a
+    // website prospect) with its own "Login page" source.
+    const isClientLogin = source === 'client_login';
     const { error } = await supabase.from('agency_support_requests').insert({
       agency_id: agency.id,
       client_id: null,
-      user_type: 'prospect',
+      user_type: isClientLogin ? 'client' : 'prospect',
       requester_name: nm || null,
       contact: ct,
       message: body,
-      source: 'marketing_site',
+      source: isClientLogin ? 'client_login' : 'marketing_site',
       status: 'new',
     });
 
@@ -330,7 +334,7 @@ router.post('/support-requests/intake', async (req, res) => {
     // Heads-up SMS to the agency owner (best-effort). The typed message is
     // preferred for the excerpt; falls back to the composed body (transcript).
     notifyAgencyOwner(agency, {
-      title: 'New website message',
+      title: isClientLogin ? 'A client messaged you from your login page' : 'New website message',
       requesterName: nm,
       contact: ct,
       message: typed || body,
