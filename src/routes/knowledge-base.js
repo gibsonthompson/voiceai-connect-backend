@@ -54,6 +54,63 @@ const { INDUSTRY_KNOWLEDGE_BASES } = require('../lib/industry-knowledge-bases');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 
+// ============================================================================
+// SERVICE SUGGESTION HELPERS (used by the "Learn from website" scrape).
+// Normalizes names and detects near-duplicates so a scraped service is only
+// suggested when the client does not already have something like it. Shared
+// shape with the frontend filter in ClientServicesSection.
+// ============================================================================
+function normServiceName(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function servicesAreSimilar(a, b) {
+  const na = normServiceName(a);
+  const nb = normServiceName(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.includes(nb) || nb.includes(na)) return true;
+  const ta = new Set(na.split(' ').filter(Boolean));
+  const tb = new Set(nb.split(' ').filter(Boolean));
+  if (!ta.size || !tb.size) return false;
+  let inter = 0;
+  ta.forEach(t => { if (tb.has(t)) inter++; });
+  const union = new Set([...ta, ...tb]).size;
+  return union > 0 && inter / union >= 0.6;
+}
+// Builds suggestion objects {name, price} from the scraper's structured output
+// (services[] names + pricing[] "Name: $X" strings), merging a price onto a
+// service when found, then dropping anything similar to an existing service.
+function buildServiceSuggestions(structuredData, existingNames) {
+  if (!structuredData) return [];
+  const byKey = new Map();
+  const add = (name, price) => {
+    const clean = String(name || '').trim();
+    if (!clean || clean.length > 80) return;
+    const key = normServiceName(clean);
+    if (!key) return;
+    const prev = byKey.get(key);
+    if (!prev) byKey.set(key, { name: clean, price: price || null });
+    else if (!prev.price && price) prev.price = price; // upgrade with a price
+  };
+  // pricing strings: "Oil Change: $39.99", "Consultation - Free"
+  (Array.isArray(structuredData.pricing) ? structuredData.pricing : []).forEach(entry => {
+    const str = String(entry || '').trim();
+    const m = str.match(/^(.*?)[:\-–]\s*(.+)$/);
+    if (m && m[1] && m[2]) add(m[1], m[2].trim().slice(0, 100));
+    else add(str, null);
+  });
+  (Array.isArray(structuredData.services) ? structuredData.services : []).forEach(s => add(s, null));
+
+  const existing = (existingNames || []).map(normServiceName);
+  const out = [];
+  for (const cand of byKey.values()) {
+    if (existing.some(ex => servicesAreSimilar(cand.name, ex))) continue;
+    out.push(cand);
+    if (out.length >= 15) break;
+  }
+  return out;
+}
+
 // Maximum assembled document size. Mirrors the website scraper's cap. VAPI
 // handles 100k fine; we trim from the tail so the client-provided block at the
 // top is never the part that gets cut.
@@ -365,13 +422,70 @@ async function updateKnowledgeBase(req, res) {
     const oldToolId = client.vapi_query_tool_id || null;
 
     // ========================================
+    // 3b. OPTIONAL WEBSITE SCRAPE ("Learn from website" action).
+    //    A normal save never scrapes (fast). When the caller sets scrapeWebsite,
+    //    we fetch the site now (synchronous; the UI shows a spinner) and use the
+    //    freshly scraped content + industry doc as the base, replacing whatever
+    //    was cached. The client-provided block is layered on top below, so the
+    //    client's own hours/FAQs are preserved. A failed/empty scrape returns an
+    //    error so the user knows nothing was learned, rather than silently saving.
+    // ========================================
+    const effectiveUrl = (websiteUrl || client.business_website || '').trim();
+    let scrapedBase = null;
+    if (req.body.scrapeWebsite && effectiveUrl) {
+      console.log(`🌐 Learn from website requested: ${effectiveUrl}`);
+      try {
+        const { createKnowledgeBaseFromWebsite } = require('../lib/website-scraper');
+        const scrapeResult = await createKnowledgeBaseFromWebsite(effectiveUrl, client.business_name);
+        if (scrapeResult && scrapeResult.websiteContent && scrapeResult.websiteContent.trim()) {
+          const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
+          const gen = INDUSTRY_KNOWLEDGE_BASES[industryKey] || INDUSTRY_KNOWLEDGE_BASES['professional_services'];
+          const industryDoc = gen ? gen(client.business_name) : '';
+          scrapedBase = industryDoc
+            ? `${industryDoc}\n\n${scrapeResult.websiteContent}`
+            : scrapeResult.websiteContent;
+          console.log(`🌐 Scraped ${effectiveUrl}, ${scrapeResult.websiteContent.length} chars of website content`);
+
+          // Surface services found on the site as suggestions in the structured
+          // Services section, deduped against what the client already has so a
+          // scrape never contradicts a manual entry. Stored on the client row;
+          // the Services section reads + resolves them. Best-effort: a failure
+          // here never blocks the knowledge-base save.
+          try {
+            const { data: existingSvcs } = await supabase
+              .from('client_services')
+              .select('name')
+              .eq('client_id', clientId);
+            const suggestions = buildServiceSuggestions(
+              scrapeResult.structuredData,
+              (existingSvcs || []).map(s => s.name)
+            );
+            await supabase.from('clients').update({ service_suggestions: suggestions }).eq('id', clientId);
+            console.log(`💡 ${suggestions.length} service suggestion(s) stored from website`);
+          } catch (suggErr) {
+            console.warn('⚠️ Service suggestion build failed (non-fatal):', suggErr.message);
+          }
+        } else {
+          return res.status(422).json({ success: false, error: 'We could not read any content from that website. Make sure the URL is correct and the site is publicly reachable, then try again.' });
+        }
+      } catch (e) {
+        console.error('Website scrape failed:', e.message);
+        return res.status(502).json({ success: false, error: 'Something went wrong reading that website. Please try again in a moment.' });
+      }
+    } else if (req.body.scrapeWebsite && !effectiveUrl) {
+      return res.status(400).json({ success: false, error: 'Add your website address first, then tap Learn from website.' });
+    }
+
+    // ========================================
     // 4. ASSEMBLE the new document.
     //    Strip any prior client block, then prepend the fresh one. If there's
     //    no existing document at all (KB never built, e.g. signup scrape
     //    failed), rebuild the base from the industry doc so the AI still gets
     //    a real knowledge base.
     // ========================================
-    let baseDoc = stripClientSection(currentDoc);
+    // A fresh scrape (scrapedBase) becomes the base document, replacing the
+    // cached one; otherwise keep the existing base (minus its client block).
+    let baseDoc = scrapedBase || stripClientSection(currentDoc);
 
     if (!baseDoc || !baseDoc.trim()) {
       const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
@@ -424,6 +538,7 @@ async function updateKnowledgeBase(req, res) {
     res.json({
       success: true,
       message: 'Knowledge base updated successfully',
+      scraped: !!scrapedBase,
     });
 
     // ========================================

@@ -46,9 +46,74 @@ router.get('/:clientId/services', requirePermissionIfAuthed('my_business'), asyn
     const staffMap = {};
     (staff || []).forEach(s => { staffMap[s.id] = s.name; });
 
-    res.json({ success: true, services: services || [], staffMap });
+    // Website-scraped service suggestions (stored by the Learn-from-website
+    // scrape). Re-filter against the CURRENT services so anything the client has
+    // added since the scrape drops off automatically, no stale suggestion for a
+    // service they already created.
+    let suggestions = [];
+    try {
+      const { data: clientRow } = await supabase
+        .from('clients')
+        .select('service_suggestions')
+        .eq('id', clientId)
+        .single();
+      const raw = Array.isArray(clientRow?.service_suggestions) ? clientRow.service_suggestions : [];
+      const existing = (services || []).map(s => normServiceName(s.name));
+      suggestions = raw.filter(sg => sg && sg.name && !existing.some(ex => servicesAreSimilar(sg.name, ex)));
+    } catch (e) { /* suggestions are best-effort */ }
+
+    res.json({ success: true, services: services || [], staffMap, suggestions });
   } catch (error) {
     console.error('Error fetching services:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// Service-name similarity (shared with the scrape-side suggestion builder).
+// ============================================================================
+function normServiceName(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function servicesAreSimilar(a, b) {
+  const na = normServiceName(a);
+  const nb = normServiceName(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.includes(nb) || nb.includes(na)) return true;
+  const ta = new Set(na.split(' ').filter(Boolean));
+  const tb = new Set(nb.split(' ').filter(Boolean));
+  if (!ta.size || !tb.size) return false;
+  let inter = 0;
+  ta.forEach(t => { if (tb.has(t)) inter++; });
+  const union = new Set([...ta, ...tb]).size;
+  return union > 0 && inter / union >= 0.6;
+}
+
+// ============================================================================
+// POST /api/client/:clientId/services/suggestions/dismiss, remove one scraped
+// suggestion (by name) from the stored list. Used when the client adds it as a
+// real service or dismisses it. Defined before the /:serviceId routes so the
+// "suggestions" path segment is never matched as a service id.
+// ============================================================================
+router.post('/:clientId/services/suggestions/dismiss', requirePermissionIfAuthed('my_business'), async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { name } = req.body || {};
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: 'name is required' });
+    }
+    const { data: clientRow } = await supabase
+      .from('clients')
+      .select('service_suggestions')
+      .eq('id', clientId)
+      .single();
+    const raw = Array.isArray(clientRow?.service_suggestions) ? clientRow.service_suggestions : [];
+    const remaining = raw.filter(sg => !(sg && sg.name && servicesAreSimilar(sg.name, name)));
+    await supabase.from('clients').update({ service_suggestions: remaining }).eq('id', clientId);
+    res.json({ success: true, suggestions: remaining });
+  } catch (error) {
+    console.error('Error dismissing suggestion:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
