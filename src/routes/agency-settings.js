@@ -1748,57 +1748,38 @@ async function disconnectFlutterwave(req, res) {
 // ============================================================================
 // LEGAL PAGES (Terms / Privacy) EDITING
 // ----------------------------------------------------------------------------
-// The hosted marketing site renders Terms and Privacy from the platform default
-// template (legal_templates table) UNLESS the agency has set an override in
-// agencies.legal_overrides ({ terms, privacy } markdown). These two handlers
-// let an agency read the effective content (override if set, else the platform
-// default, so they always start from real text) and save or clear a per-page
-// override. Placeholders like {{AGENCY_NAME}} and {{SUPPORT_EMAIL}} are left
-// intact in storage and resolved at render time by components/LegalPage.
+// The hosted Terms and Privacy pages are composed from a fixed canonical
+// template (lib/legal-template.ts on the frontend) with a small set of editable
+// FIELDS dropped in. The agency only ever stores those field values in
+// agencies.legal_overrides as { terms: {fields}, privacy: {fields} }; it can
+// never store or remove page body, so the protective clauses in the template
+// are always published. These handlers read and write only the field values.
+// Only whitelisted keys are accepted; everything else is ignored.
 // ============================================================================
 const LEGAL_TYPES = ['terms', 'privacy'];
-const LEGAL_MAX_CHARS = 60000; // generous cap; a long policy is well under this
+const LEGAL_FIELD_KEYS = ['support_email', 'business_name', 'payment_processor', 'trial_terms', 'refund_policy'];
+const LEGAL_MAX_CHARS = 60000; // generous cap across a page's field values
 
-async function fetchDefaultLegalTemplate(type) {
-  try {
-    const { data, error } = await supabase
-      .from('legal_templates')
-      .select('template_type, title, content')
-      .eq('template_type', type)
-      .single();
-    if (error || !data) return null;
-    return data;
-  } catch (e) {
-    console.error('fetchDefaultLegalTemplate error:', e.message);
-    return null;
-  }
+function normalizeFieldObject(v) {
+  // Only a plain object of field values counts. Legacy string overrides (from
+  // the earlier markdown version) are ignored, which also means a stale full
+  // override can never strip the protective template.
+  return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
 }
 
 // GET /api/agency/:agencyId/legal
-// Returns the effective Terms and Privacy content for the editor, flagging
-// whether each is a custom override or the inherited platform default.
+// Returns the agency's stored editable field values for each page. Defaults are
+// filled on the frontend from the canonical template, so an empty object simply
+// means "using the standard wording".
 async function getAgencyLegal(req, res) {
   try {
     const { agencyId } = req.params;
     const agency = await getAgencyById(agencyId);
     if (!agency) return res.status(404).json({ error: 'Agency not found' });
 
-    const overrides = (agency.legal_overrides && typeof agency.legal_overrides === 'object') ? agency.legal_overrides : {};
+    const overrides = normalizeFieldObject(agency.legal_overrides);
     const out = {};
-    for (const type of LEGAL_TYPES) {
-      const override = typeof overrides[type] === 'string' && overrides[type].trim() ? overrides[type] : null;
-      if (override) {
-        out[type] = { content: override, isOverride: true, title: type === 'terms' ? 'Terms of Service' : 'Privacy Policy' };
-      } else {
-        const def = await fetchDefaultLegalTemplate(type);
-        out[type] = {
-          content: def ? def.content : '',
-          isOverride: false,
-          title: (def && def.title) || (type === 'terms' ? 'Terms of Service' : 'Privacy Policy'),
-          defaultMissing: !def,
-        };
-      }
-    }
+    for (const type of LEGAL_TYPES) out[type] = normalizeFieldObject(overrides[type]);
     return res.json({ legal: out });
   } catch (e) {
     console.error('getAgencyLegal error:', e.message);
@@ -1806,36 +1787,44 @@ async function getAgencyLegal(req, res) {
   }
 }
 
-// PUT /api/agency/:agencyId/legal   body: { type: 'terms'|'privacy', content: string|null }
-// Sets a per-page override, or clears it (content null/empty => revert to the
-// platform default). Only the targeted page is touched; the other is preserved.
+// PUT /api/agency/:agencyId/legal   body: { type: 'terms'|'privacy', fields: {...} }
+// Saves the editable field values for one page, or clears them (empty fields =>
+// revert that page to the standard wording). Only whitelisted keys are kept and
+// only the targeted page is touched; the other is preserved.
 async function updateAgencyLegal(req, res) {
   try {
     const { agencyId } = req.params;
-    const { type, content } = req.body || {};
+    const { type, fields } = req.body || {};
 
     if (!LEGAL_TYPES.includes(type)) {
       return res.status(400).json({ error: 'type must be "terms" or "privacy"' });
     }
-    if (content != null && typeof content !== 'string') {
-      return res.status(400).json({ error: 'content must be a string or null' });
+    if (fields != null && (typeof fields !== 'object' || Array.isArray(fields))) {
+      return res.status(400).json({ error: 'fields must be an object' });
     }
-    if (typeof content === 'string' && content.length > LEGAL_MAX_CHARS) {
+
+    const clean = {};
+    let total = 0;
+    if (fields && typeof fields === 'object') {
+      for (const k of LEGAL_FIELD_KEYS) {
+        const val = fields[k];
+        if (typeof val === 'string' && val.trim()) { clean[k] = val; total += val.length; }
+      }
+    }
+    if (total > LEGAL_MAX_CHARS) {
       return res.status(400).json({ error: `content is too long (max ${LEGAL_MAX_CHARS} characters)` });
     }
 
     const agency = await getAgencyById(agencyId);
     if (!agency) return res.status(404).json({ error: 'Agency not found' });
 
-    const current = (agency.legal_overrides && typeof agency.legal_overrides === 'object') ? { ...agency.legal_overrides } : {};
-    const trimmed = typeof content === 'string' ? content.trim() : '';
-    if (trimmed) {
-      current[type] = content; // store as-authored (keep author's whitespace)
-    } else {
-      delete current[type]; // reset this page to the platform default
-    }
+    const current = normalizeFieldObject(agency.legal_overrides);
+    const next = { ...current };
+    // Drop any legacy string-shaped values so they can never shadow the template.
+    for (const t of LEGAL_TYPES) { if (typeof next[t] === 'string') delete next[t]; }
+    if (Object.keys(clean).length > 0) next[type] = clean; else delete next[type];
 
-    const nextOverrides = Object.keys(current).length > 0 ? current : null;
+    const nextOverrides = Object.keys(next).length > 0 ? next : null;
     const { error } = await supabase
       .from('agencies')
       .update({ legal_overrides: nextOverrides })
@@ -1845,7 +1834,7 @@ async function updateAgencyLegal(req, res) {
       return res.status(500).json({ error: 'Failed to save legal page' });
     }
 
-    return res.json({ success: true, type, isOverride: !!trimmed });
+    return res.json({ success: true, type, hasOverride: Object.keys(clean).length > 0 });
   } catch (e) {
     console.error('updateAgencyLegal error:', e.message);
     return res.status(500).json({ error: 'Failed to save legal page' });
