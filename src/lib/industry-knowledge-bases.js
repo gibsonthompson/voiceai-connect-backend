@@ -228,10 +228,10 @@ A: We understand healthcare costs can be a concern. We accept various payment me
 A: If you are experiencing a medical emergency, please call 911 immediately or go to your nearest emergency room. Our office handles non-emergency medical care.
 
 **Q: Can I request prescription refills by phone?**
-A: Prescription refills typically require a review by your provider. Please allow 24–48 hours for refill requests. Contact our office and we'll pass the request to your provider.
+A: Prescription refills typically require a review by the doctor. Please allow 24–48 hours for refill requests. Contact our office and we'll pass the request to the doctor.
 
 **Q: Do you treat children?**
-A: Many of our providers see patients of all ages, including children. Pediatric-specific services may also be available. Ask when scheduling.
+A: Many of our doctors see patients of all ages, including children. Pediatric-specific services may also be available. Ask when scheduling.
 
 ## HIPAA Compliance Reminders
 - Never discuss specific patient medical details over the phone unless identity is verified
@@ -274,8 +274,8 @@ A: Many of our providers see patients of all ages, including children. Pediatric
 - **Copay**: Fixed amount you pay at the time of visit (e.g., $25 for a primary care visit)
 - **Deductible**: Amount you pay out-of-pocket before insurance starts covering
 - **Coinsurance**: Percentage you pay after meeting your deductible
-- **In-Network**: Providers who have agreements with your insurance for lower rates
-- **Out-of-Network**: Providers without insurance agreements — typically higher costs
+- **In-Network**: Doctors or clinics that have agreements with your insurance for lower rates
+- **Out-of-Network**: Doctors or clinics without insurance agreements, typically higher costs
 - **Prior Authorization**: Approval required from insurance before certain procedures
 - **EOB (Explanation of Benefits)**: Statement from insurance showing what was covered
 - **FSA/HSA**: Tax-advantaged savings accounts for medical expenses

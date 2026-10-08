@@ -174,7 +174,7 @@ CRITICAL DATE RULES:
 
 Booking flow:
 1. Caller wants to book, ask what service they need (if not already stated)
-2. Ask if they have a preferred provider/staff member (if staff are listed above)
+2. Ask if they have a preferred staff member (if staff are listed above)
 3. Ask for their preferred date
 4. Call check_availability with the date and service type
 5. Read the tool response, it contains the CORRECT date and available times
@@ -390,7 +390,7 @@ DATA COLLECTION, NEVER ask about or collect:
 - Any specific health information
 
 CONVERSATION RULES:
-- If a caller shares medical details voluntarily, redirect immediately: "Our provider will discuss that with you at your appointment. For now, let me help you get scheduled."
+- If a caller shares medical details voluntarily, redirect immediately: "The doctor will discuss that with you at your appointment. For now, let me help you get scheduled."
 - Do NOT repeat back, confirm, or acknowledge any health information the caller shares.
 - When asking about the visit, say: "What type of appointment are you looking for?", NOT "What brings you in?" or "What's going on?"
 - Do NOT reference any previous calls or history with this caller.
@@ -450,7 +450,41 @@ async function buildServicesBlock(clientId) {
 // ============================================================================
 // STAFF BLOCK, Queries staff_members table
 // ============================================================================
-async function buildStaffBlock(clientId) {
+// Industry-specific word for the people a caller books with, so the AI says
+// "dentist" or "stylist" instead of the generic, clinical "provider". Falls
+// back to "staff member" for anything not listed.
+const STAFF_TERMS = {
+  dental: { one: 'dentist', many: 'dentists' },
+  dentist: { one: 'dentist', many: 'dentists' },
+  medical: { one: 'doctor', many: 'doctors' },
+  medical_practice: { one: 'doctor', many: 'doctors' },
+  healthcare: { one: 'doctor', many: 'doctors' },
+  mental_health: { one: 'therapist', many: 'therapists' },
+  therapy: { one: 'therapist', many: 'therapists' },
+  veterinary: { one: 'veterinarian', many: 'veterinarians' },
+  vet: { one: 'veterinarian', many: 'veterinarians' },
+  chiropractic: { one: 'chiropractor', many: 'chiropractors' },
+  optometry: { one: 'optometrist', many: 'optometrists' },
+  physical_therapy: { one: 'therapist', many: 'therapists' },
+  salon_spa: { one: 'stylist', many: 'stylists' },
+  salon: { one: 'stylist', many: 'stylists' },
+  spa: { one: 'specialist', many: 'specialists' },
+  legal: { one: 'attorney', many: 'attorneys' },
+  law: { one: 'attorney', many: 'attorneys' },
+  law_firm: { one: 'attorney', many: 'attorneys' },
+  real_estate: { one: 'agent', many: 'agents' },
+  automotive: { one: 'technician', many: 'technicians' },
+  home_services: { one: 'technician', many: 'technicians' },
+  fitness: { one: 'trainer', many: 'trainers' },
+  restaurant: { one: 'team member', many: 'team members' },
+};
+function staffTermForIndustry(industry) {
+  const key = String(industry || '').toLowerCase().trim().replace(/[\s-]+/g, '_');
+  return STAFF_TERMS[key] || { one: 'staff member', many: 'staff members' };
+}
+
+async function buildStaffBlock(clientId, term) {
+  const t = term || { one: 'staff member', many: 'staff members' };
   if (!supabase || !clientId) return '';
 
   try {
@@ -463,7 +497,7 @@ async function buildStaffBlock(clientId) {
 
     if (error || !staff || staff.length === 0) return '';
 
-    const lines = ['\n\n# Staff / Providers'];
+    const lines = ['\n\n# Staff'];
 
     staff.forEach(s => {
       let line = `- ${s.name}`;
@@ -490,7 +524,7 @@ async function buildStaffBlock(clientId) {
 
     lines.push('');
     if (staff.length > 1) {
-      lines.push('When booking an appointment, ask: "Do you have a preferred provider?" If they do, include that name in the booking. If they don\'t have a preference, you can skip it.');
+      lines.push(`When booking an appointment, ask: "Do you have a preferred ${t.one}?" If they do, include that name in the booking. If they don't have a preference, you can skip it.`);
     } else {
       lines.push(`Appointments are with ${staff[0].name}${staff[0].role ? ` (${staff[0].role})` : ''}. Include their name in booking details.`);
     }
@@ -976,9 +1010,13 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
   //    HIPAA always forces collect_request. auto_book WITHOUT a connected
   //    calendar degrades to collect_request so the AI never promises a booking
   //    it cannot make.
+  // Industry-specific word for the people callers book with (dentist, stylist,
+  // attorney...), used across the booking and staff blocks instead of "provider".
+  const staffTerm = staffTermForIndustry(client.industry);
+
   if (canAutoBook && !hipaaMode) {
     if (!systemPrompt.includes('## APPOINTMENT BOOKING')) {
-      systemPrompt += APPOINTMENT_BOOKING_BLOCK;
+      systemPrompt += APPOINTMENT_BOOKING_BLOCK.replace('preferred staff member', `preferred ${staffTerm.one}`);
     }
   } else {
     const rawMode = hipaaMode ? 'collect_request' : (client.booking_mode || 'auto_book');
@@ -995,8 +1033,8 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
   // Phase 3B: Structured services from client_services table
   systemPrompt += await buildServicesBlock(client.id);
 
-  // Phase 3B: Staff members from staff_members table
-  systemPrompt += await buildStaffBlock(client.id);
+  // Phase 3B: Staff members from staff_members table, industry-aware wording.
+  systemPrompt += await buildStaffBlock(client.id, staffTerm);
 
   // Phase 1: Service areas
   systemPrompt += buildServiceAreasBlock(client.service_areas);
@@ -1259,7 +1297,7 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
             date: { type: 'string', description: 'Appointment date (YYYY-MM-DD if known, otherwise natural language)' },
             time: { type: 'string', description: 'Appointment time (e.g., 2:00 PM)' },
             service_type: { type: 'string', description: 'Type of service or reason for appointment' },
-            staff_name: { type: 'string', description: 'Name of the preferred staff member or provider, if the caller specified one' },
+            staff_name: { type: 'string', description: 'Name of the preferred staff member, if the caller specified one' },
             notes: { type: 'string', description: 'Any special requests or notes' }
           },
           required: ['customer_name', 'customer_phone', 'date', 'time']
