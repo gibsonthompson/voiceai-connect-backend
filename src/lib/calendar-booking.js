@@ -247,6 +247,43 @@ async function getAvailableSlots(clientId, date, options) {
 
     const timezone = client.timezone || 'America/New_York';
 
+    // ── Booking window settings ─────────────────────────────────────────
+    // Minimum notice (how soon a slot may be offered) and max horizon (how far
+    // ahead bookings are taken) are per-client, falling back to the agency
+    // default, then to a sane platform default. Neither hard-blocks a day: the
+    // notice simply shifts the earliest offerable slot forward.
+    let agencyDefaults = {};
+    if (client.agency_id) {
+      try {
+        const { data: ag } = await supabase
+          .from('agencies')
+          .select('default_min_booking_notice_minutes, default_max_booking_days_ahead')
+          .eq('id', client.agency_id)
+          .single();
+        agencyDefaults = ag || {};
+      } catch (e) { /* defaults below */ }
+    }
+    const pickNum = (...vals) => {
+      for (const v of vals) { const n = Number(v); if (v !== null && v !== undefined && v !== '' && !isNaN(n)) return n; }
+      return null;
+    };
+    const leadMinutes = pickNum(client.min_booking_notice_minutes, agencyDefaults.default_min_booking_notice_minutes, LEAD_TIME_MINUTES);
+    const maxDaysAhead = pickNum(client.max_booking_days_ahead, agencyDefaults.default_max_booking_days_ahead, 60);
+
+    // Reject dates beyond the booking horizon (compared in the client's tz).
+    if (maxDaysAhead != null && maxDaysAhead > 0) {
+      const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+      const [ty, tmo, td] = todayStr.split('-').map(Number);
+      const [ry, rmo, rd] = date.split('-').map(Number);
+      const todayMid = Date.UTC(ty, tmo - 1, td);
+      const reqMid = Date.UTC(ry, rmo - 1, rd);
+      const daysOut = Math.round((reqMid - todayMid) / 86400000);
+      if (daysOut > maxDaysAhead) {
+        console.log(`📅 ${date} is ${daysOut} days out, beyond the ${maxDaysAhead}-day booking window`);
+        return { success: true, slots: [], message: `We only take bookings up to ${maxDaysAhead} days ahead.` };
+      }
+    }
+
     const businessHours = client.business_hours || {
       monday: { open: '09:00', close: '17:00' },
       tuesday: { open: '09:00', close: '17:00' },
@@ -267,7 +304,10 @@ async function getAvailableSlots(clientId, date, options) {
       .toLowerCase();
     const hours = businessHours[dayName];
 
-    if (!hours || !hours.open || !hours.close) {
+    // Closed when the day is missing hours OR explicitly flagged closed (some
+    // paths store closed:true alongside leftover open/close times; honor the
+    // flag the same way checkBusinessHours does so a closed day never books).
+    if (!hours || hours.closed === true || !hours.open || !hours.close) {
       return { success: true, slots: [], message: 'Closed on this day' };
     }
 
@@ -337,7 +377,7 @@ async function getAvailableSlots(clientId, date, options) {
     }
 
     const nowMs = Date.now();
-    const leadMs = LEAD_TIME_MINUTES * 60000;
+    const leadMs = (leadMinutes != null ? leadMinutes : LEAD_TIME_MINUTES) * 60000;
     const slots = [];
 
     for (let cur = openTotal; cur + duration <= closeTotal; cur += SLOT_STEP_MINUTES) {

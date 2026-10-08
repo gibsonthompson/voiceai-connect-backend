@@ -669,7 +669,12 @@ async function getAgencySettings(req, res) {
         og_title: agency.og_title || null,
         og_description: agency.og_description || null,
         og_image_url: agency.og_image_url || null,
-        
+
+        // Booking-window defaults clients inherit (null = platform default:
+        // 30 min notice, 60 days ahead).
+        default_min_booking_notice_minutes: agency.default_min_booking_notice_minutes ?? null,
+        default_max_booking_days_ahead: agency.default_max_booking_days_ahead ?? null,
+
         // Timestamps
         created_at: agency.created_at,
         updated_at: agency.updated_at
@@ -808,10 +813,31 @@ async function updateAgencySettings(req, res) {
       // Agency renames/removals of built-in feature rows { [key]: { label?, hidden? } }
       'feature_overrides',
       // Agency's self-billing method (record only, for a possible future integration)
-      'billing_method'
+      'billing_method',
+      // Default booking-window rules new/existing clients inherit unless they set
+      // their own override. Range-clamped below. NULL = fall back to platform
+      // default (30 min notice, 60 days ahead).
+      'default_min_booking_notice_minutes', 'default_max_booking_days_ahead'
     ];
-    
+
     const sanitizedUpdates = {};
+    // Booking-window defaults: clamp to sane ranges; null/'' clears to platform default.
+    if (updates.default_min_booking_notice_minutes !== undefined) {
+      if (updates.default_min_booking_notice_minutes === null || updates.default_min_booking_notice_minutes === '') {
+        updates.default_min_booking_notice_minutes = null;
+      } else {
+        const n = Math.round(Number(updates.default_min_booking_notice_minutes));
+        updates.default_min_booking_notice_minutes = isNaN(n) ? null : Math.min(20160, Math.max(0, n));
+      }
+    }
+    if (updates.default_max_booking_days_ahead !== undefined) {
+      if (updates.default_max_booking_days_ahead === null || updates.default_max_booking_days_ahead === '') {
+        updates.default_max_booking_days_ahead = null;
+      } else {
+        const n = Math.round(Number(updates.default_max_booking_days_ahead));
+        updates.default_max_booking_days_ahead = isNaN(n) ? null : Math.min(365, Math.max(1, n));
+      }
+    }
     if (updates.bill_minutes_during_trial !== undefined) updates.bill_minutes_during_trial = updates.bill_minutes_during_trial === true;
     if (updates.allow_client_plan_changes !== undefined) updates.allow_client_plan_changes = updates.allow_client_plan_changes === true;
     if (updates.hide_client_billing !== undefined) updates.hide_client_billing = updates.hide_client_billing === true;

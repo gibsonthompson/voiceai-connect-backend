@@ -682,10 +682,25 @@ router.get('/:id/ai-settings', requirePermissionIfAuthed('ai_agent'), async (req
     const { id } = req.params;
     const { data: client, error } = await supabase
       .from('clients')
-      .select('ai_tone, booking_mode, dashboard_access, service_areas, priority_rules')
+      .select('agency_id, ai_tone, booking_mode, dashboard_access, service_areas, priority_rules, min_booking_notice_minutes, max_booking_days_ahead')
       .eq('id', id)
       .single();
     if (error || !client) return res.status(404).json({ error: 'Client not found' });
+
+    // Agency-level defaults so the client UI can show "Using agency default (X)"
+    // when this client has not set its own booking-window overrides.
+    let agencyDefaults = { default_min_booking_notice_minutes: null, default_max_booking_days_ahead: null };
+    if (client.agency_id) {
+      try {
+        const { data: ag } = await supabase
+          .from('agencies')
+          .select('default_min_booking_notice_minutes, default_max_booking_days_ahead')
+          .eq('id', client.agency_id)
+          .single();
+        if (ag) agencyDefaults = ag;
+      } catch (e) { /* keep nulls */ }
+    }
+
     res.json({
       success: true,
       settings: {
@@ -694,6 +709,11 @@ router.get('/:id/ai-settings', requirePermissionIfAuthed('ai_agent'), async (req
         dashboard_access: client.dashboard_access || 'full',
         service_areas: client.service_areas || [],
         priority_rules: client.priority_rules || {},
+        // null means "inherit the agency default" (shown below).
+        min_booking_notice_minutes: client.min_booking_notice_minutes ?? null,
+        max_booking_days_ahead: client.max_booking_days_ahead ?? null,
+        agency_default_min_booking_notice_minutes: agencyDefaults.default_min_booking_notice_minutes ?? null,
+        agency_default_max_booking_days_ahead: agencyDefaults.default_max_booking_days_ahead ?? null,
       }
     });
   } catch (error) { console.error('Error fetching AI settings:', error); res.status(500).json({ error: 'Server error' }); }
@@ -703,7 +723,7 @@ router.get('/:id/ai-settings', requirePermissionIfAuthed('ai_agent'), async (req
 router.put('/:id/ai-settings', requirePermissionIfAuthed('ai_agent'), async (req, res) => {
   try {
     const { id } = req.params;
-    const { ai_tone, booking_mode, service_areas, priority_rules } = req.body;
+    const { ai_tone, booking_mode, service_areas, priority_rules, min_booking_notice_minutes, max_booking_days_ahead } = req.body;
     const updates = {};
 
     if (ai_tone !== undefined) {
@@ -713,6 +733,26 @@ router.put('/:id/ai-settings', requirePermissionIfAuthed('ai_agent'), async (req
     if (booking_mode !== undefined) {
       if (!['auto_book', 'collect_request', 'disabled'].includes(booking_mode)) return res.status(400).json({ error: 'Invalid booking_mode. Must be: auto_book, collect_request, or disabled' });
       updates.booking_mode = booking_mode;
+    }
+    // Booking window overrides. null clears the override so the client inherits
+    // the agency default. A number is clamped to a sane range.
+    if (min_booking_notice_minutes !== undefined) {
+      if (min_booking_notice_minutes === null) {
+        updates.min_booking_notice_minutes = null;
+      } else {
+        const n = Number(min_booking_notice_minutes);
+        if (isNaN(n) || n < 0 || n > 20160) return res.status(400).json({ error: 'min_booking_notice_minutes must be between 0 and 20160 (14 days), or null to inherit' });
+        updates.min_booking_notice_minutes = Math.round(n);
+      }
+    }
+    if (max_booking_days_ahead !== undefined) {
+      if (max_booking_days_ahead === null) {
+        updates.max_booking_days_ahead = null;
+      } else {
+        const n = Number(max_booking_days_ahead);
+        if (isNaN(n) || n < 1 || n > 365) return res.status(400).json({ error: 'max_booking_days_ahead must be between 1 and 365, or null to inherit' });
+        updates.max_booking_days_ahead = Math.round(n);
+      }
     }
     if (service_areas !== undefined) {
       if (!Array.isArray(service_areas)) return res.status(400).json({ error: 'service_areas must be an array' });
@@ -726,7 +766,7 @@ router.put('/:id/ai-settings', requirePermissionIfAuthed('ai_agent'), async (req
     if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No valid fields to update' });
     updates.updated_at = new Date().toISOString();
 
-    const { data, error } = await supabase.from('clients').update(updates).eq('id', id).select('id, ai_tone, booking_mode, service_areas, priority_rules').single();
+    const { data, error } = await supabase.from('clients').update(updates).eq('id', id).select('id, ai_tone, booking_mode, service_areas, priority_rules, min_booking_notice_minutes, max_booking_days_ahead').single();
     if (error) { console.error('AI settings update error:', error); return res.status(400).json({ error: error.message }); }
     console.log(`✅ AI settings updated for client ${id}: ${Object.keys(updates).filter(k => k !== 'updated_at').join(', ')}`);
     res.json({ success: true, settings: data });

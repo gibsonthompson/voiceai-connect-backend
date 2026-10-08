@@ -457,11 +457,18 @@ async function buildStaffBlock(clientId) {
 
       if (s.available_hours && typeof s.available_hours === 'object' && Object.keys(s.available_hours).length > 0) {
         const dayAbbrev = { monday: 'Mon', tuesday: 'Tue', wednesday: 'Wed', thursday: 'Thu', friday: 'Fri', saturday: 'Sat', sunday: 'Sun' };
-        const activeDays = Object.entries(s.available_hours)
-          .filter(([_, val]) => val && val !== 'off' && val !== false)
-          .map(([day]) => dayAbbrev[day] || day)
-          .join(', ');
-        if (activeDays) line += `, available ${activeDays}`;
+        const order = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+        const parts = [];
+        for (const day of order) {
+          const v = s.available_hours[day];
+          if (!v) continue;
+          // Object shape {open,close,closed} shows times; a legacy truthy value
+          // (not 'off'/false) just marks the day available.
+          if (typeof v !== 'object') { if (v !== 'off' && v !== false) parts.push(dayAbbrev[day]); continue; }
+          if (v.closed || !v.open || !v.close) continue;
+          parts.push(`${dayAbbrev[day]} ${v.open}-${v.close}`);
+        }
+        if (parts.length) line += `, works ${parts.join('; ')}`;
       }
 
       lines.push(line);
@@ -487,12 +494,12 @@ async function buildStaffBlock(clientId) {
 // becomes a named transferCall destination and is listed in the prompt. Empty
 // list (the common case) means transfers go only to the main business line.
 // ============================================================================
-async function fetchTransferableStaff(clientId) {
+async function fetchTransferableStaff(clientId, timezone) {
   if (!supabase || !clientId) return [];
   try {
     const { data, error } = await supabase
       .from('staff_members')
-      .select('name, role, phone')
+      .select('name, role, phone, available_hours')
       .eq('client_id', clientId)
       .eq('is_active', true)
       .eq('transferable', true)
@@ -500,7 +507,13 @@ async function fetchTransferableStaff(clientId) {
       .order('name', { ascending: true });
 
     if (error || !data) return [];
-    return data.filter(s => s.phone && String(s.phone).trim());
+    const withPhone = data.filter(s => s.phone && String(s.phone).trim());
+    // Gate by working hours: a live caller should only be offered a transfer to
+    // someone who is on shift right now. Staff with no schedule stay always-on.
+    const working = withPhone.filter(s => isStaffWorkingNow(s.available_hours, timezone));
+    const offNow = withPhone.length - working.length;
+    if (offNow > 0) console.log(`⏰ ${offNow} transferable staff off-shift right now, excluded from transfer destinations`);
+    return working;
   } catch (err) {
     console.warn('⚠️ Transferable staff fetch failed:', err.message);
     return [];
@@ -589,6 +602,31 @@ function checkBusinessHours(client) {
     ? (currentMinutes >= openMinutes && currentMinutes < closeMinutes)
     : (currentMinutes >= openMinutes || currentMinutes < closeMinutes);
   return { isOpen, daySchedule, currentTime: null };
+}
+
+// Whether a staff member is working RIGHT NOW, per their available_hours
+// ({monday:{open,close,closed}, ...}, same shape as business_hours). Used to
+// gate live transfers so a caller is never warm-transferred to someone who is
+// off. Staff with NO schedule set are treated as always available, so existing
+// transferable staff keep behaving exactly as before until an owner sets hours.
+function isStaffWorkingNow(availableHours, timezone) {
+  if (!availableHours || typeof availableHours !== 'object' || Object.keys(availableHours).length === 0) {
+    return true;
+  }
+  const { weekday, hour, minute } = nowInTimezone(timezone);
+  const day = availableHours[weekday];
+  if (!day) return false;
+  // Legacy/simple value: truthy (not 'off'/false) means available all day.
+  if (typeof day !== 'object') return !(day === 'off' || day === false);
+  if (day.closed || !day.open || !day.close) return false;
+  const openMinutes = parseTimeToMinutes(day.open);
+  const closeMinutes = parseTimeToMinutes(day.close);
+  // Unparseable hours: do not trap the person as permanently off.
+  if (openMinutes == null || closeMinutes == null) return true;
+  const cur = hour * 60 + minute;
+  return closeMinutes > openMinutes
+    ? (cur >= openMinutes && cur < closeMinutes)
+    : (cur >= openMinutes || cur < closeMinutes);
 }
 
 // ============================================================================
@@ -1452,7 +1490,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   // whisper/Telnyx-CC bridge resolves its destination server-side). Fetched
   // only when we are actually transferring, so message-mode calls skip the query.
   const transferStaff = (handoff === 'transfer' && client.voice_routing !== 'telnyx_cc')
-    ? await fetchTransferableStaff(client.id)
+    ? await fetchTransferableStaff(client.id, client.timezone)
     : [];
   if (forwardingMode === 'missed') {
     console.log('📮 Missed-call coverage, AI will take a message, not transfer');
