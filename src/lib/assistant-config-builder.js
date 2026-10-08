@@ -425,23 +425,47 @@ async function buildServicesBlock(clientId) {
   try {
     const { data: services, error } = await supabase
       .from('client_services')
-      .select('name, price, description, duration_minutes, buffer_minutes, booking_mode')
+      .select('name, price, description, duration_minutes, buffer_minutes, booking_mode, assigned_staff')
       .eq('client_id', clientId)
       .eq('is_active', true)
       .order('sort_order', { ascending: true });
 
     if (error || !services || services.length === 0) return '';
 
+    // Resolve any staff assigned to a service (assigned_staff holds UUIDs) to
+    // their names, in one query, so each service can name its provider and the
+    // AI books it under that person (the name then lands in the calendar event).
+    const staffIds = [...new Set(services.flatMap(s => Array.isArray(s.assigned_staff) ? s.assigned_staff : []).filter(Boolean))];
+    const staffNameById = {};
+    if (staffIds.length > 0) {
+      const { data: staffRows } = await supabase
+        .from('staff_members')
+        .select('id, name')
+        .eq('client_id', clientId)
+        .in('id', staffIds);
+      (staffRows || []).forEach(r => { if (r && r.id && r.name) staffNameById[r.id] = r.name; });
+    }
+
     const lines = ['\n\n# Available Services'];
     lines.push('This business offers the following services. When a caller asks what you offer or wants to schedule, present the relevant options:');
     lines.push('');
 
+    let anyProvider = false;
     services.forEach((s, i) => {
       let line = `${i + 1}. ${s.name}`;
       if (s.duration_minutes) line += `, ${s.duration_minutes} min`;
       if (s.price) line += `, ${s.price}`;
       lines.push(line);
       if (s.description) lines.push(`   ${s.description}`);
+
+      const providerNames = (Array.isArray(s.assigned_staff) ? s.assigned_staff : []).map(id => staffNameById[id]).filter(Boolean);
+      if (providerNames.length === 1) {
+        anyProvider = true;
+        lines.push(`   Provider: ${providerNames[0]}. When booking this service, pass staff_name "${providerNames[0]}" unless the caller asks for someone else.`);
+      } else if (providerNames.length > 1) {
+        anyProvider = true;
+        lines.push(`   Providers: ${providerNames.join(', ')}. Ask which one the caller prefers and pass it as staff_name.`);
+      }
 
       if (s.booking_mode === 'collect_request') {
         lines.push(`   ⚠ DO NOT book this service directly. Collect the caller's name, phone, preferred date/time, and let them know: "Someone from the office will call you to confirm."`);
@@ -452,6 +476,9 @@ async function buildServicesBlock(clientId) {
 
     lines.push('');
     lines.push('When booking, use the service-specific duration listed above (not the default). If a caller is unsure which service they need, ask a clarifying question to guide them to the right one.');
+    if (anyProvider) {
+      lines.push('When a service above lists a Provider, pass that person as staff_name when you book it, so the appointment and the calendar event show who the provider is, unless the caller asks for someone else.');
+    }
 
     return lines.join('\n');
   } catch (err) {
