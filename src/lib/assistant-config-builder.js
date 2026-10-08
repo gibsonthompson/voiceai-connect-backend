@@ -1113,6 +1113,30 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
       const aiNumber = client.vapi_phone_number
         ? (isValidE164(client.vapi_phone_number) ? client.vapi_phone_number : formatPhoneE164(client.vapi_phone_number))
         : null;
+
+      // Warm transfer that (1) briefs the person who answers with a spoken
+      // summary of the call, and (2) if they do not answer or it hits voicemail,
+      // returns the caller to THIS assistant instead of stranding them in a
+      // personal voicemail. fallbackPlan.endCallEnabled:false is what hands the
+      // line back; the prompt's "Transfer Fallback" block then offers to take a
+      // message. warm-transfer-experimental is the only mode that returns on a
+      // no-answer, so both behaviors come from it.
+      const warmTransferPlan = (failMessage) => ({
+        mode: 'warm-transfer-experimental',
+        summaryPlan: {
+          enabled: true,
+          messages: [
+            { role: 'system', content: 'You are briefing a team member who is about to receive a transferred phone call from an AI receptionist. In one or two short, natural sentences, tell them who is calling and what they need, the way a receptionist hands off a call. No greetings or filler.' },
+            { role: 'user', content: 'Here is the transcript of the call so far:\n\n{{transcript}}\n\nBrief the team member now in one or two sentences.' },
+          ],
+          timeoutSeconds: 20,
+        },
+        fallbackPlan: {
+          endCallEnabled: false,
+          message: failMessage,
+        },
+      });
+
       const destinations = [];
       const seen = new Set();
 
@@ -1128,7 +1152,7 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
             // generated summary of the call first (warm transfer) before the
             // caller is bridged in.
             message: 'One moment, connecting you now.',
-            transferPlan: { mode: 'warm-transfer-say-summary' }
+            transferPlan: warmTransferPlan("It looks like the team isn't available right now. I can take a message and make sure someone gets back to you."),
           });
           seen.add(formattedPhone);
         }
@@ -1144,7 +1168,7 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
           number: fp,
           description: `Transfer to ${s.name}${s.role ? `, ${s.role}` : ''}`,
           message: `One moment, connecting you to ${s.name}.`,
-          transferPlan: { mode: 'warm-transfer-say-summary' }
+          transferPlan: warmTransferPlan(`I wasn't able to reach ${s.name} just now. I can take a message and make sure they get back to you.`),
         });
       }
 
