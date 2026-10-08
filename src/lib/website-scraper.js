@@ -243,8 +243,11 @@ Return this JSON structure. Use null for any field you cannot find:
   "payment_methods": ["array of payment methods if mentioned"],
   "year_established": "string or null",
   "tagline": "string — company tagline/slogan if found, or null",
-  "key_differentiators": ["what makes this business stand out — 2-3 points max"]
-}`;
+  "key_differentiators": ["what makes this business stand out, 2-3 points max"],
+  "faqs": [{ "question": "the question as a caller would ask it", "answer": "concise answer, under ~300 characters" }]
+}
+
+For "faqs": pull real question-and-answer pairs the site actually states (FAQ/help pages, or clear Q&A inline). Phrase each question the way a caller would ask it and keep answers short and factual. Include at most 8, the most useful for a phone receptionist. Return an empty array if the site has none. Do not invent FAQs.`;
 
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -256,7 +259,7 @@ Return this JSON structure. Use null for any field you cannot find:
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-6",
-        max_tokens: 2000,
+        max_tokens: 3000,
         temperature: 0.1,
         messages: [{ role: "user", content: prompt }]
       })
@@ -341,6 +344,15 @@ function formatStructuredSection(data) {
 
   if (data.key_differentiators?.length > 0) {
     sections.push(`\n## What Sets Us Apart\n${data.key_differentiators.map(d => `- ${d}`).join('\n')}`);
+  }
+
+  if (Array.isArray(data.faqs) && data.faqs.length > 0) {
+    const faqLines = data.faqs
+      .filter(f => f && f.question && f.answer)
+      .map(f => `- Q: ${String(f.question).trim()}\n  A: ${String(f.answer).trim()}`);
+    if (faqLines.length > 0) {
+      sections.push(`\n## Frequently Asked Questions\n${faqLines.join('\n')}`);
+    }
   }
 
   return sections.join('\n');

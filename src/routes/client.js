@@ -73,7 +73,7 @@ const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
 const { requirePermissionIfAuthed } = require('./auth');
-const { isSimilar, norm } = require('../lib/scrape-suggestions');
+const { isSimilar, norm, existingFaqQuestions } = require('../lib/scrape-suggestions');
 
 function decodeToken(req) {
   try {
@@ -803,23 +803,28 @@ router.put('/:id/ai-settings', requirePermissionIfAuthed('ai_agent'), async (req
 
 // ============================================================================
 // GET /api/client/:id/scrape-suggestions
-// Service-area and business-hours suggestions found by a website scrape, for
-// the My Business page. Areas are re-filtered against the client's current
-// service_areas so added ones drop off. Hours is the full editor shape or null.
+// Service-area, business-hours and FAQ suggestions found by a website scrape,
+// for the My Business page. Areas and FAQs are re-filtered against what the
+// client already has so added ones drop off. Hours is the full editor shape or
+// null.
 // ============================================================================
 router.get('/:id/scrape-suggestions', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { id } = req.params;
     const { data: client } = await supabase
       .from('clients')
-      .select('service_areas, service_area_suggestions, hours_suggestion')
+      .select('service_areas, service_area_suggestions, hours_suggestion, faq_suggestions, knowledge_base_data')
       .eq('id', id)
       .single();
     const existing = (Array.isArray(client?.service_areas) ? client.service_areas : []).map(norm);
     const rawAreas = Array.isArray(client?.service_area_suggestions) ? client.service_area_suggestions : [];
     const areas = rawAreas.filter(a => a && !existing.some(ex => ex === norm(a) || isSimilar(a, ex)));
     const hours = client?.hours_suggestion || null;
-    res.json({ success: true, areas, hours });
+    // Drop FAQ suggestions the client has since added/answered.
+    const existingQs = existingFaqQuestions(client?.knowledge_base_data).map(norm);
+    const rawFaqs = Array.isArray(client?.faq_suggestions) ? client.faq_suggestions : [];
+    const faqs = rawFaqs.filter(f => f && f.question && f.answer && !existingQs.some(ex => ex === norm(f.question) || isSimilar(f.question, ex)));
+    res.json({ success: true, areas, hours, faqs });
   } catch (error) {
     console.error('Error fetching scrape suggestions:', error);
     res.status(500).json({ error: 'Server error' });
@@ -827,8 +832,9 @@ router.get('/:id/scrape-suggestions', requirePermissionIfAuthed('my_business'), 
 });
 
 // ============================================================================
-// POST /api/client/:id/scrape-suggestions/dismiss  { type: 'area'|'hours', name? }
-// Removes a single area suggestion, or clears the hours suggestion.
+// POST /api/client/:id/scrape-suggestions/dismiss  { type: 'area'|'hours'|'faq', name? }
+// Removes a single area suggestion, clears the hours suggestion, or removes a
+// single FAQ suggestion (matched by its question in `name`).
 // ============================================================================
 router.post('/:id/scrape-suggestions/dismiss', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
@@ -850,7 +856,19 @@ router.post('/:id/scrape-suggestions/dismiss', requirePermissionIfAuthed('my_bus
       await supabase.from('clients').update({ service_area_suggestions: remaining }).eq('id', id);
       return res.json({ success: true, areas: remaining });
     }
-    return res.status(400).json({ error: 'type must be area or hours' });
+    if (type === 'faq') {
+      if (!name || !String(name).trim()) return res.status(400).json({ error: 'name (question) is required' });
+      const { data: client } = await supabase
+        .from('clients')
+        .select('faq_suggestions')
+        .eq('id', id)
+        .single();
+      const raw = Array.isArray(client?.faq_suggestions) ? client.faq_suggestions : [];
+      const remaining = raw.filter(f => f && norm(f.question) !== norm(name));
+      await supabase.from('clients').update({ faq_suggestions: remaining }).eq('id', id);
+      return res.json({ success: true, faqs: remaining });
+    }
+    return res.status(400).json({ error: 'type must be area, hours, or faq' });
   } catch (error) {
     console.error('Error dismissing scrape suggestion:', error);
     res.status(500).json({ error: 'Server error' });

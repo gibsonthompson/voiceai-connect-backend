@@ -13,6 +13,7 @@
 //   staff_suggestions        jsonb  [{ name, role }]
 //   service_area_suggestions jsonb  ["City", ...]
 //   hours_suggestion         jsonb  { monday: {open,close,closed}, ... } | null
+//   faq_suggestions          jsonb  [{ question, answer }]
 // ============================================================================
 
 const MAX_ITEMS = 15;
@@ -140,6 +141,40 @@ function buildHoursSuggestion(structuredData) {
   return found > 0 ? out : null;
 }
 
+// ---- FAQs: faqs[] { question, answer } ------------------------------------
+// Deduped against the questions the client already has in their knowledge base
+// so a scrape never re-suggests one they've already added or answered.
+function buildFaqSuggestions(structuredData, existingQuestions) {
+  if (!structuredData || !Array.isArray(structuredData.faqs)) return [];
+  const existing = (existingQuestions || []).map(norm);
+  const seen = new Set();
+  const out = [];
+  for (const entry of structuredData.faqs) {
+    const q = String(entry && entry.question || '').trim();
+    const a = String(entry && entry.answer || '').trim();
+    if (!q || !a || q.length > 200) continue;
+    const key = norm(q);
+    if (!key || seen.has(key)) continue;
+    if (existing.some(ex => isSimilar(q, ex))) continue;
+    seen.add(key);
+    out.push({ question: q, answer: a.slice(0, 600) });
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
+// Pull the client's current FAQ questions out of the stored KB text
+// ("Q: ...\nA: ...") so buildFaqSuggestions can dedupe against them.
+function existingFaqQuestions(knowledgeBaseData) {
+  const text = knowledgeBaseData && knowledgeBaseData.faqs;
+  if (!text || typeof text !== 'string') return [];
+  return text.split('\n')
+    .map(l => l.trim())
+    .filter(l => /^Q:/i.test(l))
+    .map(l => l.replace(/^Q:\s*/i, '').trim())
+    .filter(Boolean);
+}
+
 // ---- Build everything from one scrape -------------------------------------
 function buildAllSuggestions(structuredData, existing) {
   const e = existing || {};
@@ -148,6 +183,7 @@ function buildAllSuggestions(structuredData, existing) {
     staff_suggestions: buildStaffSuggestions(structuredData, e.staff),
     service_area_suggestions: buildAreaSuggestions(structuredData, e.areas),
     hours_suggestion: buildHoursSuggestion(structuredData),
+    faq_suggestions: buildFaqSuggestions(structuredData, e.faqs),
   };
 }
 
@@ -159,15 +195,16 @@ async function storeSuggestionsFromScrape(supabase, clientId, structuredData) {
     const [{ data: svcs }, { data: staff }, { data: clientRow }] = await Promise.all([
       supabase.from('client_services').select('name').eq('client_id', clientId),
       supabase.from('staff_members').select('name').eq('client_id', clientId),
-      supabase.from('clients').select('service_areas').eq('id', clientId).single(),
+      supabase.from('clients').select('service_areas, knowledge_base_data').eq('id', clientId).single(),
     ]);
     const suggestions = buildAllSuggestions(structuredData, {
       services: (svcs || []).map(s => s.name),
       staff: (staff || []).map(s => s.name),
       areas: Array.isArray(clientRow?.service_areas) ? clientRow.service_areas : [],
+      faqs: existingFaqQuestions(clientRow?.knowledge_base_data),
     });
     await supabase.from('clients').update(suggestions).eq('id', clientId);
-    console.log(`💡 Suggestions stored for ${clientId}: ${suggestions.service_suggestions.length} services, ${suggestions.staff_suggestions.length} staff, ${suggestions.service_area_suggestions.length} areas, hours=${!!suggestions.hours_suggestion}`);
+    console.log(`💡 Suggestions stored for ${clientId}: ${suggestions.service_suggestions.length} services, ${suggestions.staff_suggestions.length} staff, ${suggestions.service_area_suggestions.length} areas, ${suggestions.faq_suggestions.length} faqs, hours=${!!suggestions.hours_suggestion}`);
   } catch (err) {
     console.warn('⚠️ storeSuggestionsFromScrape failed (non-fatal):', err.message);
   }
@@ -180,6 +217,8 @@ module.exports = {
   buildStaffSuggestions,
   buildAreaSuggestions,
   buildHoursSuggestion,
+  buildFaqSuggestions,
+  existingFaqQuestions,
   buildAllSuggestions,
   storeSuggestionsFromScrape,
 };
