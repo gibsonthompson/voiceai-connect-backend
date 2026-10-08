@@ -405,4 +405,218 @@ clientRouter.post('/:clientId/provider-inbox/reply', async (req, res) => {
   }
 });
 
+// ===========================================================================
+// UNIFIED AGENCY INBOX (the iMessage-style messaging center)
+// One list that merges every channel the agency talks on:
+//   - platform : the two-way thread with VoiceAI Connect (support_requests)
+//   - client   : the in-app thread with each client (agency_support_requests)
+//   - prospect : an in-app contact-form request with no client portal
+//   - sms      : carrier SMS on the agency demo number (sms_log demo threads)
+// GET returns conversations with their messages already merged and ordered;
+// send routes a reply/compose to the right channel; read clears unread. These
+// live on agencyRouter (mounted at /api/agency) so no new server mount is needed.
+// ===========================================================================
+const DEMO_SMS_TYPES = ['demo_followup', 'demo_followup_industry', 'demo_followup_custom', 'demo_reply_inbound', 'demo_reply_outbound'];
+function inboxLast10(p) { const d = String(p || '').replace(/\D/g, ''); return d.length > 10 ? d.slice(-10) : d; }
+function looksLikePhone(s) { return !!s && /\d/.test(s) && String(s).replace(/\D/g, '').length >= 10 && !/@/.test(s); }
+function finalizeConvo(c) {
+  const n = c.messages.length;
+  c.lastAt = n ? c.messages[n - 1].at : null;
+  c.lastDirection = n ? c.messages[n - 1].sender : null;
+  c.lastPreview = n ? String(c.messages[n - 1].body || '').slice(0, 120) : '';
+  c.needsReply = c.lastDirection === 'in';
+  return c;
+}
+
+agencyRouter.get('/:agencyId/inbox', requireAgencyAccess('dashboard'), async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const conversations = [];
+
+    // 1) PLATFORM (VoiceAI Connect)
+    try {
+      const { data: preqs } = await supabase
+        .from('support_requests').select('id, message, status, created_at, agency_unread')
+        .eq('agency_id', agencyId).order('created_at', { ascending: true });
+      const pids = (preqs || []).map(r => r.id);
+      let pmsgs = [];
+      if (pids.length) {
+        const { data } = await supabase.from('support_thread_messages').select('id, sender, body, created_at').in('request_id', pids).order('created_at', { ascending: true });
+        pmsgs = data || [];
+      }
+      const items = [];
+      for (const r of (preqs || [])) if (r.message) items.push({ id: `pseed-${r.id}`, sender: 'out', body: r.message, at: r.created_at });
+      for (const m of pmsgs) items.push({ id: m.id, sender: m.sender === 'admin' ? 'in' : 'out', body: m.body, at: m.created_at });
+      items.sort((a, b) => new Date(a.at) - new Date(b.at));
+      const latest = (preqs || []).length ? preqs[preqs.length - 1] : null;
+      conversations.push(finalizeConvo({ key: 'platform', type: 'platform', name: 'VoiceAI Connect', phone: null, pinned: true, target: latest ? latest.id : null, messages: items, unread: (preqs || []).reduce((n, r) => n + (r.agency_unread || 0), 0) }));
+    } catch (e) { console.warn('inbox platform build failed:', e.message); }
+
+    // 2) CLIENTS + PROSPECTS (in-app agency threads)
+    try {
+      const { data: areqs } = await supabase
+        .from('agency_support_requests').select('id, client_id, requester_name, contact, message, status, created_at, agency_unread')
+        .eq('agency_id', agencyId).order('created_at', { ascending: true }).limit(500);
+      const aids = (areqs || []).map(r => r.id);
+      let amsgs = [];
+      if (aids.length) { const { data } = await supabase.from('agency_thread_messages').select('id, request_id, sender, body, created_at').in('request_id', aids).order('created_at', { ascending: true }); amsgs = data || []; }
+      const msgsByReq = {}; for (const m of amsgs) { (msgsByReq[m.request_id] = msgsByReq[m.request_id] || []).push(m); }
+      const cids = [...new Set((areqs || []).map(r => r.client_id).filter(Boolean))];
+      const cnames = {}, cphones = {};
+      if (cids.length) { const { data: cs } = await supabase.from('clients').select('id, business_name, owner_phone').in('id', cids); (cs || []).forEach(c => { cnames[c.id] = c.business_name; cphones[c.id] = c.owner_phone; }); }
+      const clientConvos = {};
+      for (const r of (areqs || [])) {
+        const items = [];
+        if (r.message) items.push({ id: `aseed-${r.id}`, sender: 'in', body: r.message, at: r.created_at });
+        for (const m of (msgsByReq[r.id] || [])) items.push({ id: m.id, sender: m.sender === 'agency' ? 'out' : 'in', body: m.body, at: m.created_at });
+        if (r.client_id) {
+          const k = `client-${r.client_id}`;
+          if (!clientConvos[k]) clientConvos[k] = { key: k, type: 'client', name: cnames[r.client_id] || 'Client', phone: cphones[r.client_id] || null, clientId: r.client_id, target: r.client_id, messages: [], unread: 0, _latest: 0 };
+          const c = clientConvos[k];
+          c.messages.push(...items);
+          c.unread += r.agency_unread || 0;
+        } else {
+          conversations.push(finalizeConvo({ key: `req-${r.id}`, type: 'prospect', name: r.requester_name || r.contact || 'Prospect', phone: looksLikePhone(r.contact) ? r.contact : null, target: r.id, messages: items.sort((a, b) => new Date(a.at) - new Date(b.at)), unread: r.agency_unread || 0 }));
+        }
+      }
+      for (const c of Object.values(clientConvos)) { delete c._latest; c.messages.sort((a, b) => new Date(a.at) - new Date(b.at)); conversations.push(finalizeConvo(c)); }
+    } catch (e) { console.warn('inbox client build failed:', e.message); }
+
+    // 3) DEMO-NUMBER SMS threads
+    try {
+      const { data: rows } = await supabase
+        .from('sms_log').select('id, recipient_phone, message_body, message_type, delivery_status, metadata, created_at')
+        .eq('agency_id', agencyId).in('message_type', DEMO_SMS_TYPES).order('created_at', { ascending: true }).limit(2000);
+      const threads = {};
+      for (const r of (rows || [])) {
+        const k = inboxLast10(r.recipient_phone); if (!k) continue;
+        const inbound = r.message_type === 'demo_reply_inbound' || r.delivery_status === 'received' || (r.metadata && r.metadata.direction === 'inbound');
+        if (!threads[k]) threads[k] = { key: `sms-${k}`, type: 'sms', name: null, phone: r.recipient_phone, target: r.recipient_phone, messages: [], unread: 0 };
+        threads[k].messages.push({ id: r.id, sender: inbound ? 'in' : 'out', body: r.message_body || '', at: r.created_at });
+      }
+      const { data: calls } = await supabase.from('demo_calls').select('caller_phone, caller_name, business_name, created_at').eq('agency_id', agencyId).order('created_at', { ascending: false }).limit(500);
+      const nameByKey = {}; for (const c of (calls || [])) { const k = inboxLast10(c.caller_phone); if (k && !nameByKey[k]) nameByKey[k] = c.business_name || c.caller_name || null; }
+      for (const t of Object.values(threads)) { t.name = nameByKey[inboxLast10(t.phone)] || null; t.messages.sort((a, b) => new Date(a.at) - new Date(b.at)); conversations.push(finalizeConvo(t)); }
+    } catch (e) { console.warn('inbox sms build failed:', e.message); }
+
+    conversations.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (new Date(b.lastAt || 0) - new Date(a.lastAt || 0)));
+    res.json({ success: true, conversations });
+  } catch (error) {
+    console.error('Agency inbox load error:', error.message);
+    res.status(500).json({ error: 'Failed to load inbox' });
+  }
+});
+
+agencyRouter.post('/:agencyId/inbox/send', requireAgencyAccess('dashboard'), async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const type = clean(req.body && req.body.type, 24);
+    const target = clean(req.body && req.body.target, 300);
+    const body = clean(req.body && req.body.body, MAX_BODY);
+    if (!body) return res.status(400).json({ error: 'Message is required' });
+
+    if (type === 'sms') {
+      if (!looksLikePhone(target)) return res.status(400).json({ error: 'A valid phone number is required' });
+      const { data: agency } = await supabase.from('agencies').select('demo_phone_number').eq('id', agencyId).single();
+      if (!agency || !agency.demo_phone_number) return res.status(400).json({ error: 'No demo number on this agency yet' });
+      const ok = await sendAndLogSMS({ phone: target, message: body, from: agency.demo_phone_number, agencyId, recipientType: 'prospect', messageType: 'demo_reply_outbound', metadata: { direction: 'outbound', demo_number: agency.demo_phone_number } });
+      if (!ok) return res.status(502).json({ error: 'Message could not be sent' });
+      return res.json({ success: true });
+    }
+
+    if (type === 'platform') {
+      let requestId = target || null;
+      if (!requestId) {
+        const { data: created, error } = await supabase.from('support_requests').insert({ agency_id: agencyId, user_type: 'agency', message: body, source: 'inbox', status: 'open', last_sender: 'agency', admin_unread: 1 }).select('id').single();
+        if (error) throw error;
+        return res.json({ success: true, started: true, request_id: created.id });
+      }
+      const { data: msg, error: insErr } = await supabase.from('support_thread_messages').insert({ request_id: requestId, sender: 'agency', body, read_by_agency: true, read_by_admin: false }).select('id').single();
+      if (insErr) throw insErr;
+      const { data: cur } = await supabase.from('support_requests').select('admin_unread, status').eq('id', requestId).eq('agency_id', agencyId).single();
+      const upd = { admin_unread: ((cur && cur.admin_unread) || 0) + 1, last_reply_at: new Date().toISOString() };
+      if (cur && cur.status === 'resolved') upd.status = 'open';
+      await supabase.from('support_requests').update(upd).eq('id', requestId).eq('agency_id', agencyId);
+      return res.json({ success: true, message_id: msg.id });
+    }
+
+    // client (target = clientId) or prospect (target = agency_support_requests id)
+    if (type === 'client') {
+      const { data: client } = await supabase.from('clients').select('id, agency_id, business_name').eq('id', target).single();
+      if (!client || client.agency_id !== agencyId) return res.status(404).json({ error: 'Client not found' });
+      const { data: latest } = await supabase.from('agency_support_requests').select('id, status').eq('client_id', target).eq('agency_id', agencyId).order('created_at', { ascending: false }).limit(1).maybeSingle();
+      let reqId = latest ? latest.id : null;
+      if (!reqId) {
+        const { data: created, error } = await supabase.from('agency_support_requests').insert({ agency_id: agencyId, client_id: target, user_type: 'client', requester_name: client.business_name || null, message: body, source: 'agency_outreach', status: 'new', last_sender: 'agency', client_unread: 1 }).select('id').single();
+        if (error) throw error;
+        await notifyClientOfAgencyMessage(agencyId, target);
+        return res.json({ success: true, started: true, request_id: created.id });
+      }
+      const { data: msg, error: insErr } = await supabase.from('agency_thread_messages').insert({ request_id: reqId, sender: 'agency', body, read_by_agency: true, read_by_client: false }).select('id').single();
+      if (insErr) throw insErr;
+      const { data: cur } = await supabase.from('agency_support_requests').select('client_unread, status').eq('id', reqId).single();
+      const upd = { client_unread: ((cur && cur.client_unread) || 0) + 1, last_reply_at: new Date().toISOString(), last_sender: 'agency' };
+      if (cur && cur.status === 'resolved') upd.status = 'in_progress';
+      await supabase.from('agency_support_requests').update(upd).eq('id', reqId).eq('agency_id', agencyId);
+      await notifyClientOfAgencyMessage(agencyId, target);
+      return res.json({ success: true, message_id: msg.id });
+    }
+
+    if (type === 'prospect') {
+      const request = await loadRequest(target, { agencyId });
+      if (!request) return res.status(404).json({ error: 'Thread not found' });
+      const { data: msg, error: insErr } = await supabase.from('agency_thread_messages').insert({ request_id: request.id, sender: 'agency', body, read_by_agency: true, read_by_client: false }).select('id').single();
+      if (insErr) throw insErr;
+      await supabase.from('agency_support_requests').update({ client_unread: (request.client_unread || 0) + 1, last_reply_at: new Date().toISOString(), last_sender: 'agency' }).eq('id', request.id).eq('agency_id', agencyId);
+      // No portal: if the prospect left a phone, text them the reply itself.
+      if (looksLikePhone(request.contact)) {
+        try { await sendAndLogSMS({ phone: request.contact, agencyId, recipientType: 'prospect', messageType: 'agency_reply', message: body }); }
+        catch (e) { console.error('prospect reply SMS failed (non-blocking):', e.message); }
+      }
+      return res.json({ success: true, message_id: msg.id });
+    }
+
+    return res.status(400).json({ error: 'Unknown conversation type' });
+  } catch (error) {
+    console.error('Agency inbox send error:', error.message);
+    res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+agencyRouter.post('/:agencyId/inbox/read', requireAgencyAccess('dashboard'), async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const type = clean(req.body && req.body.type, 24);
+    const target = clean(req.body && req.body.target, 300);
+    if (type === 'platform') {
+      await supabase.from('support_requests').update({ agency_unread: 0 }).eq('agency_id', agencyId).gt('agency_unread', 0);
+    } else if (type === 'client') {
+      await supabase.from('agency_support_requests').update({ agency_unread: 0 }).eq('agency_id', agencyId).eq('client_id', target);
+    } else if (type === 'prospect') {
+      await supabase.from('agency_support_requests').update({ agency_unread: 0 }).eq('agency_id', agencyId).eq('id', target);
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Agency inbox read error:', error.message);
+    res.json({ success: false });
+  }
+});
+
+async function notifyClientOfAgencyMessage(agencyId, clientId) {
+  try {
+    const { data: client } = await supabase.from('clients').select('owner_phone, business_name').eq('id', clientId).single();
+    const { data: agency } = await supabase.from('agencies').select('name, demo_phone_number').eq('id', agencyId).single();
+    if (client && client.owner_phone) {
+      await sendAndLogSMS({
+        phone: client.owner_phone,
+        from: (agency && agency.demo_phone_number) || null,
+        agencyId,
+        recipientType: 'client_owner',
+        messageType: 'agency_message',
+        message: `New message from ${(agency && agency.name) || 'your provider'}. Open your dashboard inbox to reply.`,
+      });
+    }
+  } catch (e) { console.error('client notify SMS failed (non-blocking):', e.message); }
+}
+
 module.exports = { agencyRouter, clientRouter };
