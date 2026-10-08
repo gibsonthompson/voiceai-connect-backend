@@ -232,8 +232,7 @@ const RESPONSE_GUIDELINES_BLOCK = `
 - Talk like a real person. Use contractions and natural acknowledgments ("sure," "got it," "no problem"). Never sound like a form or a script.
 - Say numbers, dates, and times as words: "two thirty this afternoon," "March fourth." Read a phone number one digit at a time. Spell an email slowly ("j-o-h-n at gmail dot com").
 - Acknowledge briefly and move forward. Don't repeat the caller's whole sentence back.
-- If a caller asks for a real person, has an urgent problem, or you can't help them, hand them off to the team using your handoff instructions below.
-- Never hang up or end the call yourself. The caller ends the call when they're ready. If they decline or say that's all, warmly confirm and ask if there's anything else you can help with, then wait.`;
+- If a caller asks for a real person, has an urgent problem, or you can't help them, hand them off to the team using your handoff instructions below.`;
 
 // ============================================================================
 // SAFETY / IDENTITY-LOCK BLOCK  (added 2026-10-07)
@@ -479,6 +478,32 @@ async function buildStaffBlock(clientId) {
   } catch (err) {
     console.warn('⚠️ Staff block failed:', err.message);
     return '';
+  }
+}
+
+// ============================================================================
+// TRANSFERABLE STAFF, staff the AI may transfer a live caller to.
+// Returns active staff flagged transferable that have a phone number, so each
+// becomes a named transferCall destination and is listed in the prompt. Empty
+// list (the common case) means transfers go only to the main business line.
+// ============================================================================
+async function fetchTransferableStaff(clientId) {
+  if (!supabase || !clientId) return [];
+  try {
+    const { data, error } = await supabase
+      .from('staff_members')
+      .select('name, role, phone')
+      .eq('client_id', clientId)
+      .eq('is_active', true)
+      .eq('transferable', true)
+      .not('phone', 'is', null)
+      .order('name', { ascending: true });
+
+    if (error || !data) return [];
+    return data.filter(s => s.phone && String(s.phone).trim());
+  } catch (err) {
+    console.warn('⚠️ Transferable staff fetch failed:', err.message);
+    return [];
   }
 }
 
@@ -801,7 +826,7 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
 // instructions and transfer keywords. 'message' suppresses both and injects a
 // take-a-message block (missed-call variant when forwarding_mode is 'missed').
 // ============================================================================
-async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook = false, handoff = 'transfer') {
+async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook = false, handoff = 'transfer', transferStaff = []) {
   const hipaaMode = client.hipaa_mode === true;
   const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
   const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
@@ -936,6 +961,24 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     systemPrompt += TRANSFER_KEYWORDS_BLOCK;
   }
 
+  // Guardrail against unprompted transfers. The transfer tool is powerful and
+  // the model will occasionally fire it on its own (e.g. right after answering a
+  // question), which drops the caller to a human for no reason. This hard-scopes
+  // when a transfer is allowed. Injected only when a transfer is actually
+  // possible, right after the keywords so the two read together.
+  if (toolConfig.transferCall && handoff === 'transfer' && !systemPrompt.includes('# When NOT to Transfer')) {
+    systemPrompt += `\n\n# When NOT to Transfer\nTransfer ONLY when the caller explicitly asks for a person (see Transfer Keywords) or there is a genuine emergency. Do not transfer on your own initiative. Never transfer just because you finished answering a question, because there is a pause, or to wrap up the call. If you can answer or help, do that instead. When unsure, keep helping or offer to take a message. Never call the transfer tool unless one of those two conditions is clearly met.\n`;
+  }
+
+  // Transfer routing: when specific team members can take transfers, name them
+  // so the AI routes a caller to the right person (by name or by what they
+  // handle) instead of always sending everyone to the main line. Only meaningful
+  // when we are actually transferring.
+  if (toolConfig.transferCall && handoff === 'transfer' && Array.isArray(transferStaff) && transferStaff.length > 0 && !systemPrompt.includes('# Transfer Routing')) {
+    const names = transferStaff.map(s => `- ${s.name}${s.role ? ` (${s.role})` : ''}`).join('\n');
+    systemPrompt += `\n\n# Transfer Routing\nYou can connect callers directly to specific team members. When a caller asks for one of these people by name, or clearly needs what that person handles, use the transfer tool and pick that person. For anyone else who needs a human, transfer to the main team.\n${names}\n`;
+  }
+
   // After-hours mode (always dynamic, never in cached prompt)
   if (isAfterHours && toolConfig.businessHoursRouting) {
     systemPrompt += buildAfterHoursBlock(client, toolConfig);
@@ -995,7 +1038,7 @@ Only offer, mention, or ask about services this business actually provides. If y
 //  - everyone else gets the native VAPI transferCall tool to transferTo
 //    (transfer_phone || owner_phone, resolved and safety-checked upstream).
 // ============================================================================
-function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, handoff = 'transfer', transferTo = null) {
+function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, handoff = 'transfer', transferTo = null, transferStaff = []) {
   const tools = [];
   const isWhisperTransfer = client.voice_routing === 'telnyx_cc';
 
@@ -1024,24 +1067,60 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
       // Native VAPI transfer (vapi_direct clients). Destination is the resolved,
       // safety-checked transferTo (transfer_phone || owner_phone), never the
       // client's own AI number.
+      // Build the destination list: the main business line first (the default
+      // target), then any transferable staff as named destinations so VAPI can
+      // route the caller to the right person. The AI's own number is excluded so
+      // a transfer never loops back into the assistant, and duplicates are
+      // de-duped (e.g. a staff phone that equals the business line).
+      const aiNumber = client.vapi_phone_number
+        ? (isValidE164(client.vapi_phone_number) ? client.vapi_phone_number : formatPhoneE164(client.vapi_phone_number))
+        : null;
+      const destinations = [];
+      const seen = new Set();
+
       const ownerPhone = transferTo || client.owner_phone;
       if (ownerPhone) {
         const formattedPhone = isValidE164(ownerPhone) ? ownerPhone : formatPhoneE164(ownerPhone);
-        if (formattedPhone && isValidE164(formattedPhone)) {
-          tools.push({
-            type: 'transferCall',
-            function: {
-              name: 'transferCall',
-              description: 'Transfer the call to the business team. Use this when the caller needs to speak with someone directly, has an emergency, billing question, existing account issue, or when you cannot fully help them.',
-            },
-            destinations: [{
-              type: 'number',
-              number: formattedPhone,
-              description: 'Transfer to business team',
-              message: 'One moment, transferring you now.'
-            }]
+        if (formattedPhone && isValidE164(formattedPhone) && formattedPhone !== aiNumber) {
+          destinations.push({
+            type: 'number',
+            number: formattedPhone,
+            description: 'Transfer to the main business team',
+            // Caller hears this hold line; the person who answers hears a
+            // generated summary of the call first (warm transfer) before the
+            // caller is bridged in.
+            message: 'One moment, connecting you now.',
+            transferPlan: { mode: 'warm-transfer-say-summary' }
           });
+          seen.add(formattedPhone);
         }
+      }
+
+      for (const s of (Array.isArray(transferStaff) ? transferStaff : [])) {
+        if (!s || !s.phone) continue;
+        const fp = isValidE164(s.phone) ? s.phone : formatPhoneE164(s.phone);
+        if (!fp || !isValidE164(fp) || fp === aiNumber || seen.has(fp)) continue;
+        seen.add(fp);
+        destinations.push({
+          type: 'number',
+          number: fp,
+          description: `Transfer to ${s.name}${s.role ? `, ${s.role}` : ''}`,
+          message: `One moment, connecting you to ${s.name}.`,
+          transferPlan: { mode: 'warm-transfer-say-summary' }
+        });
+      }
+
+      if (destinations.length > 0) {
+        tools.push({
+          type: 'transferCall',
+          function: {
+            name: 'transferCall',
+            description: destinations.length > 1
+              ? 'Transfer the call to the right person on the team. Pick the destination that best matches who the caller needs: a specific team member when they ask for one by name or clearly need what that person handles, otherwise the main business team. Use this when the caller needs a human, has an emergency, a billing question, an existing account issue, or when you cannot fully help them.'
+              : 'Transfer the call to the business team. Use this when the caller needs to speak with someone directly, has an emergency, billing question, existing account issue, or when you cannot fully help them.',
+          },
+          destinations,
+        });
       }
     }
   }
@@ -1136,8 +1215,13 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
     });
   }
 
-  // Note: no endCall tool is attached. The assistant must never hang up; only
-  // the caller ends the call. VAPI's silence timeout closes abandoned lines.
+  tools.push({
+    type: 'endCall',
+    function: {
+      name: 'endCall',
+      description: 'End the call. Use this when the conversation is complete and the caller has confirmed they have no more questions.',
+    },
+  });
 
   return tools;
 }
@@ -1363,6 +1447,13 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   // call_mode/Fallback path. Computed once here and passed into the prompt,
   // tools, and hooks builders (mirrors canAutoBook).
   const { handoff, transferTo, forwardingMode } = resolveHandoff(client, toolConfig);
+
+  // Staff the AI may transfer a live caller to (native VAPI transfer only; the
+  // whisper/Telnyx-CC bridge resolves its destination server-side). Fetched
+  // only when we are actually transferring, so message-mode calls skip the query.
+  const transferStaff = (handoff === 'transfer' && client.voice_routing !== 'telnyx_cc')
+    ? await fetchTransferableStaff(client.id)
+    : [];
   if (forwardingMode === 'missed') {
     console.log('📮 Missed-call coverage, AI will take a message, not transfer');
   } else if (handoff === 'transfer') {
@@ -1442,9 +1533,9 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     : (tplBackgroundDenoising != null) ? (tplBackgroundDenoising !== false)
     : true;
 
-  const systemPrompt = await buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook, handoff);
+  const systemPrompt = await buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook, handoff, transferStaff);
   const firstMessage = buildFirstMessage(client.business_name, industryKey, callerContext, isAfterHours, toolConfig, hipaaMode, client.greeting_message);
-  const tools = buildTools(client, toolConfig, isAfterHours, canAutoBook, handoff, transferTo);
+  const tools = buildTools(client, toolConfig, isAfterHours, canAutoBook, handoff, transferTo, transferStaff);
   const hooks = buildHooks(client, toolConfig, isAfterHours, handoff, transferTo);
 
   // KB query tool: always attach when present. (Previously gated on

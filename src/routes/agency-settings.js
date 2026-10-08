@@ -518,6 +518,8 @@ async function getAgencySettings(req, res) {
         // PWA home-screen identity (installed-app name + square app icon).
         app_name: agency.app_name || null,
         app_icon_url: agency.app_icon_url || null,
+        // Default transfer style for new clients ('vapi_direct' | 'telnyx_cc').
+        default_voice_routing: agency.default_voice_routing || 'vapi_direct',
 
         // Marketing website content
         company_tagline: agency.company_tagline,
@@ -764,6 +766,9 @@ async function updateAgencySettings(req, res) {
       'logo_background_color',
       'signup_logo_align',
       'setup_fee_timing',
+      // Default transfer style for NEW clients ('vapi_direct' | 'telnyx_cc').
+      // Validated below; an invalid value coerces to 'vapi_direct'.
+      'default_voice_routing',
       // Dashboard branding overrides (nav, bg, card, button colors)
       'branding_overrides',
       // Client dashboard settings
@@ -814,6 +819,9 @@ async function updateAgencySettings(req, res) {
       updates.signup_logo_align = 'left';
     }
 
+    if (updates.default_voice_routing !== undefined && !['vapi_direct', 'telnyx_cc'].includes(updates.default_voice_routing)) {
+      updates.default_voice_routing = 'vapi_direct';
+    }
     if (updates.setup_fee_timing !== undefined && !['upfront', 'after_trial'].includes(updates.setup_fee_timing)) {
       updates.setup_fee_timing = 'upfront';
     }
