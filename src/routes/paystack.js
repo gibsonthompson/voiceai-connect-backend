@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const { supabase } = require('../lib/supabase');
 const { decrypt } = require('../lib/encryption');
 const { getPlan } = require('../lib/plans');
+const { computeOverageCents } = require('../lib/overage-billing');
 const paystack = require('../lib/paystack');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
@@ -143,14 +144,19 @@ async function chargeClientOnce(client) {
   const dueDate = client.paystack_next_charge_at ? new Date(client.paystack_next_charge_at) : new Date();
   const period = dueDate.toISOString().slice(0, 10).replace(/-/g, '');
   const reference = `psr_${client.id}_${period}_r${client.paystack_retry_count || 0}`;
+  // Per-minute overage for the month that just closed (0 unless the agency bills
+  // per minute and the client went over the plan's included minutes). Added to
+  // the base plan price; a tally error returns 0 so the base charge still runs.
+  const overageCents = await computeOverageCents(client, agency, dueDate.toISOString());
+  const totalCents = priceCents + overageCents;
   try {
     const tx = await paystack.chargeAuthorization(secretKey, {
       email: client.paystack_email || client.email,
-      amount: priceCents / 100,
+      amount: totalCents / 100,
       authorizationCode: client.paystack_authorization_code,
       currency,
       reference,
-      metadata: { client_id: client.id, agency_id: agency.id, type: 'recurring', plan: client.plan_type },
+      metadata: { client_id: client.id, agency_id: agency.id, type: 'recurring', plan: client.plan_type, overage_cents: overageCents },
     });
     if (tx && tx.status === 'success') {
       const next = new Date();

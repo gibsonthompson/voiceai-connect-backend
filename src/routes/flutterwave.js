@@ -12,6 +12,7 @@ const jwt = require('jsonwebtoken');
 const { supabase } = require('../lib/supabase');
 const { decrypt } = require('../lib/encryption');
 const { getPlan } = require('../lib/plans');
+const { computeOverageCents } = require('../lib/overage-billing');
 const flutterwave = require('../lib/flutterwave');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
@@ -163,15 +164,22 @@ async function chargeClientOnce(client) {
   const dueDate = client.flutterwave_next_charge_at ? new Date(client.flutterwave_next_charge_at) : new Date();
   const period = dueDate.toISOString().slice(0, 10).replace(/-/g, '');
   const reference = `flwr_${client.id}_${period}_r${client.flutterwave_retry_count || 0}`;
+  // Per-minute overage for the month that just closed (0 unless the agency bills
+  // per minute and the client went over the plan's included minutes). Added to
+  // the base plan price; a tally error returns 0 so the base charge still runs.
+  const overageCents = await computeOverageCents(client, agency, dueDate.toISOString());
+  const totalCents = priceCents + overageCents;
   try {
     const tx = await flutterwave.tokenizedCharge(secretKey, {
       token: client.flutterwave_card_token,
-      amount: priceCents / 100,       // Flutterwave amounts are in MAJOR units
+      amount: totalCents / 100,       // Flutterwave amounts are in MAJOR units
       currency,
       country: currencyToCountry(currency),
       email: client.flutterwave_email || client.email,
       txRef: reference,
-      narration: `${(plan && plan.name) || 'Subscription'} - monthly`,
+      narration: overageCents > 0
+        ? `${(plan && plan.name) || 'Subscription'} - monthly + usage`
+        : `${(plan && plan.name) || 'Subscription'} - monthly`,
     });
     if (tx && tx.status === 'successful') {
       const next = new Date();

@@ -533,10 +533,15 @@ async function setMinutePassThrough(req, res) {
     if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
 
     if (enabled) {
-      if (!agency.stripe_account_id || !agency.stripe_charges_enabled) {
+      // A client-billing provider must be connected. Stripe bills minutes via a
+      // metered subscription item; Paystack/Flutterwave bill the overage inside
+      // their monthly recurring charge (lib/overage-billing). Either qualifies.
+      const stripeReady = !!(agency.stripe_account_id && agency.stripe_charges_enabled);
+      const altReady = !!(agency.flutterwave_connected || agency.paystack_connected);
+      if (!stripeReady && !altReady) {
         return res.status(400).json({
-          error: 'stripe_not_ready',
-          message: 'Connect Stripe and finish onboarding before enabling per-minute billing.',
+          error: 'provider_not_ready',
+          message: 'Connect a payment provider (Stripe, Paystack, or Flutterwave) before enabling per-minute billing.',
         });
       }
       if (!(Number(agency.client_minute_rate_cents) > 0)) {
@@ -555,11 +560,17 @@ async function setMinutePassThrough(req, res) {
         });
       }
 
-      await ensureConnectMinuteMeter(agency);
       await supabase.from('agencies').update({ minute_pass_through: true }).eq('id', agencyId);
       agency.minute_pass_through = true;
 
-      const sweep = await attachMinuteItemsForAgency(agencyId);
+      // Only Stripe needs a connected-account meter + item sweep. For a
+      // Paystack/Flutterwave-only agency there is nothing to provision here; the
+      // recurring charge computes overage at bill time.
+      let sweep = null;
+      if (stripeReady) {
+        await ensureConnectMinuteMeter(agency);
+        sweep = await attachMinuteItemsForAgency(agencyId);
+      }
       return res.json({ success: true, enabled: true, sweep });
     }
 
