@@ -207,7 +207,7 @@ router.post('/availability/:clientId', async function(req, res) {
           return res.json({ 
             results: [{ 
               toolCallId: toolCallId,
-              result: 'CORRECT DATE: ' + dateLabel + '. The next available date is ' + dateLabel + '. Available times: ' + suggested.join(', ') + '. Tell the caller this date and ask which time works best.'
+              result: 'Date to use: ' + dateLabel + '. Open times: ' + suggested.join(', ') + '. Offer the caller this date and these times in natural speech and ask which works best. Use this exact date, not any other.'
             }] 
           });
         }
@@ -252,7 +252,7 @@ router.post('/availability/:clientId', async function(req, res) {
     return res.json({ 
       results: [{ 
         toolCallId: toolCallId,
-        result: 'CORRECT DATE: ' + dateLabel2 + '. Available times on ' + dateLabel2 + ': ' + suggested2.join(', ') + '. Tell the caller this exact date and ask which time works best. Do NOT say any other date.'
+        result: 'Date to use: ' + dateLabel2 + '. Open times: ' + suggested2.join(', ') + '. Offer the caller this date and these times in natural speech and ask which works best. Use this exact date, not any other.'
       }] 
     });
 

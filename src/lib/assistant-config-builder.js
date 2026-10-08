@@ -172,6 +172,10 @@ CRITICAL DATE RULES:
 - The check_availability tool response will tell you the EXACT correct date. ONLY use that date when speaking to the caller.
 - NEVER say a date like "October", "November", or any date from your own memory. ONLY say the date that appears in the tool response.
 
+READING TOOL RESPONSES OUT LOUD:
+- Tool responses contain internal notes and labels (like "CORRECT DATE:", "Available times:", "Tell the caller...", "Do NOT say any other date"). These are instructions FOR YOU. NEVER read any of that scaffolding, labels, or instructions out loud, the caller must never hear them.
+- Only speak the actual date and the actual times, in natural, conversational English. For example, say "I have this Thursday open at 9 AM, 1 PM, or 3:30. Which works best for you?", not the raw text from the tool. Say times the way a person would ("nine", "one o'clock", "three thirty"), never as code or a run-on string.
+
 Booking flow:
 1. Caller wants to book, ask what service they need (if not already stated)
 2. Ask if they have a preferred staff member (if staff are listed above)
@@ -196,7 +200,7 @@ A booking restriction applies ONLY to that one service, never to the whole call.
 const CALL_CLOSING_BLOCK = `
 
 ## ENDING THE CALL
-When the caller signals they are done (for example "no, that's all" or "no thank you"), say a short, warm closing out loud, such as "Okay, have a great day!" or "Thanks for calling, take care!" Then stop talking and let the caller hang up. Do NOT try to end or disconnect the call yourself, and never cut the caller off mid-conversation. If the caller goes quiet but has not said they are finished, gently check in ("Are you still there?") before assuming the call is over.`;
+When the caller signals they are done (for example "no, that's all" or "no thank you"), say a short, warm closing out loud, such as "Okay, have a great day!" or "Thanks for calling, take care!" Then stop talking and let the caller hang up. Do NOT try to end or disconnect the call yourself, and never cut the caller off mid-conversation. If the caller goes quiet but has not said they are finished, gently check in ("Are you still there?") before assuming the call is over. Keep the closing simple, like "have a great day", do NOT say "I'll see you" or "can't wait to see you".`;
 
 // ============================================================================
 // TAKE-A-MESSAGE BLOCKS
@@ -812,7 +816,7 @@ function buildSmsBlock(toolConfig, isAfterHours) {
     }
   }
   if (instructions) block += `\n\nAdditional guidance: ${instructions}`;
-  block += `\n\nFor anything else, call send_sms with a friendly, complete message rather than a bare link or single word. Greet the caller, say what you are sending, and include the business name, for example "Hi! Here's the booking link you asked for from [business name]: <link>. See you soon!" instead of just the link on its own. Keep it to a couple of short, natural lines. After sending, tell the caller you have just texted it. If unsure a text is wanted, offer first ("want me to text you that?").`;
+  block += `\n\nFor anything else, call send_sms with a friendly, complete message rather than a bare link or single word. Greet the caller, say what you are sending, and include the business name, for example "Hi! Here's the booking link you asked for from [business name]: <link>. Have a great day!" instead of just the link on its own. Keep it to a couple of short, natural lines. After sending, tell the caller you have just texted it. If unsure a text is wanted, offer first ("want me to text you that?").`;
   return block;
 }
 
