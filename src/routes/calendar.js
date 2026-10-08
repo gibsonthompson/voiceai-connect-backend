@@ -171,6 +171,18 @@ router.post('/availability/:clientId', async function(req, res) {
     if (serviceType) {
       var svcConfig = await lookupServiceConfig(clientId, serviceType);
       if (svcConfig) {
+        // Enforce the service's booking mode BEFORE offering any times, so the
+        // AI cannot present slots (and then "confirm" a booking) for a service
+        // that is not bookable by phone. book_appointment enforces the same, but
+        // blocking it here stops the AI from ever quoting a time.
+        if (svcConfig.booking_mode === 'disabled') {
+          console.log('📅 Availability blocked: "' + (svcConfig.name || serviceType) + '" is booking_mode=disabled');
+          return res.json({ results: [{ toolCallId: toolCallId, result: 'The service "' + (svcConfig.name || serviceType) + '" is NOT bookable by phone. Do NOT offer any appointment times and do NOT say it is booked. Tell the caller you can\'t schedule this one directly, take their name and phone number, and let them know the office will reach out.' }] });
+        }
+        if (svcConfig.booking_mode === 'collect_request') {
+          console.log('📅 Availability gated: "' + (svcConfig.name || serviceType) + '" is booking_mode=collect_request');
+          return res.json({ results: [{ toolCallId: toolCallId, result: 'The service "' + (svcConfig.name || serviceType) + '" is request-only. Do NOT offer specific times from the calendar and do NOT say it is booked. Ask the caller for their preferred day and time, collect their name and phone number, and tell them the office will call to confirm.' }] });
+        }
         if (svcConfig.duration_minutes) slotOptions.durationOverride = svcConfig.duration_minutes;
         if (svcConfig.buffer_minutes) slotOptions.bufferMinutes = svcConfig.buffer_minutes;
         console.log('📅 Service "' + serviceType + '": duration=' + (svcConfig.duration_minutes || 'default') + 'min, buffer=' + (svcConfig.buffer_minutes || 0) + 'min');

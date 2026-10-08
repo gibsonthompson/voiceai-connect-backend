@@ -183,7 +183,18 @@ Booking flow:
 8. Use book_appointment with all details including staff_name if they chose one
 9. Read the booking confirmation from the tool response and repeat it to the caller
 
-If no slots are available, offer alternative dates or take their info for a callback.`;
+If no slots are available, offer alternative dates or take their info for a callback.
+
+NEVER tell a caller an appointment is booked, confirmed, or scheduled unless the book_appointment tool has actually returned a success confirmation. Do not invent a time, date, or confirmation number. If a tool response tells you a service is not bookable by phone or is request-only, follow it exactly: do NOT offer times and do NOT claim it is booked, instead collect the caller's name, phone, and preferred time and tell them the office will confirm. Some services in the list above cannot be booked directly, honor that.`;
+
+// ============================================================================
+// CALL CLOSING BLOCK, always injected. Stops the AI from hanging up abruptly
+// the moment a caller says they are done.
+// ============================================================================
+const CALL_CLOSING_BLOCK = `
+
+## ENDING THE CALL
+When the caller signals they are done (for example "no, that's all" or "no thank you"), do NOT hang up abruptly or end in silence. First SAY a short, warm closing out loud, such as "Okay, have a great day!" or "Thanks for calling, take care!" THEN end the call. Always speak a goodbye before ending, never cut off mid-conversation.`;
 
 // ============================================================================
 // TAKE-A-MESSAGE BLOCKS
@@ -1062,6 +1073,11 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
 Only state facts you actually have from this business's information. Never invent or guess an address, phone number, price, hours, staff name, or any other detail. If a caller asks for something you do not have, say so plainly and offer to transfer them or take a message, for example "I don't have that in front of me, but I can have someone follow up." Never read out a placeholder or example value as if it were real.
 Only offer, mention, or ask about services this business actually provides. If you are not certain what they offer, look it up in your knowledge base or ask the caller what they need, instead of guessing or reading a generic list of services that may not apply here. If a related service genuinely fits what the caller asked for, you may suggest it, but never a canned or random add-on.`;
 
+  // Closing etiquette, always on so the AI never hangs up without a goodbye.
+  if (!systemPrompt.includes('## ENDING THE CALL')) {
+    systemPrompt += CALL_CLOSING_BLOCK;
+  }
+
   return systemPrompt;
 }
 
@@ -1293,7 +1309,7 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
     type: 'endCall',
     function: {
       name: 'endCall',
-      description: 'End the call. Use this when the conversation is complete and the caller has confirmed they have no more questions.',
+      description: 'End the call, but ONLY after you have spoken a brief goodbye out loud (for example "Okay, have a great day!"). Use this when the conversation is complete and the caller has confirmed they have no more questions. Never end the call without first saying a closing line.',
     },
   });
 
