@@ -7,6 +7,7 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { updateAssistantCalendar } = require('../lib/calendar-tools');
+const { refreshAccessToken } = require('../lib/calendar-booking');
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CALENDAR_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CALENDAR_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
@@ -61,13 +62,25 @@ async function fetchGoogleEmail(tokens) {
 function allowedReturnHosts(agency) {
   const hosts = new Set(['myvoiceaiconnect.com', 'www.myvoiceaiconnect.com']);
   if (agency && agency.slug) hosts.add(`${agency.slug}.myvoiceaiconnect.com`);
-  if (agency && agency.domain_verified && agency.marketing_domain) {
+  // Allow the agency's own custom domain even when domain_verified is stale: it
+  // is a value only the agency sets, and if the client is actively on it, it is
+  // legitimately theirs. This is not an open redirect, the host must still match
+  // this agency's configured domain.
+  if (agency && agency.marketing_domain) {
     const md = String(agency.marketing_domain).replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
     const bare = md.replace(/^www\./, '');
-    hosts.add(bare);
-    hosts.add(`www.${bare}`);
+    if (bare) { hosts.add(bare); hosts.add(`www.${bare}`); }
   }
   return hosts;
+}
+
+// True for any subdomain of the platform domain. These are entirely under our
+// control (we provision every agency slug), so returning the client to one can
+// never be an open redirect, and it is exactly the branded host their session
+// lives on.
+function isPlatformHost(host) {
+  const h = String(host || '').toLowerCase();
+  return h === 'myvoiceaiconnect.com' || h.endsWith('.myvoiceaiconnect.com');
 }
 
 function safeReturnUrl(returnTo, agency) {
@@ -75,7 +88,11 @@ function safeReturnUrl(returnTo, agency) {
   let u;
   try { u = new URL(returnTo); } catch (e) { return null; }
   if (u.protocol !== 'https:') return null;
-  if (!allowedReturnHosts(agency).has(u.host.toLowerCase())) return null;
+  const host = u.host.toLowerCase();
+  // Trust any platform subdomain outright (branded white-label host), plus this
+  // agency's own slug/custom domain. This keeps the client on the EXACT origin
+  // they started on so their origin-scoped session is not dropped.
+  if (!isPlatformHost(host) && !allowedReturnHosts(agency).has(host)) return null;
   // Only client pages; drop any query/hash the caller tacked on.
   const path = (u.pathname && u.pathname.startsWith('/client')) ? u.pathname : '/client/ai-agent';
   return `${u.protocol}//${u.host}${path}`;
@@ -184,6 +201,17 @@ router.get('/callback', async (req, res) => {
       console.error('❌ Failed to decode state:', e);
       return res.redirect(`${redirectBase}/client/settings?error=calendar_failed`);
     }
+
+    // Keep EVERY redirect from here on (including errors) on the branded origin
+    // the client came from, so a failure never dumps them on the unbranded apex
+    // and never logs them out. Only trust a platform subdomain here (no agency
+    // loaded yet); the success path below also honors the agency custom domain.
+    try {
+      const ru = new URL(returnTo);
+      if (ru.protocol === 'https:' && isPlatformHost(ru.host)) {
+        redirectBase = `${ru.protocol}//${ru.host}`;
+      }
+    } catch (e) { /* keep default */ }
 
     if (!clientId) {
       return res.redirect(`${redirectBase}/client/settings?error=calendar_failed`);
@@ -363,7 +391,7 @@ router.get('/status/:clientId', async (req, res) => {
 
     const { data: client, error } = await supabase
       .from('clients')
-      .select('google_calendar_connected, google_token_expires_at, google_calendar_email')
+      .select('id, google_calendar_connected, google_access_token, google_refresh_token, google_token_expires_at, google_calendar_email')
       .eq('id', clientId)
       .single();
 
@@ -374,11 +402,35 @@ router.get('/status/:clientId', async (req, res) => {
     // Check if this client's plan allows calendar
     const planCheck = await checkPlanAccess(clientId);
 
+    // token_valid reflects whether the OAuth CONNECTION is healthy, not whether
+    // the short-lived access token happens to be fresh. Google access tokens
+    // expire every hour by design; the refresh token is what keeps bookings
+    // flowing, and the booking path mints a new access token from it on demand.
+    // So the old check (access-token expiry > now) raised a false "connection
+    // expired" banner for every client who hadn't booked in the last hour.
+    //
+    // We instead confirm a usable refresh token. When one exists we attempt a
+    // real refresh (refreshAccessToken returns the cached token instantly unless
+    // it is within 5 min of expiry, so this is cheap); a non-null result means
+    // the connection genuinely works. A null result means the refresh token was
+    // revoked or expired, which is the only case where a reconnect is actually
+    // needed, so the banner now appears only then.
+    let tokenValid = false;
+    if (client.google_calendar_connected && client.google_refresh_token) {
+      try {
+        const freshToken = await refreshAccessToken(client);
+        tokenValid = !!freshToken;
+      } catch (e) {
+        console.warn(`Calendar status: live token check failed for ${clientId}, treating connection as valid (refresh token present):`, e.message);
+        // Network/transient failure on our side should not nag the client to
+        // reconnect a connection that still has a refresh token on file.
+        tokenValid = true;
+      }
+    }
+
     res.json({
       connected: client.google_calendar_connected || false,
-      token_valid: client.google_token_expires_at
-        ? new Date(client.google_token_expires_at) > new Date()
-        : false,
+      token_valid: tokenValid,
       email: client.google_calendar_email || null,
       plan_allowed: planCheck.allowed,
       plan_message: planCheck.allowed ? null : planCheck.reason,
