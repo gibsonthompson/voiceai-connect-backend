@@ -3050,11 +3050,15 @@ async function provisionThenNotify(client, agency, plan, wasPendingPayment, cont
         .eq('id', client.id).single();
       if (_f) c = Object.assign({}, client, _f);
     } catch (e) { console.warn('⚠️ Client refresh before activation texts failed:', e.message); }
-    if (wasPendingPayment && c.owner_phone && c.vapi_phone_number) {
-      try { await sendWelcomeSMS(c.owner_phone, c.business_name, c.vapi_phone_number, agency); console.log('✅ Deferred welcome SMS sent to', c.owner_phone); }
-      catch (e) { console.error('Failed to send deferred welcome SMS:', e.message); }
-    }
+    // NOTE: the welcome SMS is intentionally NOT sent on this (card-required)
+    // path. The subscription-activated text below already welcomes the owner and
+    // carries more (plan, trial end date, the AI number), so sending both fired
+    // two near-identical texts seconds apart. The standalone welcome SMS still
+    // runs on the direct free-trial signup path (client-signup.js), where no
+    // activated text is sent, so that path keeps its single text.
     if (wasPendingPayment) {
+      // Agency-owner heads-up that a new client signed up (goes to agency.phone,
+      // not the client), so it is not a duplicate of the client's activated text.
       try { await sendClientSignupNotificationSMS(c, agency); } catch (e) { console.error('Deferred signup notification failed:', e.message); }
     }
     try { await sendClientSubscriptionActivatedSMS(c, agency, plan); } catch (e) { console.error('Activated SMS failed:', e.message); }

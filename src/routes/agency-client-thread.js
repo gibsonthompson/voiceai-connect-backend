@@ -240,4 +240,169 @@ clientRouter.post('/:clientId/agency-threads/:id/reply', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// UNIFIED PROVIDER INBOX (the iMessage-style "SmartCall Solutions" conversation)
+// One timeline that merges (a) the transactional texts the agency sent the owner
+// (sms_log, read-only history, shown as received) and (b) every in-app thread
+// message, both directions, across all of the client's agency threads. A reply
+// goes in-app: it appends to the most recent thread, or starts a new one. The
+// carrier texts are notifications the agency system sent; the client does not
+// text back on a carrier line here (see the reply handler).
+// ---------------------------------------------------------------------------
+const AGENCY_SMS_TYPES = ['client_welcome', 'client_subscription_activated', 'client_trial_expired', 'client_payment_failed'];
+
+function last10(p) { const d = String(p || '').replace(/\D/g, ''); return d.length > 10 ? d.slice(-10) : d; }
+
+clientRouter.get('/:clientId/provider-inbox', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+
+    const { data: client } = await supabase
+      .from('clients').select('id, agency_id, owner_phone, business_name, owner_name').eq('id', clientId).single();
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const { data: agency } = client.agency_id
+      ? await supabase.from('agencies').select('name, logo_url').eq('id', client.agency_id).single()
+      : { data: null };
+
+    // (a) In-app threads + their messages, flattened into one list.
+    const { data: requests } = await supabase
+      .from('agency_support_requests')
+      .select('id, message, created_at, client_unread')
+      .eq('client_id', clientId)
+      .order('created_at', { ascending: true })
+      .limit(100);
+
+    const items = [];
+    let unreadTotal = 0;
+    let replyTargetId = null;
+    let replyTargetAt = 0;
+    for (const r of requests || []) {
+      unreadTotal += r.client_unread || 0;
+      const t = new Date(r.created_at).getTime();
+      if (t >= replyTargetAt) { replyTargetAt = t; replyTargetId = r.id; }
+      if (r.message) items.push({ id: `seed-${r.id}`, sender: 'client', body: r.message, at: r.created_at, kind: 'thread' });
+      const msgs = await threadMessages(r.id);
+      for (const m of msgs) items.push({ id: m.id, sender: m.sender, body: m.body, at: m.created_at, kind: 'thread' });
+    }
+
+    // (b) Transactional texts the agency sent THIS owner (match by phone, since
+    // sms_log is agency-scoped, not client-scoped). Read-only, shown as received.
+    if (client.agency_id && client.owner_phone) {
+      const { data: smsRows } = await supabase
+        .from('sms_log')
+        .select('id, recipient_phone, message_body, message_type, created_at')
+        .eq('agency_id', client.agency_id)
+        .eq('recipient_type', 'client_owner')
+        .in('message_type', AGENCY_SMS_TYPES)
+        .order('created_at', { ascending: true })
+        .limit(500);
+      const mine = last10(client.owner_phone);
+      for (const s of smsRows || []) {
+        if (last10(s.recipient_phone) !== mine) continue;
+        items.push({ id: `sms-${s.id}`, sender: 'agency', body: s.message_body || '', at: s.created_at, kind: 'sms' });
+      }
+    }
+
+    items.sort((a, b) => new Date(a.at) - new Date(b.at));
+
+    // Opening the conversation marks the in-app agency replies read.
+    if (unreadTotal > 0) {
+      await supabase.from('agency_support_requests').update({ client_unread: 0 }).eq('client_id', clientId);
+      for (const r of requests || []) {
+        await supabase.from('agency_thread_messages').update({ read_by_client: true }).eq('request_id', r.id).eq('sender', 'agency');
+      }
+    }
+
+    res.json({
+      success: true,
+      agency: { name: (agency && agency.name) || 'Your provider', logo_url: (agency && agency.logo_url) || null },
+      messages: items,
+      unread_total: unreadTotal,
+      reply_target_id: replyTargetId,
+      has_messages: items.length > 0,
+    });
+  } catch (error) {
+    console.error('Provider-inbox load error:', error.message);
+    res.status(500).json({ error: 'Failed to load conversation' });
+  }
+});
+
+clientRouter.post('/:clientId/provider-inbox/reply', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const body = clean(req.body && req.body.body, MAX_BODY);
+    if (!body) return res.status(400).json({ error: 'Message is required' });
+
+    const { data: client } = await supabase
+      .from('clients').select('id, agency_id, business_name, owner_name, email').eq('id', clientId).single();
+    if (!client || !client.agency_id) return res.status(404).json({ error: 'Client not found' });
+
+    // Append to the client's most recent thread, or start a new one if none.
+    const { data: latest } = await supabase
+      .from('agency_support_requests')
+      .select('id, status')
+      .eq('client_id', clientId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    let message;
+    if (latest) {
+      const { data: inserted, error: insErr } = await supabase
+        .from('agency_thread_messages')
+        .insert({ request_id: latest.id, sender: 'client', body, read_by_client: true, read_by_agency: false })
+        .select('id, sender, body, created_at')
+        .single();
+      if (insErr) throw insErr;
+      message = inserted;
+      const updates = { last_reply_at: new Date().toISOString(), last_sender: 'client' };
+      // Bump agency unread by reading current value first (keep the counter honest).
+      const { data: cur } = await supabase.from('agency_support_requests').select('agency_unread, status').eq('id', latest.id).single();
+      updates.agency_unread = ((cur && cur.agency_unread) || 0) + 1;
+      if (cur && cur.status === 'resolved') updates.status = 'in_progress';
+      await supabase.from('agency_support_requests').update(updates).eq('id', latest.id).eq('client_id', clientId);
+    } else {
+      // No thread yet: create one seeded with this message so the agency sees it.
+      const { data: created, error: crErr } = await supabase
+        .from('agency_support_requests')
+        .insert({
+          agency_id: client.agency_id,
+          client_id: client.id,
+          user_type: 'client',
+          requester_name: client.owner_name || client.business_name || null,
+          contact: client.email || null,
+          message: body,
+          source: 'client_dashboard',
+          status: 'new',
+          last_sender: 'client',
+          agency_unread: 1,
+        })
+        .select('id, created_at')
+        .single();
+      if (crErr) throw crErr;
+      message = { id: `seed-${created.id}`, sender: 'client', body, created_at: created.created_at };
+    }
+
+    // Notify the agency owner (best-effort, in-app channel heads-up by text).
+    try {
+      const { data: agency } = await supabase.from('agencies').select('phone').eq('id', client.agency_id).single();
+      if (agency && agency.phone) {
+        await sendAndLogSMS({
+          phone: agency.phone,
+          agencyId: client.agency_id,
+          recipientType: 'agency',
+          messageType: 'client_reply',
+          message: `New reply from ${client.business_name || 'a client'}. Respond from your dashboard inbox.`,
+        });
+      }
+    } catch (e) { console.error('agency notify SMS failed (non-blocking):', e.message); }
+
+    res.json({ success: true, message: { id: message.id, sender: 'client', body: message.body || body, at: message.created_at, kind: 'thread' } });
+  } catch (error) {
+    console.error('Provider-inbox reply error:', error.message);
+    res.status(500).json({ error: 'Failed to send reply' });
+  }
+});
+
 module.exports = { agencyRouter, clientRouter };

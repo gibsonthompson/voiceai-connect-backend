@@ -55,16 +55,18 @@ const { supabase } = require('../lib/supabase');
 const { provisionAgencyDemo, updateDemoAssistantName, fullyReleaseNumber, createDemoAssistant } = require('../lib/vapi');
 const { provisionBYOTNumber, releaseBYOTNumber } = require('./byot');
 const { requireAgencyAccess } = require('./auth');
+const { sendAndLogSMS } = require('../lib/sms-logger');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 
 // ----------------------------------------------------------------------------
-// OWNERSHIP GUARD — covers every /:agencyId/demo-phone* and /:agencyId/demo-calls*
+// OWNERSHIP GUARD, covers every /:agencyId/demo-phone* and /:agencyId/demo-calls*
 // route. Registered before the routes below.
 // ----------------------------------------------------------------------------
 router.use('/:agencyId/demo-phone', requireAgencyAccess());
 router.use('/:agencyId/demo-calls', requireAgencyAccess());
+router.use('/:agencyId/demo-sms', requireAgencyAccess());
 
 // ============================================================================
 // IN-MEMORY DEMO PROVISIONING JOBS
@@ -707,7 +709,7 @@ router.get('/:agencyId/demo-calls/:callId', async (req, res) => {
 });
 
 // ============================================================================
-// DEMO CUSTOMIZATION — voice override, custom greeting, and extra prompt
+// DEMO CUSTOMIZATION, voice override, custom greeting, and extra prompt
 // instructions (appended at call time; the core demo script is never exposed).
 // Guarded by the requireAgencyAccess on /:agencyId/demo-phone above.
 // ============================================================================
@@ -757,6 +759,130 @@ router.put('/:agencyId/demo-phone/config', async (req, res) => {
   } catch (e) {
     console.error('demo-config PUT error:', e.message);
     res.status(500).json({ error: 'Failed to save demo config' });
+  }
+});
+
+// ============================================================================
+// DEMO NUMBER SMS (agency-level two-way texting on the demo line)
+// The demo number already sends follow-up texts (logged in sms_log) and now
+// receives replies (routed in routes/sms.js -> handleDemoInbound, also sms_log).
+// These endpoints surface both as threads grouped by the prospect's phone and
+// let the agency reply from the demo number. All rows live in sms_log tagged
+// with these message types, scoped by agency_id.
+// Guarded by requireAgencyAccess on '/:agencyId/demo-sms' above.
+// ============================================================================
+const DEMO_SMS_TYPES = ['demo_followup', 'demo_followup_industry', 'demo_followup_custom', 'demo_reply_inbound', 'demo_reply_outbound'];
+
+// Last 10 digits, so an inbound (+1XXXXXXXXXX) and an outbound (XXXXXXXXXX or
+// +1XXXXXXXXXX) to the same prospect group into one thread regardless of format.
+function demoThreadKey(phone) {
+  const d = String(phone || '').replace(/\D/g, '');
+  return d.length > 10 ? d.slice(-10) : d;
+}
+
+// GET /:agencyId/demo-sms, all demo texts for the agency, grouped into threads
+router.get('/:agencyId/demo-sms', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+
+    const { data: agency } = await supabase
+      .from('agencies').select('demo_phone_number').eq('id', agencyId).single();
+
+    const { data: rows, error } = await supabase
+      .from('sms_log')
+      .select('id, recipient_phone, message_type, message_body, delivery_status, metadata, created_at')
+      .eq('agency_id', agencyId)
+      .in('message_type', DEMO_SMS_TYPES)
+      .order('created_at', { ascending: true })
+      .limit(2000);
+
+    if (error) {
+      console.error('demo-sms list error:', error.message);
+      return res.status(400).json({ error: error.message });
+    }
+
+    // Best-effort display names from the demo call history (same prospect phone).
+    const nameByKey = {};
+    try {
+      const { data: calls } = await supabase
+        .from('demo_calls')
+        .select('caller_phone, caller_name, business_name, created_at')
+        .eq('agency_id', agencyId)
+        .order('created_at', { ascending: false })
+        .limit(500);
+      for (const c of calls || []) {
+        const k = demoThreadKey(c.caller_phone);
+        if (k && !nameByKey[k]) nameByKey[k] = c.business_name || c.caller_name || null;
+      }
+    } catch (_) { /* names are optional */ }
+
+    const threads = {};
+    for (const r of rows || []) {
+      const key = demoThreadKey(r.recipient_phone);
+      if (!key) continue;
+      const inbound = r.message_type === 'demo_reply_inbound' || r.delivery_status === 'received' || r.metadata?.direction === 'inbound';
+      if (!threads[key]) {
+        threads[key] = { key, phone: r.recipient_phone, name: nameByKey[key] || null, messages: [], lastAt: null, lastDirection: null, lastPreview: '' };
+      }
+      const t = threads[key];
+      t.messages.push({
+        id: r.id,
+        direction: inbound ? 'inbound' : 'outbound',
+        body: r.message_body || '',
+        at: r.created_at,
+        status: r.delivery_status || null,
+        messageType: r.message_type,
+      });
+      t.lastAt = r.created_at;
+      t.lastDirection = inbound ? 'inbound' : 'outbound';
+      t.lastPreview = (r.message_body || '').slice(0, 120);
+    }
+
+    const list = Object.values(threads)
+      .map((t) => ({ ...t, needsReply: t.lastDirection === 'inbound' }))
+      .sort((a, b) => new Date(b.lastAt) - new Date(a.lastAt));
+
+    res.json({ success: true, demoNumber: agency?.demo_phone_number || null, threads: list, total: list.length });
+  } catch (e) {
+    console.error('❌ demo-sms list error:', e.message);
+    res.status(500).json({ error: 'Failed to fetch demo texts' });
+  }
+});
+
+// POST /:agencyId/demo-sms/send, reply to a prospect FROM the demo number
+router.post('/:agencyId/demo-sms/send', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const to = (req.body?.to || '').toString().trim();
+    const message = (req.body?.message || '').toString().trim();
+    if (!to) return res.status(400).json({ error: 'Recipient phone (to) is required' });
+    if (!message) return res.status(400).json({ error: 'Message is required' });
+    if (message.length > 1600) return res.status(400).json({ error: 'Message too long' });
+
+    const { data: agency, error: aErr } = await supabase
+      .from('agencies').select('id, name, demo_phone_number').eq('id', agencyId).single();
+    if (aErr || !agency) return res.status(404).json({ error: 'Agency not found' });
+    if (!agency.demo_phone_number) {
+      return res.status(400).json({ error: 'No demo number on this agency yet' });
+    }
+
+    // Send FROM the demo number and log it as an outbound demo-thread row so the
+    // GET above shows the agency's reply in the conversation.
+    const sent = await sendAndLogSMS({
+      phone: to,
+      message,
+      from: agency.demo_phone_number,
+      agencyId: agency.id,
+      recipientType: 'prospect',
+      messageType: 'demo_reply_outbound',
+      metadata: { direction: 'outbound', demo_number: agency.demo_phone_number },
+    });
+
+    if (!sent) return res.status(502).json({ error: 'Message could not be sent' });
+    res.json({ success: true });
+  } catch (e) {
+    console.error('❌ demo-sms send error:', e.message);
+    res.status(500).json({ error: 'Failed to send reply' });
   }
 });
 

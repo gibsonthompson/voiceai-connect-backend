@@ -594,6 +594,60 @@ async function handleAgencyReplyToPlatform(fromPhone, text) {
   }
 }
 
+// ============================================================================
+// AGENCY DEMO NUMBER REPLIES (a prospect texting back the demo line they called)
+// These arrive on the agency's demo_phone_number, not a client number, so the
+// client lookup never matches them. Capture as a demo thread in sms_log (same
+// table the sent demo follow-ups already use) and ping the agency owner so they
+// can reply from the demo page. message_type 'demo_reply_inbound' / the sent
+// 'demo_followup*' / 'demo_reply_outbound' rows are what the demo-sms endpoints
+// group into threads by the prospect's phone.
+// ============================================================================
+async function findAgencyByDemoNumber(phone) {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return null;
+  const { data } = await supabase
+    .from('agencies').select('id, name, phone, demo_phone_number').eq('demo_phone_number', normalized).limit(1).maybeSingle();
+  if (data) return data;
+  const without1 = normalized.startsWith('+1') ? normalized.slice(2) : normalized;
+  const { data: d2 } = await supabase
+    .from('agencies').select('id, name, phone, demo_phone_number').like('demo_phone_number', `%${without1}`).limit(1).maybeSingle();
+  return d2 || null;
+}
+
+async function handleDemoInbound(agency, callerPhone, text, payload) {
+  const from = normalizePhone(callerPhone);
+  // Log the inbound reply against the agency as a demo thread row. recipient_phone
+  // holds the PROSPECT's number (same grouping key the sent demo rows use), and
+  // direction=inbound distinguishes it from the agency's outbound replies.
+  try {
+    await supabase.from('sms_log').insert({
+      agency_id: agency.id,
+      recipient_phone: from,
+      recipient_type: 'prospect',
+      message_type: 'demo_reply_inbound',
+      message_body: text,
+      telnyx_message_id: payload?.id || null,
+      delivery_status: 'received',
+      metadata: { direction: 'inbound', from, demo_number: agency.demo_phone_number || null },
+    });
+  } catch (err) {
+    console.warn('Failed to log inbound demo reply:', err.message);
+  }
+
+  // Heads-up ping to the agency owner so they know to reply from the demo page.
+  // Internal alert, so it goes from the platform number (the owner is the
+  // platform's customer, not an end client) via the RAW sender, which avoids
+  // writing a second sms_log row into the demo thread. Best-effort.
+  try {
+    if (agency.phone) {
+      await sendTelnyxSMS(agency.phone, `New reply to your demo line from ${from}:\n${text}\n\nReply from your demo page.`, PLATFORM_SMS_NUMBER);
+    }
+  } catch (err) {
+    console.warn('Demo inbound owner ping failed (non-blocking):', err.message);
+  }
+}
+
 module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(req, res) {
   try {
     const { raw, body } = getRawAndBody(req);
@@ -681,6 +735,14 @@ module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(re
     if (isPlatformSmsNumber(clientPhone)) {
       await handleAgencyReplyToPlatform(callerPhone, messageText);
       return res.status(200).json({ received: true, platformReply: true });
+    }
+
+    // Reply to an AGENCY DEMO number (a prospect texting back the demo line).
+    // Demo numbers are not client numbers, so check here before the client lookup.
+    const demoAgency = await findAgencyByDemoNumber(clientPhone);
+    if (demoAgency) {
+      await handleDemoInbound(demoAgency, callerPhone, messageText, payload);
+      return res.status(200).json({ received: true, demoReply: true });
     }
 
     // Find which client owns this phone number
