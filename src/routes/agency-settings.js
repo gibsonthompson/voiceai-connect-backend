@@ -201,6 +201,12 @@ function publicAgencyShape(agency) {
     // Dashboard branding overrides (nav, bg, card, button colors)
     branding_overrides: agency.branding_overrides || null,
 
+    // Per-agency legal page overrides ({ terms, privacy } markdown). Exposed so
+    // the hosted Terms/Privacy renderer (components/LegalPage) can pick up an
+    // agency's custom text instead of the platform default. Without this the
+    // override column is written but never read on the public site.
+    legal_overrides: (agency.legal_overrides && typeof agency.legal_overrides === 'object') ? agency.legal_overrides : null,
+
     // Plan type (for feature gating)
     plan_type: agency.plan_type,
     // Comp overrides. access_plan is a feature-tier override (a comped partner
@@ -1739,6 +1745,113 @@ async function disconnectFlutterwave(req, res) {
   }
 }
 
+// ============================================================================
+// LEGAL PAGES (Terms / Privacy) EDITING
+// ----------------------------------------------------------------------------
+// The hosted marketing site renders Terms and Privacy from the platform default
+// template (legal_templates table) UNLESS the agency has set an override in
+// agencies.legal_overrides ({ terms, privacy } markdown). These two handlers
+// let an agency read the effective content (override if set, else the platform
+// default, so they always start from real text) and save or clear a per-page
+// override. Placeholders like {{AGENCY_NAME}} and {{SUPPORT_EMAIL}} are left
+// intact in storage and resolved at render time by components/LegalPage.
+// ============================================================================
+const LEGAL_TYPES = ['terms', 'privacy'];
+const LEGAL_MAX_CHARS = 60000; // generous cap; a long policy is well under this
+
+async function fetchDefaultLegalTemplate(type) {
+  try {
+    const { data, error } = await supabase
+      .from('legal_templates')
+      .select('template_type, title, content')
+      .eq('template_type', type)
+      .single();
+    if (error || !data) return null;
+    return data;
+  } catch (e) {
+    console.error('fetchDefaultLegalTemplate error:', e.message);
+    return null;
+  }
+}
+
+// GET /api/agency/:agencyId/legal
+// Returns the effective Terms and Privacy content for the editor, flagging
+// whether each is a custom override or the inherited platform default.
+async function getAgencyLegal(req, res) {
+  try {
+    const { agencyId } = req.params;
+    const agency = await getAgencyById(agencyId);
+    if (!agency) return res.status(404).json({ error: 'Agency not found' });
+
+    const overrides = (agency.legal_overrides && typeof agency.legal_overrides === 'object') ? agency.legal_overrides : {};
+    const out = {};
+    for (const type of LEGAL_TYPES) {
+      const override = typeof overrides[type] === 'string' && overrides[type].trim() ? overrides[type] : null;
+      if (override) {
+        out[type] = { content: override, isOverride: true, title: type === 'terms' ? 'Terms of Service' : 'Privacy Policy' };
+      } else {
+        const def = await fetchDefaultLegalTemplate(type);
+        out[type] = {
+          content: def ? def.content : '',
+          isOverride: false,
+          title: (def && def.title) || (type === 'terms' ? 'Terms of Service' : 'Privacy Policy'),
+          defaultMissing: !def,
+        };
+      }
+    }
+    return res.json({ legal: out });
+  } catch (e) {
+    console.error('getAgencyLegal error:', e.message);
+    return res.status(500).json({ error: 'Failed to load legal pages' });
+  }
+}
+
+// PUT /api/agency/:agencyId/legal   body: { type: 'terms'|'privacy', content: string|null }
+// Sets a per-page override, or clears it (content null/empty => revert to the
+// platform default). Only the targeted page is touched; the other is preserved.
+async function updateAgencyLegal(req, res) {
+  try {
+    const { agencyId } = req.params;
+    const { type, content } = req.body || {};
+
+    if (!LEGAL_TYPES.includes(type)) {
+      return res.status(400).json({ error: 'type must be "terms" or "privacy"' });
+    }
+    if (content != null && typeof content !== 'string') {
+      return res.status(400).json({ error: 'content must be a string or null' });
+    }
+    if (typeof content === 'string' && content.length > LEGAL_MAX_CHARS) {
+      return res.status(400).json({ error: `content is too long (max ${LEGAL_MAX_CHARS} characters)` });
+    }
+
+    const agency = await getAgencyById(agencyId);
+    if (!agency) return res.status(404).json({ error: 'Agency not found' });
+
+    const current = (agency.legal_overrides && typeof agency.legal_overrides === 'object') ? { ...agency.legal_overrides } : {};
+    const trimmed = typeof content === 'string' ? content.trim() : '';
+    if (trimmed) {
+      current[type] = content; // store as-authored (keep author's whitespace)
+    } else {
+      delete current[type]; // reset this page to the platform default
+    }
+
+    const nextOverrides = Object.keys(current).length > 0 ? current : null;
+    const { error } = await supabase
+      .from('agencies')
+      .update({ legal_overrides: nextOverrides })
+      .eq('id', agencyId);
+    if (error) {
+      console.error('updateAgencyLegal write error:', error.message);
+      return res.status(500).json({ error: 'Failed to save legal page' });
+    }
+
+    return res.json({ success: true, type, isOverride: !!trimmed });
+  } catch (e) {
+    console.error('updateAgencyLegal error:', e.message);
+    return res.status(500).json({ error: 'Failed to save legal page' });
+  }
+}
+
 module.exports = {
   getAgencyByHost,
   getAgencyByIdPublic,
@@ -1748,5 +1861,7 @@ module.exports = {
   connectPaystack,
   disconnectPaystack,
   connectFlutterwave,
-  disconnectFlutterwave
+  disconnectFlutterwave,
+  getAgencyLegal,
+  updateAgencyLegal
 };

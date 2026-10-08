@@ -198,7 +198,7 @@ app.use((req, res, next) => {
 // ============================================================================
 
 const { handleAgencySignup, handleAgencyOnboarding } = require('./routes/agency-signup');
-const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySettings, verifyAgencyDomain, connectPaystack, disconnectPaystack, connectFlutterwave, disconnectFlutterwave } = require('./routes/agency-settings');
+const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySettings, verifyAgencyDomain, connectPaystack, disconnectPaystack, connectFlutterwave, disconnectFlutterwave, getAgencyLegal, updateAgencyLegal } = require('./routes/agency-settings');
 const demoPhoneRoutes = require('./routes/demo-phone');
 const customIndustriesRoutes = require('./routes/custom-industries');
 const referralRoutes = require('./routes/referrals');
@@ -239,7 +239,6 @@ const abandonedCheckoutCleanupRoutes = require('./routes/abandoned-checkout-clea
 // Manual client monthly usage reset (manual-billing clients have no Stripe
 // invoice to reset their counters). Mounted under /api/cron below.
 const manualUsageResetRoutes = require('./routes/manual-usage-reset');
-const agencyOnboardingSmsRoutes = require('./routes/agency-onboarding-sms');
 const activationSmsRoutes = require('./routes/activation-sms');
 const onboardingEmailRoutes = require('./routes/onboarding-emails');
 const feedbackRoutes = require('./routes/feedback');
@@ -553,6 +552,10 @@ app.get('/api/agency/:agencyId/settings', getAgencySettings);
 // breaks. requireAgencyAccess enforces a valid token + caller-owns-:agencyId +
 // the 'settings' Page Access toggle for agency_staff.
 app.put('/api/agency/:agencyId/settings', requireAgencyAccess('settings'), updateAgencySettings);
+// Legal pages (Terms / Privacy) editing. Read effective content (override or
+// platform default) and save/clear a per-page override.
+app.get('/api/agency/:agencyId/legal', requireAgencyAccess('settings'), getAgencyLegal);
+app.put('/api/agency/:agencyId/legal', requireAgencyAccess('settings'), updateAgencyLegal);
 app.post('/api/agency/:agencyId/paystack/connect', requireAgencyAccess('settings'), connectPaystack);
 app.post('/api/agency/:agencyId/paystack/disconnect', requireAgencyAccess('settings'), disconnectPaystack);
 const { initPaystackCharge, paystackCallback, paystackRecurringCron, handlePaystackWebhook } = require('./routes/paystack');
@@ -562,7 +565,7 @@ app.post('/webhook/paystack', express.raw({ type: 'application/json' }), handleP
 app.post('/api/cron/paystack-recurring', paystackRecurringCron);
 
 // Flutterwave (parallel to Paystack; was fully defined but never mounted, so the
-// connect call 404'd — "Not found" — and payments/webhook were dead too).
+// connect call 404'd ("Not found") and payments/webhook were dead too).
 app.post('/api/agency/:agencyId/flutterwave/connect', requireAgencyAccess('settings'), connectFlutterwave);
 app.post('/api/agency/:agencyId/flutterwave/disconnect', requireAgencyAccess('settings'), disconnectFlutterwave);
 const { initFlutterwaveCharge, flutterwaveCallback, flutterwaveRecurringCron, handleFlutterwaveWebhook } = require('./routes/flutterwave');
@@ -2129,10 +2132,10 @@ app.post('/api/cron/warn-agency-trials', async (req, res) => {
 app.use('/api/cron', abandonedCartRoutes);
 
 
-// Agency onboarding engagement SMS (called by cron-job.org every hour)
-// DISABLED: legacy onboarding SMS. Superseded by activationSmsRoutes below;
-// running both double-texted agencies. Re-enable only if you retire activation-sms.
-// app.use('/api/cron', agencyOnboardingSmsRoutes);
+// Agency activation engagement SMS (called by cron-job.org). The older
+// agency-onboarding-sms sequence was removed entirely; it double-texted
+// agencies alongside this one. If a cron-job.org job still points at
+// /api/cron/agency-onboarding-sms, delete that job, the route no longer exists.
 app.use('/api/cron', activationSmsRoutes);
 app.use('/api/cron', onboardingEmailRoutes);
 
