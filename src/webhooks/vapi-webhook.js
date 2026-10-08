@@ -66,6 +66,7 @@ const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
 const { sendCallNotificationSMS, sendDemoCallFollowUpSMS, sendSpamBlockedSMS } = require('../lib/notifications');
 const { upsertContactFromCall } = require('../lib/contact-upsert');
+const { getCallBooking } = require('../lib/booking-call-cache');
 const { buildDynamicAssistantConfig } = require('../lib/assistant-config-builder');
 const { notifyTeamMembers } = require('../lib/team-notifications');
 const { buildDemoDynamicConfig, buildDemoSmsContent, getIndustryDemoByPhone, buildIndustryDemoConfig, isValidBusinessName, sanitizeBusinessName, extractDemoToolCallArgs } = require('../lib/demo-config');
@@ -1140,6 +1141,11 @@ async function handleVapiWebhook(req, res) {
     const endedReason = call.endedReason || message.endedReason || null;
     const { transferStatus, wasTransferred } = detectTransferStatus(endedReason, transcript);
 
+    // Did the AI book an appointment during this call? Flagged by the /book tool
+    // (keyed by VAPI call id). Powers the "Booked" badge in the dashboards.
+    const callBooking = getCallBooking(call.id);
+    const appointmentBooked = !!callBooking;
+
     // ── HIPAA mode: strip recording and transcript before storage ──────
     const hipaaMode = client.hipaa_mode === true;
     const storedRecordingUrl = hipaaMode ? null : recordingUrl;
@@ -1157,6 +1163,7 @@ async function handleVapiWebhook(req, res) {
       recording_url: storedRecordingUrl, duration_seconds: durationSeconds,
       urgency_level: 'routine', call_status: wasTransferred ? 'transferred' : 'completed',
       ended_reason: endedReason, transfer_status: transferStatus,
+      appointment_booked: appointmentBooked, appointment_time: callBooking?.time || null,
       is_spam: false, spam_reason: null,
       call_language: 'en', created_at: new Date().toISOString()
     };

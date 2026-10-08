@@ -4,6 +4,7 @@ var calendarBooking = require('../lib/calendar-booking');
 var getAvailableSlots = calendarBooking.getAvailableSlots;
 var bookAppointment = calendarBooking.bookAppointment;
 var lookupServiceConfig = calendarBooking.lookupServiceConfig;
+var recordCallBooking = require('../lib/booking-call-cache').recordCallBooking;
 
 // ============================================================================
 // SERVER-SIDE DATE RESOLVER
@@ -75,7 +76,7 @@ function resolveDate(input) {
     }
   }
 
-  // YYYY-MM-DD — if future trust it, if past find next occurrence of that weekday
+  // YYYY-MM-DD: if future trust it, if past find next occurrence of that weekday
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
     var parsed = new Date(raw + 'T12:00:00');
     if (parsed >= today) return raw;
@@ -189,7 +190,7 @@ router.post('/availability/:clientId', async function(req, res) {
       }
     }
 
-    // Handle "next available" — search consecutive days
+    // Handle "next available": search consecutive days
     if (date === 'NEXT_AVAILABLE') {
       for (var i = 0; i < 7; i++) {
         var checkDate = new Date();
@@ -316,8 +317,11 @@ router.post('/book/:clientId', async function(req, res) {
     var result = await bookAppointment(clientId, customerName, customerPhone, date, time, serviceType, notes, staffName);
 
     if (result.success) {
-      return res.json({ 
-        results: [{ toolCallId: toolCallId, result: 'BOOKING CONFIRMED. ' + result.message + '. Repeat this exact confirmation to the caller. Do NOT say any other date.' }] 
+      // Flag that this call booked an appointment so the end-of-call handler can
+      // mark the saved call record (powers the "Booked" badge in the dashboards).
+      try { recordCallBooking(message?.call?.id, { time: result.appointment_time || (date + ' ' + time) }); } catch (e) { /* best-effort */ }
+      return res.json({
+        results: [{ toolCallId: toolCallId, result: 'Booked. ' + result.message + '. Confirm this to the caller in natural speech, using this exact date and time, not any other.' }]
       });
     } else {
       return res.json({ 
