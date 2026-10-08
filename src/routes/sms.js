@@ -638,6 +638,22 @@ module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(re
           .from('sms_messages')
           .update(update)
           .eq('telnyx_message_id', telnyxMessageId);
+
+        // Also reconcile the transactional sms_log row (welcome, activation,
+        // trial, payment, call + platform notifications). sms-logger.js stamps
+        // the same telnyx_message_id on these, but they live in sms_log, not
+        // sms_messages, so without this they stayed at the 'sent' (accepted)
+        // status forever and a silently-dropped text looked identical to a
+        // delivered one. Best-effort: a failure here must not break the
+        // sms_messages path above or the 200 Telnyx expects.
+        try {
+          await supabase
+            .from('sms_log')
+            .update({ delivery_status: status })
+            .eq('telnyx_message_id', telnyxMessageId);
+        } catch (err) {
+          console.warn('sms_log delivery reconcile failed (non-blocking):', err.message);
+        }
       }
 
       return res.status(200).json({ received: true });

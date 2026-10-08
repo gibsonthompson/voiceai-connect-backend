@@ -1,5 +1,5 @@
 // ============================================================================
-// SMS LOGGER — Wraps sendTelnyxSMS with automatic logging to sms_log table
+// SMS LOGGER: Wraps sendTelnyxSMS with automatic logging to sms_log table
 //
 // Usage:
 //   const { sendAndLogSMS } = require('../lib/sms-logger');
@@ -13,7 +13,7 @@
 //   });
 //
 // CREATED: 2026-05-09
-// UPDATED: 2026-05-20 — Early bail on undefined/null/empty phone to prevent
+// UPDATED: 2026-05-20, early bail on undefined/null/empty phone to prevent
 //          "Invalid phone number: undefined" log spam from callers with wrong
 //          param names or missing data.
 // ============================================================================
@@ -36,7 +36,7 @@ async function sendAndLogSMS({ phone, message, agencyId, recipientType, messageT
   // Catches callers passing undefined (e.g. wrong param name like "to" instead
   // of "phone") before we hit formatPhoneE164 and log a noisy warning.
   if (!phone || typeof phone !== 'string' || phone.trim().length === 0) {
-    console.warn(`⚠️ SMS Logger: Skipped — no phone provided for ${messageType || 'unknown'} (got: ${typeof phone === 'string' ? `"${phone}"` : String(phone)})`);
+    console.warn(`⚠️ SMS Logger: Skipped, no phone provided for ${messageType || 'unknown'} (got: ${typeof phone === 'string' ? `"${phone}"` : String(phone)})`);
     await logSMS({
       agencyId,
       phone: 'missing',
@@ -112,9 +112,13 @@ async function sendAndLogSMS({ phone, message, agencyId, recipientType, messageT
     }
   } else {
     try {
-      // sendTelnyxSMS returns true/false — we can't get the message ID from current implementation
-      // If you update sendTelnyxSMS to return the response, we can capture the ID
-      sent = await sendTelnyxSMS(formattedPhone, message, from);
+      // sendTelnyxSMS returns the Telnyx message id (string) on success, true if
+      // the id could not be parsed, or false on failure. Capture the id so the
+      // delivery-receipt webhook can reconcile this row's real delivery status
+      // (delivered / undelivered / failed) instead of it being stuck at 'sent'.
+      const result = await sendTelnyxSMS(formattedPhone, message, from);
+      sent = !!result;
+      if (typeof result === 'string') telnyxMessageId = result;
     } catch (err) {
       console.error(`❌ SMS Logger: Telnyx send failed for ${messageType}:`, err.message);
     }
@@ -137,7 +141,7 @@ async function sendAndLogSMS({ phone, message, agencyId, recipientType, messageT
 }
 
 /**
- * Insert a row into sms_log. Never throws — failures are swallowed with a warning.
+ * Insert a row into sms_log. Never throws. Failures are swallowed with a warning.
  */
 async function logSMS({ agencyId, phone, recipientType, messageType, message, telnyxMessageId, status, metadata }) {
   try {

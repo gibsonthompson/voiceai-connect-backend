@@ -129,8 +129,15 @@ async function sendTelnyxSMS(toPhone, message, fromNumber = null) {
       })
     });
     if (!response.ok) { const error = await response.json(); console.error('❌ Telnyx error:', error); return false; }
-    console.log('✅ SMS sent successfully');
-    return true;
+    // A 2xx from Telnyx means the message was ACCEPTED for processing, NOT that a
+    // handset received it. Capture the message id so delivery-receipt webhooks can
+    // reconcile the real outcome (delivered / undelivered / failed) against the
+    // sms_log row later. The log says "accepted", not "sent", so it stops implying
+    // delivery that we have not actually confirmed.
+    let telnyxId = null;
+    try { const ok = await response.json(); telnyxId = ok?.data?.id || null; } catch {}
+    console.log(`✅ SMS accepted by Telnyx${telnyxId ? ` (id ${telnyxId})` : ''}`);
+    return telnyxId || true;
   } catch (error) { console.error('❌ SMS error:', error.message); return false; }
 }
 
@@ -232,7 +239,10 @@ async function sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName, 
   lines.push(signupUrl);
 
   console.log(`📱 Sending demo follow-up SMS to ${callerPhone} for agency: ${agencyName}`);
-  return _logSMS({ phone: callerPhone, message: lines.join('\n'), agencyId: agency.id, recipientType: 'prospect', messageType: 'demo_followup', metadata: { businessName: callerBusinessName, businessType } });
+  // The prospect called the agency's demo number, so follow up FROM that same
+  // number (familiar + white-label), never the platform 505 number. Platform is
+  // the last-resort fallback only if the agency somehow has no demo number.
+  return _logSMS({ phone: callerPhone, message: lines.join('\n'), from: agency?.demo_phone_number || null, agencyId: agency.id, recipientType: 'prospect', messageType: 'demo_followup', metadata: { businessName: callerBusinessName, businessType } });
 }
 
 // ============================================================================
@@ -246,13 +256,15 @@ async function sendCallNotificationSMS(client, agency, callData) {
   smsMessage += `Summary: ${summary}\nPowered by ${brandName}`;
   // From the client's own AI-receptionist number (white-label + recognizable
   // to the owner), not the platform 505 number. The number is provisioned on the
-  // messaging profile well before any call, so it's registered by call-time.
-  const sent = await _logSMS({ phone: client.owner_phone, message: smsMessage, from: client.vapi_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_call_notification', metadata: { clientName: client.business_name, customerName, urgency } });
+  // messaging profile well before any call, so it's registered by call-time. If
+  // the client has no AI number on record, fall to the agency's warm demo number
+  // before ever touching the platform number, so the owner never sees 505.
+  const sent = await _logSMS({ phone: client.owner_phone, message: smsMessage, from: client.vapi_phone_number || agency?.demo_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_call_notification', metadata: { clientName: client.business_name, customerName, urgency } });
   if (!sent && client.vapi_phone_number) {
     // The client's own number isn't SMS-ready yet (not on the messaging profile /
     // 10DLC campaign). Retry from the platform number so the owner still gets the
     // summary instead of nothing. The warning shows which clients need SMS setup.
-    console.warn(`\u26a0\ufe0f Owner SMS from client number ${client.vapi_phone_number} failed; retrying from the platform number.`);
+    console.warn(`\u26a0\ufe0f Owner SMS from client number ${client.vapi_phone_number} failed; retrying from the agency demo number (platform only if the agency has none).`);
     // Self-heal: the number wasn't on the Telnyx messaging profile / 10DLC
     // campaign, so assign it now in the background. It is idempotent, and once it
     // succeeds the NEXT owner SMS (and the AI's send_sms tool + Messages replies)
@@ -264,7 +276,7 @@ async function sendCallNotificationSMS(client, agency, callData) {
         .then((r) => console.log(`\ud83d\udd27 SMS self-heal ${client.vapi_phone_number}: profile=${r.profileAssigned} campaign=${r.campaignAssigned}`))
         .catch((e) => console.warn(`SMS self-heal failed for ${client.vapi_phone_number}:`, e.message));
     } catch (e) { console.warn('SMS self-heal could not start:', e.message); }
-    return _logSMS({ phone: client.owner_phone, message: smsMessage, from: null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_call_notification', metadata: { clientName: client.business_name, customerName, urgency, fallback: 'platform' } });
+    return _logSMS({ phone: client.owner_phone, message: smsMessage, from: agency?.demo_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_call_notification', metadata: { clientName: client.business_name, customerName, urgency, fallback: agency?.demo_phone_number ? 'demo' : 'platform' } });
   }
   return sent;
 }
@@ -272,20 +284,29 @@ async function sendCallNotificationSMS(client, agency, callData) {
 async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency) {
   const brandName = agency?.name || 'VoiceAI Connect';
   const message = `🎉 Welcome to ${brandName}!\nYour AI receptionist for ${businessName} is ready!\n📞 Your AI Phone: ${formatPhoneDisplay(aiPhoneNumber)}`;
-  return _logSMS({ phone, message, from: aiPhoneNumber || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_welcome', metadata: { businessName } });
+  // Send FROM the agency's demo number, not the client's brand-new AI number.
+  // The demo number was SMS-provisioned (messaging profile + approved 10DLC
+  // campaign) when the agency onboarded, so it is already carrier-propagated and
+  // delivers instantly. The client's just-provisioned number is not yet
+  // recognized by carriers for A2P, so texts from it are accepted by Telnyx but
+  // silently dropped. The client's own AI number still appears in the body above.
+  // Falls back to the platform number (null) when the agency has no demo number.
+  return _logSMS({ phone, message, from: agency?.demo_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_welcome', metadata: { businessName } });
 }
 
 async function sendClientTrialExpiredSMS(client, agency) {
   const brandName = agency?.name || 'AI Receptionist';
   let upgradeUrl = agency?.marketing_domain && agency?.domain_verified ? `${agency.marketing_domain}/client/upgrade` : agency?.slug ? `${agency.slug}.myvoiceaiconnect.com/client/upgrade` : `myvoiceaiconnect.com/client/upgrade`;
   const message = `⚠️ ${brandName} Trial Ended\n\nHi ${client.owner_name || client.business_name}, your 7-day trial has ended.\n\nYour AI receptionist is no longer answering calls.\n\nReactivate now: ${upgradeUrl}`;
-  return _logSMS({ phone: client.owner_phone, message, from: client.vapi_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_trial_expired', metadata: { clientName: client.business_name } });
+  // From the agency's warm demo number (see sendWelcomeSMS), platform fallback.
+  return _logSMS({ phone: client.owner_phone, message, from: agency?.demo_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_trial_expired', metadata: { clientName: client.business_name } });
 }
 
 async function sendClientPaymentFailedSMS(client, agency) {
   const brandName = agency?.name || 'AI Receptionist';
   const message = `🚨 ${brandName} Payment Failed\n\nHi ${client.owner_name || client.business_name}, your payment failed.\n\nUpdate your payment method to keep your AI receptionist active.`;
-  return _logSMS({ phone: client.owner_phone, message, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_payment_failed', metadata: { clientName: client.business_name } });
+  // From the agency's warm demo number (see sendWelcomeSMS), platform fallback.
+  return _logSMS({ phone: client.owner_phone, message, from: agency?.demo_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_payment_failed', metadata: { clientName: client.business_name } });
 }
 
 async function sendClientSubscriptionActivatedSMS(client, agency, plan) {
@@ -307,17 +328,23 @@ async function sendClientSubscriptionActivatedSMS(client, agency, plan) {
   } else {
     message = `${brandName} Subscription Active!\n\nHi ${who}, your ${planName} plan is now active!${phoneLine}`;
   }
-  // Send from the client's own AI number (white-label + recognizable to the
-  // owner), not the platform number. Falls back to the platform number when the
-  // client has no provisioned number yet.
-  return _logSMS({ phone: client.owner_phone, message, from: client.vapi_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_subscription_activated', metadata: { clientName: client.business_name, plan, onTrial: !!onTrial } });
+  // Send FROM the agency's demo number: it is already SMS-provisioned and
+  // carrier-propagated (warm), so it delivers immediately, unlike the client's
+  // just-bought AI number, which carriers do not yet recognize for A2P and
+  // silently drop. It is also on-brand and familiar (the owner likely called it
+  // as the demo). The client's own number is shown in the body above. Falls back
+  // to the platform number (null) when the agency has no demo number.
+  return _logSMS({ phone: client.owner_phone, message, from: agency?.demo_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_subscription_activated', metadata: { clientName: client.business_name, plan, onTrial: !!onTrial } });
 }
 
 async function sendSpamBlockedSMS(client, agency, callerPhone, spamReason) {
   if (!client.owner_phone) return false;
   const callerDisplay = formatPhoneDisplay(callerPhone) || callerPhone || 'Unknown';
   const message = `🚫 Spam Blocked, ${client.business_name}\n\nYour AI receptionist detected and blocked a spam call.\n\nCaller: ${callerDisplay}\nType: ${spamReason || 'Robocall / telemarketer'}\n\nNo action needed, this call was not counted against your limit.`;
-  return _logSMS({ phone: client.owner_phone, message, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_spam_blocked', metadata: { clientName: client.business_name, callerPhone } });
+  // Post-call owner alert: send from the business's own AI number like the call
+  // notification, then the agency demo number, and only the platform number as a
+  // last resort, so the end client never sees the 505 platform number.
+  return _logSMS({ phone: client.owner_phone, message, from: client.vapi_phone_number || agency?.demo_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_spam_blocked', metadata: { clientName: client.business_name, callerPhone } });
 }
 
 // ============================================================================
