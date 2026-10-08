@@ -1,6 +1,6 @@
 // ============================================================================
-// CLIENT SERVICES ROUTES — CRUD for per-client service definitions
-// VoiceAI Connect — Phase 3A: Staff Members + Services
+// CLIENT SERVICES ROUTES, CRUD for per-client service definitions
+// VoiceAI Connect, Phase 3A: Staff Members + Services
 //
 // Mounted at: app.use('/api/client', clientServicesRoutes)
 // Endpoints:
@@ -10,7 +10,7 @@
 //   DELETE /api/client/:clientId/services/:serviceId
 //   PUT    /api/client/:clientId/services/reorder
 //
-// UPDATED: 2026-06-16 — Per-tab Page Access enforcement. requirePermissionIfAuthed('my_business')
+// UPDATED: 2026-06-16, Per-tab Page Access enforcement. requirePermissionIfAuthed('my_business')
 //          on every route (Services live under the My Business tab).
 // ============================================================================
 const express = require('express');
@@ -19,7 +19,7 @@ const { supabase } = require('../lib/supabase');
 const { requirePermissionIfAuthed } = require('./auth');
 
 // ============================================================================
-// GET /api/client/:clientId/services — List all services for a client
+// GET /api/client/:clientId/services, List all services for a client
 // ============================================================================
 router.get('/:clientId/services', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
@@ -54,12 +54,12 @@ router.get('/:clientId/services', requirePermissionIfAuthed('my_business'), asyn
 });
 
 // ============================================================================
-// POST /api/client/:clientId/services — Create a new service
+// POST /api/client/:clientId/services, Create a new service
 // ============================================================================
 router.post('/:clientId/services', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { clientId } = req.params;
-    const { name, duration_minutes, buffer_minutes, booking_mode, assigned_staff } = req.body;
+    const { name, price, description, duration_minutes, buffer_minutes, booking_mode, assigned_staff } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Service name is required' });
@@ -79,9 +79,17 @@ router.post('/:clientId/services', requirePermissionIfAuthed('my_business'), asy
 
     const nextOrder = existing && existing.length > 0 ? (existing[0].sort_order || 0) + 1 : 0;
 
+    // Price is free text (e.g. "$45", "$50-100", "Varies", "Free consult") so it
+    // handles ranges and non-numeric values; empty stays null. Description is the
+    // AI-facing blurb (already read by buildServicesBlock).
+    const priceClean = (price === undefined || price === null || String(price).trim() === '') ? null : String(price).trim().slice(0, 100);
+    const descClean = (description === undefined || description === null || String(description).trim() === '') ? null : String(description).trim().slice(0, 500);
+
     const serviceData = {
       client_id: clientId,
       name: name.trim(),
+      price: priceClean,
+      description: descClean,
       duration_minutes: duration_minutes || 30,
       buffer_minutes: buffer_minutes || 0,
       booking_mode: booking_mode || 'auto_book',
@@ -110,7 +118,7 @@ router.post('/:clientId/services', requirePermissionIfAuthed('my_business'), asy
 });
 
 // ============================================================================
-// PUT /api/client/:clientId/services/reorder — Reorder services
+// PUT /api/client/:clientId/services/reorder, Reorder services
 // Must be defined BEFORE the /:serviceId route to avoid matching "reorder" as a UUID
 // ============================================================================
 router.put('/:clientId/services/reorder', requirePermissionIfAuthed('my_business'), async (req, res) => {
@@ -139,17 +147,23 @@ router.put('/:clientId/services/reorder', requirePermissionIfAuthed('my_business
 });
 
 // ============================================================================
-// PUT /api/client/:clientId/services/:serviceId — Update a service
+// PUT /api/client/:clientId/services/:serviceId, Update a service
 // ============================================================================
 router.put('/:clientId/services/:serviceId', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { clientId, serviceId } = req.params;
-    const { name, duration_minutes, buffer_minutes, booking_mode, assigned_staff, is_active } = req.body;
+    const { name, price, description, duration_minutes, buffer_minutes, booking_mode, assigned_staff, is_active } = req.body;
 
     const updates = {};
     if (name !== undefined) {
       if (!name.trim()) return res.status(400).json({ error: 'Name cannot be empty' });
       updates.name = name.trim();
+    }
+    if (price !== undefined) {
+      updates.price = (price === null || String(price).trim() === '') ? null : String(price).trim().slice(0, 100);
+    }
+    if (description !== undefined) {
+      updates.description = (description === null || String(description).trim() === '') ? null : String(description).trim().slice(0, 500);
     }
     if (duration_minutes !== undefined) {
       const dur = parseInt(duration_minutes);
@@ -201,7 +215,7 @@ router.put('/:clientId/services/:serviceId', requirePermissionIfAuthed('my_busin
 });
 
 // ============================================================================
-// DELETE /api/client/:clientId/services/:serviceId — Delete a service
+// DELETE /api/client/:clientId/services/:serviceId, Delete a service
 // ============================================================================
 router.delete('/:clientId/services/:serviceId', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {

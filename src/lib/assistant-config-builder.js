@@ -1,24 +1,24 @@
 // ============================================================================
-// ASSISTANT CONFIG BUILDER — Dynamic per-call assistant configuration
+// ASSISTANT CONFIG BUILDER, Dynamic per-call assistant configuration
 //
-// UPDATED: 2026-05-18 — Phase 1: ai_tone, booking_mode, service_areas,
+// UPDATED: 2026-05-18, Phase 1: ai_tone, booking_mode, service_areas,
 //          priority_rules. New prompt blocks injected per-client.
-// UPDATED: 2026-05-19 — Phase 3B: Services & staff prompt injection.
+// UPDATED: 2026-05-19, Phase 3B: Services & staff prompt injection.
 //          buildServicesBlock() queries client_services table.
 //          buildStaffBlock() queries staff_members table.
 //          Service-level booking_mode overrides client-level.
-// UPDATED: 2026-05-20 — CRITICAL FIX: buildSystemPrompt now uses
+// UPDATED: 2026-05-20, CRITICAL FIX: buildSystemPrompt now uses
 //          client.system_prompt (custom edits) instead of always regenerating
 //          from INDUSTRY_CONFIGS. Custom prompt edits are now respected at
 //          call time. Includes-checks prevent double-appending blocks that
 //          may already exist in the cached prompt.
-// UPDATED: 2026-06-16 — CRITICAL FIX: the dynamic builder now respects the
+// UPDATED: 2026-06-16, CRITICAL FIX: the dynamic builder now respects the
 //          client's saved greeting (client.greeting_message) and voice
 //          (client.voice_id). Previously buildFirstMessage regenerated the
 //          greeting from the industry default and the voice was the industry
 //          default / agency template only, so the dashboard's greeting and
 //          voice edits never reached live calls.
-// UPDATED: 2026-06-17 — CALENDAR FIX: live calls can now actually book.
+// UPDATED: 2026-06-17, CALENDAR FIX: live calls can now actually book.
 //          Previously check_availability/book_appointment were attached only to
 //          the static assistant (via updateAssistantCalendar), which live calls
 //          never use, so the AI could talk about booking but had no tool to do
@@ -30,7 +30,7 @@
 //          never promises a booking it can't make. Also fixed: the KB query
 //          tool was gated on booking_mode !== 'disabled', which stripped the
 //          knowledge base whenever booking was off. KB now always attaches.
-// UPDATED: 2026-06-30 — WHISPER TRANSFER: clients with voice_routing ==
+// UPDATED: 2026-06-30, WHISPER TRANSFER: clients with voice_routing ==
 //          'telnyx_cc' no longer get the native VAPI transferCall tool (which
 //          uses SIP REFER and drops on Telnyx). Instead they get a
 //          request_human_transfer FUNCTION tool that calls our backend, which
@@ -38,7 +38,7 @@
 //          (dial the office, brief them privately, then bridge the caller in).
 //          vapi_direct clients are completely unchanged: same native transfer,
 //          same fallback. The switch is the single client.voice_routing flag.
-// UPDATED: 2026-07-08 — UNIFIED HANDOFF: retired the dead call_mode/Fallback
+// UPDATED: 2026-07-08, UNIFIED HANDOFF: retired the dead call_mode/Fallback
 //          path (it PATCHed the static assistant, which live calls never use).
 //          Transfer-vs-take-a-message is now derived here, from the same
 //          forwarding_mode the client picks on the dashboard forwarding card:
@@ -53,7 +53,7 @@
 //              downgrade to take-a-message so we never dial a loop.
 //          Mirrors the canAutoBook pattern: one decision computed here, passed
 //          into buildSystemPrompt / buildTools / buildHooks.
-// UPDATED: 2026-08-06 — GREETING PRECEDENCE: the client's custom greeting is
+// UPDATED: 2026-08-06, GREETING PRECEDENCE: the client's custom greeting is
 //          now the spoken opener for every caller when set, including
 //          recognized returning callers. Caller recognition still applies in
 //          the system prompt (buildCallerContextBlock), so the AI still knows a
@@ -61,7 +61,7 @@
 //          now speaks only when NO custom greeting is set. Previously the
 //          welcome-back line overrode the custom greeting for known callers, so
 //          a client who set a greeting never heard it on repeat calls.
-// UPDATED: 2026-10-07 — VOICE PIPELINE OPTIONS: the dynamic builder now honors
+// UPDATED: 2026-10-07, VOICE PIPELINE OPTIONS: the dynamic builder now honors
 //          per-client AI Lab choices for the whole pipeline, not just voice:
 //            - LLM model: default is now full gpt-4.1 (env OPENAI_MODEL); the
 //              per-client model (client.llm_model) and temperature
@@ -101,7 +101,7 @@ const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 // the fallback when a client has made no choice. Every value is env-overridable
 // so the whole fleet can be moved without touching code.
 //
-// NOTE — fleet-wide change: DEFAULT_LLM_MODEL is now the full gpt-4.1 (was
+// NOTE, fleet-wide change: DEFAULT_LLM_MODEL is now the full gpt-4.1 (was
 // gpt-4o-mini). Any client with no agency-template model and no per-client model
 // now runs on 4.1. Set OPENAI_MODEL to roll the fleet back/forward.
 // ============================================================================
@@ -130,7 +130,7 @@ const DEFAULT_TOOL_CONFIG = {
 const LANGUAGE_DETECTION_BLOCK = `
 
 # Language
-If the caller speaks Spanish, immediately switch to Spanish for the remainder of the call. Respond naturally in whatever language the caller uses. All information collection — name, phone number, address, reason for calling — should continue in the caller's language. Do not ask the caller what language they prefer. Just match them automatically. If the caller switches languages mid-conversation, follow them.`;
+If the caller speaks Spanish, immediately switch to Spanish for the remainder of the call. Respond naturally in whatever language the caller uses. All information collection, name, phone number, address, reason for calling, should continue in the caller's language. Do not ask the caller what language they prefer. Just match them automatically. If the caller switches languages mid-conversation, follow them.`;
 
 // ============================================================================
 // WHISPER TRANSFER BLOCK (telnyx_cc clients only)
@@ -165,16 +165,16 @@ You can book appointments directly to the business calendar using your tools.
 
 CRITICAL DATE RULES:
 - You do NOT know today's date. Do NOT guess or say any date to the caller until AFTER you receive the tool response.
-- When a caller asks to book, say "Let me check that for you" — do NOT repeat back any date.
+- When a caller asks to book, say "Let me check that for you", do NOT repeat back any date.
 - The check_availability tool response will tell you the EXACT correct date. ONLY use that date when speaking to the caller.
 - NEVER say a date like "October", "November", or any date from your own memory. ONLY say the date that appears in the tool response.
 
 Booking flow:
-1. Caller wants to book — ask what service they need (if not already stated)
+1. Caller wants to book, ask what service they need (if not already stated)
 2. Ask if they have a preferred provider/staff member (if staff are listed above)
 3. Ask for their preferred date
 4. Call check_availability with the date and service type
-5. Read the tool response — it contains the CORRECT date and available times
+5. Read the tool response, it contains the CORRECT date and available times
 6. Tell the caller the date and times FROM THE TOOL RESPONSE ONLY
 7. Collect: name, phone number
 8. Use book_appointment with all details including staff_name if they chose one
@@ -250,7 +250,7 @@ const SAFETY_BLOCK = `
 - Only discuss this business and the caller's needs. If they go off topic, warmly redirect to how you can help.`;
 
 // ============================================================================
-// TONE BLOCK — Overrides default tone based on client ai_tone setting
+// TONE BLOCK, Overrides default tone based on client ai_tone setting
 // ============================================================================
 function buildToneBlock(aiTone) {
   if (!aiTone || aiTone === 'professional') return '';
@@ -259,12 +259,12 @@ function buildToneBlock(aiTone) {
     friendly: `
 
 # Tone Override: Friendly
-Adjust your communication style to be warmer and more personable than the default. Use more casual language, contractions freely, and a conversational cadence. React with genuine enthusiasm: "Oh awesome!", "That's great!", "No worries at all." Be the kind of person callers enjoy talking to. Still professional — just approachable and warm.`,
+Adjust your communication style to be warmer and more personable than the default. Use more casual language, contractions freely, and a conversational cadence. React with genuine enthusiasm: "Oh awesome!", "That's great!", "No worries at all." Be the kind of person callers enjoy talking to. Still professional, just approachable and warm.`,
 
     casual: `
 
 # Tone Override: Casual
-Adjust your communication style to be relaxed and informal. Talk like a real person having a normal conversation. Use slang where natural, keep sentences short, react naturally: "Yeah for sure", "Oh man, totally", "You got it." Drop formalities — no "I appreciate your patience" or "Thank you for calling." Just be real. Still competent — just not corporate.`,
+Adjust your communication style to be relaxed and informal. Talk like a real person having a normal conversation. Use slang where natural, keep sentences short, react naturally: "Yeah for sure", "Oh man, totally", "You got it." Drop formalities, no "I appreciate your patience" or "Thank you for calling." Just be real. Still competent, just not corporate.`,
 
     clinical: `
 
@@ -276,7 +276,7 @@ Adjust your communication style to be precise, measured, and formal. Use complet
 }
 
 // ============================================================================
-// BOOKING MODE BLOCK — Overrides calendar booking behavior
+// BOOKING MODE BLOCK, Overrides calendar booking behavior
 // ============================================================================
 function buildBookingModeBlock(bookingMode) {
   if (!bookingMode || bookingMode === 'auto_book') return '';
@@ -307,7 +307,7 @@ IMPORTANT OVERRIDE: This business does not offer appointment booking through the
 }
 
 // ============================================================================
-// SERVICE AREAS BLOCK — Injects geographic coverage into prompt
+// SERVICE AREAS BLOCK, Injects geographic coverage into prompt
 // ============================================================================
 function buildServiceAreasBlock(serviceAreas) {
   if (!serviceAreas || !Array.isArray(serviceAreas) || serviceAreas.length === 0) return '';
@@ -321,7 +321,7 @@ If a caller asks about service in a specific area, check if it falls within or n
 }
 
 // ============================================================================
-// PRIORITY RULES BLOCK — Injects urgency/transfer rules
+// PRIORITY RULES BLOCK, Injects urgency/transfer rules
 // ============================================================================
 function buildPriorityRulesBlock(priorityRules) {
   if (!priorityRules || typeof priorityRules !== 'object') return '';
@@ -340,7 +340,7 @@ function buildPriorityRulesBlock(priorityRules) {
   }
 
   if (priorityRules.vipCallers && Array.isArray(priorityRules.vipCallers) && priorityRules.vipCallers.length > 0) {
-    lines.push(`The following are VIP callers — greet them by name and transfer immediately: ${priorityRules.vipCallers.join(', ')}.`);
+    lines.push(`The following are VIP callers, greet them by name and transfer immediately: ${priorityRules.vipCallers.join(', ')}.`);
     hasContent = true;
   }
 
@@ -358,17 +358,17 @@ function buildPriorityRulesBlock(priorityRules) {
 function buildHIPAABlock() {
   return `
 
-# HIPAA Compliance Mode — ACTIVE
+# HIPAA Compliance Mode, ACTIVE
 This is a healthcare practice operating under HIPAA-compliant call handling. Follow these rules strictly:
 
-DATA COLLECTION — ONLY collect:
+DATA COLLECTION, ONLY collect:
 - Caller's full name
 - Phone number
 - Whether they are a new or existing patient
 - General reason for visit (e.g., "checkup", "cleaning", "follow-up", "new patient appointment")
 - Preferred date and time for scheduling
 
-DATA COLLECTION — NEVER ask about or collect:
+DATA COLLECTION, NEVER ask about or collect:
 - Medical history, diagnoses, conditions, or symptoms
 - Medications or treatments
 - Date of birth or Social Security number
@@ -378,7 +378,7 @@ DATA COLLECTION — NEVER ask about or collect:
 CONVERSATION RULES:
 - If a caller shares medical details voluntarily, redirect immediately: "Our provider will discuss that with you at your appointment. For now, let me help you get scheduled."
 - Do NOT repeat back, confirm, or acknowledge any health information the caller shares.
-- When asking about the visit, say: "What type of appointment are you looking for?" — NOT "What brings you in?" or "What's going on?"
+- When asking about the visit, say: "What type of appointment are you looking for?", NOT "What brings you in?" or "What's going on?"
 - Do NOT reference any previous calls or history with this caller.
 - For appointment requests: collect name, phone, preferred date/time, and general visit type only. Let them know the office will call to confirm.
 
@@ -390,7 +390,7 @@ This call is NOT being recorded.`;
 }
 
 // ============================================================================
-// SERVICES BLOCK — Queries client_services table
+// SERVICES BLOCK, Queries client_services table
 // ============================================================================
 async function buildServicesBlock(clientId) {
   if (!supabase || !clientId) return '';
@@ -398,7 +398,7 @@ async function buildServicesBlock(clientId) {
   try {
     const { data: services, error } = await supabase
       .from('client_services')
-      .select('name, description, duration_minutes, buffer_minutes, booking_mode')
+      .select('name, price, description, duration_minutes, buffer_minutes, booking_mode')
       .eq('client_id', clientId)
       .eq('is_active', true)
       .order('sort_order', { ascending: true });
@@ -411,7 +411,8 @@ async function buildServicesBlock(clientId) {
 
     services.forEach((s, i) => {
       let line = `${i + 1}. ${s.name}`;
-      if (s.duration_minutes) line += ` — ${s.duration_minutes} min`;
+      if (s.duration_minutes) line += `, ${s.duration_minutes} min`;
+      if (s.price) line += `, ${s.price}`;
       lines.push(line);
       if (s.description) lines.push(`   ${s.description}`);
 
@@ -433,7 +434,7 @@ async function buildServicesBlock(clientId) {
 }
 
 // ============================================================================
-// STAFF BLOCK — Queries staff_members table
+// STAFF BLOCK, Queries staff_members table
 // ============================================================================
 async function buildStaffBlock(clientId) {
   if (!supabase || !clientId) return '';
@@ -460,7 +461,7 @@ async function buildStaffBlock(clientId) {
           .filter(([_, val]) => val && val !== 'off' && val !== false)
           .map(([day]) => dayAbbrev[day] || day)
           .join(', ');
-        if (activeDays) line += ` — available ${activeDays}`;
+        if (activeDays) line += `, available ${activeDays}`;
       }
 
       lines.push(line);
@@ -585,7 +586,7 @@ function buildCallerContextBlock(contact) {
     lines.push(`Last call: ${lastCallDate}.`);
   }
 
-  // Rolling AI summary log — each prior call is appended as "[date] summary",
+  // Rolling AI summary log, each prior call is appended as "[date] summary",
   // joined by blank lines. Surface the most recent few (not just the last one)
   // so the AI actually has this caller's history to work with.
   if (contact.ai_summary) {
@@ -598,7 +599,7 @@ function buildCallerContextBlock(contact) {
     }
   }
 
-  // Staff-entered notes on the contact record — always surface these in full.
+  // Staff-entered notes on the contact record, always surface these in full.
   if (contact.notes && contact.notes.trim()) {
     lines.push('');
     lines.push(`Notes saved about this caller: ${contact.notes.trim()}`);
@@ -607,9 +608,9 @@ function buildCallerContextBlock(contact) {
   lines.push('');
   if (name) {
     lines.push(`Greet them by name: "Hi ${name}, welcome back!"`);
-    lines.push('Do NOT ask for their name — you already have it.');
+    lines.push('Do NOT ask for their name, you already have it.');
   }
-  lines.push('Do NOT ask for their phone number — you already have it.');
+  lines.push('Do NOT ask for their phone number, you already have it.');
   lines.push('Reference their previous interaction naturally if relevant, but don\'t force it.');
 
   return lines.join('\n');
@@ -648,7 +649,7 @@ A couple of things are simply different at this hour:
 }
 
 // ============================================================================
-// SMS-TO-CALLER BLOCK — tells the AI what it may text and when.
+// SMS-TO-CALLER BLOCK, tells the AI what it may text and when.
 // Saved texts (booking link, address, etc.) are sent verbatim; instructions
 // govern timing. Only present when the Text Callers tool is enabled.
 // ============================================================================
@@ -777,9 +778,9 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
 //
 // PRIORITY ORDER for base prompt:
 //   1. Enterprise agency custom template (agency_prompt_templates table)
-//   2. Client's custom/cached prompt (client.system_prompt) — respects
+//   2. Client's custom/cached prompt (client.system_prompt), respects
 //      agency owner edits via the prompt editor UI
-//   3. Industry default from INDUSTRY_CONFIGS — freshly generated fallback
+//   3. Industry default from INDUSTRY_CONFIGS, freshly generated fallback
 //
 // After selecting the base, dynamic per-call blocks are appended:
 //   language, tone, booking mode, HIPAA, services, staff, service areas,
@@ -834,7 +835,7 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
   }
 
   if (customTemplate) {
-    // Enterprise agency template — highest priority
+    // Enterprise agency template, highest priority
     systemPrompt = customTemplate.system_prompt.replace(/\{businessName\}/g, businessName);
 
     if (customTemplate.knowledge_base_data) {
@@ -858,7 +859,7 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     systemPrompt = client.system_prompt;
 
   } else {
-    // ── Priority 3: Industry default — freshly generated fallback ─────
+    // ── Priority 3: Industry default, freshly generated fallback ─────
     // Used for brand-new clients before their first prompt cache,
     // or if system_prompt was somehow cleared.
     systemPrompt = config.systemPrompt(businessName);
@@ -868,7 +869,7 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
   // These are computed at call time and NEVER stored in client.system_prompt.
   // They layer operational behavior on top of whatever base prompt was selected.
 
-  // Language detection — check before appending (may already be in cached prompt)
+  // Language detection, check before appending (may already be in cached prompt)
   if (!systemPrompt.includes('# Language')) {
     systemPrompt += LANGUAGE_DETECTION_BLOCK;
   }
@@ -905,10 +906,10 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     systemPrompt += buildBookingModeBlock(effectiveMode);
   }
 
-  // HIPAA mode — injected before services/staff so it takes precedence
+  // HIPAA mode, injected before services/staff so it takes precedence
   if (hipaaMode) {
     systemPrompt += buildHIPAABlock();
-    console.log('🏥 HIPAA mode active — recordings disabled, collect-request forced, caller recognition off');
+    console.log('🏥 HIPAA mode active, recordings disabled, collect-request forced, caller recognition off');
   }
 
   // Phase 3B: Structured services from client_services table
@@ -923,23 +924,23 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
   // Phase 1: Priority rules
   systemPrompt += buildPriorityRulesBlock(client.priority_rules);
 
-  // Spam detection — check before appending (may already be in cached prompt)
+  // Spam detection, check before appending (may already be in cached prompt)
   if (toolConfig.spamDetection && !systemPrompt.includes('# Spam Detection')) {
     systemPrompt += SPAM_DETECTION_BLOCK;
   }
 
-  // Transfer keywords — only when we will actually transfer. In take-a-message
+  // Transfer keywords, only when we will actually transfer. In take-a-message
   // mode we must NOT tell the model to transfer on these keywords.
   if (toolConfig.transferCall && handoff === 'transfer' && !systemPrompt.includes('# Transfer Keywords')) {
     systemPrompt += TRANSFER_KEYWORDS_BLOCK;
   }
 
-  // After-hours mode (always dynamic — never in cached prompt)
+  // After-hours mode (always dynamic, never in cached prompt)
   if (isAfterHours && toolConfig.businessHoursRouting) {
     systemPrompt += buildAfterHoursBlock(client, toolConfig);
   }
 
-  // Transfer vs take-a-message behavior (always dynamic — never in cached prompt).
+  // Transfer vs take-a-message behavior (always dynamic, never in cached prompt).
   //  - handoff 'transfer': telnyx_cc clients use the whisper-transfer block
   //    (backend owns the bridge); everyone else uses the "you'll still be on the
   //    line" fallback block.
@@ -957,14 +958,14 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     systemPrompt += (client.forwarding_mode === 'missed') ? MISSED_CALL_MESSAGE_BLOCK : TAKE_MESSAGE_BLOCK;
   }
 
-  // Caller recognition — disabled in HIPAA mode (always dynamic)
+  // Caller recognition, disabled in HIPAA mode (always dynamic)
   if (toolConfig.callerRecognition && callerContext && !hipaaMode) {
     systemPrompt += buildCallerContextBlock(callerContext);
   }
 
   // Anti-fabrication guard (applies to every prompt path). Without this the
-  // model invents plausible details it doesn't have — the classic "123 Main St"
-  // address — which is worse than admitting it doesn't know.
+  // model invents plausible details it doesn't have, the classic "123 Main St"
+  // address, which is worse than admitting it doesn't know.
   systemPrompt += `\n\n# Never make things up
 Only state facts you actually have from this business's information. Never invent or guess an address, phone number, price, hours, staff name, or any other detail. If a caller asks for something you do not have, say so plainly and offer to transfer them or take a message, for example "I don't have that in front of me, but I can have someone follow up." Never read out a placeholder or example value as if it were real.
 Only offer, mention, or ask about services this business actually provides. If you are not certain what they offer, look it up in your knowledge base or ask the caller what they need, instead of guessing or reading a generic list of services that may not apply here. If a related service genuinely fits what the caller asked for, you may suggest it, but never a canned or random add-on.`;
@@ -979,7 +980,7 @@ Only offer, mention, or ask about services this business actually provides. If y
 // (check_availability, book_appointment) are attached inline, pointed at the
 // per-client /api/calendar endpoints. These were previously only ever attached
 // to the static assistant (via updateAssistantCalendar), which live calls do
-// not use — so the AI could never actually book on a call. Attaching them here
+// not use, so the AI could never actually book on a call. Attaching them here
 // puts them on the transient assistant that actually runs the call.
 //
 // TRANSFER (updated 2026-06-30, gated 2026-07-08):
@@ -1044,7 +1045,7 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
     }
   }
 
-  // Calendar booking tools — only when auto_book is on AND the calendar is
+  // Calendar booking tools, only when auto_book is on AND the calendar is
   // connected. Never during after-hours (the office is closed; after-hours
   // mode already tells the AI not to book). The server URLs route to the
   // per-client calendar endpoints, which do the real date resolution and
@@ -1223,7 +1224,7 @@ function enforceAgencyPlanFeatures(toolConfig, client, agency) {
 }
 
 // ============================================================================
-// RESOLVE HANDOFF — transfer vs take-a-message, and the safe destination
+// RESOLVE HANDOFF, transfer vs take-a-message, and the safe destination
 //
 // One decision, derived from the forwarding mode the client set on the
 // dashboard forwarding card plus an optional explicit choice. Returns
@@ -1261,10 +1262,10 @@ function resolveHandoff(client, toolConfig) {
       : null;
 
     if (!normalized || !isValidE164(normalized) || (aiNumber && normalized === aiNumber)) {
-      // No safe destination — fall back to taking a message so we never dial a
+      // No safe destination, fall back to taking a message so we never dial a
       // number that loops back into the AI.
       handoff = 'message';
-      console.log('📮 Transfer requested but no safe destination — taking a message instead');
+      console.log('📮 Transfer requested but no safe destination, taking a message instead');
     } else {
       transferTo = normalized;
     }
@@ -1308,7 +1309,7 @@ function buildVoice(voiceId, voiceSpeed, ttsModel) {
   return { provider: '11labs', model, voiceId, ...(speedOk ? { speed: Number(voiceSpeed) } : {}) };
 }
 
-// startSpeakingPlan — how long VAPI waits before the assistant responds.
+// startSpeakingPlan, how long VAPI waits before the assistant responds.
 // Flux owns end-of-turn (waitSeconds only); nova uses VAPI smart endpointing +
 // punctuation plan (multi-safe).
 function buildStartSpeakingPlan(transcriberModel) {
@@ -1343,7 +1344,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   const isAfterHours = toolConfig.businessHoursRouting && !isOpen;
 
   if (isAfterHours) {
-    console.log('🌙 After-hours mode active — transfer disabled, message-taking mode');
+    console.log('🌙 After-hours mode active, transfer disabled, message-taking mode');
   }
 
   // ── Calendar booking gating (added 2026-06-17) ──────────────────────
@@ -1356,9 +1357,9 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   const canAutoBook = bookingMode === 'auto_book' && calendarConnected;
 
   if (bookingMode === 'auto_book' && !calendarConnected && !hipaaMode) {
-    console.log('📅 Auto-book requested but Google Calendar NOT connected — degrading to collect-request (no booking tools)');
+    console.log('📅 Auto-book requested but Google Calendar NOT connected, degrading to collect-request (no booking tools)');
   } else if (canAutoBook) {
-    console.log('📅 Auto-book active (calendar connected) — booking tools attached');
+    console.log('📅 Auto-book active (calendar connected), booking tools attached');
   }
 
   // ── Human-handoff gating (added 2026-07-08) ─────────────────────────
@@ -1367,7 +1368,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   // tools, and hooks builders (mirrors canAutoBook).
   const { handoff, transferTo, forwardingMode } = resolveHandoff(client, toolConfig);
   if (forwardingMode === 'missed') {
-    console.log('📮 Missed-call coverage — AI will take a message, not transfer');
+    console.log('📮 Missed-call coverage, AI will take a message, not transfer');
   } else if (handoff === 'transfer') {
     console.log(`📞 Live transfer enabled → ${client.voice_routing === 'telnyx_cc' ? 'whisper (backend-resolved)' : transferTo}`);
   } else {
