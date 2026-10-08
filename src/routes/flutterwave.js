@@ -56,7 +56,12 @@ async function initFlutterwaveCharge(req, res) {
     if (!client.email) return res.status(400).json({ error: 'This client has no email on file.' });
 
     const currency = agency.flutterwave_currency || 'NGN';
-    const plan = getPlan(agency, client.plan_type);
+    // Honor a plan chosen at checkout (e.g. the upgrade screen), else the
+    // client's current plan. Persisted below so the recurring charge and the
+    // dashboard reflect the plan they actually paid for.
+    const requestedPlan = req.body && req.body.plan;
+    const planType = (requestedPlan && getPlan(agency, requestedPlan)) ? requestedPlan : client.plan_type;
+    const plan = getPlan(agency, planType);
     const priceCents = plan && Number.isInteger(plan.price_cents) ? plan.price_cents : 0;
     if (!priceCents || priceCents <= 0) return res.status(400).json({ error: 'No price is set for this plan.' });
 
@@ -72,10 +77,10 @@ async function initFlutterwaveCharge(req, res) {
       redirectUrl: `${BACKEND_URL}/api/client/flutterwave/callback`,
       email: client.email,
       name: client.business_name || client.name || undefined,
-      meta: { client_id: client.id, agency_id: agency.id, type: 'first_charge', plan: client.plan_type },
+      meta: { client_id: client.id, agency_id: agency.id, type: 'first_charge', plan: planType },
     });
 
-    await supabase.from('clients').update({ flutterwave_last_reference: reference }).eq('id', client.id);
+    await supabase.from('clients').update({ flutterwave_last_reference: reference, plan_type: planType }).eq('id', client.id);
     return res.json({ success: true, authorization_url: init && init.link, reference });
   } catch (e) {
     console.error('\u274c initFlutterwaveCharge error:', e.message);

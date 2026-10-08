@@ -2060,6 +2060,47 @@ async function cancelClientSubscription(req, res) {
       return res.json({ success: true, canceled: true, immediate: false, paystack: true, cancels_at: client.paystack_next_charge_at || null });
     }
 
+    // ── Flutterwave client: same model as Paystack. I own the billing schedule
+    //    and there is no stripe_connected_subscription_id, so this MUST come
+    //    before the manual branch or a self-cancel would tear the client down
+    //    immediately. Self-cancel is at period end (flutterwave_status
+    //    'canceling'); the recurring job sweeps them to expired at
+    //    flutterwave_next_charge_at. Agency/admin may force immediate teardown.
+    //    resume=true reverses a pending period-end cancel. ──
+    if (client.billing_mode === 'flutterwave') {
+      if (resume === true) {
+        if (client.flutterwave_status !== 'canceling') {
+          if (client.flutterwave_status === 'active') {
+            return res.json({ success: true, resumed: true, flutterwave: true, alreadyActive: true });
+          }
+          return res.status(400).json({ error: 'Subscription ended', message: 'This subscription has ended. Please set up billing again to reactivate.' });
+        }
+        const { error: fwResumeErr } = await supabase
+          .from('clients')
+          .update({ flutterwave_status: 'active' })
+          .eq('id', client.id);
+        if (fwResumeErr) return res.status(500).json({ error: 'Failed to resume subscription' });
+        console.log(`✅ Flutterwave client ${client.id} resumed (period-end cancel reversed)`);
+        return res.json({ success: true, resumed: true, flutterwave: true });
+      }
+      if (wantImmediate) {
+        const result = await cancelClientAndRelease(client, isOwnClient ? 'client self-cancel (flutterwave, immediate)' : 'agency/admin cancel (flutterwave)');
+        if (!result || !result.ok) return res.status(500).json({ error: 'Failed to cancel client' });
+        await supabase.from('clients').update({ flutterwave_status: 'canceled', flutterwave_next_charge_at: null }).eq('id', client.id);
+        return res.json({ success: true, canceled: true, immediate: true, flutterwave: true });
+      }
+      const { error: fwCancelErr } = await supabase
+        .from('clients')
+        .update({ flutterwave_status: 'canceling' })
+        .eq('id', client.id);
+      if (fwCancelErr) {
+        console.error('❌ Flutterwave cancel DB write failed:', fwCancelErr.message);
+        return res.status(500).json({ error: 'Failed to cancel subscription' });
+      }
+      console.log(`✅ Flutterwave client ${client.id} set to cancel at period end (through ${client.flutterwave_next_charge_at || 'n/a'})`);
+      return res.json({ success: true, canceled: true, immediate: false, flutterwave: true, cancels_at: client.flutterwave_next_charge_at || null });
+    }
+
     // ── Manual client: no Stripe subscription. Cancel = tear down now. ──
     if (client.billing_mode === 'manual' || !client.stripe_connected_subscription_id) {
       const result = await cancelClientAndRelease(client, isOwnClient ? 'client self-cancel (manual)' : 'agency/admin cancel (manual)');

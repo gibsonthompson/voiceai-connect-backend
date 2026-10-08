@@ -143,7 +143,7 @@ router.get('/:id', async (req, res) => {
     // the full select, and if it errors, log the real reason and retry without the
     // billing columns so the dashboard still loads.
     const AGENCY_CORE = 'id, name, slug, primary_color, secondary_color, accent_color, logo_url, support_email, support_phone, website_theme, client_header_mode, price_starter, price_pro, price_growth, limit_starter, limit_pro, limit_growth, plan_starter_name, plan_pro_name, plan_growth_name, plan_features, plans, allow_client_branding, hide_client_billing, marketing_domain, domain_verified';
-    const AGENCY_FULL = `${AGENCY_CORE}, allow_client_plan_changes, paystack_currency, paystack_connected`;
+    const AGENCY_FULL = `${AGENCY_CORE}, allow_client_plan_changes, paystack_currency, paystack_connected, flutterwave_currency, flutterwave_connected, stripe_charges_enabled`;
     let { data: client, error } = await supabase
       .from('clients')
       .select(`*, agency:agencies!clients_agency_id_fkey ( ${AGENCY_FULL} )`)
@@ -161,12 +161,40 @@ router.get('/:id', async (req, res) => {
       console.error('client bootstrap failed:', error ? error.message : 'client not found');
       return res.status(404).json({ error: 'Client not found' });
     }
+    // Which payment rail this client pays on. Billing was Stripe-first, with
+    // Paystack and Flutterwave added later, so the client dashboard needs one
+    // resolved answer to know which checkout endpoint to call. An explicit
+    // billing_mode wins while that provider is still connected; otherwise fall
+    // back to whichever provider the agency actually has connected (so a
+    // Flutterwave/Paystack agency's clients stop being routed to Stripe and
+    // hitting the "Stripe not set up" wall). Stripe is the final default, and
+    // its own setup check still applies at checkout.
+    client.payment_provider = resolveClientPaymentProvider(client, client.agency);
     res.json({ client, agency: client.agency });
   } catch (error) {
     console.error('Error fetching client:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+// Resolve the payment provider for a client against its agency's connections.
+// Returns 'manual' | 'flutterwave' | 'paystack' | 'stripe'.
+function resolveClientPaymentProvider(client, agency) {
+  if (!client) return 'stripe';
+  if (client.billing_mode === 'manual') return 'manual';
+  const a = agency || {};
+  if (client.billing_mode === 'flutterwave' && a.flutterwave_connected) return 'flutterwave';
+  if (client.billing_mode === 'paystack' && a.paystack_connected) return 'paystack';
+  // A real Stripe client stays on Stripe (keeps dual-provider agencies from
+  // misrouting an existing Stripe client to a newly connected alt provider).
+  if (client.billing_mode === 'connect' && a.stripe_charges_enabled) return 'stripe';
+  // No usable explicit mode: follow whatever the agency can actually charge on.
+  // (A 'connect' client whose agency has no Stripe falls through here, which is
+  // what lets a Flutterwave/Paystack-only agency's clients pay at all.)
+  if (a.flutterwave_connected) return 'flutterwave';
+  if (a.paystack_connected) return 'paystack';
+  return 'stripe';
+}
 
 // ============================================================================
 // PUT /api/client/:id/settings - Update client settings
