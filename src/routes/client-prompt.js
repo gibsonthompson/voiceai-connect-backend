@@ -3,14 +3,14 @@
 // PUT handles: system_prompt, first_message, voice_id, model, temperature,
 //              call_mode (Supabase-only), transfer_phone (VAPI transferCall tool)
 //
-// UPDATED: 2026-09-17 — SECURITY: added a top-of-router ownership guard. Every
+// UPDATED: 2026-09-17, SECURITY: added a top-of-router ownership guard. Every
 //          route is scoped by :agencyId/:clientId but had no ownership check, so
 //          an authenticated agency could read/edit/reset another agency's
 //          client's AI config, including the transfer_phone (which redirects
 //          call transfers). requireAgencyAccess('clients') enforces valid token
 //          + caller owns :agencyId. The per-query `.eq('agency_id', agencyId)`
 //          scoping stays as defense in depth.
-// UPDATED: 2026-10-07 — VOICE PIPELINE OPTIONS (simplified): the PUT now also
+// UPDATED: 2026-10-07, VOICE PIPELINE OPTIONS (simplified): the PUT now also
 //          accepts and persists the per-client pipeline choices surfaced in the
 //          AI Lab, mirroring the per-industry template fields exactly:
 //            - llm_model         -> clients.llm_model         (+ VAPI model.model)
@@ -42,7 +42,7 @@ const ALLOWED_TTS_MODELS = ['eleven_flash_v2_5', 'eleven_multilingual_v2', 'elev
 const ALLOWED_TRANSCRIBER_MODELS = ['nova-3', 'nova-2', 'flux-general-multi', 'flux-general-en'];
 
 // ----------------------------------------------------------------------------
-// OWNERSHIP GUARD — covers GET/PUT /:agencyId/clients/:clientId/prompt and
+// OWNERSHIP GUARD, covers GET/PUT /:agencyId/clients/:clientId/prompt and
 // POST /:agencyId/clients/:clientId/prompt/reset (prefix match).
 // ----------------------------------------------------------------------------
 router.use('/:agencyId/clients/:clientId/prompt', requireAgencyAccess('clients'));
@@ -163,7 +163,7 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
       : ((client.tool_config && client.tool_config.backgroundDenoising) !== false);
 
     // ====================================================================
-    // VAPI PATCH (static assistant — used by the AI Lab test call + crash
+    // VAPI PATCH (static assistant, used by the AI Lab test call + crash
     // fallback). Live calls are built fresh by buildDynamicAssistantConfig,
     // but we keep the static assistant in sync so a test call is faithful.
     // ====================================================================
@@ -247,7 +247,7 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
         patchPayload.firstMessage = first_message.trim();
       }
 
-      // --- voice (voiceId / speed / tts model) — rebuilt via the shared helper ---
+      // --- voice (voiceId / speed / tts model), rebuilt via the shared helper ---
       if (needsVoicePatch) {
         patchPayload.voice = buildVoice(finalVoiceId, finalSpeed, finalTtsModel);
       }
@@ -278,11 +278,17 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     }
 
     // ====================================================================
-    // SUPABASE — persist everything the live-call builder reads. model +
+    // SUPABASE, persist everything the live-call builder reads. model +
     // temperature land here too (not VAPI-only) so live calls honor the choice.
     // ====================================================================
     const supabaseUpdate = {};
     if (hasPrompt) supabaseUpdate.system_prompt = system_prompt.trim();
+    // Greeting: persist to clients.greeting_message, the column
+    // buildDynamicAssistantConfig reads at call time. Previously the greeting
+    // was PATCHed onto the static VAPI assistant only, so an AI Lab greeting
+    // edit said "saved" but never reached live calls. Empty clears to null so
+    // the builder falls back to the default opener.
+    if (hasGreeting) supabaseUpdate.greeting_message = first_message.trim() || null;
     if (hasCallMode) supabaseUpdate.call_mode = call_mode;
     if (hasVoice) supabaseUpdate.voice_id = voice_id.trim();
     if (hasSpeed) supabaseUpdate.voice_speed = speed;

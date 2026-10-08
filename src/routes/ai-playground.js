@@ -2,14 +2,14 @@
 // AI PLAYGROUND - Test & Configure AI Receptionists
 // Endpoints: client listing, AI config details (full prompt from VAPI), SMS swap
 //
-// UPDATED: 2026-09-17 — SECURITY: added a top-of-router ownership guard. Every
+// UPDATED: 2026-09-17, SECURITY: added a top-of-router ownership guard. Every
 //          route is scoped by :agencyId but had no ownership check, so an
 //          authenticated agency could list another agency's clients (owner PII),
-//          read a client's full AI configuration, and — worst — swap a client's
+//          read a client's full AI configuration, and, worst, swap a client's
 //          notification phone (redirecting their call alerts). requireAgencyAccess
 //          enforces valid token + caller owns :agencyId. The per-route
 //          `.eq('agency_id', agencyId)` scoping stays as defense in depth.
-// UPDATED: 2026-10-07 — VOICE PIPELINE OPTIONS: ai-details now returns the
+// UPDATED: 2026-10-07, VOICE PIPELINE OPTIONS: ai-details now returns the
 //          per-client pipeline fields on the `assistant` object so the AI Lab can
 //          seed the new controls (voice engine, speech recognition, denoising).
 //          model/temperature now prefer the clients columns (what live calls
@@ -26,7 +26,7 @@ const { requireAgencyAccess } = require('./auth');
 const DEFAULT_LLM_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
 
 // ----------------------------------------------------------------------------
-// OWNERSHIP GUARD — covers /:agencyId/ai-playground and everything under it.
+// OWNERSHIP GUARD, covers /:agencyId/ai-playground and everything under it.
 // ----------------------------------------------------------------------------
 router.use('/:agencyId/ai-playground', requireAgencyAccess());
 
@@ -105,7 +105,7 @@ router.get('/:agencyId/ai-playground/clients/:clientId/ai-details', async (req, 
             model: client.llm_model || raw.model?.model || DEFAULT_LLM_MODEL,
             voice: client.voice_id || raw.voice?.voiceId || '',
             speed: client.voice_speed ?? raw.voice?.speed ?? 1,
-            firstMessage: raw.firstMessage || '',
+            firstMessage: client.greeting_message || raw.firstMessage || '',
             systemPrompt,
             systemPromptLength: systemPrompt.length,
             temperature: client.temperature ?? raw.model?.temperature ?? 0.7,

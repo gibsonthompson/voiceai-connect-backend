@@ -515,7 +515,10 @@ async function getAgencySettings(req, res) {
         primary_color: agency.primary_color,
         secondary_color: agency.secondary_color,
         accent_color: agency.accent_color,
-        
+        // PWA home-screen identity (installed-app name + square app icon).
+        app_name: agency.app_name || null,
+        app_icon_url: agency.app_icon_url || null,
+
         // Marketing website content
         company_tagline: agency.company_tagline,
         website_headline: agency.website_headline,
@@ -712,6 +715,8 @@ async function updateAgencySettings(req, res) {
     const allowedFields = [
       'name', 'phone', 'slug',
       'logo_url', 'favicon_url',
+      // PWA home-screen identity: custom installed-app name + square app icon.
+      'app_name', 'app_icon_url',
       'primary_color', 'secondary_color', 'accent_color',
       'marketing_domain', 'domain_verified',
       'price_starter', 'price_pro', 'price_growth',
