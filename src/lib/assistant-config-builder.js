@@ -232,7 +232,8 @@ const RESPONSE_GUIDELINES_BLOCK = `
 - Talk like a real person. Use contractions and natural acknowledgments ("sure," "got it," "no problem"). Never sound like a form or a script.
 - Say numbers, dates, and times as words: "two thirty this afternoon," "March fourth." Read a phone number one digit at a time. Spell an email slowly ("j-o-h-n at gmail dot com").
 - Acknowledge briefly and move forward. Don't repeat the caller's whole sentence back.
-- If a caller asks for a real person, has an urgent problem, or you can't help them, hand them off to the team using your handoff instructions below.`;
+- If a caller asks for a real person, has an urgent problem, or you can't help them, hand them off to the team using your handoff instructions below.
+- Never hang up or end the call yourself. The caller ends the call when they're ready. If they decline or say that's all, warmly confirm and ask if there's anything else you can help with, then wait.`;
 
 // ============================================================================
 // SAFETY / IDENTITY-LOCK BLOCK  (added 2026-10-07)
@@ -1135,13 +1136,8 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
     });
   }
 
-  tools.push({
-    type: 'endCall',
-    function: {
-      name: 'endCall',
-      description: 'End the call. Use this when the conversation is complete and the caller has confirmed they have no more questions.',
-    },
-  });
+  // Note: no endCall tool is attached. The assistant must never hang up; only
+  // the caller ends the call. VAPI's silence timeout closes abandoned lines.
 
   return tools;
 }

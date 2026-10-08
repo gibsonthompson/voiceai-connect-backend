@@ -1439,9 +1439,8 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       }
     }
 
-    tools.push({
-      type: 'endCall'
-    });
+    // No endCall tool: the assistant never hangs up; only the caller ends the
+    // call. VAPI's silence timeout closes abandoned lines.
 
     const hooks = [
       {
