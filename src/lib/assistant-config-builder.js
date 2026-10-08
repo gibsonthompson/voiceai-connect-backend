@@ -167,10 +167,9 @@ const APPOINTMENT_BOOKING_BLOCK = `
 You can book appointments directly to the business calendar using your tools.
 
 CRITICAL DATE RULES:
-- You do NOT know today's date. Do NOT guess or say any date to the caller until AFTER you receive the tool response.
-- When a caller asks to book, say "Let me check that for you", do NOT repeat back any date.
-- The check_availability tool response will tell you the EXACT correct date. ONLY use that date when speaking to the caller.
-- NEVER say a date like "October", "November", or any date from your own memory. ONLY say the date that appears in the tool response.
+- You know today's date and the upcoming days from the date context above, so you can answer day, date, and hours questions directly.
+- For an actual booking, do NOT promise or confirm a specific appointment time until AFTER the check_availability tool responds. Say "Let me check that for you" first.
+- When confirming a booked appointment, use only the date and time from the check_availability tool response, not one from your own memory.
 
 READING TOOL RESPONSES OUT LOUD:
 - Tool responses contain internal notes and labels (like "CORRECT DATE:", "Available times:", "Tell the caller...", "Do NOT say any other date"). These are instructions FOR YOU. NEVER read any of that scaffolding, labels, or instructions out loud, the caller must never hear them.
@@ -660,6 +659,38 @@ function nowInTimezone(tz) {
   return { timezone, weekday, hour, minute };
 }
 
+// Human-readable current date/time plus the next several days, all in the
+// client's timezone, computed fresh on every call. Without this the model has
+// no reliable anchor and guesses the day of week, which is how "Friday's hours"
+// get quoted on a Saturday. Giving it the real weekday-to-date mapping removes
+// the guesswork (and any UTC vs local drift).
+function buildCurrentDateTimeBlock(client) {
+  const timezone = normalizeTimezone(client && client.timezone);
+  const now = new Date();
+  const nowStr = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone, weekday: 'long', year: 'numeric', month: 'long',
+    day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+  }).format(now);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(now);
+  const num = (t) => parseInt((parts.find((p) => p.type === t) || {}).value, 10);
+  // Noon UTC of the tz-local date, so adding whole days never crosses a DST edge.
+  const base = new Date(Date.UTC(num('year'), num('month') - 1, num('day'), 12, 0, 0));
+  const dayFmt = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'long', month: 'long', day: 'numeric' });
+  const days = [];
+  for (let i = 0; i < 7; i++) days.push(dayFmt.format(new Date(base.getTime() + i * 86400000)));
+  return `\n\n# Current date and time
+It is currently ${nowStr} in the business's local time. Treat this as the current date and time. When a caller asks about a day, a date, your hours, or availability, match the day of the week to the correct calendar date using this list, never guess the day:
+- Today is ${days[0]}
+- Tomorrow is ${days[1]}
+- ${days[2]}
+- ${days[3]}
+- ${days[4]}
+- ${days[5]}
+- ${days[6]}`;
+}
+
 function checkBusinessHours(client) {
   const businessHours = client.business_hours;
   if (!businessHours || typeof businessHours !== 'object') {
@@ -1017,6 +1048,12 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     // Used for brand-new clients before their first prompt cache,
     // or if system_prompt was somehow cleared.
     systemPrompt = config.systemPrompt(businessName);
+  }
+
+  // Current date/time anchor (client timezone), computed fresh every call so the
+  // AI never has to guess the day of week when answering hours/availability.
+  if (!systemPrompt.includes('# Current date and time')) {
+    systemPrompt += buildCurrentDateTimeBlock(client);
   }
 
   // ── Dynamic per-call blocks ─────────────────────────────────────────
