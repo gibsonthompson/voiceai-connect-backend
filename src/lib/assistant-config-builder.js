@@ -185,7 +185,9 @@ Booking flow:
 
 If no slots are available, offer alternative dates or take their info for a callback.
 
-NEVER tell a caller an appointment is booked, confirmed, or scheduled unless the book_appointment tool has actually returned a success confirmation. Do not invent a time, date, or confirmation number. If a tool response tells you a service is not bookable by phone or is request-only, follow it exactly: do NOT offer times and do NOT claim it is booked, instead collect the caller's name, phone, and preferred time and tell them the office will confirm. Some services in the list above cannot be booked directly, honor that.`;
+NEVER tell a caller an appointment is booked, confirmed, or scheduled unless the book_appointment tool has actually returned a success confirmation. Do not invent a time, date, or confirmation number. If a tool response tells you a service is not bookable by phone or is request-only, follow it exactly: do NOT offer times and do NOT claim it is booked, instead collect the caller's name, phone, and preferred time and tell them the office will confirm. Some services in the list above cannot be booked directly, honor that.
+
+A booking restriction applies ONLY to that one service, never to the whole call. If a caller asks about a service you can't book, handle just that one (take a message), and if they then ask about a different service that CAN be booked, book it normally as if nothing happened. Never let one service's restriction stop you from booking another, and keep helping until the caller says they are done.`;
 
 // ============================================================================
 // CALL CLOSING BLOCK, always injected. Stops the AI from hanging up abruptly
@@ -194,7 +196,7 @@ NEVER tell a caller an appointment is booked, confirmed, or scheduled unless the
 const CALL_CLOSING_BLOCK = `
 
 ## ENDING THE CALL
-When the caller signals they are done (for example "no, that's all" or "no thank you"), do NOT hang up abruptly or end in silence. First SAY a short, warm closing out loud, such as "Okay, have a great day!" or "Thanks for calling, take care!" THEN end the call. Always speak a goodbye before ending, never cut off mid-conversation.`;
+When the caller signals they are done (for example "no, that's all" or "no thank you"), say a short, warm closing out loud, such as "Okay, have a great day!" or "Thanks for calling, take care!" Then stop talking and let the caller hang up. Do NOT try to end or disconnect the call yourself, and never cut the caller off mid-conversation. If the caller goes quiet but has not said they are finished, gently check in ("Are you still there?") before assuming the call is over.`;
 
 // ============================================================================
 // TAKE-A-MESSAGE BLOCKS
@@ -1343,13 +1345,10 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
     });
   }
 
-  tools.push({
-    type: 'endCall',
-    function: {
-      name: 'endCall',
-      description: 'End the call, but ONLY after you have spoken a brief goodbye out loud (for example "Okay, have a great day!"). Use this when the conversation is complete and the caller has confirmed they have no more questions. Never end the call without first saying a closing line.',
-    },
-  });
+  // NO endCall tool. The model was firing it prematurely and cutting callers
+  // off mid-conversation. Without it the assistant can never hang up, only the
+  // caller ends the call (or VAPI's own silence/max-duration timeout does). The
+  // closing block tells the AI to say a warm goodbye and then simply stop.
 
   return tools;
 }
