@@ -13,6 +13,39 @@ const hq = require('./hq-supabase');
 const items = require('./hq-items');
 const news = require('./briefing-news');
 
+// Self-contained Claude call (same Anthropic setup the rest of the backend
+// uses). Kept here so rendering never depends on another file exporting it.
+const BRIEF_CLAUDE_MODEL = 'claude-sonnet-4-6';
+async function completeClaude(prompt, maxTokens) {
+  if (!process.env.ANTHROPIC_API_KEY) return null;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 25000);
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: BRIEF_CLAUDE_MODEL,
+        max_tokens: maxTokens || 1000,
+        temperature: 0.4,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    if (!res.ok) { console.warn('⚠️ briefing render failed:', res.status); return null; }
+    const data = await res.json();
+    const text = data && data.content && data.content[0] && data.content[0].text;
+    return text ? text.trim() : null;
+  } catch (e) {
+    console.warn('⚠️ briefing render error:', e.message);
+    return null;
+  } finally { clearTimeout(t); }
+}
+
 const WX_LAT = 33.9562;
 const WX_LON = -83.9880;
 const WX_PLACE = 'Lawrenceville';
@@ -137,6 +170,11 @@ function buildFallbackBriefing(ctx) {
   const p = ['Good morning Gibson. Here is your day.'];
   if (ctx.schedule && ctx.schedule !== 'clear') p.push(`On your calendar, ${ctx.schedule}.`);
   else p.push('Your calendar is open today.');
+  if (ctx.openTasks && ctx.openTasks.length) {
+    const top = ctx.openTasks[0];
+    p.push(`Top of your list, ${top.text}${top.venture && top.venture !== 'General' ? ', for ' + top.venture : ''}.`);
+  }
+  if (ctx.goal) p.push(`You're pushing toward ${ctx.goal}.`);
   if (ctx.weatherLine) p.push(ctx.weatherLine);
   if (ctx.news.ai) p.push(`In AI, ${ctx.news.ai}`);
   if (ctx.news.local) p.push(`Around Atlanta, ${ctx.news.local}`);
@@ -166,7 +204,7 @@ Today's data as JSON:
 ${JSON.stringify(ctx)}
 
 Write only the spoken briefing, nothing else.`;
-  const text = await news.complete(prompt, 1100);
+  const text = await completeClaude(prompt, 1100);
   return (text && text.length > 40) ? text : buildFallbackBriefing(ctx);
 }
 

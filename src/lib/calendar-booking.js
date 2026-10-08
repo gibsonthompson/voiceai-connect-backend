@@ -27,6 +27,30 @@ const LEAD_TIME_MINUTES = 30;
 // Granularity of offered start times.
 const SLOT_STEP_MINUTES = 30;
 
+// Parse a business-hours time into minutes-since-midnight, accepting BOTH the
+// 12-hour format the dashboard saves ("9:00 AM", "5:00 PM") and the 24-hour
+// format older data and defaults use ("09:00", "17:00"). The two had drifted
+// apart: the dashboard writes 12-hour strings, this engine used to parse them
+// as 24-hour, so "9:00 AM".split(':') produced NaN and every day returned zero
+// slots. Returns null when the value cannot be parsed.
+function parseTimeToMinutes(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})\s*([AaPp][Mm])?$/);
+  if (!m) return null;
+  let hr = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  if (isNaN(hr) || isNaN(min) || min > 59) return null;
+  const ap = m[3] ? m[3].toLowerCase() : null;
+  if (ap) {
+    if (hr < 1 || hr > 12) return null;
+    hr = ap === 'am' ? (hr === 12 ? 0 : hr) : (hr === 12 ? 12 : hr + 12);
+  } else if (hr > 23) {
+    return null;
+  }
+  return hr * 60 + min;
+}
+
 // ====================================================================
 // TIMEZONE HELPERS
 // Plain-Node wall-clock <-> UTC conversion for IANA timezones, so we never
@@ -305,10 +329,12 @@ async function getAvailableSlots(clientId, date, options) {
     const duration = (options && options.durationOverride) || client.appointment_duration || 30;
     const buffer = (options && options.bufferMinutes) || 0;
 
-    const [openHr, openMin] = hours.open.split(':').map(Number);
-    const [closeHr, closeMin] = hours.close.split(':').map(Number);
-    const openTotal = openHr * 60 + openMin;
-    const closeTotal = closeHr * 60 + closeMin;
+    const openTotal = parseTimeToMinutes(hours.open);
+    const closeTotal = parseTimeToMinutes(hours.close);
+    if (openTotal == null || closeTotal == null || closeTotal <= openTotal) {
+      console.log(`📅 Business hours for ${dayName} unusable (open="${hours.open}", close="${hours.close}"), no slots offered`);
+      return { success: true, slots: [], message: 'Closed on this day' };
+    }
 
     const nowMs = Date.now();
     const leadMs = LEAD_TIME_MINUTES * 60000;
