@@ -2,11 +2,11 @@
 // CLIENT ROUTES - Dashboard Settings & AI Agent Configuration
 // VoiceAI Connect Multi-Tenant
 // UPDATED: Branding now uses flat columns instead of broken branding_overrides JSONB
-// UPDATED: 2026-05-18 — Phase 1: ai-settings endpoints (tone, booking mode,
+// UPDATED: 2026-05-18, Phase 1: ai-settings endpoints (tone, booking mode,
 //          service areas, priority rules, dashboard access)
-// UPDATED: 2026-05-22 — Added allow_client_branding to agency select
-// UPDATED: 2026-05-22 — Added onboarding_completed to PUT settings
-// UPDATED: 2026-06-16 — Per-tab Page Access enforcement. requirePermissionIfAuthed
+// UPDATED: 2026-05-22, Added allow_client_branding to agency select
+// UPDATED: 2026-05-22, Added onboarding_completed to PUT settings
+// UPDATED: 2026-06-16, Per-tab Page Access enforcement. requirePermissionIfAuthed
 //          mounted per route so a client_staff member whose Page Access toggle
 //          for that tab is OFF (or who is disabled) gets a 403 from the API,
 //          not just a hidden nav link. Owners/agency owners/super_admin pass
@@ -16,15 +16,15 @@
 //          NOTE: GET /:id (bootstrap) and /:id/my-credentials (self-scoped) are
 //          intentionally ungated. /:id/dashboard-access is an AGENCY action and
 //          still needs agency-owner auth + tenant check (separate item).
-// UPDATED: 2026-06-17 — Added PUT /:id/forwarding (self-scoped) so the client
+// UPDATED: 2026-06-17, Added PUT /:id/forwarding (self-scoped) so the client
 //          dashboard can persist that call forwarding was set up. Drives the
 //          activation card and the forwarding_confirmed_at metric.
-// UPDATED: 2026-07-08 — PUT /:id/forwarding now also persists the human-handoff
+// UPDATED: 2026-07-08, PUT /:id/forwarding now also persists the human-handoff
 //          decision that the dynamic config builder reads: transfer_phone (the
 //          number the AI transfers a caller to when they need a person, custom
 //          override; null clears and falls back to owner_phone) and
 //          human_handoff ('transfer' | 'message'). This lives with the
-//          forwarding decision on purpose — one endpoint owns the whole "how
+//          forwarding decision on purpose, one endpoint owns the whole "how
 //          calls reach you and what happens when a caller needs a person"
 //          choice, replacing the retired call_mode/Fallback path.
 // UPDATED: 2026-08-10 - GREETING SAVE FIX: PUT /:id/greeting now writes
@@ -73,6 +73,7 @@ const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
 const { requirePermissionIfAuthed } = require('./auth');
+const { isSimilar, norm } = require('../lib/scrape-suggestions');
 
 function decodeToken(req) {
   try {
@@ -307,7 +308,7 @@ router.put('/:id/forwarding', async (req, res) => {
 // Identity is derived from the JWT (never the URL param), so a caller can only
 // ever read their own credentials. visible_password is null when the user has
 // set their own password.
-// Ungated: self-scoped — every user (including staff) reads only their own row.
+// Ungated: self-scoped, every user (including staff) reads only their own row.
 // ============================================================================
 router.get('/:id/my-credentials', async (req, res) => {
   try {
@@ -732,7 +733,63 @@ router.put('/:id/ai-settings', requirePermissionIfAuthed('ai_agent'), async (req
   } catch (error) { console.error('Error updating AI settings:', error); res.status(500).json({ error: 'Server error' }); }
 });
 
-// PUT /api/client/:id/dashboard-access — Agency sets client access level
+// ============================================================================
+// GET /api/client/:id/scrape-suggestions
+// Service-area and business-hours suggestions found by a website scrape, for
+// the My Business page. Areas are re-filtered against the client's current
+// service_areas so added ones drop off. Hours is the full editor shape or null.
+// ============================================================================
+router.get('/:id/scrape-suggestions', requirePermissionIfAuthed('my_business'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data: client } = await supabase
+      .from('clients')
+      .select('service_areas, service_area_suggestions, hours_suggestion')
+      .eq('id', id)
+      .single();
+    const existing = (Array.isArray(client?.service_areas) ? client.service_areas : []).map(norm);
+    const rawAreas = Array.isArray(client?.service_area_suggestions) ? client.service_area_suggestions : [];
+    const areas = rawAreas.filter(a => a && !existing.some(ex => ex === norm(a) || isSimilar(a, ex)));
+    const hours = client?.hours_suggestion || null;
+    res.json({ success: true, areas, hours });
+  } catch (error) {
+    console.error('Error fetching scrape suggestions:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// POST /api/client/:id/scrape-suggestions/dismiss  { type: 'area'|'hours', name? }
+// Removes a single area suggestion, or clears the hours suggestion.
+// ============================================================================
+router.post('/:id/scrape-suggestions/dismiss', requirePermissionIfAuthed('my_business'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { type, name } = req.body || {};
+    if (type === 'hours') {
+      await supabase.from('clients').update({ hours_suggestion: null }).eq('id', id);
+      return res.json({ success: true });
+    }
+    if (type === 'area') {
+      if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required' });
+      const { data: client } = await supabase
+        .from('clients')
+        .select('service_area_suggestions')
+        .eq('id', id)
+        .single();
+      const raw = Array.isArray(client?.service_area_suggestions) ? client.service_area_suggestions : [];
+      const remaining = raw.filter(a => a && norm(a) !== norm(name));
+      await supabase.from('clients').update({ service_area_suggestions: remaining }).eq('id', id);
+      return res.json({ success: true, areas: remaining });
+    }
+    return res.status(400).json({ error: 'type must be area or hours' });
+  } catch (error) {
+    console.error('Error dismissing scrape suggestion:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT /api/client/:id/dashboard-access, Agency sets client access level
 // NOTE: This is an AGENCY-owner action, not a client one. It is intentionally
 // NOT gated with a client Page Access key. It still needs proper agency-owner
 // auth + a check that the agency owns this client (separate security item).

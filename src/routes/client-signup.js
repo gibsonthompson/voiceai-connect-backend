@@ -101,6 +101,7 @@
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { supabase, getAgencyById, getClientByEmail } = require('../lib/supabase');
+const { storeSuggestionsFromScrape } = require('../lib/scrape-suggestions');
 const { getPlan, getAgencyPlans, getVisiblePlans } = require('../lib/plans');
 const { timezoneFromPhone } = require('../lib/area-code-timezone');
 const { 
@@ -254,7 +255,7 @@ function manualUsageResetAt() {
 // ============================================================================
 function resolveClientTrialDays(agency) {
   // Distinguish "unset" (null / undefined / '') from an explicit 0. A DB NULL
-  // reads as JS null, and Number(null) === 0 — which would silently mean
+  // reads as JS null, and Number(null) === 0, which would silently mean
   // "no trial" for any agency that never configured a trial length, even
   // though the settings UI shows the documented default of 7 (client_trial_days
   // ?? 7). Treat unset as the default 7; only an EXPLICIT 0 means no trial.
@@ -1191,7 +1192,7 @@ async function handleClientSignup(req, res) {
       // Enable two-way SMS on the provisioned number (non-blocking)
       try { await enableSMSForNumber(phoneResult.number); } catch (e) { console.warn('⚠️ SMS enable failed:', e.message); }
     } else {
-      console.log(`💳 Card-required signup for ${businessName} — deferring number + assistant until checkout completes (no publishable number before payment).`);
+      console.log(`💳 Card-required signup for ${businessName}, deferring number + assistant until checkout completes (no publishable number before payment).`);
     }
 
     // ============================================
@@ -1298,6 +1299,11 @@ async function handleClientSignup(req, res) {
     createdQueryToolId = null;
 
     console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult?.provisioningMethod}, ${planType}, limit=${callLimit}, billing=${manualBilling ? 'manual' : 'connect'})`);
+
+    // Onboarding auto-fill: turn the signup website scrape into service/staff/
+    // area/hours suggestions so the client's dashboard has them waiting on first
+    // open. Best-effort and fire-and-forget, never blocks signup.
+    storeSuggestionsFromScrape(supabase, newClient.id, knowledgeBaseData?.structuredData);
 
     // ── Update per-client billing for the agency (non-blocking) ─────
     // Fires for manual clients too: the agency still owes the platform per
@@ -1890,6 +1896,9 @@ async function handleAgencyAddClient(req, res) {
 
     console.log(`🎉 Client created: ${newClient.business_name} (${clientCountry}, ${phoneResult?.provisioningMethod}, billing=${manualBilling ? 'manual' : 'connect'})`);
 
+    // Onboarding auto-fill: website scrape, service/staff/area/hours suggestions.
+    storeSuggestionsFromScrape(supabase, newClient.id, knowledgeBaseData?.structuredData);
+
     // ── Update per-client billing for the agency (non-blocking) ─────
     // Fires for manual clients too: the agency still owes the platform per client.
     try {
@@ -2092,6 +2101,9 @@ async function provisionClient(clientId) {
       .select()
       .single();
 
+    // Onboarding auto-fill: website scrape, service/staff/area/hours suggestions.
+    storeSuggestionsFromScrape(supabase, clientId, knowledgeBaseData?.structuredData);
+
     // No more rollback needed
     createdAssistantId = null;
     createdQueryToolId = null;
@@ -2150,7 +2162,7 @@ async function provisionClient(clientId) {
 }
 
 // ============================================================================
-// RECONCILE: re-provision "stranded" clients — a live/paying client that somehow
+// RECONCILE: re-provision "stranded" clients, a live/paying client that somehow
 // has no number. The main case is a reactivation whose background provisionClient
 // threw: the webhook already returned 2xx so Stripe won't retry, and nothing else
 // re-attempts. A live client must never sit numberless, so this sweep catches it.

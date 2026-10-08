@@ -1,6 +1,6 @@
 // ============================================================================
-// STAFF MEMBERS ROUTES — CRUD for per-client staff profiles
-// VoiceAI Connect — Phase 3A: Staff Members + Services
+// STAFF MEMBERS ROUTES, CRUD for per-client staff profiles
+// VoiceAI Connect, Phase 3A: Staff Members + Services
 //
 // Mounted at: app.use('/api/client', staffMembersRoutes)
 // Endpoints:
@@ -9,18 +9,19 @@
 //   PUT    /api/client/:clientId/staff/:staffId
 //   DELETE /api/client/:clientId/staff/:staffId
 //
-// UPDATED: 2026-06-16 — Per-tab Page Access enforcement. requirePermissionIfAuthed('my_business')
+// UPDATED: 2026-06-16, Per-tab Page Access enforcement. requirePermissionIfAuthed('my_business')
 //          on every route (Staff Directory lives under the My Business tab).
 //          NOTE: this is the AI's staff DIRECTORY (providers the AI references
-//          on calls), NOT dashboard login users — those are team_members.
+//          on calls), NOT dashboard login users, those are team_members.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { requirePermissionIfAuthed } = require('./auth');
+const { isSimilar } = require('../lib/scrape-suggestions');
 
 // ============================================================================
-// GET /api/client/:clientId/staff — List all staff for a client
+// GET /api/client/:clientId/staff, List all staff for a client
 // ============================================================================
 router.get('/:clientId/staff', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
@@ -37,7 +38,21 @@ router.get('/:clientId/staff', requirePermissionIfAuthed('my_business'), async (
       return res.status(400).json({ error: error.message });
     }
 
-    res.json({ success: true, staff: staff || [] });
+    // Website-scraped staff suggestions, re-filtered against current staff so
+    // anyone the client has added since the scrape drops off automatically.
+    let suggestions = [];
+    try {
+      const { data: clientRow } = await supabase
+        .from('clients')
+        .select('staff_suggestions')
+        .eq('id', clientId)
+        .single();
+      const raw = Array.isArray(clientRow?.staff_suggestions) ? clientRow.staff_suggestions : [];
+      const existing = (staff || []).map(s => s.name);
+      suggestions = raw.filter(sg => sg && sg.name && !existing.some(ex => isSimilar(sg.name, ex)));
+    } catch (e) { /* best-effort */ }
+
+    res.json({ success: true, staff: staff || [], suggestions });
   } catch (error) {
     console.error('Error fetching staff:', error);
     res.status(500).json({ error: 'Server error' });
@@ -45,12 +60,37 @@ router.get('/:clientId/staff', requirePermissionIfAuthed('my_business'), async (
 });
 
 // ============================================================================
-// POST /api/client/:clientId/staff — Create a new staff member
+// POST /api/client/:clientId/staff/suggestions/dismiss, remove one scraped
+// staff suggestion by name. Defined before the /:staffId routes so "suggestions"
+// is never matched as a staff id.
+// ============================================================================
+router.post('/:clientId/staff/suggestions/dismiss', requirePermissionIfAuthed('my_business'), async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { name } = req.body || {};
+    if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required' });
+    const { data: clientRow } = await supabase
+      .from('clients')
+      .select('staff_suggestions')
+      .eq('id', clientId)
+      .single();
+    const raw = Array.isArray(clientRow?.staff_suggestions) ? clientRow.staff_suggestions : [];
+    const remaining = raw.filter(sg => !(sg && sg.name && isSimilar(sg.name, name)));
+    await supabase.from('clients').update({ staff_suggestions: remaining }).eq('id', clientId);
+    res.json({ success: true, suggestions: remaining });
+  } catch (error) {
+    console.error('Error dismissing staff suggestion:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// POST /api/client/:clientId/staff, Create a new staff member
 // ============================================================================
 router.post('/:clientId/staff', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { clientId } = req.params;
-    const { name, role, phone, email, notes, available_hours } = req.body;
+    const { name, role, phone, email, notes, available_hours, transferable } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Staff member name is required' });
@@ -66,6 +106,9 @@ router.post('/:clientId/staff', requirePermissionIfAuthed('my_business'), async 
       available_hours: available_hours || {},
       services: [],
       is_active: true,
+      // Whether the AI may transfer a live caller to this person. Only takes
+      // effect on calls when the member also has a phone number.
+      transferable: transferable === true,
     };
 
     const { data: staff, error } = await supabase
@@ -88,12 +131,12 @@ router.post('/:clientId/staff', requirePermissionIfAuthed('my_business'), async 
 });
 
 // ============================================================================
-// PUT /api/client/:clientId/staff/:staffId — Update a staff member
+// PUT /api/client/:clientId/staff/:staffId, Update a staff member
 // ============================================================================
 router.put('/:clientId/staff/:staffId', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { clientId, staffId } = req.params;
-    const { name, role, phone, email, notes, available_hours, is_active } = req.body;
+    const { name, role, phone, email, notes, available_hours, is_active, transferable } = req.body;
 
     const updates = {};
     if (name !== undefined) {
@@ -106,6 +149,7 @@ router.put('/:clientId/staff/:staffId', requirePermissionIfAuthed('my_business')
     if (notes !== undefined) updates.notes = notes?.trim() || null;
     if (available_hours !== undefined) updates.available_hours = available_hours;
     if (is_active !== undefined) updates.is_active = is_active;
+    if (transferable !== undefined) updates.transferable = transferable === true;
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ error: 'No fields to update' });
@@ -137,7 +181,7 @@ router.put('/:clientId/staff/:staffId', requirePermissionIfAuthed('my_business')
 });
 
 // ============================================================================
-// DELETE /api/client/:clientId/staff/:staffId — Delete a staff member
+// DELETE /api/client/:clientId/staff/:staffId, Delete a staff member
 // ============================================================================
 router.delete('/:clientId/staff/:staffId', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
