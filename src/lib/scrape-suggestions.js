@@ -195,7 +195,7 @@ async function storeSuggestionsFromScrape(supabase, clientId, structuredData) {
     const [{ data: svcs }, { data: staff }, { data: clientRow }] = await Promise.all([
       supabase.from('client_services').select('name').eq('client_id', clientId),
       supabase.from('staff_members').select('name').eq('client_id', clientId),
-      supabase.from('clients').select('service_areas, knowledge_base_data').eq('id', clientId).single(),
+      supabase.from('clients').select('service_areas, knowledge_base_data, tool_config').eq('id', clientId).single(),
     ]);
     const suggestions = buildAllSuggestions(structuredData, {
       services: (svcs || []).map(s => s.name),
@@ -203,8 +203,30 @@ async function storeSuggestionsFromScrape(supabase, clientId, structuredData) {
       areas: Array.isArray(clientRow?.service_areas) ? clientRow.service_areas : [],
       faqs: existingFaqQuestions(clientRow?.knowledge_base_data),
     });
-    await supabase.from('clients').update(suggestions).eq('id', clientId);
-    console.log(`💡 Suggestions stored for ${clientId}: ${suggestions.service_suggestions.length} services, ${suggestions.staff_suggestions.length} staff, ${suggestions.service_area_suggestions.length} areas, ${suggestions.faq_suggestions.length} faqs, hours=${!!suggestions.hours_suggestion}`);
+
+    // Pre-fill the "address" send-SMS preset from the scraped address so the AI
+    // can text it when a caller asks. We only fill the VALUE, and only when the
+    // client has not set one, and we never flip `enabled` on, the client still
+    // chooses to turn address-texting on in their dashboard (value ready to go).
+    const update = { ...suggestions };
+    const scrapedAddress = String(
+      (structuredData.primary_address && structuredData.primary_address) ||
+      (Array.isArray(structuredData.addresses) && structuredData.addresses[0]) || ''
+    ).trim();
+    if (scrapedAddress) {
+      const tc = (clientRow && clientRow.tool_config && typeof clientRow.tool_config === 'object') ? clientRow.tool_config : {};
+      const presets = (tc.smsPresets && typeof tc.smsPresets === 'object') ? tc.smsPresets : {};
+      const current = (presets.address && typeof presets.address === 'object') ? presets.address : {};
+      if (!current.value || !String(current.value).trim()) {
+        update.tool_config = {
+          ...tc,
+          smsPresets: { ...presets, address: { enabled: current.enabled === true, value: scrapedAddress } },
+        };
+      }
+    }
+
+    await supabase.from('clients').update(update).eq('id', clientId);
+    console.log(`💡 Suggestions stored for ${clientId}: ${suggestions.service_suggestions.length} services, ${suggestions.staff_suggestions.length} staff, ${suggestions.service_area_suggestions.length} areas, ${suggestions.faq_suggestions.length} faqs, hours=${!!suggestions.hours_suggestion}, addressPreset=${!!update.tool_config}`);
   } catch (err) {
     console.warn('⚠️ storeSuggestionsFromScrape failed (non-fatal):', err.message);
   }

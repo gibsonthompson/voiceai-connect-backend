@@ -224,7 +224,8 @@ Return this JSON structure. Use null for any field you cannot find:
 {
   "business_name": "string — official name as shown on site",
   "phone_numbers": ["array of phone numbers found"],
-  "addresses": ["array of physical addresses"],
+  "primary_address": "the business's single main street address as one line (street, city, state, ZIP), or null",
+  "addresses": ["array of ALL physical addresses/locations found, full street addresses"],
   "email_addresses": ["array of email addresses"],
   "business_hours": {
     "monday": "9:00 AM - 5:00 PM or null",
@@ -246,6 +247,8 @@ Return this JSON structure. Use null for any field you cannot find:
   "key_differentiators": ["what makes this business stand out, 2-3 points max"],
   "faqs": [{ "question": "the question as a caller would ask it", "answer": "concise answer, under ~300 characters" }]
 }
+
+For the address: look hard for it, it is often in the page footer, a contact or locations page, or embedded map / structured data (schema.org LocalBusiness JSON-LD), not the main text. Return the full street address with city, state and ZIP. "primary_address" is the single main location (what you would text a caller asking "where are you?"); "addresses" lists every location found. Do not guess or leave it null if the site shows an address anywhere.
 
 For "faqs": pull real question-and-answer pairs the site actually states (FAQ/help pages, or clear Q&A inline). Phrase each question the way a caller would ask it and keep answers short and factual. Include at most 8, the most useful for a phone receptionist. Return an empty array if the site has none. Do not invent FAQs.`;
 
@@ -286,10 +289,30 @@ For "faqs": pull real question-and-answer pairs the site actually states (FAQ/he
 // ============================================================================
 // FORMAT STRUCTURED DATA — Convert extracted JSON to KB-friendly text
 // ============================================================================
-function formatStructuredSection(data) {
+function formatStructuredSection(data, websiteUrl) {
   if (!data) return '';
 
   const sections = [];
+
+  // QUICK FACTS: the details the receptionist most often needs to say OR text on
+  // a call (address, directions, phone, email, website). Placed first so the KB
+  // query tool surfaces them fast, and labeled as text-ready so the send_sms
+  // tool can send an accurate address/link when a caller asks for it in writing.
+  const quick = [];
+  const primaryAddr = (data.primary_address && String(data.primary_address).trim())
+    || (Array.isArray(data.addresses) && data.addresses[0] ? String(data.addresses[0]).trim() : '');
+  if (primaryAddr) {
+    quick.push(`- Address (text this when a caller asks where you are or for directions): ${primaryAddr}`);
+    quick.push(`- Directions link (Google Maps): https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(primaryAddr)}`);
+  }
+  if (Array.isArray(data.phone_numbers) && data.phone_numbers[0]) quick.push(`- Phone: ${String(data.phone_numbers[0]).trim()}`);
+  if (Array.isArray(data.email_addresses) && data.email_addresses[0]) quick.push(`- Email: ${String(data.email_addresses[0]).trim()}`);
+  if (websiteUrl && String(websiteUrl).trim()) quick.push(`- Website: ${String(websiteUrl).trim()}`);
+  if (quick.length > 0) {
+    sections.push('# QUICK FACTS (say or text these to callers)\n');
+    sections.push(quick.join('\n') + '\n');
+  }
+
   sections.push('# BUSINESS DETAILS (Extracted from Website)\n');
 
   if (data.business_name) sections.push(`**Business Name:** ${data.business_name}`);
@@ -450,7 +473,7 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
     let structuredSection = '';
     try {
       structuredData = await extractStructuredData(combinedRaw, businessName, 'business');
-      structuredSection = formatStructuredSection(structuredData);
+      structuredSection = formatStructuredSection(structuredData, websiteUrl);
       if (structuredSection) {
         console.log(`   ✅ Extracted structured data (${structuredSection.length} chars)`);
       }
