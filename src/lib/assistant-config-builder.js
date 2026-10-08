@@ -115,7 +115,10 @@ const DEFAULT_TOOL_CONFIG = {
   callerRecognition: true,
   spamDetection: true,
   transferCall: true,
-  businessHoursRouting: false,
+  // On by default: when the client has set business hours, calls outside them
+  // take a message and book instead of transferring. Harmless for clients with
+  // no hours set (never triggers). 24/7 businesses turn it off.
+  businessHoursRouting: true,
   afterHoursMessage: "We're currently closed, but I'd be happy to take a message and have someone call you back during business hours.",
   speechTimeout: true,
   speechTimeoutSeconds: 12,
@@ -769,12 +772,14 @@ function buildSmsBlock(toolConfig, isAfterHours) {
 // ============================================================================
 // BUILD TRANSFER FALLBACK BLOCK
 // ============================================================================
-function buildTransferFallbackBlock() {
+function buildTransferFallbackBlock(canBook) {
+  const bookLine = canBook
+    ? `\n- First, finish what the caller actually came for. If they wanted an appointment, book it right now with your scheduling tools, do not make them call back just for that.`
+    : '';
   return `\n\n# Transfer Fallback
-If you transfer a call and the transfer fails or is not answered (you'll know because you'll still be on the line after attempting the transfer):
-- Don't panic or apologize excessively. Just say: "It looks like the team isn't available right now. I can take a message for you."
-- Collect their name, phone number, and a brief description of what they need.
-- Let them know: "I'll make sure the team gets this and someone will call you back."
+A transfer may not connect (no answer, voicemail, or a busy line). When that happens you are handed back to the caller, who has just heard a brief line that the person is unavailable and that you can take a message. Pick up naturally from there:
+- Do NOT re-announce that the transfer failed and do NOT apologize again. The caller was just told, so repeating it sounds broken. Keep helping them.${bookLine}
+- For anything that still needs that specific person, take a message: get their name, phone number, and a brief description of what they need, then confirm someone will get back to them.
 - Then end the call normally.`;
 }
 
@@ -1034,8 +1039,13 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     if (!systemPrompt.includes('# Connecting a Caller to a Person')) {
       systemPrompt += WHISPER_TRANSFER_BLOCK;
     }
-  } else if (handoff === 'transfer' && toolConfig.transferFallbackToMessage && toolConfig.transferCall) {
-    systemPrompt += buildTransferFallbackBlock();
+  } else if (handoff === 'transfer' && toolConfig.transferCall) {
+    // Always injected for a native transfer: a warm transfer hands the caller
+    // back to the AI on no-answer/voicemail (fallbackPlan.endCallEnabled:false),
+    // so the AI must always know what to do. It should finish what the caller
+    // came for (book, when booking is on) and take a message for the person.
+    // No longer a toggle.
+    systemPrompt += buildTransferFallbackBlock(canAutoBook);
   } else if (handoff === 'message' && !isAfterHours) {
     systemPrompt += (client.forwarding_mode === 'missed') ? MISSED_CALL_MESSAGE_BLOCK : TAKE_MESSAGE_BLOCK;
   }
@@ -1187,12 +1197,14 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
     }
   }
 
-  // Calendar booking tools, only when auto_book is on AND the calendar is
-  // connected. Never during after-hours (the office is closed; after-hours
-  // mode already tells the AI not to book). The server URLs route to the
-  // per-client calendar endpoints, which do the real date resolution and
-  // Google Calendar work.
-  if (canAutoBook && !isAfterHours) {
+  // Calendar booking tools, attached whenever auto_book is on AND the calendar
+  // is connected, INCLUDING after-hours. A caller at 2am should still be able to
+  // book a future slot; availability already only offers times inside business
+  // hours, so after-hours booking just schedules for when the office is open.
+  // After-hours mode suppresses live TRANSFERS, not booking. The server URLs
+  // route to the per-client calendar endpoints, which do the real date
+  // resolution and Google Calendar work.
+  if (canAutoBook) {
     const calendarBase = `${BACKEND_URL}/api/calendar`;
 
     tools.push({

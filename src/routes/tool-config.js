@@ -14,7 +14,9 @@ const DEFAULT_TOOL_CONFIG = {
   callerRecognition: true,
   spamDetection: true,
   transferCall: true,
-  businessHoursRouting: false,
+  // On by default (see assistant-config-builder DEFAULT_TOOL_CONFIG). Only has
+  // an effect once business hours are set; 24/7 businesses turn it off.
+  businessHoursRouting: true,
   afterHoursMessage: "We're currently closed, but I'd be happy to take a message and have someone call you back during business hours.",
   speechTimeout: true,
   speechTimeoutSeconds: 12,
