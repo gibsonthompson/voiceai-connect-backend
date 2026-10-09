@@ -187,7 +187,7 @@ function buildFallbackBriefing(ctx) {
 // Render the ENTIRE briefing as one spoken monologue. This becomes the call's
 // first message, so VAPI speaks the whole thing instead of waiting for Gibson.
 async function renderBriefingText(ctx) {
-  const prompt = `You are Gibson's chief of staff delivering his morning briefing out loud over the phone. Write the complete briefing as one flowing spoken monologue that he hears start to finish. Warm, grounded, sharp, never perky, no fake cheer. Plain spoken text only: no markdown, no bullet points, no numbered list, no symbols, no em dashes. Say numbers, dates, and times as words. Never say how many of anything there are, never read labels.
+  const prompt = `You are Gibson's chief of staff delivering his morning briefing out loud over the phone. Write the complete briefing as one flowing spoken monologue that he hears start to finish. Warm, grounded, sharp, never perky, no fake cheer. Keep it tight and snappy, short punchy sentences, he is busy and wants the signal, not padding. Plain spoken text only: no markdown, no bullet points, no numbered list, no symbols, no em dashes. Say numbers, dates, and times as words. Never say how many of anything there are, never read labels.
 
 Deliver in this order, and skip anything with no data without mentioning it:
 1. His day. Walk through today's calendar in time order, a sentence or two. If the schedule shows clear, tell him his calendar is open today.
@@ -204,7 +204,7 @@ Today's data as JSON:
 ${JSON.stringify(ctx)}
 
 Write only the spoken briefing, nothing else.`;
-  const text = await completeClaude(prompt, 1100);
+  const text = await completeClaude(prompt, 1800);
   return (text && text.length > 40) ? text : buildFallbackBriefing(ctx);
 }
 

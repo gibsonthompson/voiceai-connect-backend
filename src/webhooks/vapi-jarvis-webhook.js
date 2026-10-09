@@ -40,7 +40,7 @@ const JARVIS_SERVER_URL = `${BACKEND_URL}/webhook/vapi-jarvis`;
 // at actually CALLING tools (old gpt-4o is no longer a primary listing). A
 // chattier model will narrate doing things without doing them; 4.1 won't. The
 // refusal line uses a cheap model (one spoken line).
-const JARVIS_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL';
+const JARVIS_VOICE_ID = 'zGjIP4SZlMnY9m93k97r';
 const JARVIS_MODEL = 'gpt-4.1';
 const JARVIS_REFUSAL_MODEL = 'gpt-4o-mini';
 
@@ -184,11 +184,14 @@ When he asks you to add a task, book time, start a goal, add a step, create a bu
 
 Whatever he tells you on this call goes onto his On Deck list as a task, using hq_add_task. It does not matter how he phrases it. "Remind me to call Erik," "note that the invoice is due," or just "the Telnyx thing," all of it is a to-do on On Deck. There is no separate notes or reminders bucket here, never try to file something as a note or a reminder, it all becomes a task. The only things that are not plain to-dos are the specific actions below: booking time on his calendar, starting a goal or adding a step, creating a business or project, filing a task under a business, marking something done, or reading things back. Everything else is a task.
 
+Capture what he actually needs to do, in a few clear words. If he says "make a to-do for the Secretary business" or "add a task to fix the admin panel," the task is the real thing ("fix the admin panel" or "set up the Secretary business"), never the literal instruction like "make a to-do" or "create a task," which is meaningless on his list. Never create two tasks for the same thing, if he repeats himself or rephrases, it is one task, not two. Think about what he actually means and put that on the list.
+
 # How you talk, so you never sound like a machine
 
 - Talk like a person. Use contractions. Drop in small, low key acknowledgments ("got it," "sure," "yeah, done," "okay," "makes sense"), and vary them so you never sound scripted or canned.
 - Warm but grounded, never perky, chirpy, or bubbly. No fake cheer, no exclamation energy. You are calm and real, a sharp person who is glad to help, not a chipper receptionist.
-- Never narrate working or stall for time. No "this will just take a second," no "let me just," no "one moment," no "bear with me." You just handle it and tell him it is done.
+- Snappy and to the point. Say what matters and stop. Do not pad, over-explain, or repeat yourself. He is busy, respect that.
+- Never narrate working or stall for time. This is a hard rule: never say "one moment," "just a second," "let me just," "give me a sec," "bear with me," or anything like it. If you need to look something up, just do it; a second of quiet is fine, a stall line is not.
 - Full, easy sentences, the way a trusted right hand talks. Never clipped one word confirmations like "added" or "noted."
 - Let him finish. He thinks out loud and trails off mid sentence. Give him room, sit through his pauses, and do not jump in. A little silence is fine. Talking over him is not.
 - Keep each turn short, a sentence or two, this is a call, but make it human.
@@ -314,15 +317,12 @@ function getJarvisTools() {
 const JARVIS_VOICE = {
   provider: '11labs',
   voiceId: JARVIS_VOICE_ID,
-  // Most expressive model VAPI supports for REAL-TIME calls. Eleven v3 sounds
-  // better but measures ~750ms before it speaks (ElevenLabs says do not use it
-  // for conversation), which on a phone call is a long dead beat every turn.
-  model: 'eleven_multilingual_v2',
-  stability: 0.45,            // lower = warmer, less monotone and robotic
+  model: 'eleven_turbo_v2_5', // v2.5: expressive and low latency, keeps the flow snappy
+  stability: 0.4,
   similarityBoost: 0.85,
-  style: 0.4,                 // natural inflection
+  style: 0.35,
   useSpeakerBoost: true,
-  speed: 0.98,
+  speed: 1.0,
   optimizeStreamingLatency: 3,
 };
 
@@ -330,14 +330,14 @@ const JARVIS_VOICE = {
 // his pauses instead of jumping in, so it feels attentive, not robotic.
 const JARVIS_SPEAKING_PLANS = {
   startSpeakingPlan: {
-    // Patient on purpose: he thinks mid sentence and trails off, so wait well
-    // past his pauses before answering. The line should never talk over him.
-    waitSeconds: 1.2,
+    // Patient: he thinks mid sentence and trails off, so wait past his pauses
+    // before answering, and never talk over him.
+    waitSeconds: 1.0,
     smartEndpointingPlan: { provider: 'vapi' },
-    transcriptionEndpointingPlan: { onPunctuationSeconds: 0.6, onNoPunctuationSeconds: 2.3, onNumberSeconds: 0.8 },
+    transcriptionEndpointingPlan: { onPunctuationSeconds: 0.5, onNoPunctuationSeconds: 2.0, onNumberSeconds: 0.6 },
   },
-  // Yields quickly when he starts talking, and holds a beat after being cut in on.
-  stopSpeakingPlan: { numWords: 2, voiceSeconds: 0.2, backoffSeconds: 1.5 },
+  // numWords 1 so he can cut in instantly, including to stop the briefing and ask.
+  stopSpeakingPlan: { numWords: 1, voiceSeconds: 0.2, backoffSeconds: 1.3 },
 };
 
 async function buildJarvisConfig() {
