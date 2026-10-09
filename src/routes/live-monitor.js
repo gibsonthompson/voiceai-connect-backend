@@ -128,10 +128,20 @@ router.get('/:id/live/stream', async (req, res) => {
     // Tell nginx / proxies not to buffer the stream.
     'X-Accel-Buffering': 'no',
   });
+  // Real-time delivery: push headers now, turn off Nagle so small events are not
+  // held for coalescing, and flush after every write. The padding comment forces
+  // any proxy that buffers a small amount to release the stream immediately.
+  try { res.flushHeaders(); } catch (e) {}
+  try { if (res.socket) res.socket.setNoDelay(true); } catch (e) {}
+  res.write(`:${' '.repeat(2048)}\n\n`);
   res.write('retry: 3000\n\n');
+  if (typeof res.flush === 'function') { try { res.flush(); } catch (e) {} }
 
   const send = (event, data) => {
-    try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {}
+    try {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      if (typeof res.flush === 'function') res.flush();
+    } catch (e) {}
   };
 
   send('hello', { clientId, business: auth.client.business_name, ts: Date.now() });
@@ -139,7 +149,9 @@ router.get('/:id/live/stream', async (req, res) => {
   for (const ev of snapshot(clientId)) send('event', ev);
 
   const unsub = subscribe(clientId, (ev) => send('event', ev));
-  const heartbeat = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 15000);
+  const heartbeat = setInterval(() => {
+    try { res.write(': ping\n\n'); if (typeof res.flush === 'function') res.flush(); } catch (e) {}
+  }, 15000);
 
   let closed = false;
   const cleanup = () => { if (closed) return; closed = true; clearInterval(heartbeat); unsub(); try { res.end(); } catch {} };
