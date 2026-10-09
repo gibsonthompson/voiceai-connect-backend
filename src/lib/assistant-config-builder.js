@@ -1277,12 +1277,21 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
       // Warm transfer that (1) briefs the person who answers with a spoken
       // summary of the call, and (2) if they do not answer or it hits voicemail,
       // returns the caller to THIS assistant instead of stranding them in a
-      // personal voicemail. fallbackPlan.endCallEnabled:false is what hands the
-      // line back; the prompt's "Transfer Fallback" block then offers to take a
-      // message. warm-transfer-experimental is the only mode that returns on a
-      // no-answer, so both behaviors come from it.
+      // personal voicemail.
+      //
+      // mode: we wait for the person who answers to speak first ("hello?") and
+      // THEN speak the summary, so the AI never talks over them and the context
+      // is actually heard. The previous 'warm-transfer-experimental' mode is
+      // VAPI's assistant-based transfer: with only a summaryPlan and no
+      // transferAssistant it bridged the caller in cold and never voiced the
+      // summary, which is why the person who answered heard no context. 'timeout'
+      // caps how long we wait for them to speak before giving up (short, so a
+      // silent or voicemail leg does not hang). fallbackPlan.endCallEnabled:false
+      // still hands the line back on a failed transfer; the prompt's "Transfer
+      // Fallback" block then offers to take a message.
       const warmTransferPlan = (failMessage) => ({
-        mode: 'warm-transfer-experimental',
+        mode: 'warm-transfer-wait-for-operator-to-speak-first-and-then-say-summary',
+        timeout: 8,
         summaryPlan: {
           enabled: true,
           messages: [
