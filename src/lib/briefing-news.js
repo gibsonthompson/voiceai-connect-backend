@@ -296,4 +296,40 @@ async function briefFalcons(todayStr, nextGame) {
   );
 }
 
-module.exports = { briefAI, briefLocal, briefPolitics, briefFalcons, nextFalconsGame, answerWithWebSearch, fetchRssItems, gatherTopic, summarize };
+// Voice AI industry, the space Gibson builds in (VoiceAI Connect).
+async function briefVoiceAI(todayStr) {
+  const items = await gatherTopic(
+    ['voice AI agents', 'Vapi OR Retell OR Bland AI OR ElevenLabs OR Synthflow', 'AI voice receptionist OR AI phone agent', 'conversational voice AI funding OR launch'],
+    4, 10,
+  );
+  return summarize(
+    `${datePre(todayStr)}You are briefing a founder who builds and sells a white-label AI voice receptionist platform (VoiceAI Connect). In two or three spoken sentences, tell him what actually matters in the voice AI space today: new voice or speech models, moves by the platforms and competitors he builds around or against (Vapi, Retell, Bland, ElevenLabs, Synthflow, and the like), funding, pricing or product changes that affect someone building phone agents. Be specific, name names, cut the hype.`,
+    items, 320,
+  );
+}
+
+// Notable disclosed trades: politicians (Pelosi and the like), whales, insiders.
+async function briefTrades(todayStr) {
+  const items = await gatherTopic(
+    ['Nancy Pelosi stock trades', 'congress stock trades disclosure', 'politician stock trades', 'notable insider buying OR hedge fund stake'],
+    4, 10,
+  );
+  return summarize(
+    `${datePre(todayStr)}You are flagging notable disclosed trades worth knowing. In two or three spoken sentences, cover recently disclosed Congressional or politician stock trades (who bought or sold what, Pelosi and other high profile names), plus any big investor, insider, or activist moves. Name the person, the company or ticker, and the rough size when it is reported. Strictly factual, this is not advice and never a recommendation.`,
+    items, 320,
+  );
+}
+
+// Crypto, including political and meme coins and where the majors sit today.
+async function briefCrypto(todayStr) {
+  const items = await gatherTopic(
+    ['Trump memecoin OR political memecoin', 'Bitcoin price today', 'crypto market news today', 'notable memecoin launch OR crypto token launch'],
+    4, 10,
+  );
+  return summarize(
+    `${datePre(todayStr)}You are giving a quick crypto read. In two or three spoken sentences, cover notable moves today: meme coins and political coins (anything like a Trump coin), major launches or blowups, and roughly where Bitcoin and Ether are sitting. Name the coins and the rough prices or moves. Strictly factual, not advice.`,
+    items, 320,
+  );
+}
+
+module.exports = { briefAI, briefLocal, briefPolitics, briefFalcons, briefVoiceAI, briefTrades, briefCrypto, nextFalconsGame, answerWithWebSearch, fetchRssItems, gatherTopic, summarize };

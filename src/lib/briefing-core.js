@@ -225,7 +225,7 @@ async function assembleBriefing() {
   // day instead of guessing "tonight" off a headline.
   const falconsGame = await news.nextFalconsGame().catch(() => null);
 
-  const [hqSchedule, openMovers, goals, weather, ai, local, politics, falcons, gcalEvents] = await Promise.all([
+  const [hqSchedule, openMovers, goals, weather, ai, local, politics, falcons, voiceai, trades, crypto, gcalEvents] = await Promise.all([
     ready ? hq.listScheduleForDate(etDate, dow) : Promise.resolve([]),
     ready ? hq.listOpenMovers() : Promise.resolve([]),
     ready ? hq.listGoals() : Promise.resolve([]),
@@ -234,6 +234,9 @@ async function assembleBriefing() {
     news.briefLocal(weekend, todayStr),
     news.briefPolitics(todayStr),
     news.briefFalcons(todayStr, falconsGame),
+    news.briefVoiceAI(todayStr),
+    news.briefTrades(todayStr),
+    news.briefCrypto(todayStr),
     googleCal.listEventsForDate(etDate).catch(() => []),
   ]);
 
@@ -263,7 +266,7 @@ async function assembleBriefing() {
     openTasks,
     goal: (goals && goals[0]) ? goals[0].title : null,
     weatherLine: weatherLine(weather),
-    news: { ai, local, politics, falcons },
+    news: { ai, voiceai, local, politics, trades, crypto, falcons },
   };
 }
 
@@ -282,8 +285,11 @@ function buildFallbackBriefing(ctx) {
   if (ctx.goal) p.push(`You're pushing toward ${ctx.goal}.`);
   if (ctx.weatherLine) p.push(ctx.weatherLine);
   if (ctx.news.ai) p.push(`In AI, ${ctx.news.ai}`);
+  if (ctx.news.voiceai) p.push(`In voice AI, ${ctx.news.voiceai}`);
   if (ctx.news.local) p.push(`Around Atlanta, ${ctx.news.local}`);
   if (ctx.news.politics) p.push(`Nationally, ${ctx.news.politics}`);
+  if (ctx.news.trades) p.push(`On notable trades, ${ctx.news.trades}`);
+  if (ctx.news.crypto) p.push(`In crypto, ${ctx.news.crypto}`);
   if (ctx.news.falcons) p.push(ctx.news.falcons);
   p.push('Anything you want to add or change?');
   return p.join(' ');
@@ -302,9 +308,12 @@ Deliver in this order, and skip anything with no data without mentioning it:
 3. The goal he is pushing, one quick line, only if there is one.
 4. Weather, give him the real read from the weather data provided: what it is doing right now, where the day is headed with the high and low, any rain, the wind, and when the sun sets. A few natural sentences, not one clipped line.
 5. AI news, from the ai summary.
-6. Around Atlanta, from the local summary.
-7. Politics, from the politics summary, neutral and factual.
-8. Falcons, one quick beat, only if there is something.
+6. Voice AI, from the voiceai summary, the space he builds in, so give it weight.
+7. Around Atlanta, from the local summary.
+8. Politics, from the politics summary, neutral and factual.
+9. Notable trades, from the trades summary: disclosed politician trades like Pelosi and other big moves. State it factually, never as advice.
+10. Crypto, from the crypto summary: meme and political coins and where the majors sit. Factual, never advice.
+11. Falcons, one quick beat, only if there is something.
 End by asking if there is anything he wants to add or change.
 
 Today's data as JSON:
