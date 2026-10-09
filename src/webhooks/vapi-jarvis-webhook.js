@@ -537,8 +537,13 @@ async function tool_research_topic(args) {
 
 async function tool_hq_todays_briefing() {
   try {
-    const ctx = await core.assembleBriefing();
-    const text = await core.renderBriefingText(ctx);
+    // Prefer the briefing the morning cron already rendered and cached, so the
+    // line answers instantly instead of re-running the slow news research and
+    // render, which overran VAPI's tool timeout and made it say the server
+    // timed out. Only assemble fresh if there is no recent cache.
+    const cached = await core.getFreshBriefing();
+    if (cached && cached.text) return cached.text;
+    const { text } = await core.assembleAndRenderBriefing();
     return text || 'I could not put your briefing together right now.';
   } catch (e) {
     console.error('❌ hq_todays_briefing failed:', e.message);

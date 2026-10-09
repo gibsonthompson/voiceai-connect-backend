@@ -12,6 +12,15 @@
 const hq = require('./hq-supabase');
 const items = require('./hq-items');
 const news = require('./briefing-news');
+const { getPlatformSetting, setPlatformSetting } = require('./vapi');
+
+// Where the most recent fully-rendered briefing is cached. The morning cron
+// warms this, so when Gibson calls in and asks for his briefing the line can
+// hand back the cached text instantly instead of re-running the slow news
+// research and render, which overran VAPI's tool-webhook timeout and made the
+// assistant say the server timed out.
+const BRIEFING_CACHE_KEY = 'jarvis_briefing_cache';
+const BRIEFING_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 // Self-contained Claude call (same Anthropic setup the rest of the backend
 // uses). Kept here so rendering never depends on another file exporting it.
@@ -208,7 +217,39 @@ Write only the spoken briefing, nothing else.`;
   return (text && text.length > 40) ? text : buildFallbackBriefing(ctx);
 }
 
+// ── Cache (so the in-call briefing never re-runs the slow pipeline) ──────────
+
+// Assemble and render the briefing once, then cache the finished text + ctx.
+// Both the morning cron and an on-demand call-in go through here, so the text
+// is always available for the next read without paying the research cost again.
+async function assembleAndRenderBriefing() {
+  const ctx = await assembleBriefing();
+  const text = await renderBriefingText(ctx);
+  try {
+    await setPlatformSetting(BRIEFING_CACHE_KEY, { text, ctx, ts: Date.now() });
+  } catch (e) {
+    console.warn('⚠️ briefing cache write failed:', e.message);
+  }
+  return { ctx, text };
+}
+
+// Return the cached briefing if it is still fresh, else null. Fresh means it
+// was rendered within maxAgeMs (default six hours), so a mid-morning call-in
+// gets today's briefing, not yesterday's.
+async function getFreshBriefing(maxAgeMs) {
+  const limit = maxAgeMs || BRIEFING_CACHE_MAX_AGE_MS;
+  try {
+    const c = await getPlatformSetting(BRIEFING_CACHE_KEY);
+    if (c && c.text && c.ts && (Date.now() - c.ts) <= limit) {
+      return { text: c.text, ctx: c.ctx || null, ageMs: Date.now() - c.ts };
+    }
+  } catch (e) {
+    console.warn('⚠️ briefing cache read failed:', e.message);
+  }
+  return null;
+}
+
 // System prompt for AFTER the briefing is spoken: handle his follow-ups and
 // anything he wants to add, as the secretary (tasks by default, must call tools).
 
-module.exports = { assembleBriefing, renderBriefingText, buildFallbackBriefing, etHour, etDateInfo, isWeekendish, fetchWeather, weatherLine };
+module.exports = { assembleBriefing, renderBriefingText, assembleAndRenderBriefing, getFreshBriefing, buildFallbackBriefing, etHour, etDateInfo, isWeekendish, fetchWeather, weatherLine };
