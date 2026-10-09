@@ -27,6 +27,28 @@ const DEFAULT_TOOL_CONFIG = {
   smsPresets: {},
 };
 
+// Pull the business address + website out of what the AI already knows, so the
+// "Texting the caller" address/website presets can pre-fill from the knowledge
+// base instead of the client re-typing them. Website is a stored field; the
+// address is read from the assembled KB document the website scrape wrote
+// (its "QUICK FACTS" block, or the "## Addresses" section).
+function deriveKbContact(client) {
+  const website = String(client && client.business_website || '').trim();
+  let address = '';
+  const kb = String(client && client.knowledge_base_content || '');
+  if (kb) {
+    // "- Address (text this ...): <addr>" from the QUICK FACTS block.
+    let m = kb.match(/^\s*-+\s*Address\b[^:\n]*:\s*(.+)$/im);
+    if (m && m[1]) address = m[1].trim();
+    if (!address) {
+      // First bullet under a "## Addresses" heading.
+      const sec = kb.match(/##\s*Addresses\s*\n([\s\S]*?)(?:\n#|$)/i);
+      if (sec && sec[1]) { const b = sec[1].match(/^\s*-+\s*(.+)$/m); if (b && b[1]) address = b[1].trim(); }
+    }
+  }
+  return { address, website };
+}
+
 // ============================================================================
 // GET /api/client/:id/tool-config
 // ============================================================================
@@ -36,7 +58,7 @@ router.get('/:id/tool-config', requirePermissionIfAuthed('ai_agent'), async (req
 
     const { data: client, error } = await supabase
       .from('clients')
-      .select('tool_config, business_hours')
+      .select('tool_config, business_hours, business_website, knowledge_base_content')
       .eq('id', id)
       .single();
 
@@ -51,6 +73,9 @@ router.get('/:id/tool-config', requirePermissionIfAuthed('ai_agent'), async (req
       success: true,
       tool_config: config,
       business_hours: client.business_hours || null,
+      // Address + website pulled from the knowledge base, so the texting presets
+      // can pre-fill when the client hasn't typed them yet.
+      kb_contact: deriveKbContact(client),
     });
   } catch (error) {
     console.error('Error fetching tool config:', error);
