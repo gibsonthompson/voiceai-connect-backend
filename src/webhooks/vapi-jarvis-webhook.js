@@ -317,7 +317,7 @@ function getJarvisTools() {
 const JARVIS_VOICE = {
   provider: '11labs',
   voiceId: JARVIS_VOICE_ID,
-  model: 'eleven_turbo_v2_5', // v2.5: expressive and low latency, keeps the flow snappy
+  model: 'eleven_flash_v2_5', // VAPI-supported v2.5 model, lowest latency (turbo_v2_5 is NOT on VAPI's list and gets the whole assistant rejected)
   stability: 0.4,
   similarityBoost: 0.85,
   style: 0.35,
