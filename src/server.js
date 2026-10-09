@@ -1785,6 +1785,7 @@ app.use('/api/agency', supportRoutes);
 app.use('/api/agency', require('./routes/agency-support-requests'));
 app.use('/api/agency', require('./routes/support-thread').agencyRouter);
 app.use('/api/agency', require('./routes/agency-client-thread').agencyRouter);
+app.use('/api/agency', require('./routes/admin-broadcasts').agencyRouter); // platform broadcast banner (dashboard)
 app.use('/api/agency', require('./routes/agency-og-upload'));
 app.use('/api/help', helpRoutes);
 app.use('/api/yt', ytContentRoutes);
@@ -2026,6 +2027,7 @@ app.use('/api/admin', smsTemplatesAdminRoutes);
 app.use('/api/admin', require('./routes/platform-inbox')); // agency SMS reply inbox
 app.use('/api/admin', emailTemplatesAdminRoutes);
 app.use('/api/admin', require('./routes/admin-demo-calls')); // concierge / demo-line call log
+app.use('/api/admin', require('./routes/admin-broadcasts').adminRouter); // platform-wide agency broadcasts
 app.use('/api/admin', errorReportRoutes);
 app.use('/api/admin', require('./routes/admin-expenses'));
 app.use('/api/admin', require('./routes/admin-margin'));
