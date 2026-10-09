@@ -31,6 +31,7 @@ const hq = require('../lib/hq-supabase');
 const items = require('../lib/hq-items');
 const news = require('../lib/briefing-news');
 const core = require('../lib/briefing-core');
+const googleCal = require('../lib/google-calendar');
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 const JARVIS_SERVER_URL = `${BACKEND_URL}/webhook/vapi-jarvis`;
@@ -172,7 +173,9 @@ function resolveDay(dayStr) {
 // ── system prompt + first message (the product) ────────────────────────────
 
 function getJarvisSystemPrompt(plate) {
-  return `# Who you are
+  return `Right now it is ${core.etNowString()}. That is the current date and time, treat it as truth, and never state any other year or date.
+
+# Who you are
 
 You are Gibson's personal secretary and right hand, on the phone with him. Not an assistant reading responses, a real person who works for him and knows his whole world, the businesses, the goals, what is on his plate. Warm, sharp, calm, and genuinely in his corner. Think of the best executive assistant you can picture, the one who anticipates, connects the dots, and quietly keeps anything from slipping.
 
@@ -208,13 +211,14 @@ Capture what he actually needs to do, in a few clear words. If he says "make a t
 # What you can do for him (use these tools, never name or narrate them)
 
 - Tasks (this is almost everything he says): hq_add_task. If he names a business, pass it as the venture, otherwise General. Confirm warmly and say where it landed.
-- Book time: hq_book_slot. Pass the title, day, and time however he said it. It handles conflicts and conversion and tells you the real time, so say that back, like "you're set for two thirty," or "two was taken so I moved you to two fifteen."
+- Book time: hq_book_slot. Pass the title, day, and time however he said it. It handles conflicts across both his HQ and Google calendars and tells you the real time, so say that back, like "you're set for two thirty," or "two was taken so I moved you to two fifteen." Anything you book also lands on his Google Calendar.
+- Check his calendar: hq_check_schedule, when he asks what he has on a day, what his day looks like, or whether he is free. It merges HQ and his Google Calendar. Give him the gist naturally, not a list.
 - Goals: hq_add_goal to start one, capture why it matters and whether it is business or personal if he says. hq_add_goal_step to add a step under a goal he names.
 - A new business or category: hq_add_business. A new project: hq_add_project.
 - File an existing task under a business: hq_assign_task, for a to-do already on his list he wants put under one of his businesses.
 - Read back what is open: hq_list_tasks, a few woven into a sentence, never a count or a list. Hear his goals: hq_list_goals.
 - Mark something done: hq_complete_task with what he said. His single best next move: hq_highest_leverage, then give one clear pick and why.
-- Look something up: research_topic, when he asks about a news event or wants to know more about something in the moment. Pull it and tell him conversationally, in his words.
+- Look something up: research_topic searches the web live, so you can answer anything he asks, store or business hours, a phone number, an address, a price, a score, a fact, or current news. Any time he asks something you are not sure of, use it rather than guessing, then tell him the answer conversationally in his words.
 - Give him today's briefing: hq_todays_briefing, when he asks for his rundown or briefing. Read it to him naturally.
 
 # The little things
@@ -296,6 +300,8 @@ function getJarvisTools() {
         title: { type: 'string', description: 'The project' },
         description: { type: 'string', description: 'Optional detail' },
       }, ['title']),
+    fn('hq_check_schedule', 'Check what is on his calendar for a day, merging HQ and his Google Calendar. Use when he asks what he has going on, what his day looks like, or whether he is free. Speak it conversationally, never as a count or a list.',
+      { day: { type: 'string', description: 'Which day: today, tomorrow, a weekday, or a date. Defaults to today.' } }, []),
     fn('hq_list_tasks', 'List open (not done) tasks, optionally for one business. Returns a few recent ones as data; speak them conversationally, never as a count or a list.',
       { venture: { type: 'string', description: 'Limit to this business. Omit for all.' } }, []),
     fn('hq_list_goals', 'List current goals. Returns them as data; speak them conversationally.',
@@ -304,8 +310,8 @@ function getJarvisTools() {
       { query: { type: 'string', description: 'What the caller said to identify the task' } }, ['query']),
     fn('hq_highest_leverage', 'Return open tasks with age and business so you can pick the single highest-leverage move.',
       {}, []),
-    fn('research_topic', 'Look up current information or news on something the caller asks about, so you can tell him more in real time.',
-      { query: { type: 'string', description: 'What to look up, e.g. a news event or topic he mentioned' } }, ['query']),
+    fn('research_topic', 'Search the web live to answer anything he asks: business or store hours, a phone number or address, a price, a score, a fact, or current news. Use it whenever he asks a question you do not already know the answer to.',
+      { query: { type: 'string', description: 'What to look up, phrased as a clear search, e.g. "what time does Home Depot in Lawrenceville close today"' } }, ['query']),
     fn('hq_todays_briefing', "Assemble and deliver today's full briefing on demand: his calendar, top move, weather, and AI, local, and politics news. Use when he asks for his briefing or rundown.",
       {}, []),
     { type: 'endCall' },
@@ -409,11 +415,20 @@ async function tool_hq_book_slot(args) {
   if (!isFinite(start)) return 'What time should I book that for?';
   const dur = parseDuration(args.durationHours);
   console.log(`📅 Jarvis book: "${title}" day=${day.date} start=${start} dur=${dur} (raw day=${JSON.stringify(args.day)}, raw start=${JSON.stringify(args.startHour)})`);
-  const ranges = await hq.getOccupiedRanges(day.date, day.dow, null);
-  const r = items.resolveBooking(start, dur, ranges);
+  // Check conflicts against BOTH calendars so he is never double-booked across
+  // HQ and his real Google Calendar.
+  const hqRanges = await hq.getOccupiedRanges(day.date, day.dow, null);
+  const gRanges = await googleCal.occupiedRangesForDate(day.date).catch(() => []);
+  const r = items.resolveBooking(start, dur, [...hqRanges, ...gRanges]);
   if (!r.ok) { console.log('   booking refused:', r.reason, '-', r.message); return r.message; }
   const res = await hq.insertItem(items.buildEvent({ title, date: day.date, startHour: r.startHour, duration: dur }));
   if (!res.ok) return 'That did not save to HQ.';
+  // Mirror onto his real Google Calendar when connected, so it shows up there
+  // too. HQ already has it, so a Google failure is logged, not surfaced.
+  if (await googleCal.isConnected()) {
+    const g = await googleCal.createEvent({ title, dateStr: day.date, startHour: r.startHour, durationHours: dur }).catch(() => ({ ok: false }));
+    if (!g.ok) console.warn('⚠️ Jarvis: booked in HQ but Google Calendar mirror failed');
+  }
   console.log('   booked at', r.startHour);
   return r.message;
 }
@@ -475,6 +490,23 @@ async function tool_hq_add_project(args) {
   return res.ok ? `New project: ${title}.` : 'That did not save to HQ.';
 }
 
+async function tool_hq_check_schedule(args) {
+  const day = resolveDay(args.day);
+  if (!day) return 'Which day do you want me to check?';
+  const [hqS, gS] = await Promise.all([
+    hq.listScheduleForDate(day.date, day.dow),
+    googleCal.listEventsForDate(day.date).catch(() => []),
+  ]);
+  const merged = [...(hqS || []), ...(gS || [])].sort((a, b) => {
+    if (a.allDay && !b.allDay) return -1;
+    if (b.allDay && !a.allDay) return 1;
+    return (a.startHour || 0) - (b.startHour || 0);
+  });
+  if (!merged.length) return JSON.stringify({ day: day.date, clear: true, events: [] });
+  const events = merged.map((e) => (e.allDay ? `all day ${e.title}` : `${items.fmtHour(e.startHour)} ${e.title}`));
+  return JSON.stringify({ day: day.date, events });
+}
+
 async function tool_hq_list_tasks(args) {
   const open = await hq.listOpenMovers();
   let list = open;
@@ -526,8 +558,13 @@ async function tool_hq_highest_leverage() {
 async function tool_research_topic(args) {
   const q = (args.query || '').trim();
   if (!q) return 'What do you want me to look up?';
+  // A real web search first, so he can ask anything: business hours, a fact, an
+  // address, a score, current events. Fall back to the news-headline search
+  // only if the web search comes back empty.
+  const web = await news.answerWithWebSearch(q, core.etTodayString());
+  if (web) return web;
   const list = await news.gatherTopic([q, q + ' news', q + ' latest'], 4, 10);
-  if (!list.length) return "I couldn't find anything recent on that.";
+  if (!list.length) return "I looked but couldn't find a clear answer on that.";
   const summary = await news.summarize(
     `Gibson asked you to look up and tell him more about: "${q}". In two to four spoken sentences give him the substance of what is going on, specific and factual, like you just read the coverage. If there is little out there, say so plainly.`,
     list, 420,
@@ -537,7 +574,7 @@ async function tool_research_topic(args) {
 
 async function tool_hq_todays_briefing() {
   try {
-    // Prefer the briefing the morning cron already rendered and cached, so the
+    // Prefer the briefing the morning cron or prewarm already rendered, so the
     // line answers instantly instead of re-running the slow news research and
     // render, which overran VAPI's tool timeout and made it say the server
     // timed out. Only assemble fresh if there is no recent cache.
@@ -559,6 +596,7 @@ const TOOL_HANDLERS = {
   hq_add_business: tool_hq_add_business,
   hq_assign_task: tool_hq_assign_task,
   hq_add_project: tool_hq_add_project,
+  hq_check_schedule: tool_hq_check_schedule,
   hq_list_tasks: tool_hq_list_tasks,
   hq_list_goals: tool_hq_list_goals,
   hq_complete_task: tool_hq_complete_task,
