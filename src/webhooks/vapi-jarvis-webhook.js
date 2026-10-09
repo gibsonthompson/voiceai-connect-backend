@@ -274,8 +274,18 @@ function buildPlateContext(openTasks, goals, ventures) {
   return out;
 }
 
+// Time-of-day greeting in Gibson's timezone, so the opener matches when he calls.
+function timeGreeting() {
+  const h = parseInt(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour: '2-digit', hour12: false, hourCycle: 'h23',
+  }).format(new Date()), 10);
+  if (h < 12) return 'Good morning';
+  if (h < 17) return 'Good afternoon';
+  return 'Good evening';
+}
+
 function getJarvisFirstMessage() {
-  return "Hey Gibson, good to hear from you. What's on your mind?";
+  return `${timeGreeting()} Gibson. How can I help? Want your briefing, something added to the list, or a note jotted down?`;
 }
 
 // ── tool schemas (VAPI function tools) ─────────────────────────────────────

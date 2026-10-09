@@ -285,12 +285,15 @@ router.post('/texml/warm-transfer', async (req, res) => {
     const callerId = clientAiNumber || (session.caller_number && normE164(session.caller_number)) || agent;
     const whisperUrl = `${BACKEND_URL}/texml/whisper?token=${encodeURIComponent(token)}`;
     const afterUrl = `${BACKEND_URL}/texml/warm-transfer/after?token=${encodeURIComponent(token)}`;
+    const recordUrl = `${BACKEND_URL}/texml/transfer-recording?token=${encodeURIComponent(token)}`;
 
     await supabase.from('call_sessions').update({ status: 'warm_dialing' }).eq('id', token).then(() => {}, () => {});
     log(`dialing agent ${agent} for session ${token} (callerId=${callerId})`);
 
+    // record-from-answer captures the bridged caller<->agent conversation so we
+    // can transcribe + summarize it for the owner (the AI is off the call by now).
     const xml = `<Response>
-  <Dial answerOnBridge="true" callerId="${escapeXml(callerId)}" timeout="25" action="${afterUrl}" method="POST">
+  <Dial answerOnBridge="true" callerId="${escapeXml(callerId)}" timeout="25" action="${afterUrl}" method="POST" record="record-from-answer" recordingStatusCallback="${recordUrl}" recordingStatusCallbackMethod="POST">
     <Number url="${whisperUrl}" method="POST">${escapeXml(agent)}</Number>
   </Dial>
 </Response>`;
@@ -401,6 +404,143 @@ router.post('/texml/voicemail', async (req, res) => {
     logErr(`texml/voicemail failed: ${err.message}`);
     return sendTexml(res, '<Response><Hangup/></Response>');
   }
+});
+
+// ===========================================================================
+// TRANSFER-CALL RECAP: record -> transcribe -> summarize -> notify the owner
+// The caller<->agent conversation happens on Telnyx after the AI is gone, so we
+// record it, transcribe it with Telnyx Speech-to-Text, summarize it with Claude,
+// and text the owner what actually happened plus the recording. All best-effort:
+// if transcription fails, the owner still gets the recording link.
+// ===========================================================================
+
+// Transcribe a hosted recording with Telnyx Speech-to-Text (synchronous).
+async function telnyxTranscribe(fileUrl) {
+  const key = process.env.TELNYX_API_KEY;
+  if (!key || !fileUrl) return null;
+  try {
+    const fd = new FormData();
+    fd.set('model', 'openai/whisper-large-v3-turbo');
+    fd.set('file_url', fileUrl);
+    fd.set('response_format', 'json');
+    const controller = new AbortController();
+    const timer = setTimeout(() => { try { controller.abort(); } catch (e) {} }, 60000);
+    const r = await fetch('https://api.telnyx.com/v2/ai/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}` },
+      body: fd,
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timer));
+    if (!r.ok) { logErr(`telnyx STT failed [${r.status}]: ${(await r.text().catch(() => '')).slice(0, 180)}`); return null; }
+    const data = await r.json();
+    return (data && (data.text || (data.data && data.data.text))) || null;
+  } catch (e) { logErr(`telnyx STT threw: ${e.message}`); return null; }
+}
+
+// Summarize the transferred (human) conversation with Claude.
+async function summarizeTransferCall(transcript, businessName) {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key || !transcript) return null;
+  const prompt = `This is a transcript of a phone call between a caller and a team member at ${businessName || 'the business'}, after an AI receptionist transferred the call to a person. In 2 to 4 short sentences, summarize what actually happened: what the caller needed, what was discussed or agreed, and any follow-up or next step. Be concrete and factual. No greetings, no labels, just the summary.\n\nTranscript:\n${transcript}`;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => { try { controller.abort(); } catch (e) {} }, 20000);
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 400, temperature: 0.3, messages: [{ role: 'user', content: prompt }] }),
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timer));
+    if (!r.ok) { logErr(`anthropic recap failed [${r.status}]`); return null; }
+    const data = await r.json();
+    const text = data && data.content && data.content[0] && data.content[0].text;
+    return (text || '').trim() || null;
+  } catch (e) { logErr(`anthropic recap threw: ${e.message}`); return null; }
+}
+
+router.post('/texml/transfer-recording', async (req, res) => {
+  const token = (req.query && req.query.token) || (req.body && req.body.token) || null;
+  const b = req.body || {};
+  const recordingUrl = b.RecordingUrl || b.recordingUrl || b.PublicRecordingUrl || b.MediaUrl || null;
+  const recStatus = b.RecordingStatus || b.recordingStatus || '';
+  log(`texml/transfer-recording session=${token} status=${recStatus} recording=${recordingUrl ? 'yes' : 'no'} keys=${Object.keys(b).join(',')}`);
+
+  // Ack Telnyx immediately; the recording callback does not need TeXML back. The
+  // transcription + summary happen after we respond so Telnyx is never held up
+  // (this is a long-running server, so post-response work completes normally).
+  res.status(200).send('ok');
+
+  if (!token || !recordingUrl) return;
+  try {
+    const { data: session } = await supabase
+      .from('call_sessions')
+      .select('id, client_id, caller_number')
+      .eq('id', token).single();
+    if (!session || !session.client_id) return;
+
+    const { data: client } = await supabase
+      .from('clients')
+      .select('id, agency_id, business_name, owner_phone, vapi_phone_number, industry')
+      .eq('id', session.client_id).single();
+    if (!client) return;
+
+    let agency = null;
+    if (client.agency_id) {
+      const { data } = await supabase.from('agencies').select('id, name, demo_phone_number').eq('id', client.agency_id).single();
+      agency = data || null;
+    }
+
+    const transcript = await telnyxTranscribe(recordingUrl);
+    const recap = transcript ? await summarizeTransferCall(transcript, client.business_name) : null;
+    log(`transfer recap session ${token}: transcriptLen=${transcript ? transcript.length : 0} recap=${recap ? 'yes' : 'no'}`);
+
+    // Text the owner the real recap (or the recording if transcription failed).
+    if (client.owner_phone) {
+      const who = session.caller_number ? `${session.caller_number}` : 'the caller';
+      const smsBody = recap
+        ? `Recap of the transferred call for ${client.business_name} (${who}):\n\n${recap}\n\nRecording: ${recordingUrl}`
+        : `A transferred call for ${client.business_name} (${who}) just wrapped up. Recording: ${recordingUrl}`;
+      await sendAndLogSMS({
+        phone: client.owner_phone,
+        message: smsBody,
+        from: client.vapi_phone_number || (agency && agency.demo_phone_number) || null,
+        agencyId: client.agency_id || null,
+        recipientType: 'client_owner',
+        messageType: 'transfer_recap',
+        metadata: { token, hasRecap: !!recap },
+      });
+      log(`transfer recap SMS to ${client.owner_phone} (recap=${!!recap})`);
+    }
+
+    // Best-effort: fold the recap into the dashboard call record (the transferred
+    // calls row the end-of-call report created). Match on client + a single
+    // recent transferred call. Non-destructive: append to ai_summary and stash
+    // the transfer recording in call_metadata, never touch the AI recording_url.
+    if (recap) {
+      try {
+        const since = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+        const { data: rows } = await supabase
+          .from('calls')
+          .select('id, ai_summary, call_metadata')
+          .eq('client_id', client.id)
+          .eq('call_status', 'transferred')
+          .gte('created_at', since)
+          .order('created_at', { ascending: false })
+          .limit(2);
+        if (rows && rows.length === 1) {
+          const row = rows[0];
+          const merged = (row.ai_summary ? row.ai_summary + '\n\n' : '') + `After transfer: ${recap}`;
+          const meta = Object.assign({}, row.call_metadata || {}, { transfer_recording_url: recordingUrl });
+          await supabase.from('calls').update({ ai_summary: merged, call_metadata: meta }).eq('id', row.id);
+          log(`folded transfer recap into call ${row.id}`);
+        } else {
+          log(`calls-row recap match: ${rows ? rows.length : 0} candidates, skipped dashboard update`);
+        }
+      } catch (e) { logErr(`calls recap update failed: ${e.message}`); }
+    }
+
+    await supabase.from('call_sessions').update({ status: 'transfer_recapped' }).eq('id', token).then(() => {}, () => {});
+  } catch (e) { logErr(`transfer-recording processing failed: ${e.message}`); }
 });
 
 module.exports = router;
