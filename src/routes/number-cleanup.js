@@ -534,6 +534,30 @@ async function buildLiveAllowlist() {
     }
   }
 
+  // Belt-and-suspenders: protect every number whose VAPI routing points at an
+  // internal platform webhook (Jarvis, concierge, support), keyed off its actual
+  // serverUrl rather than a DB row. This is what makes those lines immune to the
+  // sweep even when their platform_settings row is missing, stale, or stored in a
+  // shape the pass above cannot read (which is exactly what kept wiping Jarvis).
+  // If the VAPI list fails we THROW so the caller aborts and deletes nothing,
+  // the same safety guarantee as every other branch here.
+  if (VAPI_API_KEY) {
+    const r = await fetch('https://api.vapi.ai/phone-number?limit=1000', {
+      headers: { Authorization: `Bearer ${VAPI_API_KEY}` },
+    });
+    if (!r.ok) throw new Error(`allowlist VAPI list failed: HTTP ${r.status}`);
+    const data = await r.json();
+    const arr = Array.isArray(data) ? data : (data.results || data.data || []);
+    const INTERNAL_WEBHOOKS = ['/webhook/vapi-jarvis', '/webhook/vapi-concierge', '/webhook/vapi-support'];
+    for (const p of arr) {
+      const url = (p && (p.serverUrl || (p.server && p.server.url))) || '';
+      if (INTERNAL_WEBHOOKS.some((w) => url.includes(w))) {
+        const n = normalizeE164(p.number);
+        if (n) set.add(n);
+      }
+    }
+  }
+
   return set;
 }
 

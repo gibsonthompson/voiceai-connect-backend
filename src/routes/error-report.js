@@ -124,8 +124,13 @@ router.post('/error-report', async (req, res) => {
 
     // Filter out browser extension / third-party errors
     if (isExtensionError(message, stack, component, url)) {
-      // Still log for visibility, but don't trigger SMS alerts
-      console.log(`🔇 Extension/hydration error suppressed: ${(message || '').substring(0, 80)}`);
+      // Benign noise (browser-extension or hydration errors). Never alerts, and
+      // stays OUT of the logs by default so it does not flood DigitalOcean or
+      // trip admin error monitoring. Set LOG_SUPPRESSED_ERRORS=true to inspect
+      // them while debugging a specific page.
+      if (process.env.LOG_SUPPRESSED_ERRORS === 'true') {
+        console.log(`🔇 Suppressed benign client error: ${(message || '').substring(0, 80)}`);
+      }
       return res.json({ received: true, filtered: true });
     }
 

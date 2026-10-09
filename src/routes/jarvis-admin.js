@@ -140,9 +140,12 @@ async function ensureJarvis() {
   await pointNumberAtJarvis(canonical.id);
 
   const existing = await getPlatformSetting(SETTINGS_KEY).catch(() => null);
+  // Build a FRESH, clean object. Never spread `existing`: a prior bad write (or a
+  // string round-trip) can make it a string, and spreading a string shatters it
+  // into "0","1","2" character keys. The canonical number is the source of truth.
+  const existingNumber = (existing && typeof existing === 'object' && typeof existing.number === 'string') ? existing.number : null;
   const config = {
-    ...(existing || {}),
-    number: canonical.number || (existing && existing.number) || null,
+    number: canonical.number || existingNumber || null,
     vapiPhoneId: canonical.id,
     serverUrl: JARVIS_SERVER_URL,
     ensuredAt: new Date().toISOString(),
@@ -271,9 +274,9 @@ router.post('/repin', requireSecret, async (req, res) => {
     }
     await pointNumberAtJarvis(canonical.id);
     const cfg = await getPlatformSetting(SETTINGS_KEY).catch(() => null);
+    const cfgNumber = (cfg && typeof cfg === 'object' && typeof cfg.number === 'string') ? cfg.number : null;
     const updated = {
-      ...(cfg || {}),
-      number: canonical.number || (cfg && cfg.number) || null,
+      number: canonical.number || cfgNumber || null,
       vapiPhoneId: canonical.id,
       serverUrl: JARVIS_SERVER_URL,
       repinnedAt: new Date().toISOString(),

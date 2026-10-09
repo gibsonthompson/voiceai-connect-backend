@@ -2024,7 +2024,19 @@ async function getPlatformSetting(key) {
   if (!supabase) return null;
   try {
     const { data } = await supabase.from('platform_settings').select('value').eq('key', key).maybeSingle();
-    return data?.value ?? null;
+    let v = data?.value ?? null;
+    // Object-valued settings (e.g. jarvis_config) are stored as JSON strings so
+    // they round-trip identically regardless of column type. Parse them back so
+    // callers always get the object, never a stringified blob. (A string that
+    // got stored object-first and read back as text is exactly what left the
+    // Jarvis number unprotected, since the allowlist could not read its .number.)
+    if (typeof v === 'string') {
+      const t = v.trim();
+      if (t.startsWith('{') || t.startsWith('[')) {
+        try { return JSON.parse(t); } catch { /* not JSON, leave as-is */ }
+      }
+    }
+    return v;
   } catch (err) {
     console.warn(`⚠️ getPlatformSetting(${key}) failed:`, err.message);
     return null;
@@ -2034,8 +2046,11 @@ async function getPlatformSetting(key) {
 async function setPlatformSetting(key, value) {
   if (!supabase) return;
   try {
+    // Store objects/arrays as JSON strings so the value round-trips identically
+    // whether the column is jsonb or text (getPlatformSetting parses them back).
+    const stored = (value !== null && typeof value === 'object') ? JSON.stringify(value) : value;
     await supabase.from('platform_settings').upsert(
-      { key, value, updated_at: new Date().toISOString() },
+      { key, value: stored, updated_at: new Date().toISOString() },
       { onConflict: 'key' }
     );
   } catch (err) {
