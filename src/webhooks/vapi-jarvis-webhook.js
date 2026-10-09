@@ -35,6 +35,12 @@ const googleCal = require('../lib/google-calendar');
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
 const JARVIS_SERVER_URL = `${BACKEND_URL}/webhook/vapi-jarvis`;
+// Quiet background track under the call. VAPI loops it for the whole call and
+// plays nothing if the URL is unreachable, so it is safe to leave on. Served by
+// this backend at /media/jarvis-hold.mp3 (already volume-reduced). Override the
+// URL, or set it to "off", via JARVIS_HOLD_MUSIC_URL.
+const JARVIS_HOLD_MUSIC = (process.env.JARVIS_HOLD_MUSIC_URL && process.env.JARVIS_HOLD_MUSIC_URL.trim())
+  || `${BACKEND_URL}/media/jarvis-hold.mp3`;
 
 // Current date/time in Gibson's timezone, computed here so the live line never
 // depends on another file exporting it. A missing shared export must never be
@@ -381,6 +387,7 @@ async function buildJarvisConfig() {
     },
     voice: JARVIS_VOICE,
     ...JARVIS_SPEAKING_PLANS,
+    backgroundSound: JARVIS_HOLD_MUSIC,
     firstMessage: getJarvisFirstMessage(),
     recordingEnabled: false,
     maxDurationSeconds: 900,

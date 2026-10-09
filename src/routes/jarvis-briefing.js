@@ -46,6 +46,10 @@ const {
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 const JARVIS_SERVER_URL = `${BACKEND_URL}/webhook/vapi-jarvis`;
+// Quiet background track under the briefing call, served by this backend and
+// looped by VAPI for the whole call. Override or disable with JARVIS_HOLD_MUSIC_URL.
+const JARVIS_HOLD_MUSIC = (process.env.JARVIS_HOLD_MUSIC_URL && process.env.JARVIS_HOLD_MUSIC_URL.trim())
+  || `${BACKEND_URL}/media/jarvis-hold.mp3`;
 
 // Lawrenceville, GA
 const core = require('../lib/briefing-core');
@@ -94,6 +98,7 @@ async function buildBriefingAssistant(ctx, briefingText) {
     },
     voice: JARVIS_VOICE,
     ...JARVIS_SPEAKING_PLANS,
+    backgroundSound: JARVIS_HOLD_MUSIC,
     // The whole briefing is the first message, so VAPI speaks it all, then
     // listens for his follow-ups. This is what fixes the dead-air silence.
     firstMessage: text,
