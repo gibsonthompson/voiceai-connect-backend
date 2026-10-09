@@ -2206,6 +2206,7 @@ app.post('/webhook/twilio-sms', express.urlencoded({ extended: false, limit: '2m
 // still gets the JSON body parsed by the global middleware above.
 app.use('/webhook/telnyx-voice', express.raw({ type: '*/*', limit: '5mb' }));
 app.use('/', require('./routes/telnyx-voice'));
+app.use('/', require('./routes/voice-brief')); // Phase 0: AI texts the team a heads-up right before a transfer
 
 // Stripe platform webhooks (agency subscriptions)
 app.post('/webhook/stripe', 

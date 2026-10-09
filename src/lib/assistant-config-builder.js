@@ -1342,13 +1342,36 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
       }
 
       if (destinations.length > 0) {
+        // Phase 0 warm-transfer brief: the AI texts the team member a one-line
+        // heads-up (who is calling and why) right before it connects them, so
+        // they have context even though the native VAPI transfer is still a
+        // blind hand-off on Telnyx. The transferCall descriptions below tell the
+        // AI to call this first, then transferCall.
+        tools.push({
+          type: 'function',
+          function: {
+            name: 'brief_operator',
+            description: 'Text the team member a one-line heads-up about who is calling and why, right before you connect them. Call this ONCE, immediately BEFORE transferCall, using the name and reason you gathered. When it returns, call transferCall to connect the caller.',
+            parameters: {
+              type: 'object',
+              properties: {
+                summary: {
+                  type: 'string',
+                  description: 'One or two sentences: who is calling and what they need. Example: "Maria Lopez is calling about a burst pipe in her basement and needs someone out today."',
+                },
+              },
+              required: ['summary'],
+            },
+          },
+          server: { url: `${BACKEND_URL}/api/voice/brief-operator?clientId=${client.id}`, timeoutSeconds: 12 },
+        });
         tools.push({
           type: 'transferCall',
           function: {
             name: 'transferCall',
             description: destinations.length > 1
-              ? 'Transfer the call to the right person on the team. Pick the destination that best matches who the caller needs: a specific team member when they ask for one by name or clearly need what that person handles, otherwise the main business team. Use this when the caller needs a human, has an emergency, a billing question, an existing account issue, or when you cannot fully help them. Before transferring, get the name and reason for the call unless it is a clear emergency, and do not transfer sales or spam calls.'
-              : 'Transfer the call to the business team. Use this when the caller needs to speak with someone directly, has an emergency, billing question, existing account issue, or when you cannot fully help them. Before transferring, get the name and reason for the call unless it is a clear emergency, and do not transfer sales or spam calls.',
+              ? 'Transfer the call to the right person on the team. Pick the destination that best matches who the caller needs: a specific team member when they ask for one by name or clearly need what that person handles, otherwise the main business team. Use this when the caller needs a human, has an emergency, a billing question, an existing account issue, or when you cannot fully help them. Before transferring, get the name and reason for the call unless it is a clear emergency, and do not transfer sales or spam calls. First call brief_operator with that name and reason, then use this to connect them.'
+              : 'Transfer the call to the business team. Use this when the caller needs to speak with someone directly, has an emergency, billing question, existing account issue, or when you cannot fully help them. Before transferring, get the name and reason for the call unless it is a clear emergency, and do not transfer sales or spam calls. First call brief_operator with that name and reason, then use this to connect them.',
           },
           destinations,
         });
