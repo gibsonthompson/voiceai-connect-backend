@@ -27,6 +27,7 @@
 const express = require('express');
 const { supabase } = require('../lib/supabase');
 const { requireAgencyAccess } = require('./auth');
+const { getPlan } = require('../lib/plans');
 
 const MAX_BODY = 4000;
 
@@ -618,5 +619,80 @@ async function notifyClientOfAgencyMessage(agencyId, clientId) {
     }
   } catch (e) { console.error('client notify SMS failed (non-blocking):', e.message); }
 }
+
+// ============================================================================
+// GET /:agencyId/inbox/facts?type=client|prospect&target=<id>
+// Quick facts about whoever a thread is with, shown in the inbox so the agency
+// has context while replying. Client: plan, status/trial, numbers, tenure,
+// usage, last call, price. Prospect: who they are, how to reach them, status.
+// ============================================================================
+agencyRouter.get('/:agencyId/inbox/facts', requireAgencyAccess('dashboard'), async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const { type, target } = req.query;
+    if (!target) return res.status(400).json({ error: 'target is required' });
+
+    if (type === 'client') {
+      const { data: client } = await supabase
+        .from('clients')
+        .select('id, agency_id, business_name, owner_name, owner_phone, vapi_phone_number, plan_type, subscription_status, trial_ends_at, created_at, calls_this_month, monthly_call_limit, custom_price_cents, is_test_client')
+        .eq('id', target).eq('agency_id', agencyId).single();
+      if (!client) return res.status(404).json({ error: 'Client not found' });
+
+      // Latest call time (best-effort).
+      let lastCallAt = null;
+      try {
+        const { data: lc } = await supabase.from('calls').select('created_at').eq('client_id', client.id).order('created_at', { ascending: false }).limit(1);
+        if (lc && lc[0]) lastCallAt = lc[0].created_at;
+      } catch {}
+
+      // Monthly price: the client's custom override, else their plan's price.
+      let plan = null;
+      try {
+        const { data: agency } = await supabase.from('agencies').select('*').eq('id', agencyId).single();
+        plan = client.plan_type ? getPlan(agency, client.plan_type) : null;
+      } catch {}
+      let priceCents = (client.custom_price_cents != null && Number(client.custom_price_cents) > 0)
+        ? Number(client.custom_price_cents)
+        : (plan && plan.price_cents != null ? Number(plan.price_cents) : null);
+
+      return res.json({ success: true, type: 'client', facts: {
+        businessName: client.business_name || null,
+        ownerName: client.owner_name || null,
+        plan: plan ? plan.name : (client.plan_type || null),
+        status: client.subscription_status || null,
+        trialEndsAt: client.trial_ends_at || null,
+        aiPhone: client.vapi_phone_number || null,
+        ownerPhone: client.owner_phone || null,
+        memberSince: client.created_at || null,
+        callsThisMonth: client.calls_this_month != null ? client.calls_this_month : null,
+        monthlyCallLimit: client.monthly_call_limit != null ? client.monthly_call_limit : null,
+        lastCallAt,
+        priceCents,
+        isTest: !!client.is_test_client,
+      }});
+    }
+
+    if (type === 'prospect') {
+      const { data: reqRow } = await supabase
+        .from('agency_support_requests')
+        .select('id, requester_name, contact, message, status, created_at, client_id')
+        .eq('id', target).eq('agency_id', agencyId).single();
+      if (!reqRow) return res.status(404).json({ error: 'Not found' });
+      return res.json({ success: true, type: 'prospect', facts: {
+        name: reqRow.requester_name || null,
+        contact: reqRow.contact || null,
+        firstMessage: reqRow.message || null,
+        status: reqRow.status || null,
+        createdAt: reqRow.created_at || null,
+      }});
+    }
+
+    return res.json({ success: true, type: type || 'unknown', facts: null });
+  } catch (e) {
+    console.error('inbox facts error:', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 
 module.exports = { agencyRouter, clientRouter };

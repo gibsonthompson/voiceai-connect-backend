@@ -18,6 +18,7 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { requirePermissionIfAuthed } = require('./auth');
+const { backfillContactCallNames } = require('../lib/contact-upsert');
 
 // ============================================================================
 // GET /api/client/:id/contacts - List all contacts with stats
@@ -237,6 +238,12 @@ router.put('/:id/contacts/:contactId', requirePermissionIfAuthed('contacts'), as
     if (error) {
       console.error('Error updating contact:', error);
       return res.status(400).json({ error: error.message });
+    }
+
+    // Renaming a contact stamps that name onto its past nameless calls, so the
+    // calls list, call detail, and exports all catch up to the correct name.
+    if (name !== undefined && contact && contact.name) {
+      await backfillContactCallNames(contactId, contact.name);
     }
 
     res.json({ success: true, contact });

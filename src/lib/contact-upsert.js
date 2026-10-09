@@ -4,6 +4,30 @@
 // ============================================================================
 const { supabase } = require('./supabase');
 
+// A call's customer_name is a placeholder when it's empty or a generic stand-in
+// the system writes when the AI never caught a real name.
+const CALL_NAME_PLACEHOLDERS = ['unknown', 'unknown caller', 'customer'];
+function isPlaceholderName(n) {
+  const t = String(n || '').trim().toLowerCase();
+  return !t || CALL_NAME_PLACEHOLDERS.includes(t);
+}
+
+// Set a real caller name on a contact's past calls that have none, so the calls
+// list, call detail, and CSV export all read correctly once the name is known.
+// Matches by contact_id and a stored placeholder (null / "Unknown" / "Customer").
+async function backfillContactCallNames(contactId, name) {
+  if (!contactId || isPlaceholderName(name)) return;
+  try {
+    await supabase
+      .from('calls')
+      .update({ customer_name: name })
+      .eq('contact_id', contactId)
+      .or('customer_name.is.null,customer_name.eq.Unknown,customer_name.eq.Customer');
+  } catch (e) {
+    console.warn('⚠️ backfillContactCallNames failed (non-fatal):', e.message);
+  }
+}
+
 /**
  * Upsert a contact from an inbound call.
  * - If contact exists (by phone + client_id): increment total_calls, update last_call_at, update ai_summary
@@ -127,11 +151,24 @@ async function upsertContactFromCall({
         return { contact: existing, isNew: false };
       }
 
-      // Link the call record to this contact
+      // Link the call to this contact, and stamp the contact's real name onto
+      // the call when this call came in without one, so the call record itself
+      // (and any export of it) shows who it was, not "Unknown".
+      const resolvedName = (updates.name && !isPlaceholderName(updates.name)) ? updates.name
+        : (!isPlaceholderName(existing.name)) ? existing.name
+        : (!isPlaceholderName(customerName)) ? customerName : null;
+      const callPatch = { contact_id: existing.id };
+      if (resolvedName && isPlaceholderName(customerName)) callPatch.customer_name = resolvedName;
       await supabase
         .from('calls')
-        .update({ contact_id: existing.id })
+        .update(callPatch)
         .eq('id', callId);
+
+      // If this call is what taught us the caller's name (the contact had none
+      // before), backfill the contact's earlier nameless calls too.
+      if (updates.name && !isPlaceholderName(updates.name)) {
+        await backfillContactCallNames(existing.id, updates.name);
+      }
 
       console.log(`📇 Contact updated: ${updated.name} (${normalizedPhone}) — ${updated.total_calls} calls`);
       return { contact: updated, isNew: false };
@@ -181,10 +218,13 @@ async function upsertContactFromCall({
         return { contact: null, isNew: false };
       }
 
-      // Link the call record to this contact
+      // Link the call to this contact; stamp the name if we have a real one and
+      // this call came in without.
+      const callPatch = { contact_id: created.id };
+      if (!isPlaceholderName(created.name) && isPlaceholderName(customerName)) callPatch.customer_name = created.name;
       await supabase
         .from('calls')
-        .update({ contact_id: created.id })
+        .update(callPatch)
         .eq('id', callId);
 
       console.log(`📇 New contact created: ${created.name} (${normalizedPhone})`);
@@ -205,4 +245,4 @@ function normalizePhone(phone) {
   return digits;
 }
 
-module.exports = { upsertContactFromCall };
+module.exports = { upsertContactFromCall, backfillContactCallNames, isPlaceholderName };
