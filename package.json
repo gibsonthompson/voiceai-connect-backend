@@ -33,7 +33,8 @@
     "svg-to-pdfkit": "^0.1.8",
     "uuid": "^13.0.0",
     "pdf-parse": "^1.1.1",
-    "mammoth": "^1.6.0"
+    "mammoth": "^1.6.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.0"

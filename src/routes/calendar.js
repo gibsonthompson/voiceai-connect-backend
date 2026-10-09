@@ -5,6 +5,7 @@ var getAvailableSlots = calendarBooking.getAvailableSlots;
 var bookAppointment = calendarBooking.bookAppointment;
 var lookupServiceConfig = calendarBooking.lookupServiceConfig;
 var recordCallBooking = require('../lib/booking-call-cache').recordCallBooking;
+var liveMonitor = require('../lib/live-monitor-bus');
 
 // ============================================================================
 // SERVER-SIDE DATE RESOLVER
@@ -150,7 +151,15 @@ router.post('/availability/:clientId', async function(req, res) {
       dateInput = parsed.date;
       serviceType = parsed.service_type || null;
     }
-    
+
+    // Live monitor: the AI just reached for the calendar.
+    try {
+      liveMonitor.publishToClient(clientId, {
+        type: 'activity', tool: 'check_availability', label: 'Checking the calendar',
+        detail: [serviceType, dateInput].filter(Boolean).join(' · ') || null,
+      });
+    } catch (e) {}
+
     if (!dateInput) {
       return res.json({ 
         results: [{ toolCallId: toolCallId, result: 'What date would you like to check availability for?' }] 
@@ -292,6 +301,14 @@ router.post('/book/:clientId', async function(req, res) {
     var serviceType = parsed.service_type;
     var notes = parsed.notes;
     var staffName = parsed.staff_name || null;
+
+    // Live monitor: the AI is booking.
+    try {
+      liveMonitor.publishToClient(clientId, {
+        type: 'activity', tool: 'book_appointment', label: 'Booking the appointment',
+        detail: [serviceType, dateInput, time].filter(Boolean).join(' · ') || null,
+      });
+    } catch (e) {}
 
     if (!customerName || !customerPhone || !dateInput || !time) {
       var missing = [];

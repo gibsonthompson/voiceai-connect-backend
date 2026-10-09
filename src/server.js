@@ -1855,6 +1855,7 @@ app.use('/api/client', clientContactsRoutes);
 app.use('/api/client', staffMembersRoutes);
 app.use('/api/client', clientServicesRoutes);
 app.use('/api/client', toolConfigRoutes);
+app.use('/api/client', require('./routes/live-monitor')); // live call demo + monitor (SSE stream, takeover)
 app.use('/api/client', pwaTrackingRoutes);
 app.use('/api/client', require('./routes/agency-client-thread').clientRouter); // agency<->client threads (behind requireClientAccess above)
 app.use('/api/sms', smsRoutes);
@@ -2274,7 +2275,7 @@ app.use((req, res) => {
 // START SERVER
 // ============================================================================
 app.use(expressErrorHandler);
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`
 ╔═══════════════════════════════════════════════════════════════╗
 ║                                                               ║
@@ -2288,5 +2289,9 @@ app.listen(PORT, () => {
 ╚═══════════════════════════════════════════════════════════════╝
   `);
 });
+
+// Live audio relay: lets an authorized supervisor hear a call in progress.
+// WebSocket upgrades on /api/live/audio only; never throws into startup.
+try { require('./live-audio-relay').attach(server); } catch (e) { console.error('live-audio-relay attach failed:', e.message); }
 
 module.exports = app;

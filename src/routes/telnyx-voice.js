@@ -42,6 +42,7 @@ const router = express.Router();
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
 const { sendAndLogSMS } = require('../lib/sms-logger');
+const liveMonitor = require('../lib/live-monitor-bus');
 const {
   callAction,
   answerCall,
@@ -476,6 +477,14 @@ router.post('/api/voice/request-transfer', async (req, res) => {
       return reply('I could not reach the team line right now. Apologize and offer to take a detailed message with the caller name, number, and reason for calling.');
     }
 
+    // Live monitor: the AI is handing off to a person.
+    try {
+      liveMonitor.publishToClient(session.client_id, {
+        type: 'activity', tool: 'request_human_transfer', label: 'Connecting to the team',
+        detail: summary || null,
+      });
+    } catch (e) {}
+
     if (session.status === 'bridged' || session.status === 'transferring') {
       return reply('A transfer is already in progress. Please hold.');
     }
@@ -614,6 +623,14 @@ router.post('/api/voice/send-sms', async (req, res) => {
     const { data: client } = clientId
       ? await supabase.from('clients').select('agency_id, tool_config, vapi_phone_number, business_name').eq('id', clientId).single()
       : { data: null };
+
+    // Live monitor: the AI is texting the caller.
+    try {
+      liveMonitor.publishToClient(clientId, {
+        type: 'activity', tool: 'send_sms', label: 'Texting the caller',
+        detail: savedKey ? `saved: ${savedKey}` : (text ? 'custom message' : null),
+      });
+    } catch (e) {}
 
     // Resolve a saved-text key to its EXACT configured value, so links and
     // addresses are never reworded by the model.

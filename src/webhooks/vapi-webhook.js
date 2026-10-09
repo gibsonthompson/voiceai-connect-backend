@@ -89,6 +89,7 @@ async function sendDemoProspectSMS(agency, params) {
 const { formatPhone, getPhoneLocation, formatDuration } = require('../lib/area-codes');
 const { insertUsageRecord, updateClientBillingQuantity } = require('../lib/usage-tracker');
 const { verifyVapiWebhook } = require('../lib/vapi-webhook-auth');
+const liveMonitor = require('../lib/live-monitor-bus');
 const { isConciergeDemoNumber, sendConciergeDemoCallerSMS, consumeConciergeTransfer } = require('../lib/concierge-demo-sms');
 
 // Live client subscription_status values that may take/save calls. 'manual' is
@@ -956,6 +957,22 @@ async function handleAssistantRequest(req, res, message) {
     console.log(`✅ Client: ${client.business_name}`);
     const agency = client.agencies || null;
 
+    // Live monitor: link this VAPI call id to its client so the live demo /
+    // monitor page can route the call's transcript + status events, and capture
+    // the VAPI monitor control URL if it is already on the call. Side-channel
+    // only, wrapped so it can never affect answering the call.
+    try {
+      const mcall = message.call || {};
+      liveMonitor.registerCall(mcall.id, {
+        clientId: client.id,
+        agencyId: agency && agency.id ? agency.id : null,
+        businessName: client.business_name,
+      });
+      if (mcall.monitor && (mcall.monitor.controlUrl || mcall.monitor.listenUrl)) {
+        liveMonitor.setMonitorUrls(mcall.id, mcall.monitor.controlUrl, mcall.monitor.listenUrl);
+      }
+    } catch (e) { /* never block the call */ }
+
     if (agency) {
       if (!['active', 'trial', 'trialing'].includes(agency.subscription_status))
         return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
@@ -1105,10 +1122,35 @@ async function handleVapiWebhook(req, res) {
       return res.status(200).json({ received: true });
     }
 
+    // ── Live monitor relay ────────────────────────────────────────────────
+    // transcript + status-update already stream here (serverMessages). Fan them
+    // out to any dashboard watching this call, and capture the monitor control
+    // URL the first time we see it. Pure side-channel: it never changes the
+    // response below, and a known call id is required so nothing leaks.
+    try {
+      const lmCall = message.call || {};
+      if (lmCall.id && lmCall.monitor && (lmCall.monitor.controlUrl || lmCall.monitor.listenUrl)) {
+        liveMonitor.setMonitorUrls(lmCall.id, lmCall.monitor.controlUrl, lmCall.monitor.listenUrl);
+      }
+      if (message?.type === 'transcript' && lmCall.id) {
+        liveMonitor.publishByCall(lmCall.id, {
+          type: 'transcript',
+          role: message.role === 'user' ? 'caller' : 'assistant',
+          text: message.transcript || '',
+          final: message.transcriptType === 'final',
+        });
+      } else if (message?.type === 'status-update' && lmCall.id) {
+        liveMonitor.publishByCall(lmCall.id, { type: 'status', status: message.status || 'unknown' });
+      }
+    } catch (e) { /* monitor must never break the webhook */ }
+
     console.log('📞 VAPI webhook received:', message?.type);
     if (message?.type !== 'end-of-call-report') return res.status(200).json({ received: true });
 
     const call = message.call;
+
+    // Live monitor: close out the call for anyone watching.
+    try { if (call && call.id) liveMonitor.publishByCall(call.id, { type: 'status', status: 'ended' }); } catch (e) {}
 
     // telnyx_cc whisper calls arrive over a shared VAPI SIP number, so the
     // phoneNumberId does NOT map to a client. Resolve those by the session we
