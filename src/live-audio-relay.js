@@ -29,6 +29,7 @@ const urlLib = require('url');
 const jwt = require('jsonwebtoken');
 const { supabase } = require('./lib/supabase');
 const bus = require('./lib/live-monitor-bus');
+const { fetchMonitorUrls } = require('./lib/vapi-call-monitor');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const WS_PATH = '/api/live/audio';
@@ -46,7 +47,9 @@ async function authorize(clientId, callId, token) {
   if (!decoded || !clientId || !callId) return null;
 
   const info = bus.getCallInfo(callId);
-  if (!info || info.clientId !== clientId || !info.listenUrl) return null;
+  // listenUrl may not be cached yet; the connection handler fetches it as a
+  // fallback. Here we only require that the call is known and owned.
+  if (!info || info.clientId !== clientId) return null;
 
   const { data: client } = await supabase
     .from('clients')
@@ -94,9 +97,22 @@ function attach(server) {
       return;
     }
 
+    // Resolve the listen stream URL: cached from the webhook, or fetched from
+    // VAPI as a fallback so audio works even if events did not carry it.
+    let listenUrl = info.listenUrl;
+    if (!listenUrl) {
+      const urls = await fetchMonitorUrls(callId);
+      if (urls.listenUrl) { bus.setMonitorUrls(callId, urls.controlUrl, urls.listenUrl); listenUrl = urls.listenUrl; }
+    }
+    if (!listenUrl) {
+      safeSend(browser, { type: 'error', error: 'No live audio available for this call yet' });
+      try { browser.close(); } catch {}
+      return;
+    }
+
     let upstream;
     try {
-      upstream = new WebSocket(info.listenUrl);
+      upstream = new WebSocket(listenUrl);
     } catch (e) {
       safeSend(browser, { type: 'error', error: 'Could not open the listen stream' });
       try { browser.close(); } catch {}

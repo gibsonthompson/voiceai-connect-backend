@@ -33,8 +33,10 @@ const {
   subscribe,
   snapshot,
   getCallInfo,
+  setMonitorUrls,
   publishToClient,
 } = require('../lib/live-monitor-bus');
+const { fetchMonitorUrls } = require('../lib/vapi-call-monitor');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -144,7 +146,15 @@ router.post('/:id/live/control', async (req, res) => {
   if (!info || info.clientId !== auth.client.id) {
     return res.status(404).json({ success: false, error: 'No live call to control' });
   }
-  if (!info.controlUrl) {
+
+  // Use the cached controlUrl, or fall back to asking VAPI for the call so
+  // takeover works even if the webhook events did not carry the monitor URLs.
+  let controlUrl = info.controlUrl;
+  if (!controlUrl) {
+    const urls = await fetchMonitorUrls(callId);
+    if (urls.controlUrl) { setMonitorUrls(callId, urls.controlUrl, urls.listenUrl); controlUrl = urls.controlUrl; }
+  }
+  if (!controlUrl) {
     return res.status(409).json({ success: false, error: 'The control channel is not ready yet, try again in a second' });
   }
 
@@ -176,7 +186,7 @@ router.post('/:id/live/control', async (req, res) => {
   }
 
   try {
-    const r = await axios.post(info.controlUrl, payload, {
+    const r = await axios.post(controlUrl, payload, {
       headers: { 'content-type': 'application/json' },
       timeout: 8000,
     });
