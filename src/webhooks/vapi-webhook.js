@@ -804,15 +804,88 @@ function readSipHeader(message, name) {
   return null;
 }
 
+// Merge every SIP header VAPI surfaced (from the known payload locations) into
+// one object, so we can log it and look for forwarding / original-caller headers.
+function collectSipHeaders(message) {
+  const out = {};
+  const sources = [
+    message?.call?.sipHeaders,
+    message?.call?.phoneCallProviderDetails?.sipHeaders,
+    message?.sipHeaders,
+    message?.call?.transport?.sipHeaders,
+  ];
+  for (const src of sources) {
+    if (src && typeof src === 'object') {
+      for (const k of Object.keys(src)) { if (out[k] === undefined) out[k] = src[k]; }
+    }
+  }
+  return out;
+}
+
+// Pull a phone number out of a SIP header value: "Name" <sip:+1...@host>,
+// <tel:+1...>, sip:+1...@host, or a bare number. Returns E.164 (+1...) or ''.
+function parsePhoneFromHeader(val) {
+  if (val == null) return '';
+  const s = String(Array.isArray(val) ? val[0] : val);
+  const m = s.match(/(?:tel:|sip:)\s*\+?(\d{7,15})/i) || s.match(/\+(\d{7,15})/) || s.match(/\b(\d{10,15})\b/);
+  if (!m) return '';
+  const d = m[1];
+  if (d.length === 10) return `+1${d}`;
+  if (d.length === 11 && d.startsWith('1')) return `+${d}`;
+  return `+${d}`;
+}
+
+// A call forwarded by a PBX / VoIP system that re-originates the leg arrives with
+// the From (customer.number) set to the FORWARDING / business number, not the
+// real caller (carriers enforce this to prevent caller-id spoofing). The original
+// caller, when the forwarder passes it through, rides in P-Asserted-Identity (or
+// Remote-Party-ID / History-Info). Diversion carries the party that FORWARDED the
+// call (the business), so it only signals that a forward happened, it is NOT the
+// caller. Returns the number to use plus diagnostics for logging.
+function recoverForwardedCaller(message, fromNumber) {
+  const headers = collectSipHeaders(message);
+  const get = (name) => { const want = name.toLowerCase(); for (const k of Object.keys(headers)) if (k.toLowerCase() === want) return headers[k]; return null; };
+
+  const forwarded = !!(get('Diversion') || get('Diversion-Info') || get('History-Info'));
+
+  // Original-caller candidates, best first. Never Diversion (that is the forwarder).
+  const candidateHeaders = ['P-Asserted-Identity', 'P-Preferred-Identity', 'Remote-Party-ID', 'X-Original-From', 'X-Original-Caller', 'X-Caller-Id', 'X-Original-Number', 'History-Info'];
+  let recovered = '', via = '';
+  for (const h of candidateHeaders) { const p = parsePhoneFromHeader(get(h)); if (p) { recovered = p; via = h; break; } }
+
+  const fromDigits = String(fromNumber || '').replace(/\D/g, '').slice(-10);
+  const recDigits = recovered.replace(/\D/g, '').slice(-10);
+
+  // Prefer the recovered caller only when From is missing, or a forward was
+  // detected and the recovered number is real and different from From (the
+  // rewrite case). Otherwise keep From, so direct calls are unchanged.
+  let caller = fromNumber;
+  let usedRecovery = false;
+  if (recovered && (!fromNumber || fromNumber === 'Unknown' || (forwarded && recDigits && recDigits !== fromDigits))) {
+    caller = recovered; usedRecovery = true;
+  }
+  return { caller, forwarded, recovered, via, usedRecovery, headers };
+}
+
 async function handleAssistantRequest(req, res, message) {
   const startTime = Date.now();
   try {
     const vapiPhoneNumber = message.phoneNumber?.number || null;
-    const callerPhone = message.customer?.number || message.call?.customer?.number || null;
+    const fromNumber = message.customer?.number || message.call?.customer?.number || null;
+    // Recover the true caller behind a forwarded call when the From was rewritten
+    // to the business number (common with enterprise VoIP/PBX forwarding).
+    const { caller: callerPhone, forwarded, recovered, via, usedRecovery, headers: allSipHeaders } = recoverForwardedCaller(message, fromNumber);
 
     console.log(`🔔 Assistant-request received`);
     console.log(`   VAPI number: ${vapiPhoneNumber}`);
-    console.log(`   Caller: ${callerPhone || 'Unknown'}`);
+    console.log(`   From (caller id): ${fromNumber || 'Unknown'}`);
+    if (allSipHeaders && Object.keys(allSipHeaders).length > 0) {
+      console.log(`   📡 SIP headers: ${JSON.stringify(allSipHeaders)}`);
+    }
+    if (forwarded || recovered) {
+      console.log(`   ↪️ Forwarded call: ${forwarded ? 'yes' : 'no'}. Original caller via ${via || 'none'}: ${recovered || 'not found'}${usedRecovery ? ' (using recovered)' : ''}`);
+    }
+    console.log(`   Caller used: ${callerPhone || 'Unknown'}`);
 
     // telnyx_cc whisper path: the call came in over the shared VAPI SIP
     // endpoint and carries the client id as a SIP header. Resolve the client
@@ -936,17 +1009,40 @@ async function handleAssistantRequest(req, res, message) {
     let callerContext = null;
     if (callerPhone && callerPhone !== 'Unknown') {
       try {
-        let n = callerPhone;
-        if (!n.startsWith('+')) { const d = n.replace(/\D/g, ''); if (d.length === 10) n = `+1${d}`; else if (d.length === 11 && d.startsWith('1')) n = `+${d}`; }
-        const { data: contact, error } = await supabase
-          .from('client_contacts').select('name, phone, email, total_calls, last_call_at, ai_summary, notes, tags, status')
-          .eq('client_id', client.id).eq('phone', n).single();
-        if (!error && contact) {
-          callerContext = contact;
-          const who = contact.name && contact.name !== 'Unknown' ? contact.name : 'returning caller (name not captured)';
-          console.log(`📇 Recognized: ${who} (${contact.total_calls || 0} prior call(s))`);
+        // Match by the last 10 digits regardless of how the caller number or the
+        // stored contact is formatted. The old code only cleaned the number when
+        // it did NOT start with "+", so a "+1 678 316 1454" style caller id (or a
+        // contact saved in a different format) never matched and recognition
+        // silently failed. We search the common stored formats for that number.
+        const digitsOnly = String(callerPhone).replace(/\D/g, '');
+        const last10 = digitsOnly.length >= 10 ? digitsOnly.slice(-10) : '';
+        if (last10.length === 10) {
+          const candidates = [
+            `+1${last10}`,
+            `1${last10}`,
+            last10,
+            `+${last10}`,
+            `(${last10.slice(0, 3)}) ${last10.slice(3, 6)}-${last10.slice(6)}`,
+          ];
+          const { data: rows } = await supabase
+            .from('client_contacts')
+            .select('name, phone, email, total_calls, last_call_at, ai_summary, notes, tags, status')
+            .eq('client_id', client.id)
+            .in('phone', candidates)
+            .limit(5);
+          // Prefer a row that already has a real name.
+          const contact = (rows && rows.length)
+            ? (rows.find(r => r.name && r.name !== 'Unknown') || rows[0])
+            : null;
+          if (contact) {
+            callerContext = contact;
+            const who = contact.name && contact.name !== 'Unknown' ? contact.name : 'returning caller (name not captured)';
+            console.log(`📇 Recognized: ${who} (${contact.total_calls || 0} prior call(s))`);
+          } else {
+            console.log(`📇 New/unknown caller: ${callerPhone}`);
+          }
         } else {
-          console.log(`📇 New/unknown caller: ${callerPhone}`);
+          console.log(`📇 Caller number not usable for lookup: ${callerPhone}`);
         }
       } catch (e) { console.warn('⚠️ Contact lookup failed:', e.message); }
     }

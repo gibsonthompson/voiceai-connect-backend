@@ -792,6 +792,7 @@ function buildCallerContextBlock(contact) {
   if (name) {
     lines.push(`Greet them by name: "Hi ${name}, welcome back!"`);
     lines.push('Do NOT ask for their name, you already have it.');
+    lines.push(`If the caller asks whether you know who they are or what their name is, confirm it: their name is ${name}. This is not guessing, you have it on file from their contact record.`);
   }
   lines.push('Do NOT ask for their phone number, you already have it.');
   lines.push('Reference their previous interaction naturally if relevant, but don\'t force it.');

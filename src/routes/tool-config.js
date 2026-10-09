@@ -8,6 +8,7 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { requirePermissionIfAuthed } = require('./auth');
+const { looksLikeStreetAddress } = require('../lib/address-utils');
 
 // Default tool config — used when client has no tool_config or is missing keys
 const DEFAULT_TOOL_CONFIG = {
@@ -46,6 +47,8 @@ function deriveKbContact(client) {
       if (sec && sec[1]) { const b = sec[1].match(/^\s*-+\s*(.+)$/m); if (b && b[1]) address = b[1].trim(); }
     }
   }
+  // Guard against older/garbage KB values (a vague area, not a street address).
+  if (address && !looksLikeStreetAddress(address)) address = '';
   return { address, website };
 }
 

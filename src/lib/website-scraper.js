@@ -25,6 +25,7 @@
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const FormData = require('form-data');
 const fetch = require('node-fetch');
+const { looksLikeStreetAddress, pickStreetAddress } = require('./address-utils');
 
 // ============================================================================
 // JINA READER — Fetch a single page as clean markdown
@@ -224,8 +225,8 @@ Return this JSON structure. Use null for any field you cannot find:
 {
   "business_name": "string — official name as shown on site",
   "phone_numbers": ["array of phone numbers found"],
-  "primary_address": "the business's single main street address as one line (street, city, state, ZIP), or null",
-  "addresses": ["array of ALL physical addresses/locations found, full street addresses"],
+  "primary_address": "the business's single main FULL STREET address, one line with the street NUMBER, street name, city, state and ZIP (e.g. '123 Main St, Burlington, VT 05401'), or null if the site only gives a general area",
+  "addresses": ["array of ALL full street addresses found (each with a street number); do NOT include general areas"],
   "email_addresses": ["array of email addresses"],
   "business_hours": {
     "monday": "9:00 AM - 5:00 PM or null",
@@ -248,7 +249,7 @@ Return this JSON structure. Use null for any field you cannot find:
   "faqs": [{ "question": "the question as a caller would ask it", "answer": "concise answer, under ~300 characters" }]
 }
 
-For the address: look hard for it, it is often in the page footer, a contact or locations page, or embedded map / structured data (schema.org LocalBusiness JSON-LD), not the main text. Return the full street address with city, state and ZIP. "primary_address" is the single main location (what you would text a caller asking "where are you?"); "addresses" lists every location found. Do not guess or leave it null if the site shows an address anywhere.
+For the address: find the business's real FULL STREET address. It is usually in the page footer, a contact or locations page, or embedded map / structured data (schema.org LocalBusiness JSON-LD), not the body copy. It MUST include a street number plus street name, and ideally city, state and ZIP, exactly as written (e.g. "123 Main St, Burlington, VT 05401"). "primary_address" is the single main location you would text a caller asking "where are you?"; "addresses" lists every full street address found. CRITICAL: a neighborhood, district, "downtown Burlington", "Greater Boston area", a city on its own, or a service-area phrase is NOT an address. If the site shows only a general area and no actual street address, set primary_address to null and leave addresses empty. Never invent or approximate an address.
 
 For "faqs": pull real question-and-answer pairs the site actually states (FAQ/help pages, or clear Q&A inline). Phrase each question the way a caller would ask it and keep answers short and factual. Include at most 8, the most useful for a phone receptionist. Return an empty array if the site has none. Do not invent FAQs.`;
 
@@ -299,8 +300,9 @@ function formatStructuredSection(data, websiteUrl) {
   // query tool surfaces them fast, and labeled as text-ready so the send_sms
   // tool can send an accurate address/link when a caller asks for it in writing.
   const quick = [];
-  const primaryAddr = (data.primary_address && String(data.primary_address).trim())
-    || (Array.isArray(data.addresses) && data.addresses[0] ? String(data.addresses[0]).trim() : '');
+  // Only treat a value as the address if it is a real street address, never a
+  // vague area the model may have returned ("downtown Burlington", a city, etc.).
+  const primaryAddr = pickStreetAddress(data.primary_address, data.addresses);
   if (primaryAddr) {
     quick.push(`- Address (text this when a caller asks where you are or for directions): ${primaryAddr}`);
     quick.push(`- Directions link (Google Maps): https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(primaryAddr)}`);
@@ -323,8 +325,9 @@ function formatStructuredSection(data, websiteUrl) {
     sections.push(`\n## Phone Numbers\n${data.phone_numbers.map(p => `- ${p}`).join('\n')}`);
   }
 
-  if (data.addresses?.length > 0) {
-    sections.push(`\n## Addresses\n${data.addresses.map(a => `- ${a}`).join('\n')}`);
+  const realAddresses = (Array.isArray(data.addresses) ? data.addresses : []).filter(a => looksLikeStreetAddress(a));
+  if (realAddresses.length > 0) {
+    sections.push(`\n## Addresses\n${realAddresses.map(a => `- ${String(a).trim()}`).join('\n')}`);
   }
 
   if (data.email_addresses?.length > 0) {

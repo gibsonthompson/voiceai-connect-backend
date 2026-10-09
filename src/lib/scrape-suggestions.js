@@ -16,6 +16,8 @@
 //   faq_suggestions          jsonb  [{ question, answer }]
 // ============================================================================
 
+const { pickStreetAddress } = require('./address-utils');
+
 const MAX_ITEMS = 15;
 
 function norm(s) {
@@ -209,10 +211,8 @@ async function storeSuggestionsFromScrape(supabase, clientId, structuredData) {
     // client has not set one, and we never flip `enabled` on, the client still
     // chooses to turn address-texting on in their dashboard (value ready to go).
     const update = { ...suggestions };
-    const scrapedAddress = String(
-      (structuredData.primary_address && structuredData.primary_address) ||
-      (Array.isArray(structuredData.addresses) && structuredData.addresses[0]) || ''
-    ).trim();
+    // Only seed a real street address, never a vague area the model returned.
+    const scrapedAddress = pickStreetAddress(structuredData.primary_address, structuredData.addresses);
     if (scrapedAddress) {
       const tc = (clientRow && clientRow.tool_config && typeof clientRow.tool_config === 'object') ? clientRow.tool_config : {};
       const presets = (tc.smsPresets && typeof tc.smsPresets === 'object') ? tc.smsPresets : {};
