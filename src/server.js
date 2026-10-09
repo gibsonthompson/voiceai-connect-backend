@@ -2179,8 +2179,6 @@ app.use('/api/cron', numberCleanupRoutes);
 // outbound daily briefing cron (/api/cron/jarvis-briefing).
 app.use('/api/jarvis', require('./routes/jarvis-admin'));
 app.use('/api/cron', require('./routes/jarvis-briefing'));
-// Jarvis personal Google Calendar connect/callback/disconnect/status (HQ UI).
-app.use('/api/auth/jarvis-calendar', require('./routes/jarvis-calendar-auth'));
 
 
 
@@ -2208,7 +2206,7 @@ app.post('/webhook/twilio-sms', express.urlencoded({ extended: false, limit: '2m
 // still gets the JSON body parsed by the global middleware above.
 app.use('/webhook/telnyx-voice', express.raw({ type: '*/*', limit: '5mb' }));
 app.use('/', require('./routes/telnyx-voice'));
-app.use('/', require('./routes/voice-brief')); // Phase 0: AI texts the team a heads-up right before a transfer
+app.use('/', require('./routes/warm-transfer')); // Phase 1: spoken whisper warm transfer (VAPI tool + Telnyx TeXML)
 
 // Stripe platform webhooks (agency subscriptions)
 app.post('/webhook/stripe', 
