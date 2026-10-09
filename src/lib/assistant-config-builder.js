@@ -147,9 +147,9 @@ If the caller speaks Spanish, immediately switch to Spanish for the remainder of
 const WHISPER_TRANSFER_BLOCK = `
 
 # Connecting a Caller to a Person
-When the caller needs a real person (they ask to speak to someone, it is urgent, or you cannot help them), do this:
+When the caller needs a real person (they ask to speak to someone, it is urgent, or you cannot help them), FIRST screen the call per "Screening Before a Transfer": get their name and what it is regarding (unless it is a clear emergency), and do not put sales or solicitation calls through. Once you have that, do this:
 1. Say one short line, exactly like: "Sure, let me transfer you now. One moment."
-2. Immediately call the request_human_transfer tool. For its summary, give one or two sentences covering who is calling and what they need, so the team member knows the situation before they pick up. Example summary: "Maria Lopez is calling about a burst pipe in her basement and needs someone out today."
+2. Immediately call the request_human_transfer tool. For its summary, give one or two sentences covering who is calling and what they need (use the name and reason you just gathered), so the team member knows the situation before they pick up. Example summary: "Maria Lopez is calling about a burst pipe in her basement and needs someone out today."
 3. After you call the tool, do NOT keep talking. The system connects the call for you. Only speak again if the tool result tells you no one was available, in which case apologize briefly and take a detailed message (name, number, and reason for calling).
 Never read the summary out loud to the caller. It is only for the team member.`;
 
@@ -1140,6 +1140,24 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     systemPrompt += `\n\n# When NOT to Transfer\nTransfer ONLY when the caller explicitly asks for a person (see Transfer Keywords) or there is a genuine emergency. Do not transfer on your own initiative. Never transfer just because you finished answering a question, because there is a pause, or to wrap up the call. If you can answer or help, do that instead. When unsure, keep helping or offer to take a message. Never call the transfer tool unless one of those two conditions is clearly met.\n`;
   }
 
+  // Screening before a transfer. A caller asking for a person is not enough to
+  // put them straight through: the AI first gets the caller's name and the
+  // reason for the call. This screens out sales/solicitation calls and gives
+  // the person who picks up real context for the warm transfer. Emergencies
+  // skip the questions. Injected only when a transfer is actually possible.
+  if (toolConfig.transferCall && handoff === 'transfer' && !systemPrompt.includes('# Screening Before a Transfer')) {
+    systemPrompt += `\n\n# Screening Before a Transfer
+Before you transfer anyone to a person, first find out who they are and what the call is about. Do not put a caller straight through just because they asked for a person or a manager. When a caller asks for a person, a manager, or to be transferred:
+1. Get their name, if you do not already have it.
+2. Ask what the call is regarding, naturally, for example "Sure, I can get you to the right person, may I ask what this is regarding?" or "Of course, who's calling and what's it about so I can let them know?"
+3. If it is something you can handle yourself (a question you can answer, an appointment you can book), offer to help with that first instead of transferring.
+Only once you have their name and reason should you transfer, and carry both into the handoff so the person who answers already knows who is calling and why.
+
+EMERGENCY EXCEPTION: if the caller clearly has an emergency or an urgent, time-sensitive problem, do not slow them down with questions. Transfer right away and note that it is urgent in the handoff.
+
+SALES, SOLICITATIONS, AND SPAM: if the reason is a sales pitch, a marketing or advertising offer, SEO or lead-generation services, insurance or credit-card offers, or anything being sold TO the business, do NOT transfer. Politely say the business is not interested and that you cannot put them through, then take a message only if they insist, or end the call. Never transfer a solicitation to the team.\n`;
+  }
+
   // Transfer routing: when specific team members can take transfers, name them
   // so the AI routes a caller to the right person (by name or by what they
   // handle) instead of always sending everyone to the main line. Only meaningful
@@ -1229,7 +1247,7 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
         type: 'function',
         function: {
           name: 'request_human_transfer',
-          description: 'Connect the caller to a real person on the team. Use this when the caller asks to speak with someone, has an emergency, or you cannot help them. Provide a short summary so the team member knows who is calling and why before they pick up. After calling this tool, stop talking; the system connects the call.',
+          description: 'Connect the caller to a real person on the team. Before using this, get the name and reason for the call, unless it is a clear emergency, and do not transfer sales, marketing, or solicitation calls. Use this when a real caller asks to speak with someone, has an emergency, or you cannot help them. Provide a short summary covering the name and reason so the team member knows who is calling and why before they pick up. After calling this tool, stop talking; the system connects the call.',
           parameters: {
             type: 'object',
             properties: {
@@ -1320,8 +1338,8 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
           function: {
             name: 'transferCall',
             description: destinations.length > 1
-              ? 'Transfer the call to the right person on the team. Pick the destination that best matches who the caller needs: a specific team member when they ask for one by name or clearly need what that person handles, otherwise the main business team. Use this when the caller needs a human, has an emergency, a billing question, an existing account issue, or when you cannot fully help them.'
-              : 'Transfer the call to the business team. Use this when the caller needs to speak with someone directly, has an emergency, billing question, existing account issue, or when you cannot fully help them.',
+              ? 'Transfer the call to the right person on the team. Pick the destination that best matches who the caller needs: a specific team member when they ask for one by name or clearly need what that person handles, otherwise the main business team. Use this when the caller needs a human, has an emergency, a billing question, an existing account issue, or when you cannot fully help them. Before transferring, get the name and reason for the call unless it is a clear emergency, and do not transfer sales or spam calls.'
+              : 'Transfer the call to the business team. Use this when the caller needs to speak with someone directly, has an emergency, billing question, existing account issue, or when you cannot fully help them. Before transferring, get the name and reason for the call unless it is a clear emergency, and do not transfer sales or spam calls.',
           },
           destinations,
         });

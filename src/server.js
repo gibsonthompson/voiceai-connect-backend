@@ -1846,6 +1846,10 @@ app.post('/api/client/suspend', suspendManualClient);
 const _CLIENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 app.use('/api/client/:clientId', (req, res, next) => {
   if (!_CLIENT_UUID_RE.test(req.params.clientId || '')) return next();
+  // The live-monitor SSE stream authorizes itself via a ?token query param,
+  // because a browser EventSource cannot send an Authorization header. Skip the
+  // header-based gate for it (routes/live-monitor.js does the real auth check).
+  if (/\/live\/stream(\?|\/|$)/.test(req.originalUrl || req.url || '')) return next();
   return requireClientAccess()(req, res, next);
 });
 
