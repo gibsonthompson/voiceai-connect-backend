@@ -152,7 +152,9 @@ function datePre(todayStr) {
 // The real next game, so the Falcons summary states the actual day instead of
 // guessing off a headline. Best-effort: any failure degrades to null and the
 // summary just leans on the headlines.
-async function nextFalconsGame() {
+// ESPN's public team schedule: the real next game as structured data. Returns
+// null on any failure so the caller can fall back.
+async function espnNextFalconsGame() {
   try {
     const res = await getWithTimeout(
       'https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/atl/schedule',
@@ -176,9 +178,28 @@ async function nextFalconsGame() {
     const name = next.name || next.shortName || 'their next game';
     return { label: `${name} on ${dayStr} at ${timeStr} Eastern`, dayStr, timeStr, name };
   } catch (e) {
-    console.warn('⚠️ Falcons schedule lookup failed:', e.message);
+    console.warn('⚠️ Falcons ESPN schedule lookup failed:', e.message);
     return null;
   }
+}
+
+// The real next game, ESPN first, then a live web search as a fallback so the
+// summary always states the actual day instead of guessing "Friday" off a
+// headline. Any failure degrades to null and the summary leans on the headlines.
+async function nextFalconsGame() {
+  const espn = await espnNextFalconsGame();
+  if (espn) return espn;
+  try {
+    const today = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }).format(new Date());
+    const ws = await answerWithWebSearch(
+      `The Atlanta Falcons' single next upcoming NFL game as of ${today}. Reply with just the day of week, the date, the opponent, and the kickoff time, nothing else.`,
+      today,
+    );
+    if (ws) return { label: ws };
+  } catch (e) {
+    console.warn('⚠️ Falcons web schedule fallback failed:', e.message);
+  }
+  return null;
 }
 
 // ── General web search (ask it anything) ────────────────────────────────────

@@ -101,7 +101,9 @@ async function buildBriefingAssistant(ctx, briefingText) {
     backgroundSound: JARVIS_HOLD_MUSIC,
     // The whole briefing is the first message, so VAPI speaks it all, then
     // listens for his follow-ups. This is what fixes the dead-air silence.
-    firstMessage: text,
+    // Lead with a 3s pause so the first bar of the Green Onions background
+    // plays before the briefing starts, same cool entrance as the live line.
+    firstMessage: `<break time="3.0s" /> ${text}`,
     recordingEnabled: false,
     maxDurationSeconds: 600,
     serverMessages: ['end-of-call-report', 'tool-calls'],

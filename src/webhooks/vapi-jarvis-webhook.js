@@ -285,7 +285,9 @@ function timeGreeting() {
 }
 
 function getJarvisFirstMessage() {
-  return `${timeGreeting()} Gibson. How can I help? Want your briefing, something added to the list, or a note jotted down?`;
+  // Lead with a 3s pause (the max ElevenLabs flash honors) so the first bar of
+  // the Green Onions background plays before he speaks, a cool entrance.
+  return `<break time="3.0s" /> ${timeGreeting()} Gibson. How can I help? Want your briefing, something added to the list, or a note jotted down?`;
 }
 
 // ── tool schemas (VAPI function tools) ─────────────────────────────────────
