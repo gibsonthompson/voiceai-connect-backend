@@ -1342,18 +1342,34 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
       }
 
       if (destinations.length > 0) {
-        if (process.env.TELNYX_TEXML_SIP_DOMAIN) {
+        // Whisper rollout gate. TELNYX_TEXML_SIP_DOMAIN turns the feature on, but
+        // so a live test never changes real clients, it only applies to the
+        // client ids listed in WARM_WHISPER_CLIENT_IDS (comma separated) until
+        // WARM_WHISPER_ALL is 'true', which rolls it out to everyone.
+        const _whisperAllowlist = (process.env.WARM_WHISPER_CLIENT_IDS || '').split(',').map(x => x.trim()).filter(Boolean);
+        const _whisperOn = !!process.env.TELNYX_TEXML_SIP_DOMAIN
+          && (process.env.WARM_WHISPER_ALL === 'true' || _whisperAllowlist.includes(client.id));
+        if (_whisperOn) {
           // Phase 1 warm transfer with a SPOKEN whisper. Instead of VAPI's
           // native transfer (a blind hand-off on Telnyx), the AI calls
           // warm_transfer with a one-line summary. The backend uses the call's
           // controlUrl to REFER the caller into a Telnyx TeXML app that speaks
           // the summary to the team member, then bridges the caller in. See
           // routes/warm-transfer.js. Telnyx is only involved at transfer time.
+          // Reuse the SAME destinations the native path built (main line + any
+          // transferable staff), so warm transfer can route to the right person.
+          // The AI picks a destination by its label; the label->number map rides
+          // on the tool's server.url (base64) so the backend resolves it without
+          // re-deriving the staff list. These numbers are already in the VAPI
+          // config on the native path, so this exposes nothing new.
+          const _targets = destinations.map(d => ({ label: d.description, number: d.number }));
+          const _targetsParam = Buffer.from(JSON.stringify(_targets)).toString('base64');
+          const _targetLabels = _targets.map(t => t.label);
           tools.push({
             type: 'function',
             function: {
               name: 'warm_transfer',
-              description: 'Connect the caller to a real person on the team. First get the caller\'s name and the reason for the call (unless it is a clear emergency), and do not connect sales, marketing, or spam calls. Provide a one or two sentence summary of who is calling and why; the team member hears it spoken before they are connected. After you call this, STOP talking, the system connects the call.',
+              description: 'Connect the caller to a real person on the team. First get the caller\'s name and the reason for the call (unless it is a clear emergency), and do not connect sales, marketing, or spam calls. Provide a one or two sentence summary of who is calling and why; the team member hears it spoken before they are connected. Choose transfer_to for the person the caller asked for by name or who best fits what they need, otherwise the main business team. After you call this, STOP talking, the system connects the call.',
               parameters: {
                 type: 'object',
                 properties: {
@@ -1361,11 +1377,16 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
                     type: 'string',
                     description: 'One or two sentences: who is calling and what they need. Example: "Maria Lopez is calling about a burst pipe in her basement and needs someone out today."',
                   },
+                  transfer_to: {
+                    type: 'string',
+                    enum: _targetLabels,
+                    description: 'Who to connect the caller to. Pick the team member the caller asked for by name or who handles what they need, otherwise the main business team.',
+                  },
                 },
-                required: ['summary'],
+                required: ['summary', 'transfer_to'],
               },
             },
-            server: { url: `${BACKEND_URL}/api/voice/warm-transfer?clientId=${client.id}`, timeoutSeconds: 20 },
+            server: { url: `${BACKEND_URL}/api/voice/warm-transfer?clientId=${client.id}&t=${encodeURIComponent(_targetsParam)}`, timeoutSeconds: 20 },
           });
         } else {
           // Fallback until the Telnyx TeXML whisper is configured

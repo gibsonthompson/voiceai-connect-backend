@@ -144,8 +144,20 @@ router.post('/api/voice/warm-transfer', async (req, res) => {
       .single();
     if (cErr || !client) { logErr(`client ${clientId} not found: ${cErr && cErr.message}`); return reply(takeMessage); }
 
-    const agentPhone = normE164(client.transfer_phone || client.owner_phone);
-    if (!agentPhone) { logErr(`client ${clientId} has no transfer_phone/owner_phone`); return reply(takeMessage); }
+    // Resolve which destination the AI chose from the label->number map carried
+    // on the tool URL (the same destinations the native path builds, including
+    // staff). Fall back to the main transfer/owner line.
+    let targets = [];
+    try { targets = JSON.parse(Buffer.from((req.query && req.query.t) || '', 'base64').toString('utf8')); } catch (e) { targets = []; }
+    const chosenLabel = (args.transfer_to || '').toString();
+    let chosenNumber = null;
+    if (Array.isArray(targets) && targets.length) {
+      const hit = targets.find(t => t && t.label === chosenLabel) || targets[0];
+      chosenNumber = hit && hit.number;
+    }
+    const agentPhone = normE164(chosenNumber || client.transfer_phone || client.owner_phone);
+    if (!agentPhone) { logErr(`client ${clientId} has no transfer target`); return reply(takeMessage); }
+    log(`transfer_to="${chosenLabel}" resolved to agent ${agentPhone} (of ${(targets||[]).length} targets)`);
 
     let controlUrl = msg.call?.monitor?.controlUrl || body.call?.monitor?.controlUrl || null;
     log(`controlUrl on event: ${controlUrl ? 'present' : 'absent'}`);
@@ -234,7 +246,7 @@ router.post('/texml/warm-transfer', async (req, res) => {
     if (token) {
       const { data } = await supabase
         .from('call_sessions')
-        .select('id, office_number, caller_number, vapi_call_id, status')
+        .select('id, client_id, office_number, caller_number, vapi_call_id, status')
         .eq('id', token).single();
       session = data || null;
       log(`token from To=${token}; session ${session ? 'found' : 'MISSING'}`);
@@ -245,7 +257,7 @@ router.post('/texml/warm-transfer', async (req, res) => {
       const fromNorm = normE164(from);
       const { data } = await supabase
         .from('call_sessions')
-        .select('id, office_number, caller_number, vapi_call_id, status')
+        .select('id, client_id, office_number, caller_number, vapi_call_id, status')
         .in('status', ['warm_pending', 'warm_dialing'])
         .order('created_at', { ascending: false })
         .limit(10);
@@ -260,7 +272,17 @@ router.post('/texml/warm-transfer', async (req, res) => {
       return sendTexml(res, voicemailXml(token));
     }
 
-    const callerId = (session.caller_number && normE164(session.caller_number)) || agent;
+    // Caller ID for the agent leg: the client's own Telnyx number (owned, so the
+    // outbound dial is never rejected for an unauthorized caller ID), then the
+    // caller's number, then the agent number.
+    let clientAiNumber = null;
+    if (session.client_id) {
+      try {
+        const { data: c } = await supabase.from('clients').select('vapi_phone_number').eq('id', session.client_id).single();
+        clientAiNumber = (c && c.vapi_phone_number) ? normE164(c.vapi_phone_number) : null;
+      } catch (e) { /* fall back below */ }
+    }
+    const callerId = clientAiNumber || (session.caller_number && normE164(session.caller_number)) || agent;
     const whisperUrl = `${BACKEND_URL}/texml/whisper?token=${encodeURIComponent(token)}`;
     const afterUrl = `${BACKEND_URL}/texml/warm-transfer/after?token=${encodeURIComponent(token)}`;
 
