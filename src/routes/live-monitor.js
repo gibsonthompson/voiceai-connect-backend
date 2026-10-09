@@ -53,7 +53,7 @@ async function authorizeClient(clientId, tokenRaw) {
 
   const { data: client } = await supabase
     .from('clients')
-    .select('id, agency_id, business_name, vapi_assistant_id, industry, agencies(name, logo_url, logo, primary_color, accent_color)')
+    .select('id, agency_id, business_name, vapi_assistant_id, industry')
     .eq('id', clientId)
     .single();
 
@@ -80,7 +80,20 @@ router.get('/:id/live/info', async (req, res) => {
   const auth = await authorizeClient(req.params.id, req.headers.authorization || req.query.token);
   if (!auth.ok) return res.status(auth.code).json({ success: false, error: errText(auth.code) });
 
-  const a = auth.client.agencies || {};
+  // Branding comes from the agency, fetched separately and best-effort so a
+  // branding hiccup (or a missing column) can never 404 the whole page.
+  let a = {};
+  try {
+    if (auth.client.agency_id) {
+      const { data: ag } = await supabase
+        .from('agencies')
+        .select('name, logo_url, primary_color, accent_color')
+        .eq('id', auth.client.agency_id)
+        .single();
+      if (ag) a = ag;
+    }
+  } catch (e) { /* branding is optional */ }
+
   res.json({
     success: true,
     client: {
@@ -93,7 +106,7 @@ router.get('/:id/live/info', async (req, res) => {
     // White-label: the page shows the agency's brand, never the platform's.
     branding: {
       agency_name: a.name || null,
-      logo_url: a.logo_url || a.logo || null,
+      logo_url: a.logo_url || null,
       primary_color: a.primary_color || null,
       accent_color: a.accent_color || null,
     },
