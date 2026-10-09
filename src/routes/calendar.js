@@ -6,6 +6,7 @@ var bookAppointment = calendarBooking.bookAppointment;
 var lookupServiceConfig = calendarBooking.lookupServiceConfig;
 var recordCallBooking = require('../lib/booking-call-cache').recordCallBooking;
 var liveMonitor = require('../lib/live-monitor-bus');
+var { broadcastLiveEvent } = require('../lib/live-broadcast');
 
 // ============================================================================
 // SERVER-SIDE DATE RESOLVER
@@ -154,7 +155,7 @@ router.post('/availability/:clientId', async function(req, res) {
 
     // Live monitor: the AI just reached for the calendar.
     try {
-      liveMonitor.publishToClient(clientId, {
+      broadcastLiveEvent(clientId, {
         type: 'activity', tool: 'check_availability', label: 'Checking the calendar',
         detail: [serviceType, dateInput].filter(Boolean).join(' · ') || null,
       });
@@ -304,7 +305,7 @@ router.post('/book/:clientId', async function(req, res) {
 
     // Live monitor: the AI is booking.
     try {
-      liveMonitor.publishToClient(clientId, {
+      broadcastLiveEvent(clientId, {
         type: 'activity', tool: 'book_appointment', label: 'Booking the appointment',
         detail: [serviceType, dateInput, time].filter(Boolean).join(' · ') || null,
       });

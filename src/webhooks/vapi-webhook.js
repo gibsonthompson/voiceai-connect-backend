@@ -90,6 +90,7 @@ const { formatPhone, getPhoneLocation, formatDuration } = require('../lib/area-c
 const { insertUsageRecord, updateClientBillingQuantity } = require('../lib/usage-tracker');
 const { verifyVapiWebhook } = require('../lib/vapi-webhook-auth');
 const liveMonitor = require('../lib/live-monitor-bus');
+const { broadcastLiveEvent } = require('../lib/live-broadcast');
 const { isConciergeDemoNumber, sendConciergeDemoCallerSMS, consumeConciergeTransfer } = require('../lib/concierge-demo-sms');
 
 // Live client subscription_status values that may take/save calls. 'manual' is
@@ -1132,15 +1133,23 @@ async function handleVapiWebhook(req, res) {
       if (lmCall.id && lmCall.monitor && (lmCall.monitor.controlUrl || lmCall.monitor.listenUrl)) {
         liveMonitor.setMonitorUrls(lmCall.id, lmCall.monitor.controlUrl, lmCall.monitor.listenUrl);
       }
-      if (message?.type === 'transcript' && lmCall.id) {
-        liveMonitor.publishByCall(lmCall.id, {
+      // Resolve the client id without shared state: it rides on the serverUrl
+      // query (buildDynamicAssistantConfig sets ?clientId=...), with the
+      // in-memory call index as a same-instance fallback. broadcastLiveEvent
+      // fans the event to SSE viewers on this instance AND to Supabase Realtime
+      // so viewers on any instance receive it.
+      const lmClientId = (req.query && req.query.clientId)
+        || (lmCall.id ? (liveMonitor.getCallInfo(lmCall.id) || {}).clientId : null);
+      if (lmClientId && message?.type === 'transcript' && lmCall.id) {
+        broadcastLiveEvent(lmClientId, {
+          callId: lmCall.id,
           type: 'transcript',
           role: message.role === 'user' ? 'caller' : 'assistant',
           text: message.transcript || '',
           final: message.transcriptType === 'final',
         });
-      } else if (message?.type === 'status-update' && lmCall.id) {
-        liveMonitor.publishByCall(lmCall.id, { type: 'status', status: message.status || 'unknown' });
+      } else if (lmClientId && message?.type === 'status-update' && lmCall.id) {
+        broadcastLiveEvent(lmClientId, { callId: lmCall.id, type: 'status', status: message.status || 'unknown' });
       }
     } catch (e) { /* monitor must never break the webhook */ }
 
@@ -1149,8 +1158,12 @@ async function handleVapiWebhook(req, res) {
 
     const call = message.call;
 
-    // Live monitor: close out the call for anyone watching.
-    try { if (call && call.id) liveMonitor.publishByCall(call.id, { type: 'status', status: 'ended' }); } catch (e) {}
+    // Live monitor: close out the call for anyone watching (both delivery paths).
+    try {
+      const endClientId = (req.query && req.query.clientId)
+        || (call && call.id ? (liveMonitor.getCallInfo(call.id) || {}).clientId : null);
+      if (endClientId && call && call.id) broadcastLiveEvent(endClientId, { callId: call.id, type: 'status', status: 'ended' });
+    } catch (e) {}
 
     // telnyx_cc whisper calls arrive over a shared VAPI SIP number, so the
     // phoneNumberId does NOT map to a client. Resolve those by the session we

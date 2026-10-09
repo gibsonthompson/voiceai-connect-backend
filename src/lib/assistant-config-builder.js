@@ -1802,7 +1802,10 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     firstMessage,
     recordingEnabled: hipaaMode ? false : true,
     serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
-    serverUrl: `${BACKEND_URL}/webhook/vapi`,
+    // clientId rides on the query so every server message (transcript, status,
+    // end-of-call) carries it. The live monitor uses it to fan events to the
+    // right channel without any shared per-instance state.
+    serverUrl: `${BACKEND_URL}/webhook/vapi?clientId=${client.id}`,
     hooks
   };
 

@@ -37,6 +37,7 @@ const {
   publishToClient,
 } = require('../lib/live-monitor-bus');
 const { fetchMonitorUrls } = require('../lib/vapi-call-monitor');
+const { channelFor, broadcastLiveEvent } = require('../lib/live-broadcast');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -112,6 +113,10 @@ router.get('/:id/live/info', async (req, res) => {
     },
     // So the page can warn instead of silently failing the web demo.
     web_demo_available: !!auth.client.vapi_assistant_id,
+    // Supabase Realtime channel this viewer subscribes to for live events. The
+    // name is an unguessable keyed HMAC of the client id, issued only here (to
+    // an authorized viewer); the webhook broadcasts to the same name.
+    realtime_channel: channelFor(auth.client.id),
   });
 });
 
@@ -217,7 +222,7 @@ router.post('/:id/live/control', async (req, res) => {
     });
     // Reflect the takeover into the monitor so every viewer sees what the
     // human just did.
-    publishToClient(auth.client.id, { callId, type: 'takeover', action, text: text || null });
+    broadcastLiveEvent(auth.client.id, { callId, type: 'takeover', action, text: text || null });
     return res.json({ success: true, result: r.data ?? null });
   } catch (e) {
     return res.status(502).json({

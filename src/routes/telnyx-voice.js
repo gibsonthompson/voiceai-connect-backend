@@ -43,6 +43,7 @@ const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
 const { sendAndLogSMS } = require('../lib/sms-logger');
 const liveMonitor = require('../lib/live-monitor-bus');
+const { broadcastLiveEvent } = require('../lib/live-broadcast');
 const {
   callAction,
   answerCall,
@@ -479,7 +480,7 @@ router.post('/api/voice/request-transfer', async (req, res) => {
 
     // Live monitor: the AI is handing off to a person.
     try {
-      liveMonitor.publishToClient(session.client_id, {
+      broadcastLiveEvent(session.client_id, {
         type: 'activity', tool: 'request_human_transfer', label: 'Connecting to the team',
         detail: summary || null,
       });
@@ -626,7 +627,7 @@ router.post('/api/voice/send-sms', async (req, res) => {
 
     // Live monitor: the AI is texting the caller.
     try {
-      liveMonitor.publishToClient(clientId, {
+      broadcastLiveEvent(clientId, {
         type: 'activity', tool: 'send_sms', label: 'Texting the caller',
         detail: savedKey ? `saved: ${savedKey}` : (text ? 'custom message' : null),
       });
