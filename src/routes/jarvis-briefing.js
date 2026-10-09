@@ -49,7 +49,7 @@ const JARVIS_SERVER_URL = `${BACKEND_URL}/webhook/vapi-jarvis`;
 
 // Lawrenceville, GA
 const core = require('../lib/briefing-core');
-const { assembleBriefing, renderBriefingText, assembleAndRenderBriefing, etHour } = core;
+const { assembleBriefing, renderBriefingText, assembleAndRenderBriefing, getFreshBriefing, etHour, etNowString } = core;
 
 function requireSecret(req, res, next) {
   const secret = req.headers['x-cron-secret'];
@@ -61,7 +61,9 @@ function requireSecret(req, res, next) {
 
 function briefingQASystemPrompt(ctx) {
   const context = { schedule: ctx.schedule, openTasks: ctx.openTasks, goal: ctx.goal };
-  return `# Who you are
+  return `Right now it is ${ctx.now || etNowString()}. That is the current date and time, treat it as truth, and never state any other year or date.
+
+# Who you are
 
 You are Gibson's chief of staff. You just gave him his morning briefing out loud, he heard the whole thing. Now you are on the line for anything he wants to add, change, or ask. Warm, grounded, sharp, never perky, no fake cheer. Talk like a real person, short spoken sentences, snappy and to the point, no counts read out, no lists, no filler like "one moment" or "one sec," no em dashes. Say numbers and times as words.
 
@@ -164,18 +166,22 @@ router.post('/jarvis-briefing', requireSecret, async (req, res) => {
       if (h !== 10) return res.json({ ok: true, skipped: `outside 10am ET window (ET hour ${h})` });
     }
 
-    // Respond to the cron right away, then assemble, render, and dial in the
-    // background. Assembling the briefing (news research + two Claude passes)
-    // takes long enough to overrun the hosting gateway's request timeout, which
-    // was returning a 502 to the cron and leaving the morning call flaky. The
-    // call no longer waits on the HTTP response, so it places reliably.
+    // Respond to the cron right away, then build and dial in the background.
+    // Assembling the briefing (news research plus two Claude passes) takes long
+    // enough to overrun the hosting gateway's request timeout, which returned a
+    // 502 to the cron and left the morning call flaky. The dial no longer waits
+    // on the HTTP response. If a prewarm already cached today's briefing, the
+    // call reuses it and rings almost immediately instead of re-rendering.
     res.status(202).json({ ok: true, accepted: true });
     (async () => {
       try {
-        const { ctx, text } = await assembleAndRenderBriefing();
+        const cached = await getFreshBriefing();
+        const { ctx, text } = (cached && cached.text && cached.ctx)
+          ? { ctx: cached.ctx, text: cached.text }
+          : await assembleAndRenderBriefing();
         const assistant = await buildBriefingAssistant(ctx, text);
         const result = await placeBriefingCall(assistant);
-        if (result.ok) console.log(`📞 Jarvis briefing placed: call ${result.callId || '(no id)'} | openTasks ${ctx.openTasks.length}`);
+        if (result.ok) console.log(`📞 Jarvis briefing placed: call ${result.callId || '(no id)'} | cached ${!!(cached && cached.text)} | openTasks ${ctx.openTasks.length}`);
         else console.error('❌ Jarvis briefing call failed:', result.error, result.detail ? JSON.stringify(result.detail).slice(0, 300) : '');
       } catch (e) {
         console.error('❌ Jarvis briefing background run failed:', e.message);
@@ -186,6 +192,21 @@ router.post('/jarvis-briefing', requireSecret, async (req, res) => {
     console.error('❌ Jarvis briefing failed:', e.message);
     return res.status(500).json({ error: e.message });
   }
+});
+
+// POST /api/cron/jarvis-briefing-prewarm -> assemble + render + cache only, no
+// call. Schedule this a few minutes before the briefing so the real call reads
+// a warm cache and rings almost immediately instead of waiting on the research.
+router.post('/jarvis-briefing-prewarm', requireSecret, async (req, res) => {
+  res.status(202).json({ ok: true, accepted: true });
+  (async () => {
+    try {
+      const { ctx } = await assembleAndRenderBriefing();
+      console.log(`🔥 Jarvis briefing prewarmed | openTasks ${ctx.openTasks.length}`);
+    } catch (e) {
+      console.error('❌ Jarvis briefing prewarm failed:', e.message);
+    }
+  })();
 });
 
 module.exports = router;

@@ -33,8 +33,23 @@ const news = require('../lib/briefing-news');
 const core = require('../lib/briefing-core');
 const googleCal = require('../lib/google-calendar');
 
-const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
+const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
 const JARVIS_SERVER_URL = `${BACKEND_URL}/webhook/vapi-jarvis`;
+
+// Current date/time in Gibson's timezone, computed here so the live line never
+// depends on another file exporting it. A missing shared export must never be
+// able to reject an incoming call.
+function etNow() {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', weekday: 'long', year: 'numeric', month: 'long',
+    day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+  }).format(new Date()) + ' Eastern';
+}
+function etToday() {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+  }).format(new Date());
+}
 // Clear, calm ElevenLabs voice (Sarah) and a strong, current conversational
 // model. Baked in on purpose; change these constants if you want to swap them.
 // JARVIS_MODEL is gpt-4.1: on VAPI's current OpenAI list and the most reliable
@@ -173,7 +188,7 @@ function resolveDay(dayStr) {
 // ── system prompt + first message (the product) ────────────────────────────
 
 function getJarvisSystemPrompt(plate) {
-  return `Right now it is ${core.etNowString()}. That is the current date and time, treat it as truth, and never state any other year or date.
+  return `Right now it is ${etNow()}. That is the current date and time, treat it as truth, and never state any other year or date.
 
 # Who you are
 
@@ -561,7 +576,7 @@ async function tool_research_topic(args) {
   // A real web search first, so he can ask anything: business hours, a fact, an
   // address, a score, current events. Fall back to the news-headline search
   // only if the web search comes back empty.
-  const web = await news.answerWithWebSearch(q, core.etTodayString());
+  const web = (typeof news.answerWithWebSearch === 'function') ? await news.answerWithWebSearch(q, etToday()) : null;
   if (web) return web;
   const list = await news.gatherTopic([q, q + ' news', q + ' latest'], 4, 10);
   if (!list.length) return "I looked but couldn't find a clear answer on that.";

@@ -12,12 +12,13 @@
 const hq = require('./hq-supabase');
 const items = require('./hq-items');
 const news = require('./briefing-news');
+const googleCal = require('./google-calendar');
 const { getPlatformSetting, setPlatformSetting } = require('./vapi');
 
 // Where the most recent fully-rendered briefing is cached. The morning cron
-// warms this, so when Gibson calls in and asks for his briefing the line can
-// hand back the cached text instantly instead of re-running the slow news
-// research and render, which overran VAPI's tool-webhook timeout and made the
+// (and an optional prewarm) warm this, so the briefing call and an on-demand
+// call-in hand back the cached text instantly instead of re-running the slow
+// news research and render, which overran VAPI's tool timeout and made the
 // assistant say the server timed out.
 const BRIEFING_CACHE_KEY = 'jarvis_briefing_cache';
 const BRIEFING_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
@@ -79,6 +80,25 @@ function isWeekendish() {
   return wd === 'Fri' || wd === 'Sat' || wd === 'Sun';
 }
 
+// Plain-English current date and time in Gibson's timezone. Injected into every
+// prompt so the model never guesses the date. It was answering "June 2024" (its
+// training prior) because nothing told it what day it actually is, which also
+// drove the Falcons "they play tonight" error.
+function etNowString() {
+  const s = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', weekday: 'long', year: 'numeric', month: 'long',
+    day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+  }).format(new Date());
+  return `${s} Eastern`;
+}
+
+// Just the weekday + date (no time), for prompts that want the day only.
+function etTodayString() {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+  }).format(new Date());
+}
+
 async function getWithTimeout(url, ms, headers) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
@@ -98,32 +118,92 @@ const WMO = {
   95: 'thunderstorms', 96: 'thunderstorms', 99: 'severe thunderstorms',
 };
 
+const WIND_DIRS = ['north', 'northeast', 'east', 'southeast', 'south', 'southwest', 'west', 'northwest'];
+function windDir(deg) {
+  if (typeof deg !== 'number' || !isFinite(deg)) return '';
+  return WIND_DIRS[Math.round(deg / 45) % 8];
+}
+
+// Format an Open-Meteo local ISO time ("2026-10-09T19:12") to "7:12 PM".
+function clockFromIso(iso) {
+  if (!iso || typeof iso !== 'string') return '';
+  const m = iso.match(/T(\d{2}):(\d{2})/);
+  if (!m) return '';
+  let h = parseInt(m[1], 10);
+  const min = m[2];
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12; if (h === 0) h = 12;
+  return `${h}:${min} ${ampm}`;
+}
+
 async function fetchWeather() {
   try {
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${WX_LAT}&longitude=${WX_LON}`
-      + `&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code`
-      + `&temperature_unit=fahrenheit&timezone=America%2FNew_York&forecast_days=1`;
+      + `&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m`
+      + `&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code,sunrise,sunset,uv_index_max`
+      + `&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America%2FNew_York&forecast_days=1`;
     const res = await getWithTimeout(url, 8000);
     if (!res.ok) return null;
     const d = await res.json();
     const day = d.daily || {};
+    const cur = d.current || {};
     const hi = Math.round((day.temperature_2m_max || [])[0]);
     const lo = Math.round((day.temperature_2m_min || [])[0]);
     const pop = (day.precipitation_probability_max || [])[0];
     const code = (day.weather_code || [])[0];
     const cond = WMO[code] || 'mixed conditions';
     if (!isFinite(hi) || !isFinite(lo)) return null;
-    return { hi, lo, pop, cond, place: WX_PLACE };
+    const now = isFinite(Math.round(cur.temperature_2m)) ? Math.round(cur.temperature_2m) : null;
+    const feels = isFinite(Math.round(cur.apparent_temperature)) ? Math.round(cur.apparent_temperature) : null;
+    const nowCond = WMO[cur.weather_code] || null;
+    const wind = isFinite(Math.round(cur.wind_speed_10m)) ? Math.round(cur.wind_speed_10m) : null;
+    const wdir = windDir(cur.wind_direction_10m);
+    const sunset = clockFromIso((day.sunset || [])[0]);
+    const uvRaw = (day.uv_index_max || [])[0];
+    const uv = (typeof uvRaw === 'number' && isFinite(uvRaw)) ? Math.round(uvRaw) : null;
+    return { hi, lo, pop, cond, place: WX_PLACE, now, feels, nowCond, wind, wdir, sunset, uv };
   } catch (e) {
     console.warn('⚠️ Briefing weather failed:', e.message);
     return null;
   }
 }
 
+// A fuller spoken weather read: what it is doing right now, where it is headed,
+// rain, wind, and when the sun goes down. Plain spoken sentences.
 function weatherLine(w) {
   if (!w) return null;
-  const rain = (typeof w.pop === 'number' && w.pop >= 20) ? `, ${w.pop}% chance of rain` : '';
-  return `${w.place} today: ${w.cond}, high ${w.hi}, low ${w.lo}${rain}.`;
+  const parts = [];
+  if (w.now != null) {
+    let right = `Right now in ${w.place} it is ${w.now}${w.nowCond ? ' and ' + w.nowCond : ''}`;
+    if (w.feels != null && Math.abs(w.feels - w.now) >= 3) right += `, feels like ${w.feels}`;
+    parts.push(right + '.');
+  }
+  let out = `Today you're looking at a high of ${w.hi} and a low of ${w.lo}, ${w.cond}`;
+  if (typeof w.pop === 'number' && w.pop >= 20) out += `, with a ${w.pop}% chance of rain`;
+  parts.push(out + '.');
+  if (w.wind != null && w.wind >= 8) parts.push(`Wind around ${w.wind} out of the ${w.wdir}.`);
+  if (w.uv != null) {
+    const band = w.uv >= 8 ? 'very high' : w.uv >= 6 ? 'high' : w.uv >= 3 ? 'moderate' : 'low';
+    parts.push(`UV index peaks around ${w.uv}, ${band}.`);
+  }
+  if (w.sunset) parts.push(`Sun sets at ${w.sunset}.`);
+  const note = weatherNote(w);
+  if (note) parts.push(note);
+  return parts.join(' ');
+}
+
+// A practical takeaway pulled from the day's numbers, so the weather ends with
+// something actionable rather than just readings. One short note, highest
+// priority first.
+function weatherNote(w) {
+  if (!w) return null;
+  if (typeof w.pop === 'number' && w.pop >= 60) return 'Take an umbrella, rain is likely.';
+  if (w.uv != null && w.uv >= 6) return 'Wear sunscreen if you are out for a while, the sun is strong.';
+  if (typeof w.hi === 'number' && w.hi <= 40) return 'Bundle up, it stays cold.';
+  if (typeof w.hi === 'number' && w.hi >= 90) return 'Stay hydrated, it gets hot.';
+  if (typeof w.pop === 'number' && w.pop >= 30) return 'Maybe keep an umbrella handy.';
+  if (w.wind != null && w.wind >= 18) return 'It is breezy, so a jacket helps.';
+  return null;
 }
 
 // ── Schedule line ───────────────────────────────────────────────────────────
@@ -139,17 +219,32 @@ async function assembleBriefing() {
   const { date: etDate, dow } = etDateInfo();
   const weekend = isWeekendish();
   const ready = hq.isReady();
+  const todayStr = etTodayString();
 
-  const [schedule, openMovers, goals, weather, ai, local, politics, falcons] = await Promise.all([
+  // Pull the real next Falcons game first so the summary can state the actual
+  // day instead of guessing "tonight" off a headline.
+  const falconsGame = await news.nextFalconsGame().catch(() => null);
+
+  const [hqSchedule, openMovers, goals, weather, ai, local, politics, falcons, gcalEvents] = await Promise.all([
     ready ? hq.listScheduleForDate(etDate, dow) : Promise.resolve([]),
     ready ? hq.listOpenMovers() : Promise.resolve([]),
     ready ? hq.listGoals() : Promise.resolve([]),
     fetchWeather(),
-    news.briefAI(),
-    news.briefLocal(weekend),
-    news.briefPolitics(),
-    news.briefFalcons(),
+    news.briefAI(todayStr),
+    news.briefLocal(weekend, todayStr),
+    news.briefPolitics(todayStr),
+    news.briefFalcons(todayStr, falconsGame),
+    googleCal.listEventsForDate(etDate).catch(() => []),
   ]);
+
+  // Merge his real Google Calendar into the HQ schedule so the day's lead-in
+  // reflects both. Same { title, startHour, allDay } shape, all-day first then
+  // by time.
+  const schedule = [...(hqSchedule || []), ...(gcalEvents || [])].sort((a, b) => {
+    if (a.allDay && !b.allDay) return -1;
+    if (b.allDay && !a.allDay) return 1;
+    return (a.startHour || 0) - (b.startHour || 0);
+  });
 
   const now = Date.now();
   const openTasks = (openMovers || []).slice(0, 30).map((t) => ({
@@ -159,6 +254,7 @@ async function assembleBriefing() {
   }));
 
   return {
+    now: etNowString(),
     date: new Intl.DateTimeFormat('en-US', {
       timeZone: 'America/New_York', weekday: 'long', month: 'long', day: 'numeric',
     }).format(new Date()),
@@ -196,13 +292,15 @@ function buildFallbackBriefing(ctx) {
 // Render the ENTIRE briefing as one spoken monologue. This becomes the call's
 // first message, so VAPI speaks the whole thing instead of waiting for Gibson.
 async function renderBriefingText(ctx) {
-  const prompt = `You are Gibson's chief of staff delivering his morning briefing out loud over the phone. Write the complete briefing as one flowing spoken monologue that he hears start to finish. Warm, grounded, sharp, never perky, no fake cheer. Keep it tight and snappy, short punchy sentences, he is busy and wants the signal, not padding. Plain spoken text only: no markdown, no bullet points, no numbered list, no symbols, no em dashes. Say numbers, dates, and times as words. Never say how many of anything there are, never read labels.
+  const prompt = `Right now it is ${ctx.now || etNowString()}. That is the current date and time, use it as truth, never state any other year or date.
+
+You are Gibson's chief of staff delivering his morning briefing out loud over the phone. Write the complete briefing as one flowing spoken monologue that he hears start to finish. Warm, grounded, sharp, never perky, no fake cheer. Keep it tight and snappy, short punchy sentences, he is busy and wants the signal, not padding. Plain spoken text only: no markdown, no bullet points, no numbered list, no symbols, no em dashes. Say numbers, dates, and times as words. Never say how many of anything there are, never read labels.
 
 Deliver in this order, and skip anything with no data without mentioning it:
 1. His day. Walk through today's calendar in time order, a sentence or two. If the schedule shows clear, tell him his calendar is open today.
 2. His single highest-leverage move from his open tasks, with one line on why. Weigh how long it has sat and that VoiceAI Connect is his main business. Pick exactly one, do not list them.
 3. The goal he is pushing, one quick line, only if there is one.
-4. Weather, one line.
+4. Weather, give him the real read from the weather data provided: what it is doing right now, where the day is headed with the high and low, any rain, the wind, and when the sun sets. A few natural sentences, not one clipped line.
 5. AI news, from the ai summary.
 6. Around Atlanta, from the local summary.
 7. Politics, from the politics summary, neutral and factual.
@@ -217,11 +315,11 @@ Write only the spoken briefing, nothing else.`;
   return (text && text.length > 40) ? text : buildFallbackBriefing(ctx);
 }
 
-// ── Cache (so the in-call briefing never re-runs the slow pipeline) ──────────
+// ── Cache (so the briefing call and in-call briefing never pay the slow cost) ─
 
 // Assemble and render the briefing once, then cache the finished text + ctx.
-// Both the morning cron and an on-demand call-in go through here, so the text
-// is always available for the next read without paying the research cost again.
+// The morning cron, an optional prewarm, and an on-demand call-in all go
+// through here, so the text is ready for the next read without re-researching.
 async function assembleAndRenderBriefing() {
   const ctx = await assembleBriefing();
   const text = await renderBriefingText(ctx);
@@ -234,8 +332,8 @@ async function assembleAndRenderBriefing() {
 }
 
 // Return the cached briefing if it is still fresh, else null. Fresh means it
-// was rendered within maxAgeMs (default six hours), so a mid-morning call-in
-// gets today's briefing, not yesterday's.
+// was rendered within maxAgeMs (default six hours), so a mid-morning read gets
+// today's briefing, not yesterday's.
 async function getFreshBriefing(maxAgeMs) {
   const limit = maxAgeMs || BRIEFING_CACHE_MAX_AGE_MS;
   try {
@@ -252,4 +350,8 @@ async function getFreshBriefing(maxAgeMs) {
 // System prompt for AFTER the briefing is spoken: handle his follow-ups and
 // anything he wants to add, as the secretary (tasks by default, must call tools).
 
-module.exports = { assembleBriefing, renderBriefingText, assembleAndRenderBriefing, getFreshBriefing, buildFallbackBriefing, etHour, etDateInfo, isWeekendish, fetchWeather, weatherLine };
+module.exports = {
+  assembleBriefing, renderBriefingText, assembleAndRenderBriefing, getFreshBriefing,
+  buildFallbackBriefing, etHour, etDateInfo, etNowString, etTodayString,
+  isWeekendish, fetchWeather, weatherLine,
+};

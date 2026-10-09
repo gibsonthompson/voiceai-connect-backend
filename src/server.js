@@ -2179,6 +2179,8 @@ app.use('/api/cron', numberCleanupRoutes);
 // outbound daily briefing cron (/api/cron/jarvis-briefing).
 app.use('/api/jarvis', require('./routes/jarvis-admin'));
 app.use('/api/cron', require('./routes/jarvis-briefing'));
+// Jarvis personal Google Calendar connect/callback/disconnect/status (HQ UI).
+app.use('/api/auth/jarvis-calendar', require('./routes/jarvis-calendar-auth'));
 
 
 
