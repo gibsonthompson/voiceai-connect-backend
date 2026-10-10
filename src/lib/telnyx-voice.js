@@ -49,7 +49,7 @@ const DEFAULT_VOICE_API_KEY_REF = process.env.TELNYX_VOICE_API_KEY_REF || null;
 function buildVoiceSettings(opts = {}, voice = '') {
   if (!/^ElevenLabs\./i.test(String(voice || opts.voice || ''))) return null;
   const ref = opts.apiKeyRef || DEFAULT_VOICE_API_KEY_REF;
-  return ref ? { api_key_ref: ref } : null;
+  return ref ? { type: 'elevenlabs', api_key_ref: ref } : null;
 }
 
 // ----------------------------------------------------------------------------
@@ -266,6 +266,49 @@ async function gatherUsingSpeak(callControlId, text, opts = {}) {
 }
 
 // ----------------------------------------------------------------------------
+// gatherUsingAI - speak a greeting to ONE leg and collect a SPOKEN response the
+// agent gives out loud (yes / no), interpreted by Telnyx's voice AI into the
+// parameters schema. Used for the "want me to put them through?" accept gate so
+// the person answers naturally instead of pressing a key. The result arrives as
+// a 'call.ai_gather.ended' event.
+//
+// opts:
+//   voice / apiKeyRef      TTS voice + ElevenLabs key ref (same as speak)
+//   parameters             JSON schema to capture (defaults to { accept: bool })
+//   instructions           extra guidance for the interpreting assistant
+//   timeoutMillis          user response timeout (default 10000)
+//   clientState            echoed back on the ai_gather event
+// ----------------------------------------------------------------------------
+async function gatherUsingAI(callControlId, greeting, opts = {}) {
+  if (!greeting) { console.warn('telnyx-voice: gatherUsingAI called with empty greeting'); return null; }
+  const body = {
+    greeting: String(greeting),
+    voice: opts.voice || DEFAULT_SPEAK_VOICE,
+    parameters: opts.parameters || {
+      type: 'object',
+      properties: {
+        accept: {
+          type: 'boolean',
+          description: 'true only if the team member clearly agrees to take the call now (yes, sure, put them through, send them). false if they decline or want a message.',
+        },
+      },
+      required: ['accept'],
+    },
+    user_response_timeout_ms: opts.timeoutMillis || 10000,
+  };
+  const instructions = opts.instructions
+    || 'You are the phone system briefing a team member about a caller being transferred to them. After the greeting, listen for their answer and set accept to true only if they clearly agree to take the call now, or false if they decline or want to take a message. Do not chat or ask anything else.';
+  body.assistant = { instructions: String(instructions) };
+  const vs = buildVoiceSettings(opts, body.voice);
+  if (vs) body.voice_settings = vs;
+  const cs = encodeClientState(opts.clientState);
+  if (cs) body.client_state = cs;
+  const out = await callAction(callControlId, 'gather_using_ai', body);
+  if (out) console.log(`telnyx-voice: gather_using_ai on ${callControlId}`);
+  return out;
+}
+
+// ----------------------------------------------------------------------------
 // bridgeCalls - connect two legs so the people on them can talk. Issued on one
 // leg with the other leg's id. Used to merge caller + office.
 // ----------------------------------------------------------------------------
@@ -360,6 +403,7 @@ module.exports = {
   dialVapi,
   speakToCall,
   gatherUsingSpeak,
+  gatherUsingAI,
   bridgeCalls,
   unbridgeCall,
   hangupCall,

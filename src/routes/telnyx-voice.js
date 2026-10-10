@@ -61,6 +61,7 @@ const {
   dialCall,
   speakToCall,
   gatherUsingSpeak,
+  gatherUsingAI,
   bridgeCalls,
   hangupCall,
   startPlayback,
@@ -105,7 +106,7 @@ const TRANSFER_PREROLL_MS = Number(process.env.TRANSFER_PREROLL_MS || 1000);
 // secret (TELNYX_VOICE_API_KEY_REF set), the whisper is spoken in the client's
 // own ElevenLabs voice (clients.voice_id) so it matches the AI receptionist. The
 // model defaults to flash v2.5 (low latency); override with TELNYX_ELEVENLABS_MODEL.
-const WHISPER_ELEVENLABS_MODEL = process.env.TELNYX_ELEVENLABS_MODEL || 'eleven_flash_v2_5';
+const WHISPER_ELEVENLABS_MODEL = process.env.TELNYX_ELEVENLABS_MODEL || 'eleven_multilingual_v2';
 const WHISPER_VOICE_API_KEY_REF = process.env.TELNYX_VOICE_API_KEY_REF || null;
 
 async function whisperVoiceFor(clientId) {
@@ -119,6 +120,22 @@ async function whisperVoiceFor(clientId) {
     console.warn('telnyx-voice: whisperVoiceFor lookup failed:', e.message);
     return {};
   }
+}
+
+// Pull the yes/no decision out of the (undocumented) call.ai_gather.ended
+// payload. Checks the likely spots for our { accept: boolean } result and
+// defaults to false (do not connect) when a clear true is not found.
+function parseAiAccept(payload) {
+  const candidates = [payload && payload.result, payload && payload.data && payload.data.result, payload];
+  for (let c of candidates) {
+    if (typeof c === 'string') { try { c = JSON.parse(c); } catch (e) { continue; } }
+    if (c && typeof c === 'object') {
+      if (typeof c.accept === 'boolean') return c.accept;
+      if (c.result && typeof c.result.accept === 'boolean') return c.result.accept;
+      if (c.parameters && typeof c.parameters.accept === 'boolean') return c.parameters.accept;
+    }
+  }
+  return false;
 }
 
 // ----------------------------------------------------------------------------
@@ -384,7 +401,7 @@ async function stopRingback(caller) {
 // press-1-to-accept gate. Only the winner of transferring -> ringing_gate
 // actually plays the gather, so the whisper prompt is spoken exactly once.
 // ============================================================================
-async function startGate(sessionId) {
+async function startGate(sessionId, recipientName) {
   const won = await atomicTransition(sessionId, ['transferring'], 'ringing_gate');
   if (!won) return;
 
@@ -393,21 +410,33 @@ async function startGate(sessionId) {
   const office = session.telnyx_office_control_id;
   if (!office) return;
 
+  // A comprehensive, natural whisper that greets the person by name, gives the
+  // caller and reason (the AI's summary), and asks to put them through.
   const summary = session.whisper_summary || 'A caller would like to speak with you.';
-  const prompt = `You have a call. ${summary} Press 1 to take it.`;
+  const hey = recipientName ? `Hey ${recipientName}, ` : '';
+  const greeting = `${hey}${summary} Want me to send them through?`;
 
-  // Speak the whisper in the SAME voice as this client's AI receptionist, so the
-  // agent hears a consistent voice. Each client's voice_id is its ElevenLabs
-  // voice; when Telnyx has the ElevenLabs key (TELNYX_VOICE_API_KEY_REF set) we
-  // use it, otherwise we fall back to the lib default (Polly neural).
+  // Speak in this client's own receptionist voice when the ElevenLabs key is
+  // wired (TELNYX_VOICE_API_KEY_REF), otherwise the lib default (Polly neural).
   const voiceOpts = await whisperVoiceFor(session.client_id);
 
-  await gatherUsingSpeak(office, prompt, Object.assign({
-    validDigits: '1',
+  // Accept gate: ask for a spoken yes/no via Telnyx voice AI. If the AI gather
+  // cannot start (e.g. not enabled), fall back to a press-1 DTMF gate so the
+  // transfer can still complete.
+  const aiRes = await gatherUsingAI(office, greeting, Object.assign({
     timeoutMillis: GATHER_TIMEOUT_MS,
     clientState: { role: 'office', sessionId },
   }, voiceOpts));
-  console.log(`telnyx-voice: press-1 gate opened on office (session ${sessionId})${voiceOpts.voice ? ' [voice ' + voiceOpts.voice + ']' : ''}`);
+
+  if (!aiRes) {
+    console.warn(`telnyx-voice: gather_using_ai unavailable (session ${sessionId}), falling back to press-1`);
+    await gatherUsingSpeak(office, `${greeting} If so, press 1.`, Object.assign({
+      validDigits: '1',
+      timeoutMillis: GATHER_TIMEOUT_MS,
+      clientState: { role: 'office', sessionId },
+    }, voiceOpts));
+  }
+  console.log(`telnyx-voice: accept gate opened on office (session ${sessionId})${voiceOpts.voice ? ' [voice ' + voiceOpts.voice + ']' : ''}`);
 }
 
 // ============================================================================
@@ -654,10 +683,10 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
         if (role === 'vapi' && sessionId) {
           await handleVapiAnswered(sessionId);
         }
-        // Open the press-1 gate the instant the office answers (no AMD wait).
+        // Open the accept gate the instant the office answers (no AMD wait).
         // startGate is a no-op unless the session is still 'transferring'.
         if (role === 'office' && sessionId) {
-          await startGate(sessionId);
+          await startGate(sessionId, state && state.recipientName);
         }
         break;
 
@@ -668,6 +697,20 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
             await completeAccept(sessionId);
           } else {
             await returnToAI(sessionId, 'no_keypress');
+          }
+        }
+        break;
+
+      case 'call.ai_gather.ended':
+        if (role === 'office' && sessionId) {
+          // Telnyx does not publicly document this payload, so log it once and
+          // parse the accept decision defensively. Anything not a clear yes
+          // returns the caller to the AI (safe default).
+          try { console.log(`telnyx-voice: ai_gather.ended payload: ${JSON.stringify(payload).slice(0, 600)}`); } catch (e) {}
+          if (parseAiAccept(payload) === true) {
+            await completeAccept(sessionId);
+          } else {
+            await returnToAI(sessionId, 'declined_or_no_response');
           }
         }
         break;
@@ -771,7 +814,7 @@ router.post('/api/voice/request-transfer', async (req, res) => {
 
     const { data: client } = await supabase
       .from('clients')
-      .select('vapi_phone_number, owner_phone, transfer_phone, tool_config, agency_id')
+      .select('vapi_phone_number, owner_phone, transfer_phone, tool_config, agency_id, owner_name, business_name')
       .eq('id', session.client_id)
       .single();
 
@@ -785,6 +828,12 @@ router.post('/api/voice/request-transfer', async (req, res) => {
     const officeNumber = toE164(chosenNumber || session.office_number || client?.transfer_phone || client?.owner_phone);
     const businessDid = toE164(client?.vapi_phone_number) || officeNumber;
     if (transferToLabel) console.log(`telnyx-voice: transfer_to="${transferToLabel}" -> ${officeNumber}${chosenNumber ? '' : ' (no match, used main line)'}`);
+
+    // First name of whoever we are connecting, so the whisper can greet them by
+    // name. A chosen staff label looks like "Jonathan, Stylist"; the main line
+    // falls back to the owner's first name.
+    const firstName = (s) => (s ? String(s).split(',')[0].trim().split(/\s+/)[0] : '') || '';
+    const recipientName = chosenNumber ? firstName(transferToLabel) : firstName(client?.owner_name);
 
     if (!officeNumber) {
       return reply('There is no team phone number on file to transfer to. Apologize and offer to book an appointment or take a detailed message instead.');
@@ -834,7 +883,7 @@ router.post('/api/voice/request-transfer', async (req, res) => {
       // before the gate opens. The press-1 gate is the real backstop (a
       // voicemail never presses 1), so we gate the instant the office answers.
       timeoutSecs: OFFICE_RING_SECONDS,
-      clientState: { role: 'office', sessionId: session.id },
+      clientState: { role: 'office', sessionId: session.id, recipientName },
     });
 
     if (!officeLeg || !officeLeg.call_control_id) {
