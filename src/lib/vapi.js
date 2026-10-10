@@ -190,13 +190,15 @@ const VOICES = {
 };
 
 // ============================================================================
-// Env-overridable ElevenLabs model. Default eleven_turbo_v2_5 (natural, fast).
-const ELEVEN_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_turbo_v2_5';
+// Env-overridable ElevenLabs model. Default eleven_flash_v2_5 (fleet default,
+// matches the dynamic live-call builder so test calls and live calls sound the
+// same). Set ELEVENLABS_TTS_MODEL to override.
+const ELEVEN_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_flash_v2_5';
 
 // Env-overridable transcriber + LLM so the stack can be tuned without a deploy.
 // nova-3 (vs nova-2) improves accuracy on phone audio, accents, and multilingual.
 const DEEPGRAM_MODEL = process.env.DEEPGRAM_MODEL || 'nova-3';
-const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
 
 // Appended to every receptionist prompt. Shifts delivery from "reading a script"
 // toward how a real receptionist actually talks on the phone (the single biggest
@@ -1597,7 +1599,7 @@ async function createDemoAssistant(agencyName) {
       transcriber: { provider: 'deepgram', model: DEEPGRAM_MODEL, language: 'multi' },
       model: {
         provider: 'openai',
-        model: 'gpt-4o-mini',
+        model: OPENAI_MODEL,
         temperature: 0.7,
         messages: [{ role: 'system', content: getDemoSystemPrompt(agencyName) }]
       },
@@ -1802,7 +1804,7 @@ async function updateDemoAssistantName(assistantId, newAgencyName) {
         firstMessage: getDemoFirstMessage(newAgencyName),
         model: {
           provider: 'openai',
-          model: 'gpt-4o-mini',
+          model: OPENAI_MODEL,
           temperature: 0.7,
           messages: [{ role: 'system', content: getDemoSystemPrompt(newAgencyName) }]
         }

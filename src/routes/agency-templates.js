@@ -1353,7 +1353,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         first_message: customTemplate?.first_message || defaults.first_message,
         voice_id: voiceId,
         voice: voice || null,
-        model: customTemplate?.model || 'gpt-4o-mini',
+        model: customTemplate?.model || 'gpt-4.1',
         tts_model: customTemplate?.tts_model || 'eleven_flash_v2_5',
         transcriber_model: customTemplate?.transcriber_model || 'nova-3',
         temperature: customTemplate?.temperature || 0.7,
@@ -1366,7 +1366,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         system_prompt: defaults.system_prompt,
         first_message: defaults.first_message,
         voice_id: defaults.voice_id,
-        model: 'gpt-4o-mini',
+        model: 'gpt-4.1',
         tts_model: 'eleven_flash_v2_5',
         transcriber_model: 'nova-3',
         temperature: 0.7,
@@ -1412,7 +1412,7 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
 
   // Added 2026-10-07: 'gpt-4.1' (full 4.1) is now a selectable template model.
   const validModels = ['gpt-4.1', 'gpt-4o-mini', 'gpt-4.1-mini', 'gpt-4o'];
-  const finalModel = validModels.includes(model) ? model : 'gpt-4o-mini';
+  const finalModel = validModels.includes(model) ? model : 'gpt-4.1';
 
   // TTS + transcriber model, both restricted to Vapi-verified values so an
   // agency can never save a string that would break their own calls.
