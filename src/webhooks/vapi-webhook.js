@@ -940,7 +940,8 @@ async function handleAssistantRequest(req, res, message) {
     let client;
     if (sipClientId) {
       console.log(`🔀 telnyx_cc call - resolving client by SIP header X-Client-Id=${sipClientId}`);
-      const { data: byId } = await supabase.from('clients').select('*, agencies(*)').eq('id', sipClientId).single();
+      const { data: byId, error: byIdErr } = await supabase.from('clients').select('*, agencies!clients_agency_id_fkey(*)').eq('id', sipClientId).single();
+      if (byIdErr) console.warn(`⚠️ telnyx_cc client lookup failed for id ${sipClientId}: ${byIdErr.message}`);
       client = byId || null;
       if (client && sipSessionId && message.call?.id) {
         await supabase.from('call_sessions')
@@ -1215,7 +1216,7 @@ async function handleVapiWebhook(req, res) {
         .maybeSingle();
       if (session?.client_id) {
         if (session.status === 'bridged' || session.status === 'transfer_recapped') transferredViaTelnyx = true;
-        const { data: c } = await supabase.from('clients').select('*, agencies(*)').eq('id', session.client_id).single();
+        const { data: c } = await supabase.from('clients').select('*, agencies!clients_agency_id_fkey(*)').eq('id', session.client_id).single();
         if (c) { client = c; console.log('✅ Resolved client via call_sessions (telnyx_cc):', c.business_name, transferredViaTelnyx ? '[bridged transfer]' : ''); }
       }
     }
