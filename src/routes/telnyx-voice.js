@@ -96,6 +96,10 @@ const GATHER_TIMEOUT_MS = 6000;
 // (set to 25s on the request_human_transfer tool in the config builder) so VAPI
 // does not time the tool out first.
 const TRANSFER_WAIT_MS = 22000;
+// Pause after the AI calls the transfer tool, before we take the caller off the
+// AI, so the AI's short "connecting you" line finishes instead of being cut off
+// mid sentence. The caller stays bridged to the AI during this pause.
+const TRANSFER_PREROLL_MS = Number(process.env.TRANSFER_PREROLL_MS || 2500);
 
 // ----------------------------------------------------------------------------
 // Whisper infra ids live in platform_settings (created lazily by vapi.js
@@ -724,6 +728,16 @@ router.post('/api/voice/request-transfer', async (req, res) => {
     try { args = JSON.parse(args); } catch { args = { summary: args }; }
   }
   const summary = (args.summary || '').toString().trim() || 'A caller would like to speak with you.';
+  const transferToLabel = (args.transfer_to || '').toString().trim() || null;
+
+  // Decode the label->number destination map the config builder stamped on the
+  // tool URL (?t=base64), so we dial the person the AI chose (transfer_to), not
+  // just the main line.
+  let transferTargets = [];
+  try {
+    const t = req.query && req.query.t;
+    if (t) transferTargets = JSON.parse(Buffer.from(String(t), 'base64').toString('utf-8')) || [];
+  } catch (e) { transferTargets = []; }
 
   const reply = (text) => res.status(200).json({ results: [{ toolCallId, result: text }] });
 
@@ -751,8 +765,16 @@ router.post('/api/voice/request-transfer', async (req, res) => {
       .eq('id', session.client_id)
       .single();
 
-    const officeNumber = toE164(session.office_number || client?.transfer_phone || client?.owner_phone);
+    // Pick the number to dial: the staff member the AI chose (transfer_to),
+    // matched against the stamped label->number map, else the main business line.
+    let chosenNumber = null;
+    if (transferToLabel && transferTargets.length) {
+      const hit = transferTargets.find(x => x && x.label === transferToLabel);
+      if (hit && hit.number) chosenNumber = hit.number;
+    }
+    const officeNumber = toE164(chosenNumber || session.office_number || client?.transfer_phone || client?.owner_phone);
     const businessDid = toE164(client?.vapi_phone_number) || officeNumber;
+    if (transferToLabel) console.log(`telnyx-voice: transfer_to="${transferToLabel}" -> ${officeNumber}${chosenNumber ? '' : ' (no match, used main line)'}`);
 
     if (!officeNumber) {
       return reply('There is no team phone number on file to transfer to. Apologize and offer to book an appointment or take a detailed message instead.');
@@ -766,6 +788,11 @@ router.post('/api/voice/request-transfer', async (req, res) => {
     }
 
     await updateSession(session.id, { status: 'transferring', whisper_summary: summary });
+
+    // Let the AI finish its short "connecting you" line before we take the
+    // caller off it, so the caller is not cut off mid sentence. The AI is still
+    // bridged to the caller during this pause.
+    if (TRANSFER_PREROLL_MS > 0) await new Promise((r) => setTimeout(r, TRANSFER_PREROLL_MS));
 
     // Take the caller OFF the AI so they hear ringing (not the AI) during the
     // dial. The VAPI leg is kept alive and parked so we can re-bridge the caller

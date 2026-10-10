@@ -1243,25 +1243,63 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
   if (toolConfig.transferCall && !isAfterHours && handoff === 'transfer') {
     if (isWhisperTransfer) {
       // Whisper warm transfer via our backend (Telnyx Call Control).
+      // Build the destination list so the AI can route to the right person: the
+      // main business team first, then any transferable staff on shift. The AI
+      // picks a destination by its label; the label to number map rides on the
+      // tool's server.url (base64) so the backend dials the right number without
+      // re-deriving the staff list. The AI's own number is excluded so a
+      // transfer never loops back into the assistant.
+      const aiNumber = client.vapi_phone_number
+        ? (isValidE164(client.vapi_phone_number) ? client.vapi_phone_number : formatPhoneE164(client.vapi_phone_number))
+        : null;
+      const destinations = [];
+      const seen = new Set();
+      const mainPhone = client.transfer_phone || client.owner_phone;
+      if (mainPhone) {
+        const fp = isValidE164(mainPhone) ? mainPhone : formatPhoneE164(mainPhone);
+        if (fp && isValidE164(fp) && fp !== aiNumber) { destinations.push({ label: 'The main business team', number: fp }); seen.add(fp); }
+      }
+      for (const s of (Array.isArray(transferStaff) ? transferStaff : [])) {
+        if (!s || !s.phone) continue;
+        const fp = isValidE164(s.phone) ? s.phone : formatPhoneE164(s.phone);
+        if (!fp || !isValidE164(fp) || fp === aiNumber || seen.has(fp)) continue;
+        seen.add(fp);
+        destinations.push({ label: `${s.name}${s.role ? `, ${s.role}` : ''}`, number: fp });
+      }
+
+      const _targets = destinations.map(d => ({ label: d.label, number: d.number }));
+      const _targetsParam = Buffer.from(JSON.stringify(_targets)).toString('base64');
+      const _targetLabels = _targets.map(t => t.label);
+
+      const _props = {
+        summary: {
+          type: 'string',
+          description: 'One or two sentences describing who is calling and what they need, to brief the team member before they are connected. Example: "Maria Lopez is calling about a burst pipe in her basement and needs someone out today."',
+        },
+      };
+      const _required = ['summary'];
+      // Only expose transfer_to when there is a real choice (more than just the
+      // main line), so a single-destination client keeps a simple one-arg tool.
+      if (_targetLabels.length > 1) {
+        _props.transfer_to = {
+          type: 'string',
+          enum: _targetLabels,
+          description: 'Who to connect the caller to. Pick the team member the caller asked for by name or who handles what they need, otherwise the main business team.',
+        };
+        _required.push('transfer_to');
+      }
+
       tools.push({
         type: 'function',
         function: {
           name: 'request_human_transfer',
-          description: 'Connect the caller to a real person on the team. Before using this, get the name and reason for the call, unless it is a clear emergency, and do not transfer sales, marketing, or solicitation calls. Use this when a real caller asks to speak with someone, has an emergency, or you cannot help them. Provide a short summary covering the name and reason so the team member knows who is calling and why before they pick up. After calling this tool, stop talking; the system connects the call.',
-          parameters: {
-            type: 'object',
-            properties: {
-              summary: {
-                type: 'string',
-                description: 'One or two sentences describing who is calling and what they need, to brief the team member before they are connected. Example: "Maria Lopez is calling about a burst pipe in her basement and needs someone out today."',
-              },
-            },
-            required: ['summary'],
-          },
+          description: 'Connect the caller to a real person on the team. Before using this, get the name and reason for the call, unless it is a clear emergency, and do not transfer sales, marketing, or solicitation calls. Provide a short summary covering the name and reason so the team member knows who is calling and why before they pick up. Choose transfer_to for the person the caller asked for by name or who best fits what they need, otherwise the main business team. After calling this tool, stop talking; the system connects the call.',
+          parameters: { type: 'object', properties: _props, required: _required },
         },
         // 30s gives the backend room to ring the office and run the press-1
         // accept gate (it resolves by ~22s) before VAPI would time the tool out.
-        server: { url: `${BACKEND_URL}/api/voice/request-transfer`, timeoutSeconds: 30 },
+        // t = base64 label->number map so the backend dials the chosen person.
+        server: { url: `${BACKEND_URL}/api/voice/request-transfer?t=${encodeURIComponent(_targetsParam)}`, timeoutSeconds: 30 },
       });
     } else {
       // Native VAPI transfer (vapi_direct clients). Destination is the resolved,
@@ -1734,7 +1772,11 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   // Staff the AI may transfer a live caller to (native VAPI transfer only; the
   // whisper/Telnyx-CC bridge resolves its destination server-side). Fetched
   // only when we are actually transferring, so message-mode calls skip the query.
-  const transferStaff = (handoff === 'transfer' && client.voice_routing !== 'telnyx_cc')
+  // Fetch transferable staff for BOTH routing modes now: telnyx_cc uses them to
+  // build the request_human_transfer destination list (main line + named staff)
+  // so the AI can route to the person the caller asked for, not just the main
+  // number.
+  const transferStaff = (handoff === 'transfer')
     ? await fetchTransferableStaff(client.id, client.timezone)
     : [];
   if (forwardingMode === 'missed') {
