@@ -62,7 +62,6 @@ const {
   speakToCall,
   gatherUsingSpeak,
   bridgeCalls,
-  unbridgeCall,
   hangupCall,
   startPlayback,
   stopPlayback,
@@ -88,18 +87,39 @@ const REQUIRE_SIGNATURE = String(process.env.TELNYX_REQUIRE_SIGNATURE || '').toL
 
 // How long the office is allowed to ring before we give up and return the
 // caller to the AI.
-const OFFICE_RING_SECONDS = 18;
-// Overall press-1 gate timeout once the office answers.
-const GATHER_TIMEOUT_MS = 6000;
+const OFFICE_RING_SECONDS = 16;
+// How long to wait for the agent to press 1 after the whisper (gives them time
+// to react once they have heard who is calling).
+const GATHER_TIMEOUT_MS = 10000;
 // How long /api/voice/request-transfer polls for an outcome before returning
 // the caller to the AI. Keep this a few seconds UNDER the VAPI tool timeout
 // (set to 25s on the request_human_transfer tool in the config builder) so VAPI
 // does not time the tool out first.
-const TRANSFER_WAIT_MS = 22000;
+const TRANSFER_WAIT_MS = 27000;
 // Pause after the AI calls the transfer tool, before we take the caller off the
 // AI, so the AI's short "connecting you" line finishes instead of being cut off
 // mid sentence. The caller stays bridged to the AI during this pause.
-const TRANSFER_PREROLL_MS = Number(process.env.TRANSFER_PREROLL_MS || 2500);
+const TRANSFER_PREROLL_MS = Number(process.env.TRANSFER_PREROLL_MS || 1000);
+
+// Whisper voice matching. When Telnyx holds the ElevenLabs key as an integration
+// secret (TELNYX_VOICE_API_KEY_REF set), the whisper is spoken in the client's
+// own ElevenLabs voice (clients.voice_id) so it matches the AI receptionist. The
+// model defaults to flash v2.5 (low latency); override with TELNYX_ELEVENLABS_MODEL.
+const WHISPER_ELEVENLABS_MODEL = process.env.TELNYX_ELEVENLABS_MODEL || 'eleven_flash_v2_5';
+const WHISPER_VOICE_API_KEY_REF = process.env.TELNYX_VOICE_API_KEY_REF || null;
+
+async function whisperVoiceFor(clientId) {
+  if (!WHISPER_VOICE_API_KEY_REF || !clientId) return {};
+  try {
+    const { data: client } = await supabase.from('clients').select('voice_id').eq('id', clientId).single();
+    const vid = client && client.voice_id ? String(client.voice_id).trim() : null;
+    if (!vid) return {};
+    return { voice: `ElevenLabs.${WHISPER_ELEVENLABS_MODEL}.${vid}`, apiKeyRef: WHISPER_VOICE_API_KEY_REF };
+  } catch (e) {
+    console.warn('telnyx-voice: whisperVoiceFor lookup failed:', e.message);
+    return {};
+  }
+}
 
 // ----------------------------------------------------------------------------
 // Whisper infra ids live in platform_settings (created lazily by vapi.js
@@ -374,15 +394,20 @@ async function startGate(sessionId) {
   if (!office) return;
 
   const summary = session.whisper_summary || 'A caller would like to speak with you.';
-  const callerLabel = session.caller_number ? ` The caller's number is ${session.caller_number}.` : '';
-  const prompt = `You have a call from your A I receptionist. ${summary}${callerLabel} To take the call, press 1. Otherwise, just hang up and I will take a message.`;
+  const prompt = `You have a call. ${summary} Press 1 to take it.`;
 
-  await gatherUsingSpeak(office, prompt, {
+  // Speak the whisper in the SAME voice as this client's AI receptionist, so the
+  // agent hears a consistent voice. Each client's voice_id is its ElevenLabs
+  // voice; when Telnyx has the ElevenLabs key (TELNYX_VOICE_API_KEY_REF set) we
+  // use it, otherwise we fall back to the lib default (Polly neural).
+  const voiceOpts = await whisperVoiceFor(session.client_id);
+
+  await gatherUsingSpeak(office, prompt, Object.assign({
     validDigits: '1',
     timeoutMillis: GATHER_TIMEOUT_MS,
     clientState: { role: 'office', sessionId },
-  });
-  console.log(`telnyx-voice: press-1 gate opened on office (session ${sessionId})`);
+  }, voiceOpts));
+  console.log(`telnyx-voice: press-1 gate opened on office (session ${sessionId})${voiceOpts.voice ? ' [voice ' + voiceOpts.voice + ']' : ''}`);
 }
 
 // ============================================================================
@@ -440,15 +465,14 @@ async function returnToAI(sessionId, reason) {
   const session = await getSessionById(sessionId);
   if (!session) return;
   const caller = session.telnyx_caller_control_id;
-  const vapi = session.telnyx_vapi_control_id;
   const office = session.telnyx_office_control_id;
 
+  // The caller never left the AI (we did not unbridge), so there is nothing to
+  // re-bridge: just stop the ringback and drop the office leg, and the AI is
+  // already there to resume.
   await stopRingback(caller);
   if (office) await hangupCall(office);
-  if (caller && vapi) {
-    await callAction(caller, 'bridge', { call_control_id: vapi, park_after_unbridge: 'self' });
-  }
-  console.log(`telnyx-voice: office not reached (${reason || 'no_answer'}) - caller returned to AI (session ${sessionId})`);
+  console.log(`telnyx-voice: office not reached (${reason || 'no_answer'}) - caller stays with AI (session ${sessionId})`);
 }
 
 // ===========================================================================
@@ -630,24 +654,10 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
         if (role === 'vapi' && sessionId) {
           await handleVapiAnswered(sessionId);
         }
-        // If answering-machine detection never fires (some carriers), fall back
-        // to opening the press-1 gate after a short grace period. startGate is a
-        // no-op unless the session is still 'transferring'.
+        // Open the press-1 gate the instant the office answers (no AMD wait).
+        // startGate is a no-op unless the session is still 'transferring'.
         if (role === 'office' && sessionId) {
-          setTimeout(() => { startGate(sessionId).catch(() => {}); }, 6000);
-        }
-        break;
-
-      case 'call.machine.detection.ended':
-        if (role === 'office' && sessionId) {
-          // A confirmed 'machine' is treated as voicemail and returned to the
-          // AI. 'human', 'not_sure', and 'silence' open the press-1 gate, where
-          // the keypress is the real human check.
-          if (payload.result === 'machine') {
-            await returnToAI(sessionId, 'voicemail');
-          } else {
-            await startGate(sessionId);
-          }
+          await startGate(sessionId);
         }
         break;
 
@@ -794,12 +804,13 @@ router.post('/api/voice/request-transfer', async (req, res) => {
     // bridged to the caller during this pause.
     if (TRANSFER_PREROLL_MS > 0) await new Promise((r) => setTimeout(r, TRANSFER_PREROLL_MS));
 
-    // Take the caller OFF the AI so they hear ringing (not the AI) during the
-    // dial. The VAPI leg is kept alive and parked so we can re-bridge the caller
-    // to it if the office does not answer.
+    // The caller stays bridged to the AI while the office rings (Telnyx has no
+    // unbridge). We play ringback over that leg, and keep the AI leg alive so it
+    // is still there if the office does not answer. On accept we hang up the AI
+    // leg, which parks the caller (park_after_unbridge:'self' set at bridge time)
+    // so it survives to be bridged to the office.
     const caller = session.telnyx_caller_control_id;
     const vapi = session.telnyx_vapi_control_id;
-    if (caller && vapi) await unbridgeCall(caller, { otherCallControlId: vapi });
 
     // Resolve the white-label ringback/hold audio (client override -> agency
     // default -> platform default -> spoken fallback) and play it to the caller.
@@ -819,7 +830,9 @@ router.post('/api/voice/request-transfer', async (req, res) => {
       to: officeNumber,
       from: businessDid,
       connectionId,
-      amd: 'premium',
+      // No answering-machine detection: it adds several seconds of latency
+      // before the gate opens. The press-1 gate is the real backstop (a
+      // voicemail never presses 1), so we gate the instant the office answers.
       timeoutSecs: OFFICE_RING_SECONDS,
       clientState: { role: 'office', sessionId: session.id },
     });

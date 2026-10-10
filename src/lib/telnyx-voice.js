@@ -31,8 +31,26 @@ const TELNYX_BASE = 'https://api.telnyx.com/v2';
 
 // Default voice for the whisper. Telnyx accepts simple values like 'female' or
 // 'male', or specific provider voices. Override per call if needed.
-const DEFAULT_SPEAK_VOICE = process.env.TELNYX_SPEAK_VOICE || 'female';
+// A natural AWS Polly neural voice by default (the basic 'male'/'female' voices
+// sound robotic). Override with TELNYX_SPEAK_VOICE, e.g. AWS.Polly.Matthew-Neural.
+const DEFAULT_SPEAK_VOICE = process.env.TELNYX_SPEAK_VOICE || 'AWS.Polly.Joanna-Neural';
 const DEFAULT_SPEAK_LANGUAGE = process.env.TELNYX_SPEAK_LANGUAGE || 'en-US';
+
+// To use ElevenLabs (or Azure/Minimax/etc.) voices, Telnyx needs a reference to
+// the provider API key stored as a Telnyx Integration Secret (never the raw key
+// inline). Set TELNYX_VOICE_API_KEY_REF to that secret's identifier, and set
+// TELNYX_SPEAK_VOICE to e.g. ElevenLabs.eleven_turbo_v2_5.<voiceId>. When the ref
+// is set we attach voice_settings on every speak/gather so the provider is used.
+const DEFAULT_VOICE_API_KEY_REF = process.env.TELNYX_VOICE_API_KEY_REF || null;
+
+// Only voices from a provider that needs an API key (ElevenLabs) get
+// voice_settings. Polly and Telnyx voices must NOT carry it, so the Polly
+// fallback lines keep working even when the ElevenLabs key ref is set globally.
+function buildVoiceSettings(opts = {}, voice = '') {
+  if (!/^ElevenLabs\./i.test(String(voice || opts.voice || ''))) return null;
+  const ref = opts.apiKeyRef || DEFAULT_VOICE_API_KEY_REF;
+  return ref ? { api_key_ref: ref } : null;
+}
 
 // ----------------------------------------------------------------------------
 // client_state is a base64 string Telnyx echoes back on every webhook for a
@@ -201,6 +219,8 @@ async function speakToCall(callControlId, text, opts = {}) {
     voice: opts.voice || DEFAULT_SPEAK_VOICE,
     language: opts.language || DEFAULT_SPEAK_LANGUAGE,
   };
+  const vs = buildVoiceSettings(opts, body.voice);
+  if (vs) body.voice_settings = vs;
   const cs = encodeClientState(opts.clientState);
   if (cs) body.client_state = cs;
   const out = await callAction(callControlId, 'speak', body);
@@ -236,6 +256,8 @@ async function gatherUsingSpeak(callControlId, text, opts = {}) {
     timeout_millis: opts.timeoutMillis || 6000,
     inter_digit_timeout_millis: opts.interDigitTimeoutMillis || 3000,
   };
+  const vs = buildVoiceSettings(opts, body.voice);
+  if (vs) body.voice_settings = vs;
   const cs = encodeClientState(opts.clientState);
   if (cs) body.client_state = cs;
   const out = await callAction(callControlId, 'gather_using_speak', body);
