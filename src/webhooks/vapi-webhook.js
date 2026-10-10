@@ -1188,12 +1188,12 @@ async function handleVapiWebhook(req, res) {
 
     const call = message.call;
 
-    // Live monitor: close out the call for anyone watching (both delivery paths).
-    try {
-      const endClientId = (req.query && req.query.clientId)
-        || (call && call.id ? (liveMonitor.getCallInfo(call.id) || {}).clientId : null);
-      if (endClientId && call && call.id) broadcastLiveEvent(endClientId, { callId: call.id, type: 'status', status: 'ended' });
-    } catch (e) {}
+    // NOTE: the live-monitor "ended" event is emitted BELOW, after we know
+    // whether this was a connected telnyx_cc transfer. On a bridged transfer
+    // the VAPI leg ends at hand-off while the caller is still on with a human,
+    // so firing "ended" here would make the monitor say the call ended early.
+    // For bridged transfers the telnyx-voice engine emits "ended" when the
+    // caller actually hangs up; for everything else we emit it here.
 
     // telnyx_cc whisper calls arrive over a shared VAPI SIP number, so the
     // phoneNumberId does NOT map to a client. Resolve those by the session we
@@ -1219,6 +1219,19 @@ async function handleVapiWebhook(req, res) {
         const { data: c } = await supabase.from('clients').select('*, agencies!clients_agency_id_fkey(*)').eq('id', session.client_id).single();
         if (c) { client = c; console.log('✅ Resolved client via call_sessions (telnyx_cc):', c.business_name, transferredViaTelnyx ? '[bridged transfer]' : ''); }
       }
+    }
+
+    // Live monitor: close out the call for anyone watching, UNLESS this was a
+    // connected transfer (bridged). On a bridged transfer the caller is still
+    // talking to a person after the VAPI leg ends, so the telnyx-voice engine
+    // owns the real "ended" (fired on the caller's hangup). Firing it here would
+    // end the monitor early. Both delivery paths (SSE + Supabase) via broadcast.
+    if (!transferredViaTelnyx) {
+      try {
+        const endClientId = (req.query && req.query.clientId)
+          || (call && call.id ? (liveMonitor.getCallInfo(call.id) || {}).clientId : null);
+        if (endClientId && call && call.id) broadcastLiveEvent(endClientId, { callId: call.id, type: 'status', status: 'ended' });
+      } catch (e) {}
     }
 
     let phoneNumber = null;

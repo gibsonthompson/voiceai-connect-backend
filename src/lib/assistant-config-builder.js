@@ -1912,6 +1912,12 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     ...(client.voice_routing === 'telnyx_cc' ? { silenceTimeoutSeconds: 60 } : {}),
     firstMessage,
     recordingEnabled: hipaaMode ? false : true,
+    // Live monitor: provision VAPI's listen + control channels so the AI Lab
+    // monitor can stream the call audio and take over the AI if needed. These
+    // only expose monitor.listenUrl / monitor.controlUrl on call events (the
+    // monitor reads them); they do not change how the call runs. Off in HIPAA
+    // mode so PHI is never opened to a live listen channel.
+    ...(hipaaMode ? {} : { monitorPlan: { listenEnabled: true, controlEnabled: true } }),
     serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
     // clientId rides on the query so every server message (transcript, status,
     // end-of-call) carries it. The live monitor uses it to fan events to the

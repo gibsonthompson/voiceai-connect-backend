@@ -418,6 +418,14 @@ async function startGate(sessionId, recipientName) {
   const hey = recipientName ? `Hey ${recipientName}, ` : '';
   const greeting = `${hey}${summary} Want me to send them through?`;
 
+  // Live monitor: the team member answered and is being briefed (the whisper).
+  try {
+    broadcastLiveEvent(session.client_id, {
+      type: 'activity', tool: 'transfer_whisper',
+      label: recipientName ? `Briefing ${recipientName}` : 'Briefing the team',
+    });
+  } catch (e) {}
+
   // Speak in this client's own receptionist voice when the ElevenLabs key is
   // wired (TELNYX_VOICE_API_KEY_REF), otherwise the lib default (Polly neural).
   const voiceOpts = await whisperVoiceFor(session.client_id);
@@ -450,7 +458,7 @@ async function startGate(sessionId, recipientName) {
 // Because the caller leg was parked when we unbridged it from VAPI, it survives
 // the VAPI hangup and is ready to bridge to the office.
 // ============================================================================
-async function completeAccept(sessionId) {
+async function completeAccept(sessionId, recipientName) {
   const won = await atomicTransition(sessionId, ['ringing_gate'], 'bridged');
   if (!won) return;
 
@@ -479,6 +487,18 @@ async function completeAccept(sessionId) {
     console.warn('telnyx-voice: hipaa check failed, recording skipped:', e.message);
   }
 
+  // Live monitor: the AI has handed the caller to a person, so the monitor
+  // should show "connected to the team" (not "ended"). The VAPI leg just went
+  // away, so its transcript stops here; the viewer sees why. Best-effort.
+  try {
+    const who = recipientName ? `Connected to ${recipientName}` : 'Connected to the team';
+    broadcastLiveEvent(session.client_id, { type: 'status', status: 'bridged', label: who });
+    broadcastLiveEvent(session.client_id, {
+      type: 'activity', tool: 'transfer_connected',
+      label: recipientName ? `Caller connected to ${recipientName}` : 'Caller connected to the team',
+    });
+  } catch (e) {}
+
   console.log(`telnyx-voice: caller bridged to office (session ${sessionId}) - transfer connected`);
 }
 
@@ -503,6 +523,17 @@ async function returnToAI(sessionId, reason) {
   // already there to resume.
   await stopRingback(caller);
   if (office) await hangupCall(office);
+
+  // Live monitor: the team did not pick up, so the caller is back with the AI.
+  // Flip the pill back to Live and note it on the activity rail. Best-effort.
+  try {
+    broadcastLiveEvent(session.client_id, {
+      type: 'activity', tool: 'transfer_returned',
+      label: 'No answer from the team, caller back with the AI',
+    });
+    broadcastLiveEvent(session.client_id, { type: 'status', status: 'in-progress', label: 'Back with the AI' });
+  } catch (e) {}
+
   console.log(`telnyx-voice: office not reached (${reason || 'no_answer'}) - caller stays with AI (session ${sessionId})`);
 }
 
@@ -790,7 +821,7 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
         if (role === 'office' && sessionId) {
           const digits = (payload.digits || '').toString();
           if (digits.includes('1')) {
-            await completeAccept(sessionId);
+            await completeAccept(sessionId, state && state.recipientName);
           } else {
             await returnToAI(sessionId, 'no_keypress');
           }
@@ -804,7 +835,7 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
           // returns the caller to the AI (safe default).
           try { console.log(`telnyx-voice: ai_gather.ended payload: ${JSON.stringify(payload).slice(0, 600)}`); } catch (e) {}
           if (parseAiAccept(payload) === true) {
-            await completeAccept(sessionId);
+            await completeAccept(sessionId, state && state.recipientName);
           } else {
             await returnToAI(sessionId, 'declined_or_no_response');
           }
@@ -824,6 +855,13 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
         if (sessionId) {
           const s = await getSessionById(sessionId);
           const st = s && s.status;
+          // Live monitor: a caller (or AI-leg) hangup is the TRUE end of the
+          // call. On a connected transfer it fires after the human conversation
+          // wraps, so close the monitor here even though we deliberately leave
+          // the DB status as 'bridged' for vapi-webhook to read. Best-effort.
+          if (s && (role === 'caller' || role === 'vapi')) {
+            try { broadcastLiveEvent(s.client_id, { type: 'status', status: 'ended' }); } catch (e) {}
+          }
           // Leave 'bridged' alone so vapi-webhook can detect the connected
           // transfer, and leave terminal states alone.
           if (st && st !== 'bridged' && st !== 'ended' && st !== 'transfer_recapped') {
@@ -902,6 +940,7 @@ router.post('/api/voice/request-transfer', async (req, res) => {
         type: 'activity', tool: 'request_human_transfer', label: 'Connecting to the team',
         detail: summary || null,
       });
+      broadcastLiveEvent(session.client_id, { type: 'status', status: 'dialing_team', label: 'Transferring to the team' });
     } catch (e) {}
 
     if (session.status === 'bridged' || session.status === 'transferring' || session.status === 'ringing_gate') {
