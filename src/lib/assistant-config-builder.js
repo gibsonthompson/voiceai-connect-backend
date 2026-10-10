@@ -586,7 +586,9 @@ async function fetchTransferableStaff(clientId, timezone) {
   try {
     const { data, error } = await supabase
       .from('staff_members')
-      .select('name, role, phone, available_hours')
+      // select('*') (not a fixed column list) so this keeps working even if a
+      // newer column like transfer_criteria has not been added to the table yet.
+      .select('*')
       .eq('client_id', clientId)
       .eq('is_active', true)
       .eq('transferable', true)
@@ -1163,8 +1165,14 @@ SALES, SOLICITATIONS, AND SPAM: if the reason is a sales pitch, a marketing or a
   // handle) instead of always sending everyone to the main line. Only meaningful
   // when we are actually transferring.
   if (toolConfig.transferCall && handoff === 'transfer' && Array.isArray(transferStaff) && transferStaff.length > 0 && !systemPrompt.includes('# Transfer Routing')) {
-    const names = transferStaff.map(s => `- ${s.name}${s.role ? ` (${s.role})` : ''}`).join('\n');
-    systemPrompt += `\n\n# Transfer Routing\nYou can connect callers directly to specific team members. When a caller asks for one of these people by name, or clearly needs what that person handles, use the transfer tool and pick that person. For anyone else who needs a human, transfer to the main team.\n${names}\n`;
+    const names = transferStaff.map(s => {
+      const who = `${s.name}${s.role ? ` (${s.role})` : ''}`;
+      const crit = (s.transfer_criteria && String(s.transfer_criteria).trim())
+        ? `: transfer to this person when ${String(s.transfer_criteria).trim()}`
+        : '';
+      return `- ${who}${crit}`;
+    }).join('\n');
+    systemPrompt += `\n\n# Transfer Routing\nYou can connect callers directly to specific team members. Use the routing rules below to decide who each caller goes to: match the caller's reason for calling against the rules and transfer to the person whose rule fits. Always transfer a caller to the specific person they ask for by name. If no rule clearly fits what the caller needs, transfer to the main team. Follow these rules exactly, and never connect a caller to a person whose rule does not match what they need.\n${names}\n`;
   }
 
   // After-hours mode (always dynamic, never in cached prompt)

@@ -90,7 +90,7 @@ router.post('/:clientId/staff/suggestions/dismiss', requirePermissionIfAuthed('m
 router.post('/:clientId/staff', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { clientId } = req.params;
-    const { name, role, phone, email, notes, available_hours, transferable } = req.body;
+    const { name, role, phone, email, notes, available_hours, transferable, transfer_criteria } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Staff member name is required' });
@@ -109,6 +109,11 @@ router.post('/:clientId/staff', requirePermissionIfAuthed('my_business'), async 
       // Whether the AI may transfer a live caller to this person. Only takes
       // effect on calls when the member also has a phone number.
       transferable: transferable === true,
+      // Free-text rule for WHEN a caller should be routed to this person (e.g.
+      // "billing and payment questions"). Injected into the live prompt's
+      // Transfer Routing block so the AI connects the right caller to the right
+      // person. Only meaningful when transferable.
+      transfer_criteria: transfer_criteria?.trim() || null,
     };
 
     const { data: staff, error } = await supabase
@@ -136,7 +141,7 @@ router.post('/:clientId/staff', requirePermissionIfAuthed('my_business'), async 
 router.put('/:clientId/staff/:staffId', requirePermissionIfAuthed('my_business'), async (req, res) => {
   try {
     const { clientId, staffId } = req.params;
-    const { name, role, phone, email, notes, available_hours, is_active, transferable } = req.body;
+    const { name, role, phone, email, notes, available_hours, is_active, transferable, transfer_criteria } = req.body;
 
     const updates = {};
     if (name !== undefined) {
@@ -150,6 +155,7 @@ router.put('/:clientId/staff/:staffId', requirePermissionIfAuthed('my_business')
     if (available_hours !== undefined) updates.available_hours = available_hours;
     if (is_active !== undefined) updates.is_active = is_active;
     if (transferable !== undefined) updates.transferable = transferable === true;
+    if (transfer_criteria !== undefined) updates.transfer_criteria = transfer_criteria?.trim() || null;
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ error: 'No fields to update' });
