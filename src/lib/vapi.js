@@ -2135,7 +2135,11 @@ async function ensureWhisperInfra() {
       body: JSON.stringify({
         provider: 'vapi',
         sipUri: wantUri,
-        server: { url: `${BACKEND_URL}/webhook/vapi` },
+        // Carry the webhook secret so VAPI's assistant-request to /webhook/vapi
+        // is accepted (the handler 401s a request with no secret once
+        // VAPI_WEBHOOK_SECRET is set). Without this the shared SIP door's calls
+        // are rejected and the AI never gets its config.
+        server: { url: `${BACKEND_URL}/webhook/vapi`, secret: process.env.VAPI_WEBHOOK_SECRET || undefined },
         name: 'VoiceAI Whisper Shared SIP',
       }),
     });
