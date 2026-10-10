@@ -2,14 +2,17 @@
 // TELNYX VOICE - Call Control action helpers (warm transfer)
 // ----------------------------------------------------------------------------
 // Thin, well-logged wrappers over the Telnyx Call Control v2 API. These are the
-// only building blocks the warm-transfer flow needs:
+// building blocks the own-the-call warm-transfer flow needs:
 //
 //   answer  -> pick up the inbound caller leg so we can control it
 //   dial    -> originate a new leg (to VAPI over SIP, or to the office number)
-//   speak   -> say a line to ONE leg only (this is the whisper to the office)
+//   speak   -> say a line to ONE leg only (used for the ringback fallback)
+//   gather  -> speak a prompt to ONE leg and collect a DTMF digit (press-1 gate)
 //   bridge  -> connect two legs together (caller + office)
+//   unbridge-> separate two bridged legs WITHOUT hanging either up (both parked)
 //   hangup  -> end a leg (we drop the VAPI leg once the office is bridged in)
-//   playback start/stop -> optional hold audio for the caller while we dial out
+//   playback start/stop -> ringback audio for the caller while we dial out
+//   record  start/stop  -> record the bridged caller<->office call for the recap
 //
 // All of these use the same TELNYX_API_KEY the SMS code already uses. Nothing
 // here hardcodes your connection id or the VAPI SIP URI; the caller passes them
@@ -103,7 +106,7 @@ async function answerCall(callControlId, clientStateObj = null) {
 //   1. to VAPI over SIP (to = the VAPI SIP URI), stamping X-Client-Id so VAPI
 //      knows which client this call is for.
 //   2. to the office number (to = +1XXXXXXXXXX) with answering-machine
-//      detection so we only whisper to a human, not a voicemail greeting.
+//      detection so we only gate a human, not a voicemail greeting.
 //
 // Returns the new leg's data, including its call_control_id, on success.
 //
@@ -187,8 +190,8 @@ async function dialVapi({ clientId, from, fromDisplayName, sipUri, clientState, 
 }
 
 // ----------------------------------------------------------------------------
-// speakToCall - say a line to ONE leg. This is the whisper: call it on the
-// office leg only, before bridging, and the caller never hears it.
+// speakToCall - say a line to ONE leg. Used for the spoken ringback fallback
+// (when no ringback audio url is configured) and any one-leg announcement.
 // ----------------------------------------------------------------------------
 async function speakToCall(callControlId, text, opts = {}) {
   if (!text) { console.warn('telnyx-voice: speak called with empty text'); return null; }
@@ -206,16 +209,69 @@ async function speakToCall(callControlId, text, opts = {}) {
 }
 
 // ----------------------------------------------------------------------------
+// gatherUsingSpeak - speak a prompt to ONE leg and collect DTMF in the same
+// command. This is the press-1-to-accept gate on the office leg: the agent
+// hears the whisper, then presses 1 to take the call. A voicemail never presses
+// a key, so this is the reliable backstop that answering-machine detection
+// alone is not. The result arrives as a 'call.gather.ended' event whose
+// payload.digits is what was pressed (empty on timeout).
+//
+// opts:
+//   validDigits            default '1'
+//   timeoutMillis          overall gather timeout (default 6000)
+//   interDigitTimeoutMillis default 3000
+//   voice / language       TTS voice + language
+//   clientState            echoed back on the gather event
+// ----------------------------------------------------------------------------
+async function gatherUsingSpeak(callControlId, text, opts = {}) {
+  if (!text) { console.warn('telnyx-voice: gatherUsingSpeak called with empty text'); return null; }
+  const body = {
+    payload: String(text),
+    payload_type: 'text',
+    voice: opts.voice || DEFAULT_SPEAK_VOICE,
+    language: opts.language || DEFAULT_SPEAK_LANGUAGE,
+    valid_digits: opts.validDigits || '1',
+    minimum_digits: 1,
+    maximum_digits: 1,
+    timeout_millis: opts.timeoutMillis || 6000,
+    inter_digit_timeout_millis: opts.interDigitTimeoutMillis || 3000,
+  };
+  const cs = encodeClientState(opts.clientState);
+  if (cs) body.client_state = cs;
+  const out = await callAction(callControlId, 'gather_using_speak', body);
+  if (out) console.log(`telnyx-voice: gather_using_speak on ${callControlId}`);
+  return out;
+}
+
+// ----------------------------------------------------------------------------
 // bridgeCalls - connect two legs so the people on them can talk. Issued on one
 // leg with the other leg's id. Used to merge caller + office.
 // ----------------------------------------------------------------------------
 async function bridgeCalls(callControlIdA, callControlIdB, opts = {}) {
   if (!callControlIdA || !callControlIdB) { console.warn('telnyx-voice: bridge needs two leg ids'); return null; }
   const body = { call_control_id: callControlIdB };
+  if (opts.parkAfterUnbridge) body.park_after_unbridge = opts.parkAfterUnbridge;
   const cs = encodeClientState(opts.clientState);
   if (cs) body.client_state = cs;
   const out = await callAction(callControlIdA, 'bridge', body);
   if (out) console.log(`telnyx-voice: bridged ${callControlIdA} <-> ${callControlIdB}`);
+  return out;
+}
+
+// ----------------------------------------------------------------------------
+// unbridgeCall - separate two currently-bridged legs WITHOUT hanging up either.
+// Both legs stay up and parked. We use this at transfer time to take the caller
+// off the AI (so they can hear ringback while the office is dialed) while
+// keeping the AI leg alive and parked, ready to be re-bridged to the caller if
+// the office does not pick up.
+// ----------------------------------------------------------------------------
+async function unbridgeCall(callControlId, opts = {}) {
+  const body = {};
+  if (opts.otherCallControlId) body.call_control_id = opts.otherCallControlId;
+  const cs = encodeClientState(opts.clientState);
+  if (cs) body.client_state = cs;
+  const out = await callAction(callControlId, 'unbridge', body);
+  if (out) console.log(`telnyx-voice: unbridged ${callControlId}`);
   return out;
 }
 
@@ -232,8 +288,9 @@ async function hangupCall(callControlId, opts = {}) {
 }
 
 // ----------------------------------------------------------------------------
-// startPlayback / stopPlayback - optional hold audio for the caller while the
-// office is being dialed. audioUrl must be a publicly reachable file.
+// startPlayback / stopPlayback - ringback (or hold) audio for the caller while
+// the office is being dialed. audioUrl must be a publicly reachable file. Pass
+// opts.loop = 'infinity' to loop a short ringback tone for the whole ring.
 // ----------------------------------------------------------------------------
 async function startPlayback(callControlId, audioUrl, opts = {}) {
   if (!audioUrl) { console.warn('telnyx-voice: playback called with no audio url'); return null; }
@@ -248,6 +305,30 @@ async function stopPlayback(callControlId) {
   return callAction(callControlId, 'playback_stop', {});
 }
 
+// ----------------------------------------------------------------------------
+// recordStart / recordStop - record a leg and whatever it is bridged to. We
+// start recording on the caller leg right after it is bridged to the office so
+// the whole human conversation is captured for the owner recap. channels
+// 'dual' keeps the two parties on separate channels. The finished file arrives
+// as a 'call.recording.saved' event carrying the recording url(s).
+// ----------------------------------------------------------------------------
+async function recordStart(callControlId, opts = {}) {
+  const body = {
+    format: opts.format || 'mp3',
+    channels: opts.channels || 'dual',
+  };
+  if (opts.playBeep) body.play_beep = true;
+  const cs = encodeClientState(opts.clientState);
+  if (cs) body.client_state = cs;
+  const out = await callAction(callControlId, 'record_start', body);
+  if (out) console.log(`telnyx-voice: recording started on ${callControlId}`);
+  return out;
+}
+
+async function recordStop(callControlId) {
+  return callAction(callControlId, 'record_stop', {});
+}
+
 module.exports = {
   encodeClientState,
   decodeClientState,
@@ -256,8 +337,12 @@ module.exports = {
   dialCall,
   dialVapi,
   speakToCall,
+  gatherUsingSpeak,
   bridgeCalls,
+  unbridgeCall,
   hangupCall,
   startPlayback,
   stopPlayback,
+  recordStart,
+  recordStop,
 };

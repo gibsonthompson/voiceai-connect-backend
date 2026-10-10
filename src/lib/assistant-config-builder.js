@@ -1259,7 +1259,9 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
             required: ['summary'],
           },
         },
-        server: { url: `${BACKEND_URL}/api/voice/request-transfer`, timeoutSeconds: 25 },
+        // 30s gives the backend room to ring the office and run the press-1
+        // accept gate (it resolves by ~22s) before VAPI would time the tool out.
+        server: { url: `${BACKEND_URL}/api/voice/request-transfer`, timeoutSeconds: 30 },
       });
     } else {
       // Native VAPI transfer (vapi_direct clients). Destination is the resolved,
@@ -1859,6 +1861,13 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     ...(denoisingOn
       ? { backgroundSpeechDenoisingPlan: { smartDenoisingPlan: { enabled: true } } }
       : {}),
+    // telnyx_cc warm transfer: during a transfer the backend takes the caller
+    // off this assistant and parks THIS (VAPI) leg while the agent's phone rings
+    // (up to ~22s), so the assistant hears silence for that window. Raise the
+    // silence timeout well past it so VAPI does not end the parked leg before
+    // the caller can be handed back on a no-answer. Only telnyx_cc parks the
+    // leg; vapi_direct keeps VAPI's default.
+    ...(client.voice_routing === 'telnyx_cc' ? { silenceTimeoutSeconds: 60 } : {}),
     firstMessage,
     recordingEnabled: hipaaMode ? false : true,
     serverMessages: ['end-of-call-report', 'transcript', 'status-update'],

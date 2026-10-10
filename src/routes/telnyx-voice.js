@@ -1,34 +1,44 @@
 // ============================================================================
-// TELNYX VOICE ROUTES - Whisper warm transfer engine (telnyx_cc clients only)
+// TELNYX VOICE ROUTES - Own-the-call warm transfer engine (telnyx_cc clients)
 // ----------------------------------------------------------------------------
 // Deploy to: src/routes/telnyx-voice.js
 // Mount in server.js with:   app.use('/', require('./routes/telnyx-voice'));
 // AND add '/webhook/telnyx-voice' to the express.raw() exception list so the
 // Telnyx webhook arrives as a raw Buffer for signature verification.
 //
-// This file owns two endpoints:
+// This file owns these endpoints:
 //
-//   POST /webhook/telnyx-voice      <- Telnyx Call Control events (raw body)
+//   POST /webhook/telnyx-voice       <- Telnyx Call Control events (raw body)
 //   POST /api/voice/request-transfer <- VAPI calls this when the AI decides to
 //                                        hand the caller to a human (JSON body)
+//   POST /api/voice/send-sms         <- the AI's send_sms tool (text the caller)
 //
 // THE THREE LEGS of a telnyx_cc call:
 //   A = caller   (inbound PSTN leg, we answer it)
 //   B = VAPI     (outbound SIP leg into VAPI, bridged to A so the AI can talk)
-//   C = office   (outbound PSTN leg to the owner, created only on transfer)
+//   C = office   (outbound PSTN leg to a person, created only on transfer)
 //
-// HAPPY PATH:
-//   1. Caller dials in. Telnyx fires call.initiated. We answer A, create a
-//      call_sessions row, then dial VAPI (B) carrying the client id + session
-//      id as SIP headers. We bridge A<->B. Caller is now talking to the AI.
-//   2. Caller asks for a human. VAPI calls /api/voice/request-transfer with a
-//      one-line summary. We dial the office (C) with answering-machine
-//      detection, and hold the HTTP response open briefly.
-//   3. A real person answers C. We speak the whisper to C ONLY (the caller does
-//      not hear it). When the whisper finishes, we hang up the VAPI leg (B) and
-//      bridge the caller (A) to the office (C). Done.
-//   4. If nobody answers / it hits voicemail, we hang up C, leave the caller
-//      with the AI (A<->B is untouched), and tell the AI to take a message.
+// FULL TRANSFER FLOW (own-the-call):
+//   1. Caller dials in. We answer A, create a call_sessions row, dial VAPI (B),
+//      and bridge A<->B. The caller is talking to the AI.
+//   2. Caller asks for a human. VAPI calls /api/voice/request-transfer. We
+//      UNBRIDGE A from B (keeping B alive and parked), play ringback to A so
+//      the caller hears the phone ring, and dial the office (C) with premium
+//      answering-machine detection.
+//   3. A person answers C. We play a whisper + "press 1 to take the call"
+//      (gather_using_speak) to C only. On digit 1 we stop ringback, hang up B,
+//      bridge A<->C, and start recording for the owner recap.
+//   4. If no one answers, it rolls to voicemail, or no key is pressed, we stop
+//      ringback, hang up C, and RE-BRIDGE A<->B so the SAME AI resumes and
+//      offers to book an appointment or take a message (never voicemail).
+//   5. When the bridged human call ends, the recording is transcribed and
+//      summarized, and the owner gets ONE recap SMS with the recording link.
+//
+// MULTI-INSTANCE SAFE: the transfer state lives in call_sessions.status, and
+// the ring/gate/accept/return handlers each claim their step with an atomic
+// status transition, so a step runs exactly once even if Telnyx delivers the
+// deciding event to a different backend instance. request-transfer learns the
+// outcome by polling that status (not an in-memory promise).
 //
 // SAFETY: vapi_direct clients never touch this file. Their calls go straight
 // into VAPI exactly as before. This path only runs for numbers pointed at the
@@ -37,6 +47,7 @@
 
 const express = require('express');
 const crypto = require('crypto');
+const path = require('path');
 const router = express.Router();
 
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
@@ -49,8 +60,13 @@ const {
   answerCall,
   dialCall,
   speakToCall,
+  gatherUsingSpeak,
   bridgeCalls,
+  unbridgeCall,
   hangupCall,
+  startPlayback,
+  stopPlayback,
+  recordStart,
   decodeClientState,
 } = require('../lib/telnyx-voice');
 
@@ -58,9 +74,34 @@ const VAPI_SIP_URI = process.env.VAPI_SIP_URI || null;
 const TELNYX_PUBLIC_KEY = process.env.TELNYX_PUBLIC_KEY || null;
 const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
 
+// Ringback the caller hears while the office is dialed. Set TELNYX_RINGBACK_URL
+// to a publicly reachable short ringback tone (mp3/wav) for a true phone-ring
+// sound; it is looped for the whole ring. If unset, we fall back to a single
+// spoken "please hold" line so the caller is never met with dead air.
+const RINGBACK_AUDIO_URL = process.env.TELNYX_RINGBACK_URL || null;
+
+// When true, a webhook with no/invalid signature is REJECTED even if
+// TELNYX_PUBLIC_KEY is somehow missing. Set this (and the key) at go-live so
+// the webhook is fail-closed. Left unset during first bring-up so the flow can
+// be tested before the key is wired.
+const REQUIRE_SIGNATURE = String(process.env.TELNYX_REQUIRE_SIGNATURE || '').toLowerCase() === 'true';
+
+// How long the office is allowed to ring before we give up and return the
+// caller to the AI.
+const OFFICE_RING_SECONDS = 18;
+// Overall press-1 gate timeout once the office answers.
+const GATHER_TIMEOUT_MS = 6000;
+// How long /api/voice/request-transfer polls for an outcome before returning
+// the caller to the AI. Keep this a few seconds UNDER the VAPI tool timeout
+// (set to 25s on the request_human_transfer tool in the config builder) so VAPI
+// does not time the tool out first.
+const TRANSFER_WAIT_MS = 22000;
+
+// ----------------------------------------------------------------------------
 // Whisper infra ids live in platform_settings (created lazily by vapi.js
 // ensureWhisperInfra during provisioning). Read them here, cached for 60s, with
 // env fallback so a manually-set env still works. DB value wins when present.
+// ----------------------------------------------------------------------------
 let _whisperCfg = null;
 let _whisperCfgAt = 0;
 async function getWhisperConfig() {
@@ -85,35 +126,6 @@ async function getWhisperConfig() {
   return _whisperCfg;
 }
 
-// How long the office is allowed to ring before we give up and take a message.
-const OFFICE_RING_SECONDS = 20;
-// How long /api/voice/request-transfer waits for an answer before telling the
-// AI to take a message. Keep this a few seconds UNDER the VAPI tool timeout
-// (set to 25s on the tool in the config builder) so VAPI does not time out
-// first. If answering-machine detection is slow, we still resolve by here.
-const TRANSFER_WAIT_MS = 19000;
-
-// ----------------------------------------------------------------------------
-// In-memory registry of transfers waiting on an office answer. Keyed by session
-// id. Each entry lets the Telnyx event handler resolve the HTTP request that is
-// still open in /api/voice/request-transfer.
-//
-// NOTE: this assumes a single backend instance (DigitalOcean App Platform with
-// 1 instance, which is the current setup). If you scale to multiple instances,
-// the bridge/whisper still works (it is driven entirely by Telnyx events), but
-// the "tell the AI it failed" message may not fire on the instance holding the
-// HTTP request. Move this to a shared store (Redis) before scaling out.
-// ----------------------------------------------------------------------------
-const pendingTransfers = new Map();
-
-function settleTransfer(sessionId, outcome) {
-  const entry = pendingTransfers.get(sessionId);
-  if (!entry) return;
-  pendingTransfers.delete(sessionId);
-  if (entry.timer) clearTimeout(entry.timer);
-  try { entry.resolve(outcome); } catch (_) { /* already responded */ }
-}
-
 // ----------------------------------------------------------------------------
 // E.164 formatter (local copy so this route has no dependency on vapi.js).
 // ----------------------------------------------------------------------------
@@ -130,20 +142,23 @@ function toE164(phone) {
 // ----------------------------------------------------------------------------
 // Verify the Telnyx webhook signature (Ed25519).
 //
-// Telnyx signs the raw body as `${timestamp}|${rawBody}` and sends the
-// signature in the 'telnyx-signature-ed25519' header (base64) with the
-// timestamp in 'telnyx-timestamp'. TELNYX_PUBLIC_KEY is the base64 raw 32-byte
-// public key from the Telnyx portal. We wrap it in the standard Ed25519 SPKI
-// DER prefix so Node's crypto can use it with no extra dependency.
+// Telnyx signs `${timestamp}|${rawBody}` and sends the signature in
+// 'telnyx-signature-ed25519' (base64) with the timestamp in 'telnyx-timestamp'.
+// TELNYX_PUBLIC_KEY is the base64 raw 32-byte public key from the portal; we
+// wrap it in the standard Ed25519 SPKI DER prefix so Node's crypto can use it.
 //
-// If TELNYX_PUBLIC_KEY is not set yet, we log a warning and ALLOW the request
-// through, so you can get the flow working before wiring the key. Once the key
-// is set, a bad signature is rejected.
+// Fail-closed: once TELNYX_PUBLIC_KEY is set, a bad signature is rejected. If
+// the key is NOT set, we allow the request through ONLY while TELNYX_REQUIRE_
+// SIGNATURE is not 'true' (first bring-up). Set both at go-live.
 // ----------------------------------------------------------------------------
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
 function verifyTelnyxSignature(rawBody, signatureB64, timestamp) {
   if (!TELNYX_PUBLIC_KEY) {
+    if (REQUIRE_SIGNATURE) {
+      console.error('telnyx-voice: TELNYX_PUBLIC_KEY not set but TELNYX_REQUIRE_SIGNATURE=true - rejecting');
+      return false;
+    }
     console.warn('telnyx-voice: TELNYX_PUBLIC_KEY not set - skipping signature check (set it before going live)');
     return true;
   }
@@ -194,6 +209,27 @@ async function updateSession(id, fields) {
   await supabase.from('call_sessions').update(fields).eq('id', id);
 }
 
+// Atomically move a session from one of `fromStatuses` to `toStatus`. Returns
+// true only for the single caller that wins the transition. This is the lock
+// that makes the ring/gate/accept/return handlers each run exactly once, even
+// if Telnyx delivers the deciding event to more than one backend instance (the
+// DB row is the shared store).
+async function atomicTransition(sessionId, fromStatuses, toStatus, extraFields = {}) {
+  if (!sessionId) return false;
+  const from = Array.isArray(fromStatuses) ? fromStatuses : [fromStatuses];
+  const { data, error } = await supabase
+    .from('call_sessions')
+    .update(Object.assign({ status: toStatus, updated_at: new Date().toISOString() }, extraFields))
+    .eq('id', sessionId)
+    .in('status', from)
+    .select('id');
+  if (error) {
+    console.error('telnyx-voice: atomicTransition failed:', error.message);
+    return false;
+  }
+  return !!(data && data.length);
+}
+
 // ============================================================================
 // INBOUND: a caller dialed a telnyx_cc number. Answer, set up the session,
 // dial VAPI, and bridge them so the AI can start talking.
@@ -205,7 +241,6 @@ async function handleInbound(payload) {
 
   console.log(`telnyx-voice: inbound ${fromNumber} -> ${toNumber} (leg ${callerLeg})`);
 
-  // Which client owns this number?
   const client = await getClientByVapiPhoneNumber(toNumber);
   if (!client) {
     console.error(`telnyx-voice: no client for ${toNumber} - answering and hanging up`);
@@ -218,7 +253,6 @@ async function handleInbound(payload) {
   const agencyId = client.agency_id || client.agencies?.id || null;
   const officeNumber = toE164(client.transfer_phone || client.owner_phone);
 
-  // Create the session row that ties all three legs together.
   const { data: session, error } = await supabase
     .from('call_sessions')
     .insert({
@@ -240,12 +274,8 @@ async function handleInbound(payload) {
 
   const sessionId = session.id;
 
-  // Answer the caller, tagging the leg so later events know what it is.
   await answerCall(callerLeg, { role: 'caller', sessionId });
 
-  // Dial VAPI over SIP. The two custom headers are how the shared VAPI SIP
-  // endpoint figures out which client this is (X-Client-Id) and which session
-  // to attach the VAPI call id to (X-Session-Id, read in vapi-webhook.js).
   const { connectionId, sipUri } = await getWhisperConfig();
   if (!sipUri) {
     console.error('telnyx-voice: no VAPI SIP URI (platform_settings.vapi_sip_uri / VAPI_SIP_URI) - cannot route call to AI');
@@ -274,9 +304,10 @@ async function handleInbound(payload) {
 // ============================================================================
 // VAPI leg answered: bridge the caller to the AI.
 //
-// park_after_unbridge:'self' on the caller leg is the key detail: it means when
-// we later hang up the VAPI leg, the caller leg STAYS ALIVE (parked) instead of
-// dropping, so we can immediately bridge the caller to the office.
+// park_after_unbridge:'self' on the caller leg means that whenever this bridge
+// ends by the VAPI leg hanging up, the caller leg STAYS ALIVE (parked) instead
+// of dropping. We also explicitly unbridge at transfer time (see below), which
+// likewise leaves both legs parked.
 // ============================================================================
 async function handleVapiAnswered(sessionId) {
   const session = await getSessionById(sessionId);
@@ -292,61 +323,269 @@ async function handleVapiAnswered(sessionId) {
   console.log(`telnyx-voice: caller bridged to AI (session ${sessionId})`);
 }
 
-// ============================================================================
-// Office answered + machine detection finished: decide human vs voicemail.
-// On a human, whisper the summary. On a machine, give up and take a message.
-// ============================================================================
-async function handleOfficeDecision(sessionId, isHuman) {
-  const session = await getSessionById(sessionId);
-  if (!session || session.status === 'bridged') return;
-  const office = session.telnyx_office_control_id;
-  if (!office) return;
-
-  if (!isHuman) {
-    console.log(`telnyx-voice: office reached voicemail/no-answer (session ${sessionId}) - taking message`);
-    await hangupCall(office);
-    await updateSession(sessionId, { status: 'office_failed' });
-    settleTransfer(sessionId, 'take_message');
-    return;
+// ----------------------------------------------------------------------------
+// Ringback helpers for the caller while the office is dialed.
+// ----------------------------------------------------------------------------
+async function startRingback(caller, audioUrl) {
+  if (!caller) return;
+  if (audioUrl) {
+    await startPlayback(caller, audioUrl, { loop: 'infinity' });
+  } else {
+    await speakToCall(caller, 'Please hold while I connect you to the team.');
   }
+}
 
-  // Human answered. Whisper the summary to the office leg ONLY.
-  const summary = session.whisper_summary || 'A caller is being connected to you.';
-  const callerLabel = session.caller_number ? ` The caller's number is ${session.caller_number}.` : '';
-  const whisper = `You have a call from your A I receptionist. ${summary}${callerLabel} Connecting you now.`;
+// White-label the ringback/hold audio the caller hears while the agent is
+// dialed. An agency can set its own ring or hold track, and a client can
+// override it; otherwise the platform default (TELNYX_RINGBACK_URL) is used, and
+// if none is set the caller hears a short spoken line. URLs must be publicly
+// reachable by Telnyx (mp3/wav), and are looped for the whole ring.
+//   client.tool_config.transferHoldAudioUrl        (per-client override)
+//   agency.marketing_config.transferHoldAudioUrl    (agency white-label default)
+//   TELNYX_RINGBACK_URL                             (platform default)
+function resolveHoldAudioUrl(clientToolConfig, agencyMarketingConfig) {
+  const c = clientToolConfig && clientToolConfig.transferHoldAudioUrl;
+  const a = agencyMarketingConfig && agencyMarketingConfig.transferHoldAudioUrl;
+  return (c && String(c).trim()) || (a && String(a).trim()) || RINGBACK_AUDIO_URL || null;
+}
 
-  await speakToCall(office, whisper, { clientState: { role: 'office', sessionId } });
-  // The bridge happens on call.speak.ended (below), once the whisper finishes.
-  // Tell the AI it succeeded so it stops talking; the leg drop is imminent.
-  settleTransfer(sessionId, 'connected');
+async function stopRingback(caller) {
+  if (!caller) return;
+  // No-op if the spoken fallback was used (nothing is playing to stop).
+  await stopPlayback(caller);
 }
 
 // ============================================================================
-// Whisper finished playing to the office: complete the handoff.
-//   1. Hang up the VAPI leg (the AI's job is done).
-//   2. Bridge the caller to the office.
-// Because the caller leg was parked on unbridge, it survives step 1.
+// Office answered (human, or AMD could not confirm a machine): open the
+// press-1-to-accept gate. Only the winner of transferring -> ringing_gate
+// actually plays the gather, so the whisper prompt is spoken exactly once.
 // ============================================================================
-async function handleWhisperDone(sessionId) {
+async function startGate(sessionId) {
+  const won = await atomicTransition(sessionId, ['transferring'], 'ringing_gate');
+  if (!won) return;
+
   const session = await getSessionById(sessionId);
-  if (!session || session.status === 'bridged') return;
+  if (!session) return;
+  const office = session.telnyx_office_control_id;
+  if (!office) return;
+
+  const summary = session.whisper_summary || 'A caller would like to speak with you.';
+  const callerLabel = session.caller_number ? ` The caller's number is ${session.caller_number}.` : '';
+  const prompt = `You have a call from your A I receptionist. ${summary}${callerLabel} To take the call, press 1. Otherwise, just hang up and I will take a message.`;
+
+  await gatherUsingSpeak(office, prompt, {
+    validDigits: '1',
+    timeoutMillis: GATHER_TIMEOUT_MS,
+    clientState: { role: 'office', sessionId },
+  });
+  console.log(`telnyx-voice: press-1 gate opened on office (session ${sessionId})`);
+}
+
+// ============================================================================
+// Agent pressed 1: complete the handoff.
+//   1. Stop ringback to the caller.
+//   2. Hang up the VAPI leg (the AI's job is done).
+//   3. Bridge the caller to the office.
+//   4. Start recording the conversation (for the owner recap), unless HIPAA.
+// Because the caller leg was parked when we unbridged it from VAPI, it survives
+// the VAPI hangup and is ready to bridge to the office.
+// ============================================================================
+async function completeAccept(sessionId) {
+  const won = await atomicTransition(sessionId, ['ringing_gate'], 'bridged');
+  if (!won) return;
+
+  const session = await getSessionById(sessionId);
+  if (!session) return;
   const caller = session.telnyx_caller_control_id;
   const vapi = session.telnyx_vapi_control_id;
   const office = session.telnyx_office_control_id;
   if (!caller || !office) return;
 
+  await stopRingback(caller);
   if (vapi) await hangupCall(vapi);
   await bridgeCalls(caller, office);
-  await updateSession(sessionId, { status: 'bridged' });
-  console.log(`telnyx-voice: caller bridged to office (session ${sessionId}) - whisper transfer complete`);
+
+  // Record the human conversation for the owner recap, unless this client is in
+  // HIPAA mode (no stored recordings).
+  try {
+    const { data: client } = await supabase
+      .from('clients').select('hipaa_mode').eq('id', session.client_id).single();
+    if (client && client.hipaa_mode === true) {
+      console.log(`telnyx-voice: HIPAA client - not recording transfer (session ${sessionId})`);
+    } else {
+      await recordStart(caller, { channels: 'dual', clientState: { role: 'caller', sessionId } });
+    }
+  } catch (e) {
+    console.warn('telnyx-voice: hipaa check failed, recording skipped:', e.message);
+  }
+
+  console.log(`telnyx-voice: caller bridged to office (session ${sessionId}) - transfer connected`);
+}
+
+// ============================================================================
+// Office not reached (no answer, voicemail, declined, hangup, no keypress, or
+// we timed out): put the caller back with the SAME AI. The VAPI leg was parked
+// (never hung up) when we unbridged for the ring, so it is still alive to
+// re-bridge. request-transfer, polling the status, then tells the AI to
+// apologize and offer to book or take a message.
+// ============================================================================
+async function returnToAI(sessionId, reason) {
+  const won = await atomicTransition(sessionId, ['transferring', 'ringing_gate'], 'transfer_returned');
+  if (!won) return;
+
+  const session = await getSessionById(sessionId);
+  if (!session) return;
+  const caller = session.telnyx_caller_control_id;
+  const vapi = session.telnyx_vapi_control_id;
+  const office = session.telnyx_office_control_id;
+
+  await stopRingback(caller);
+  if (office) await hangupCall(office);
+  if (caller && vapi) {
+    await callAction(caller, 'bridge', { call_control_id: vapi, park_after_unbridge: 'self' });
+  }
+  console.log(`telnyx-voice: office not reached (${reason || 'no_answer'}) - caller returned to AI (session ${sessionId})`);
+}
+
+// ===========================================================================
+// TRANSFER-CALL RECAP: the caller<->agent conversation happens on Telnyx after
+// the AI is gone, so we record it, transcribe it with Telnyx Speech-to-Text,
+// summarize it with Claude, and text the owner what actually happened plus the
+// recording. All best-effort: if transcription fails, the owner still gets the
+// recording link. (Mirrors the proven REFER-path recap.)
+// ===========================================================================
+
+// Transcribe a hosted recording with Telnyx Speech-to-Text (synchronous).
+async function telnyxTranscribe(fileUrl) {
+  const key = process.env.TELNYX_API_KEY;
+  if (!key || !fileUrl) return null;
+  try {
+    const fd = new FormData();
+    fd.set('model', 'openai/whisper-large-v3-turbo');
+    fd.set('file_url', fileUrl);
+    fd.set('response_format', 'json');
+    const controller = new AbortController();
+    const timer = setTimeout(() => { try { controller.abort(); } catch (e) {} }, 60000);
+    const r = await fetch('https://api.telnyx.com/v2/ai/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}` },
+      body: fd,
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timer));
+    if (!r.ok) { console.error(`telnyx-voice: STT failed [${r.status}]: ${(await r.text().catch(() => '')).slice(0, 180)}`); return null; }
+    const data = await r.json();
+    return (data && (data.text || (data.data && data.data.text))) || null;
+  } catch (e) { console.error(`telnyx-voice: STT threw: ${e.message}`); return null; }
+}
+
+// Summarize the transferred (human) conversation with Claude. callerContext is
+// the AI's one-line intake summary (whisper_summary), passed so the recap ties
+// what the caller originally wanted to what was discussed with the person.
+async function summarizeTransferCall(transcript, businessName, callerContext) {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key || !transcript) return null;
+  const ctx = callerContext ? `\n\nFor context, before the transfer the AI receptionist noted: ${callerContext}` : '';
+  const prompt = `This is a transcript of a phone call between a caller and a team member at ${businessName || 'the business'}, after an AI receptionist transferred the call to a person. In 2 to 4 short sentences, summarize what actually happened: what the caller needed, what was discussed or agreed, and any follow-up or next step. Be concrete and factual. No greetings, no labels, just the summary.${ctx}\n\nTranscript:\n${transcript}`;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => { try { controller.abort(); } catch (e) {} }, 20000);
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 400, temperature: 0.3, messages: [{ role: 'user', content: prompt }] }),
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timer));
+    if (!r.ok) { console.error(`telnyx-voice: anthropic recap failed [${r.status}]`); return null; }
+    const data = await r.json();
+    const text = data && data.content && data.content[0] && data.content[0].text;
+    return (text || '').trim() || null;
+  } catch (e) { console.error(`telnyx-voice: anthropic recap threw: ${e.message}`); return null; }
+}
+
+// Recording of the bridged human call is ready: transcribe, summarize, and text
+// the owner the recap + recording link. This is the SINGLE owner text on a
+// connected transfer (the intake end-of-call SMS is suppressed in vapi-webhook
+// for bridged sessions). Best-effort throughout.
+async function handleRecordingSaved(sessionId, recordingUrl) {
+  if (!recordingUrl) { console.warn(`telnyx-voice: recording.saved with no url (session ${sessionId})`); return; }
+  try {
+    const session = await getSessionById(sessionId);
+    if (!session || !session.client_id) return;
+
+    const { data: client } = await supabase
+      .from('clients')
+      .select('id, agency_id, business_name, owner_phone, vapi_phone_number, industry, hipaa_mode')
+      .eq('id', session.client_id).single();
+    if (!client) return;
+
+    if (client.hipaa_mode === true) {
+      console.log(`telnyx-voice: HIPAA client - skipping recap (session ${sessionId})`);
+      return;
+    }
+
+    let agency = null;
+    if (client.agency_id) {
+      const { data } = await supabase.from('agencies').select('id, name, demo_phone_number').eq('id', client.agency_id).single();
+      agency = data || null;
+    }
+
+    const transcript = await telnyxTranscribe(recordingUrl);
+    const recap = transcript ? await summarizeTransferCall(transcript, client.business_name, session.whisper_summary) : null;
+    console.log(`telnyx-voice: transfer recap (session ${sessionId}): transcriptLen=${transcript ? transcript.length : 0} recap=${recap ? 'yes' : 'no'}`);
+
+    if (client.owner_phone) {
+      const who = session.caller_number ? `${session.caller_number}` : 'the caller';
+      const smsBody = recap
+        ? `Recap of the transferred call for ${client.business_name} (${who}):\n\n${recap}\n\nRecording: ${recordingUrl}`
+        : `A transferred call for ${client.business_name} (${who}) just wrapped up. Recording: ${recordingUrl}`;
+      await sendAndLogSMS({
+        phone: client.owner_phone,
+        message: smsBody,
+        from: client.vapi_phone_number || (agency && agency.demo_phone_number) || null,
+        agencyId: client.agency_id || null,
+        recipientType: 'client_owner',
+        messageType: 'transfer_recap',
+        metadata: { sessionId, hasRecap: !!recap },
+      });
+      console.log(`telnyx-voice: transfer recap SMS to owner (recap=${!!recap})`);
+    }
+
+    // Best-effort: fold the recap into the dashboard call record (the
+    // transferred calls row the end-of-call report created). Non-destructive:
+    // append to ai_summary and stash the transfer recording in call_metadata.
+    if (recap) {
+      try {
+        const since = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+        const { data: rows } = await supabase
+          .from('calls')
+          .select('id, ai_summary, call_metadata')
+          .eq('client_id', client.id)
+          .eq('call_status', 'transferred')
+          .gte('created_at', since)
+          .order('created_at', { ascending: false })
+          .limit(2);
+        if (rows && rows.length === 1) {
+          const row = rows[0];
+          const merged = (row.ai_summary ? row.ai_summary + '\n\n' : '') + `After transfer: ${recap}`;
+          const meta = Object.assign({}, row.call_metadata || {}, { transfer_recording_url: recordingUrl });
+          await supabase.from('calls').update({ ai_summary: merged, call_metadata: meta }).eq('id', row.id);
+          console.log(`telnyx-voice: folded transfer recap into call ${row.id}`);
+        } else {
+          console.log(`telnyx-voice: calls-row recap match: ${rows ? rows.length : 0} candidates, skipped dashboard update`);
+        }
+      } catch (e) { console.error(`telnyx-voice: calls recap update failed: ${e.message}`); }
+    }
+
+    await updateSession(sessionId, { status: 'transfer_recapped' });
+  } catch (e) {
+    console.error(`telnyx-voice: handleRecordingSaved failed: ${e.message}`);
+  }
 }
 
 // ============================================================================
 // MAIN WEBHOOK: Telnyx Call Control events.
 // ============================================================================
 router.post('/webhook/telnyx-voice', async (req, res) => {
-  // req.body is a Buffer when '/webhook/telnyx-voice' is in the express.raw()
-  // exception list (it must be). Fall back gracefully if it is an object.
   const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body || {}), 'utf-8');
 
   const signature = req.headers['telnyx-signature-ed25519'];
@@ -387,45 +626,62 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
         if (role === 'vapi' && sessionId) {
           await handleVapiAnswered(sessionId);
         }
-        // Office answer is handled via machine-detection below. If AMD never
-        // fires (some carriers), fall back to treating the answer as human
-        // after a short grace period.
+        // If answering-machine detection never fires (some carriers), fall back
+        // to opening the press-1 gate after a short grace period. startGate is a
+        // no-op unless the session is still 'transferring'.
         if (role === 'office' && sessionId) {
-          setTimeout(async () => {
-            const s = await getSessionById(sessionId);
-            if (s && s.status === 'transferring') {
-              console.log(`telnyx-voice: no AMD result for office (session ${sessionId}) - assuming human`);
-              await handleOfficeDecision(sessionId, true);
-            }
-          }, 6000);
+          setTimeout(() => { startGate(sessionId).catch(() => {}); }, 6000);
         }
         break;
 
       case 'call.machine.detection.ended':
         if (role === 'office' && sessionId) {
-          // 'human', 'not_sure', and 'silence' all get the whisper (never drop
-          // a real person). Only a confirmed 'machine' is treated as voicemail.
-          const result = payload.result;
-          const isHuman = result !== 'machine';
-          await handleOfficeDecision(sessionId, isHuman);
+          // A confirmed 'machine' is treated as voicemail and returned to the
+          // AI. 'human', 'not_sure', and 'silence' open the press-1 gate, where
+          // the keypress is the real human check.
+          if (payload.result === 'machine') {
+            await returnToAI(sessionId, 'voicemail');
+          } else {
+            await startGate(sessionId);
+          }
         }
         break;
 
-      case 'call.speak.ended':
+      case 'call.gather.ended':
         if (role === 'office' && sessionId) {
-          await handleWhisperDone(sessionId);
+          const digits = (payload.digits || '').toString();
+          if (digits.includes('1')) {
+            await completeAccept(sessionId);
+          } else {
+            await returnToAI(sessionId, 'no_keypress');
+          }
+        }
+        break;
+
+      case 'call.recording.saved':
+        if (sessionId) {
+          const urls = payload.recording_urls || payload.public_recording_urls || {};
+          const url = urls.mp3 || urls.wav
+            || (Array.isArray(payload.recording_urls) ? payload.recording_urls[0] : null);
+          await handleRecordingSaved(sessionId, url);
         }
         break;
 
       case 'call.hangup':
         if (sessionId) {
           const s = await getSessionById(sessionId);
-          if (s && s.status !== 'bridged' && s.status !== 'ended') {
-            // If the office leg drops before we bridged, it was a no-answer.
+          const st = s && s.status;
+          // Leave 'bridged' alone so vapi-webhook can detect the connected
+          // transfer, and leave terminal states alone.
+          if (st && st !== 'bridged' && st !== 'ended' && st !== 'transfer_recapped') {
             if (role === 'office') {
-              await updateSession(sessionId, { status: 'office_failed' });
-              settleTransfer(sessionId, 'take_message');
+              // Office dropped before we connected -> return caller to the AI.
+              await returnToAI(sessionId, 'office_hangup');
             } else if (role === 'caller' || role === 'vapi') {
+              // Caller (or AI leg) ended. Tear down any outstanding office leg.
+              if ((st === 'transferring' || st === 'ringing_gate') && s.telnyx_office_control_id) {
+                await hangupCall(s.telnyx_office_control_id);
+              }
               await updateSession(sessionId, { status: 'ended' });
             }
           }
@@ -443,8 +699,9 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
 
 // ============================================================================
 // VAPI TRANSFER REQUEST: the AI's request_human_transfer function tool calls
-// this. We dial the office, then hold the response open until the office
-// answers (whisper + bridge proceed via Telnyx events) or fails (take message).
+// this. We take the caller off the AI, ring the office, and poll the session
+// status until the transfer is connected (press 1) or returns the caller to the
+// AI (no answer / voicemail / no keypress / timeout).
 //
 // Returns the VAPI tool-result shape: { results: [{ toolCallId, result }] }.
 // ============================================================================
@@ -453,7 +710,6 @@ router.post('/api/voice/request-transfer', async (req, res) => {
   const msg = body.message || body;
   const vapiCallId = msg.call?.id || body.call?.id || null;
 
-  // VAPI has used a few shapes for tool calls across versions. Check all.
   const toolCalls = msg.toolCallList || msg.toolCalls
     || (Array.isArray(msg.toolWithToolCallList)
         ? msg.toolWithToolCallList.map(t => t.toolCall).filter(Boolean)
@@ -475,10 +731,9 @@ router.post('/api/voice/request-transfer', async (req, res) => {
     const session = await getSessionByVapiCallId(vapiCallId);
     if (!session) {
       console.error(`telnyx-voice: request-transfer with no session for vapi call ${vapiCallId} (is vapi-webhook.js storing vapi_call_id on the session yet?)`);
-      return reply('I could not reach the team line right now. Apologize and offer to take a detailed message with the caller name, number, and reason for calling.');
+      return reply('I could not reach the team line right now. Apologize and offer to book an appointment or take a detailed message with the caller name, number, and reason for calling.');
     }
 
-    // Live monitor: the AI is handing off to a person.
     try {
       broadcastLiveEvent(session.client_id, {
         type: 'activity', tool: 'request_human_transfer', label: 'Connecting to the team',
@@ -486,15 +741,13 @@ router.post('/api/voice/request-transfer', async (req, res) => {
       });
     } catch (e) {}
 
-    if (session.status === 'bridged' || session.status === 'transferring') {
+    if (session.status === 'bridged' || session.status === 'transferring' || session.status === 'ringing_gate') {
       return reply('A transfer is already in progress. Please hold.');
     }
 
-    // Need the client to present a valid caller ID (the business DID) on the
-    // outbound office leg.
     const { data: client } = await supabase
       .from('clients')
-      .select('vapi_phone_number, owner_phone, transfer_phone')
+      .select('vapi_phone_number, owner_phone, transfer_phone, tool_config, agency_id')
       .eq('id', session.client_id)
       .single();
 
@@ -502,56 +755,88 @@ router.post('/api/voice/request-transfer', async (req, res) => {
     const businessDid = toE164(client?.vapi_phone_number) || officeNumber;
 
     if (!officeNumber) {
-      return reply('There is no team phone number on file to transfer to. Apologize and offer to take a detailed message instead.');
+      return reply('There is no team phone number on file to transfer to. Apologize and offer to book an appointment or take a detailed message instead.');
     }
 
     // Guard against a forwarding loop: never dial the same line the caller's
     // call may have forwarded from.
     if (businessDid && officeNumber === businessDid) {
       console.warn(`telnyx-voice: transfer number equals business DID (session ${session.id}) - refusing to avoid a loop`);
-      return reply('I am not able to connect that call right now. Apologize and offer to take a detailed message instead.');
+      return reply('I am not able to connect that call right now. Apologize and offer to book an appointment or take a detailed message instead.');
     }
 
     await updateSession(session.id, { status: 'transferring', whisper_summary: summary });
+
+    // Take the caller OFF the AI so they hear ringing (not the AI) during the
+    // dial. The VAPI leg is kept alive and parked so we can re-bridge the caller
+    // to it if the office does not answer.
+    const caller = session.telnyx_caller_control_id;
+    const vapi = session.telnyx_vapi_control_id;
+    if (caller && vapi) await unbridgeCall(caller, { otherCallControlId: vapi });
+
+    // Resolve the white-label ringback/hold audio (client override -> agency
+    // default -> platform default -> spoken fallback) and play it to the caller.
+    let agencyMarketingConfig = null;
+    try {
+      const agyId = client?.agency_id || session.agency_id;
+      if (agyId) {
+        const { data: agency } = await supabase.from('agencies').select('marketing_config').eq('id', agyId).single();
+        agencyMarketingConfig = agency?.marketing_config || null;
+      }
+    } catch (e) { /* non-fatal; fall back to the platform default */ }
+    const holdAudioUrl = resolveHoldAudioUrl(client?.tool_config, agencyMarketingConfig);
+    if (caller) await startRingback(caller, holdAudioUrl);
 
     const { connectionId } = await getWhisperConfig();
     const officeLeg = await dialCall({
       to: officeNumber,
       from: businessDid,
       connectionId,
-      amd: 'detect',
+      amd: 'premium',
       timeoutSecs: OFFICE_RING_SECONDS,
       clientState: { role: 'office', sessionId: session.id },
     });
 
     if (!officeLeg || !officeLeg.call_control_id) {
-      await updateSession(session.id, { status: 'active' });
-      return reply('I could not reach the team right now. Apologize and offer to take a detailed message with the caller name, number, and reason for calling.');
+      // Could not even dial: put the caller straight back with the AI.
+      await returnToAI(session.id, 'dial_failed');
+      return reply('I could not reach the team right now. Apologize and offer to book an appointment or take a detailed message with the caller name, number, and reason for calling.');
     }
 
     await updateSession(session.id, { telnyx_office_control_id: officeLeg.call_control_id });
 
-    // Hold the response open until a Telnyx event settles this transfer, or we
-    // time out and fall back to taking a message.
-    const outcome = await new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        pendingTransfers.delete(session.id);
-        // Cancel the ringing office leg so it cannot answer after we have
-        // already told the AI to take a message.
-        hangupCall(officeLeg.call_control_id).catch(() => {});
-        updateSession(session.id, { status: 'office_failed' }).catch(() => {});
-        resolve('take_message');
-      }, TRANSFER_WAIT_MS);
-      pendingTransfers.set(session.id, { resolve, timer });
-    });
+    // Poll the session status (the shared store) until a Telnyx-driven handler
+    // settles the transfer, or we time out. Polling the DB (rather than holding
+    // an in-memory promise) means this resolves whether the Telnyx events land
+    // on this instance or another one.
+    const deadline = Date.now() + TRANSFER_WAIT_MS;
+    let outcome = 'pending';
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const s = await getSessionById(session.id);
+      if (!s) { outcome = 'take_message'; break; }
+      if (s.status === 'bridged' || s.status === 'transfer_recapped') { outcome = 'connected'; break; }
+      if (s.status === 'transfer_returned') { outcome = 'take_message'; break; }
+      if (s.status === 'ended') { outcome = 'ended'; break; }
+      // 'transferring' / 'ringing_gate' -> still trying
+    }
+
+    if (outcome === 'pending') {
+      // Timed out while still ringing or gating: return the caller to the AI.
+      await returnToAI(session.id, 'timeout');
+      outcome = 'take_message';
+    }
 
     if (outcome === 'connected') {
       return reply('Connecting you now. Do not say anything further; the team member is taking over the call.');
     }
-    return reply('No one on the team is available right now. Apologize to the caller and offer to take a detailed message with their name, number, and reason for calling.');
+    if (outcome === 'ended') {
+      return reply('The caller has hung up. The call is over.');
+    }
+    return reply('No one on the team was available, so you are back with the caller. Apologize that you could not reach them, then offer to book an appointment or take a detailed message with their name, number, and reason for calling.');
   } catch (err) {
     console.error('telnyx-voice: request-transfer error:', err.message);
-    return reply('I ran into a problem connecting that call. Apologize and offer to take a detailed message instead.');
+    return reply('I ran into a problem connecting that call. Apologize and offer to book an appointment or take a detailed message instead.');
   }
 });
 
@@ -591,20 +876,11 @@ router.post('/api/voice/send-sms', async (req, res) => {
   }
 
   try {
-    // Resolve the caller's number + owning client for BOTH routing modes.
-    // telnyx_cc calls carry a call_sessions row (the real caller sits on the
-    // Telnyx leg, invisible to VAPI). vapi_direct calls (the default for every
-    // client) have NO session, so fall back to the VAPI tool-call payload:
-    // call.customer.number IS the real caller there, and the call's VAPI number
-    // maps to the client. Both sources are server-side, never model-supplied,
-    // so the "only ever text the person on the call" guarantee still holds.
     const session = await getSessionByVapiCallId(vapiCallId);
 
     let callerNumber = (session && session.caller_number) || msg.call?.customer?.number || null;
     let clientId = (session && session.client_id) || null;
 
-    // vapi_direct has no session: resolve the client from the VAPI number on the
-    // call (used for smsPresets + agency routing).
     if (!clientId) {
       let vapiNumber = msg.call?.phoneNumber?.number || msg.phoneNumber?.number || null;
       const phoneNumberId = msg.call?.phoneNumberId || msg.phoneNumber?.id || null;
@@ -625,7 +901,6 @@ router.post('/api/voice/send-sms', async (req, res) => {
       ? await supabase.from('clients').select('agency_id, tool_config, vapi_phone_number, business_name').eq('id', clientId).single()
       : { data: null };
 
-    // Live monitor: the AI is texting the caller.
     try {
       broadcastLiveEvent(clientId, {
         type: 'activity', tool: 'send_sms', label: 'Texting the caller',
@@ -633,17 +908,10 @@ router.post('/api/voice/send-sms', async (req, res) => {
       });
     } catch (e) {}
 
-    // Resolve a saved-text key to its EXACT configured value, so links and
-    // addresses are never reworded by the model.
     if (savedKey) {
       const preset = client && client.tool_config && client.tool_config.smsPresets && client.tool_config.smsPresets[savedKey];
       if (preset && preset.enabled && (preset.value || '').toString().trim()) {
         const value = preset.value.toString().trim();
-        // Presets are usually a bare link/address. Sending that raw reads as
-        // cold and spammy. Wrap it in a short, warm, branded message — but keep
-        // the value character-for-character (it's dropped in verbatim, not
-        // reworded), so links never break. If the client already wrote a full
-        // message as the value (has sentence punctuation or is long), leave it.
         const looksBare = value.length <= 90 && !/[.!?]\s/.test(value) && !/\n/.test(value);
         if (looksBare && client.business_name) {
           const biz = client.business_name;
@@ -663,8 +931,6 @@ router.post('/api/voice/send-sms', async (req, res) => {
       }
     }
 
-    // Per-call cap: never text the same caller more than a few times on one call.
-    // Fails open (a broken count query must not block a legitimate send).
     try {
       const { count } = await supabase
         .from('sms_log')
@@ -681,11 +947,6 @@ router.post('/api/voice/send-sms', async (req, res) => {
     const sent = await sendAndLogSMS({
       phone: callerNumber,
       message: text,
-      // Send FROM the client's own AI-receptionist number so the caller sees the
-      // number they just dialed, not an unfamiliar platform number. That number
-      // is already provisioned on the messaging profile (assignNumberForSMS at
-      // signup), so no extra registration is needed. Falls back to the platform
-      // sender when the client couldn't be resolved.
       from: (client && client.vapi_phone_number) || null,
       agencyId: (client && client.agency_id) || null,
       recipientType: 'caller',
@@ -701,6 +962,22 @@ router.post('/api/voice/send-sms', async (req, res) => {
     console.error('telnyx-voice: send-sms error', err.message);
     return reply('I could not send the text right now. Apologize and offer to read it out loud instead.');
   }
+});
+
+// ============================================================================
+// DEFAULT RINGBACK TONE
+// Serves the platform ringback so TELNYX_RINGBACK_URL can point at our own
+// backend (no third-party host to rot). Commit the file at src/audio/ringback.mp3.
+//   TELNYX_RINGBACK_URL = https://<your-backend>/audio/ringback.mp3
+// This router is mounted at '/', so the public path is /audio/ringback.mp3.
+// ============================================================================
+router.get('/audio/ringback.mp3', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'audio', 'ringback.mp3'), (err) => {
+    if (err) {
+      console.error('telnyx-voice: ringback file missing:', err.message);
+      if (!res.headersSent) res.status(404).end();
+    }
+  });
 });
 
 module.exports = router;

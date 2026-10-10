@@ -277,11 +277,16 @@ function resolveClientTrialDays(agency) {
 const VALID_VOICE_ROUTING = ['vapi_direct', 'telnyx_cc'];
 
 function resolveVoiceRouting(source, agency) {
+  // Explicit per-client request wins, then an agency-level default, then the
+  // PLATFORM default. telnyx_cc (own-the-call) is now the platform default, so
+  // every new client gets the full warm-transfer engine unless an agency or the
+  // request explicitly pins vapi_direct. Set agency.default_voice_routing =
+  // 'vapi_direct' to opt a specific agency back out.
   const v = source?.voiceRouting || source?.voice_routing;
   if (VALID_VOICE_ROUTING.includes(v)) return v;
   const a = agency?.default_voice_routing;
   if (VALID_VOICE_ROUTING.includes(a)) return a;
-  return 'vapi_direct';
+  return 'telnyx_cc';
 }
 
 // ============================================================================

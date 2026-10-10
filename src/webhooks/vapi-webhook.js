@@ -1170,17 +1170,24 @@ async function handleVapiWebhook(req, res) {
     // tagged at assistant-request time (vapi_call_id was stored then). Everyone
     // else falls through to the normal phone-number lookup, unchanged.
     let client = null;
+    // Did this telnyx_cc call end up CONNECTED to a human via our own-the-call
+    // warm transfer? If so, the telnyx-voice engine sends the owner a recap SMS
+    // after the human call ends, so we suppress the intake owner SMS below to
+    // keep it to ONE owner text per call. A transfer that was attempted but
+    // returned to the AI (no answer) is NOT bridged, so it keeps the normal SMS.
+    let transferredViaTelnyx = false;
     if (call?.id) {
       const { data: session } = await supabase
         .from('call_sessions')
-        .select('client_id')
+        .select('client_id, status')
         .eq('vapi_call_id', call.id)
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
       if (session?.client_id) {
+        if (session.status === 'bridged' || session.status === 'transfer_recapped') transferredViaTelnyx = true;
         const { data: c } = await supabase.from('clients').select('*, agencies(*)').eq('id', session.client_id).single();
-        if (c) { client = c; console.log('✅ Resolved client via call_sessions (telnyx_cc):', c.business_name); }
+        if (c) { client = c; console.log('✅ Resolved client via call_sessions (telnyx_cc):', c.business_name, transferredViaTelnyx ? '[bridged transfer]' : ''); }
       }
     }
 
@@ -1453,6 +1460,12 @@ async function handleVapiWebhook(req, res) {
     if (_demoKind === 'home_services') {
       await sendConciergeDemoCallerSMS({ callerPhone, kind: 'home_services', summary: aiSummary });
       console.log('📲 Concierge home-services demo: reframed SMS sent to caller, owner SMS skipped');
+    } else if (transferredViaTelnyx) {
+      // Connected warm transfer: the telnyx-voice engine sends the owner a recap
+      // SMS (what the caller needed + what happened on the human call + the
+      // recording) after that call ends. Suppress the intake SMS so the owner
+      // gets exactly ONE text for this call.
+      console.log('📲 Owner SMS skipped: call was a connected warm transfer (recap SMS is sent by the transfer engine)');
     } else if (client.owner_phone) {
       smsSent = await sendCallNotificationSMS(client, agency, aiData);
       console.log(`📲 Owner SMS to ${client.owner_phone}: ${smsSent ? 'sent' : 'FAILED'}`);
