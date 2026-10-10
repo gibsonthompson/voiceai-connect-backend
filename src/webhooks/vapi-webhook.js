@@ -893,8 +893,37 @@ async function handleAssistantRequest(req, res, message) {
     // endpoint and carries the client id as a SIP header. Resolve the client
     // directly from it, and link this VAPI call to the Telnyx session so
     // end-of-call logging (and nothing else) can find it later.
-    const sipClientId = readSipHeader(message, 'x-client-id');
-    const sipSessionId = readSipHeader(message, 'x-session-id');
+    let sipClientId = readSipHeader(message, 'x-client-id');
+    let sipSessionId = readSipHeader(message, 'x-session-id');
+
+    // telnyx_cc fallback: VAPI does not reliably surface the X-Client-Id SIP
+    // header on the shared SIP door, so when a call arrives with no VAPI phone
+    // number and no header, resolve the client from the Telnyx session created
+    // for this caller a second earlier (the most recent unlinked session for
+    // this caller number). This is what routes the shared door to the right
+    // client when the SIP header does not come through.
+    if (!sipClientId && !vapiPhoneNumber && (fromNumber || callerPhone)) {
+      try {
+        const since = new Date(Date.now() - 90000).toISOString();
+        const { data: sess } = await supabase
+          .from('call_sessions')
+          .select('id, client_id')
+          .eq('caller_number', fromNumber || callerPhone)
+          .is('vapi_call_id', null)
+          .not('telnyx_caller_control_id', 'is', null)
+          .gte('created_at', since)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (sess && sess.client_id) {
+          sipClientId = sess.client_id;
+          sipSessionId = sess.id;
+          console.log(`🔀 telnyx_cc call - resolved client via recent Telnyx session ${sess.id} (caller ${fromNumber || callerPhone}); X-Client-Id header was absent`);
+        }
+      } catch (e) {
+        console.warn('telnyx_cc session fallback lookup failed:', e.message);
+      }
+    }
 
     if (!vapiPhoneNumber && !sipClientId) {
       const phoneNumberId = message.call?.phoneNumberId || message.phoneNumber?.id;
