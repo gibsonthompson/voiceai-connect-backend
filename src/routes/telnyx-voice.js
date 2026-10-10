@@ -458,8 +458,42 @@ async function startGate(sessionId, recipientName) {
 // Because the caller leg was parked when we unbridged it from VAPI, it survives
 // the VAPI hangup and is ready to bridge to the office.
 // ============================================================================
+// How long to wait for the confirmation speak to finish before bridging anyway.
+// call.speak.ended normally fires in ~2s; this is only a backstop so a missing
+// event can never strand a caller who was told they are being connected.
+const CONFIRM_FALLBACK_MS = 4500;
+
 async function completeAccept(sessionId, recipientName) {
-  const won = await atomicTransition(sessionId, ['ringing_gate'], 'bridged');
+  // Move to a short 'confirming' phase and tell the AGENT out loud that we are
+  // connecting them, so they know the transfer actually completed (otherwise
+  // the line just goes quiet after they say yes). We bridge only once that
+  // confirmation finishes (finalizeBridge, on call.speak.ended), so it is never
+  // cut off. The caller stays on ringback for this ~2s.
+  const won = await atomicTransition(sessionId, ['ringing_gate'], 'confirming');
+  if (!won) return;
+
+  const session = await getSessionById(sessionId);
+  if (!session) return;
+  const office = session.telnyx_office_control_id;
+  if (!office) return;
+
+  const voiceOpts = await whisperVoiceFor(session.client_id);
+  await speakToCall(office, 'Perfect, connecting you now.', Object.assign({
+    clientState: { role: 'office', sessionId, phase: 'confirm', recipientName: recipientName || null },
+  }, voiceOpts));
+  console.log(`telnyx-voice: spoke accept confirmation to agent (session ${sessionId}), awaiting speak.ended to bridge`);
+
+  // Backstop: bridge even if call.speak.ended never arrives. Idempotent via the
+  // 'confirming' -> 'bridged' transition inside finalizeBridge.
+  setTimeout(() => { finalizeBridge(sessionId, recipientName).catch(() => {}); }, CONFIRM_FALLBACK_MS);
+}
+
+// Actually connect the caller to the agent. Triggered by call.speak.ended once
+// the confirmation finishes (or the backstop timer). The confirming->bridged
+// transition lets only the first caller through, so the event and the timer can
+// never double-bridge.
+async function finalizeBridge(sessionId, recipientName) {
+  const won = await atomicTransition(sessionId, ['confirming'], 'bridged');
   if (!won) return;
 
   const session = await getSessionById(sessionId);
@@ -510,7 +544,7 @@ async function completeAccept(sessionId, recipientName) {
 // apologize and offer to book or take a message.
 // ============================================================================
 async function returnToAI(sessionId, reason) {
-  const won = await atomicTransition(sessionId, ['transferring', 'ringing_gate'], 'transfer_returned');
+  const won = await atomicTransition(sessionId, ['transferring', 'ringing_gate', 'confirming'], 'transfer_returned');
   if (!won) return;
 
   const session = await getSessionById(sessionId);
@@ -544,6 +578,18 @@ async function returnToAI(sessionId, reason) {
 // recording. All best-effort: if transcription fails, the owner still gets the
 // recording link. (Mirrors the proven REFER-path recap.)
 // ===========================================================================
+
+// Format a US phone number as (XXX) XXX-XXXX for the owner SMS, matching how a
+// normal call's notification shows it. Telephony gives us the raw caller id
+// (e.g. +16783161454 / 6783161454); this presents it the same friendly way.
+// Non-US / unexpected lengths are returned unchanged.
+function formatPhoneUS(raw) {
+  if (!raw) return '';
+  let d = String(raw).replace(/\D/g, '');
+  if (d.length === 11 && d.startsWith('1')) d = d.slice(1);
+  if (d.length === 10) return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  return String(raw);
+}
 
 // Download a hosted recording to a Buffer. The Telnyx presigned S3 URL works
 // for a plain GET but expires in ~10 minutes, so we fetch the bytes ONCE here
@@ -684,7 +730,7 @@ async function handleRecordingSaved(sessionId, recordingUrl) {
     // end-of-call; fall back to the most-recent transferred call in a 30-min
     // window for older rows / any edge case.
     let callRow = null;
-    const callSelect = 'id, ai_summary, call_metadata, customer_name, urgency_level, transcript, recording_url';
+    const callSelect = 'id, ai_summary, call_metadata, customer_name, customer_phone, urgency_level, transcript, recording_url';
     if (session.vapi_call_id) {
       try {
         const { data: exact } = await supabase
@@ -721,7 +767,7 @@ async function handleRecordingSaved(sessionId, recordingUrl) {
       try {
         await sendCallNotificationSMS(client, agency, {
           customerName: (callRow && callRow.customer_name) || 'Caller',
-          customerPhone: session.caller_number || '',
+          customerPhone: formatPhoneUS(session.caller_number) || (callRow && callRow.customer_phone) || '',
           urgency: (callRow && callRow.urgency_level) || 'routine',
           summary: recap,
         });
@@ -842,6 +888,16 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
         }
         break;
 
+      case 'call.speak.ended':
+        // The agent's accept confirmation ("connecting you now") just finished.
+        // Now bridge the caller to them. Only the confirm speak carries
+        // phase:'confirm', so other speaks (hold message, spoken ringback) are
+        // ignored here.
+        if (role === 'office' && sessionId && state && state.phase === 'confirm') {
+          await finalizeBridge(sessionId, state.recipientName);
+        }
+        break;
+
       case 'call.recording.saved':
         if (sessionId) {
           const urls = payload.recording_urls || payload.public_recording_urls || {};
@@ -870,7 +926,7 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
               await returnToAI(sessionId, 'office_hangup');
             } else if (role === 'caller' || role === 'vapi') {
               // Caller (or AI leg) ended. Tear down any outstanding office leg.
-              if ((st === 'transferring' || st === 'ringing_gate') && s.telnyx_office_control_id) {
+              if ((st === 'transferring' || st === 'ringing_gate' || st === 'confirming') && s.telnyx_office_control_id) {
                 await hangupCall(s.telnyx_office_control_id);
               }
               await updateSession(sessionId, { status: 'ended' });
@@ -1046,9 +1102,18 @@ router.post('/api/voice/request-transfer', async (req, res) => {
     }
 
     if (outcome === 'pending') {
-      // Timed out while still ringing or gating: return the caller to the AI.
-      await returnToAI(session.id, 'timeout');
-      outcome = 'take_message';
+      // Deadline hit. If the agent already accepted (we are confirming out loud
+      // or just bridged), the connection is in flight (finalizeBridge runs on
+      // the confirmation's speak-end or its backstop timer), so treat it as
+      // connected instead of yanking the caller back to the AI. Only a call
+      // still ringing or gating falls back to take-a-message.
+      const s = await getSessionById(session.id);
+      if (s && (s.status === 'confirming' || s.status === 'bridged' || s.status === 'transfer_recapped')) {
+        outcome = 'connected';
+      } else {
+        await returnToAI(session.id, 'timeout');
+        outcome = 'take_message';
+      }
     }
 
     if (outcome === 'connected') {
