@@ -53,6 +53,8 @@ const router = express.Router();
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
 const { sendAndLogSMS } = require('../lib/sms-logger');
+const { sendCallNotificationSMS } = require('../lib/notifications');
+const spaces = require('../lib/spaces');
 const liveMonitor = require('../lib/live-monitor-bus');
 const { broadcastLiveEvent } = require('../lib/live-broadcast');
 const {
@@ -512,14 +514,31 @@ async function returnToAI(sessionId, reason) {
 // recording link. (Mirrors the proven REFER-path recap.)
 // ===========================================================================
 
-// Transcribe a hosted recording with Telnyx Speech-to-Text (synchronous).
-async function telnyxTranscribe(fileUrl) {
+// Download a hosted recording to a Buffer. The Telnyx presigned S3 URL works
+// for a plain GET but expires in ~10 minutes, so we fetch the bytes ONCE here
+// and reuse them for both transcription and permanent storage.
+async function fetchRecordingBuffer(fileUrl) {
+  if (!fileUrl) return null;
+  try {
+    const res = await fetch(fileUrl);
+    if (!res.ok) { console.error(`telnyx-voice: recording download failed [${res.status}]`); return null; }
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (!buf.length) { console.error('telnyx-voice: recording download was empty'); return null; }
+    return buf;
+  } catch (e) { console.error(`telnyx-voice: recording download threw: ${e.message}`); return null; }
+}
+
+// Transcribe already-downloaded recording bytes with Telnyx Speech-to-Text
+// (synchronous). Takes a Buffer (not a URL): STT's file_url path rejected the
+// presigned recording URL with "content-length not found", so we upload the
+// bytes as a file.
+async function telnyxTranscribe(buf) {
   const key = process.env.TELNYX_API_KEY;
-  if (!key || !fileUrl) return null;
+  if (!key || !buf || !buf.length) return null;
   try {
     const fd = new FormData();
     fd.set('model', 'openai/whisper-large-v3-turbo');
-    fd.set('file_url', fileUrl);
+    fd.set('file', new Blob([buf], { type: 'audio/mpeg' }), 'recording.mp3');
     fd.set('response_format', 'json');
     const controller = new AbortController();
     const timer = setTimeout(() => { try { controller.abort(); } catch (e) {} }, 60000);
@@ -533,6 +552,34 @@ async function telnyxTranscribe(fileUrl) {
     const data = await r.json();
     return (data && (data.text || (data.data && data.data.text))) || null;
   } catch (e) { console.error(`telnyx-voice: STT threw: ${e.message}`); return null; }
+}
+
+// Persist recording bytes to DigitalOcean Spaces so the dashboard player has a
+// durable URL (the raw Telnyx URL dies in ~10 min). Returns the permanent
+// public URL, or null if Spaces is not configured / the upload failed (callers
+// then leave recording_url untouched rather than store a URL that will expire).
+async function persistTransferRecording(clientId, sessionId, buf) {
+  if (!buf || !buf.length || !spaces.spacesConfigured) return null;
+  try {
+    const key = `transfer-recordings/${clientId}/${sessionId}-${Date.now()}.mp3`;
+    const url = await spaces.uploadBuffer(key, buf, 'audio/mpeg');
+    console.log(`telnyx-voice: transfer recording stored in Spaces (${key})`);
+    return url;
+  } catch (e) {
+    console.error(`telnyx-voice: Spaces upload failed: ${e.message}`);
+    return null;
+  }
+}
+
+// Combine the pre-transfer AI transcript (speaker-labeled, from VAPI) with the
+// post-transfer human conversation (plain text, from Telnyx STT) into one
+// transcript the dashboard shows. Either part may be empty.
+function buildCombinedTranscript(aiTranscript, humanTranscript) {
+  const human = (humanTranscript || '').trim();
+  if (!human) return (aiTranscript || '').trim() || null;
+  const divider = '\n\n----------\n[Call transferred to a team member]\n\n';
+  const ai = (aiTranscript || '').trim();
+  return ai ? ai + divider + human : `[Call transferred to a team member]\n\n${human}`;
 }
 
 // Summarize the transferred (human) conversation with Claude. callerContext is
@@ -586,51 +633,100 @@ async function handleRecordingSaved(sessionId, recordingUrl) {
       agency = data || null;
     }
 
-    const transcript = await telnyxTranscribe(recordingUrl);
-    const recap = transcript ? await summarizeTransferCall(transcript, client.business_name, session.whisper_summary) : null;
-    console.log(`telnyx-voice: transfer recap (session ${sessionId}): transcriptLen=${transcript ? transcript.length : 0} recap=${recap ? 'yes' : 'no'}`);
+    // Fetch the recording bytes ONCE (the Telnyx URL expires in ~10 min), then
+    // reuse them for permanent storage and transcription.
+    const buf = await fetchRecordingBuffer(recordingUrl);
 
-    if (client.owner_phone) {
-      const who = session.caller_number ? `${session.caller_number}` : 'the caller';
-      const smsBody = recap
-        ? `Recap of the transferred call for ${client.business_name} (${who}):\n\n${recap}\n\nRecording: ${recordingUrl}`
-        : `A transferred call for ${client.business_name} (${who}) just wrapped up. Recording: ${recordingUrl}`;
-      await sendAndLogSMS({
-        phone: client.owner_phone,
-        message: smsBody,
-        from: client.vapi_phone_number || (agency && agency.demo_phone_number) || null,
-        agencyId: client.agency_id || null,
-        recipientType: 'client_owner',
-        messageType: 'transfer_recap',
-        metadata: { sessionId, hasRecap: !!recap },
-      });
-      console.log(`telnyx-voice: transfer recap SMS to owner (recap=${!!recap})`);
+    // Store the recording somewhere durable so the dashboard player keeps
+    // working after the Telnyx URL expires. Null if Spaces is off / the upload
+    // failed, in which case we leave recording_url alone (never store a URL that
+    // will 404 in the player).
+    const storedRecordingUrl = await persistTransferRecording(client.id, sessionId, buf);
+
+    // Transcribe the human conversation, then summarize it for the owner recap.
+    const humanTranscript = await telnyxTranscribe(buf);
+    const recap = humanTranscript ? await summarizeTransferCall(humanTranscript, client.business_name, session.whisper_summary) : null;
+    console.log(`telnyx-voice: transfer recap (session ${sessionId}): stored=${storedRecordingUrl ? 'spaces' : 'no'} transcriptLen=${humanTranscript ? humanTranscript.length : 0} recap=${recap ? 'yes' : 'no'}`);
+
+    // Find the dashboard call row this transfer belongs to. Prefer an EXACT
+    // match on the VAPI call id stamped into calls.conversation_id at
+    // end-of-call; fall back to the most-recent transferred call in a 30-min
+    // window for older rows / any edge case.
+    let callRow = null;
+    const callSelect = 'id, ai_summary, call_metadata, customer_name, urgency_level, transcript, recording_url';
+    if (session.vapi_call_id) {
+      try {
+        const { data: exact } = await supabase
+          .from('calls')
+          .select(callSelect)
+          .eq('client_id', client.id)
+          .eq('conversation_id', session.vapi_call_id)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (exact) { callRow = exact; console.log(`telnyx-voice: matched calls row ${exact.id} by conversation_id`); }
+      } catch (e) { console.error(`telnyx-voice: exact calls-row lookup failed: ${e.message}`); }
     }
-
-    // Best-effort: fold the recap into the dashboard call record (the
-    // transferred calls row the end-of-call report created). Non-destructive:
-    // append to ai_summary and stash the transfer recording in call_metadata.
-    if (recap) {
+    if (!callRow) {
       try {
         const since = new Date(Date.now() - 30 * 60 * 1000).toISOString();
         const { data: rows } = await supabase
           .from('calls')
-          .select('id, ai_summary, call_metadata')
+          .select(callSelect)
           .eq('client_id', client.id)
           .eq('call_status', 'transferred')
           .gte('created_at', since)
           .order('created_at', { ascending: false })
           .limit(2);
-        if (rows && rows.length === 1) {
-          const row = rows[0];
-          const merged = (row.ai_summary ? row.ai_summary + '\n\n' : '') + `After transfer: ${recap}`;
-          const meta = Object.assign({}, row.call_metadata || {}, { transfer_recording_url: recordingUrl });
-          await supabase.from('calls').update({ ai_summary: merged, call_metadata: meta }).eq('id', row.id);
-          console.log(`telnyx-voice: folded transfer recap into call ${row.id}`);
-        } else {
-          console.log(`telnyx-voice: calls-row recap match: ${rows ? rows.length : 0} candidates, skipped dashboard update`);
+        if (rows && rows.length === 1) callRow = rows[0];
+        else console.log(`telnyx-voice: fallback calls-row match: ${rows ? rows.length : 0} candidates`);
+      } catch (e) { console.error(`telnyx-voice: calls-row lookup failed: ${e.message}`); }
+    }
+
+    // Owner SMS: the SAME template a normal post-call notification uses, with the
+    // recap as the Summary, so a transferred call's text looks identical to a
+    // regular one. Only send when there is a recap (no summary, no text, no link).
+    if (client.owner_phone && recap) {
+      try {
+        await sendCallNotificationSMS(client, agency, {
+          customerName: (callRow && callRow.customer_name) || 'Caller',
+          customerPhone: session.caller_number || '',
+          urgency: (callRow && callRow.urgency_level) || 'routine',
+          summary: recap,
+        });
+        console.log(`telnyx-voice: transfer recap SMS sent to owner (standard template)`);
+      } catch (e) { console.error(`telnyx-voice: recap SMS failed: ${e.message}`); }
+    } else {
+      console.log(`telnyx-voice: no recap summary (session ${sessionId}), skipping recap SMS`);
+    }
+
+    // Save the recording + transcript into the dashboard call row so BOTH the
+    // client and agency call-detail pages play the recording and show the full
+    // transcript (both read calls.recording_url and calls.transcript directly,
+    // and a Spaces URL passes through the VAPI resolver untouched). Best-effort
+    // and non-destructive: only overwrite recording_url with a DURABLE Spaces
+    // URL, append the human conversation to the AI intake transcript, and keep
+    // the prior VAPI recording in call_metadata.
+    if (callRow) {
+      try {
+        const meta = Object.assign({}, callRow.call_metadata || {}, {
+          transfer_recording_url: storedRecordingUrl || recordingUrl,
+        });
+        if (humanTranscript) meta.transfer_transcript = humanTranscript;
+        const update = { call_metadata: meta };
+        if (storedRecordingUrl) {
+          if (callRow.recording_url && callRow.recording_url !== storedRecordingUrl) {
+            meta.ai_recording_url = callRow.recording_url; // preserve the pre-transfer AI recording
+          }
+          update.recording_url = storedRecordingUrl;
         }
-      } catch (e) { console.error(`telnyx-voice: calls recap update failed: ${e.message}`); }
+        if (humanTranscript) update.transcript = buildCombinedTranscript(callRow.transcript, humanTranscript);
+        if (recap) update.ai_summary = (callRow.ai_summary ? callRow.ai_summary + '\n\n' : '') + `After transfer: ${recap}`;
+        await supabase.from('calls').update(update).eq('id', callRow.id);
+        console.log(`telnyx-voice: saved transfer recording${update.recording_url ? '' : ' (metadata only)'} + transcript into call ${callRow.id}`);
+      } catch (e) { console.error(`telnyx-voice: calls update failed: ${e.message}`); }
+    } else {
+      console.log(`telnyx-voice: no calls row matched (session ${sessionId}); recording stored at ${storedRecordingUrl || 'n/a'} but not linked`);
     }
 
     await updateSession(sessionId, { status: 'transfer_recapped' });

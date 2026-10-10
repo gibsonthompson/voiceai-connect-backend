@@ -295,6 +295,9 @@ async function gatherUsingAI(callControlId, greeting, opts = {}) {
       required: ['accept'],
     },
     user_response_timeout_ms: opts.timeoutMillis || 10000,
+    // Let the greeting finish before listening, so the brief is not cut off when
+    // the agent says "hello"; set opts.allowInterrupt true to allow barge-in.
+    interruption_settings: { enable: opts.allowInterrupt === true },
   };
   const instructions = opts.instructions
     || 'You are the phone system briefing a team member about a caller being transferred to them. After the greeting, listen for their answer and set accept to true only if they clearly agree to take the call now, or false if they decline or want to take a message. Do not chat or ask anything else.';

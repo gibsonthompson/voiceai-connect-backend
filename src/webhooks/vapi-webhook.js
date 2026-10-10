@@ -1353,6 +1353,11 @@ async function handleVapiWebhook(req, res) {
       ended_reason: endedReason, transfer_status: transferStatus,
       appointment_booked: appointmentBooked, appointment_time: callBooking?.time || null,
       is_spam: false, spam_reason: null,
+      // Stamp the VAPI call id so the warm-transfer recap (telnyx-voice.js) can
+      // match THIS exact row later by call_sessions.vapi_call_id, instead of
+      // guessing the most-recent transferred call in a time window. Harmless for
+      // non-transfer calls; it just records the conversation id.
+      conversation_id: call.id || null,
       call_language: 'en', created_at: new Date().toISOString()
     };
     let savedCallId = null;
@@ -1363,9 +1368,9 @@ async function handleVapiWebhook(req, res) {
         // a silent 500. This is the line that tells you WHY the save dies.
         console.error('❌ calls INSERT failed:', insertError.message, '| code:', insertError.code, '| details:', insertError.details, '| hint:', insertError.hint);
         console.error('   attempted columns:', Object.keys(initialRec).join(', '));
-        if (insertError.message && (insertError.message.includes('ended_reason') || insertError.message.includes('transfer_status') || insertError.message.includes('is_spam') || insertError.message.includes('spam_reason') || insertError.message.includes('call_language'))) {
-          console.log('↩️ Retrying insert without optional columns (ended_reason/transfer_status/is_spam/spam_reason/call_language)');
-          delete initialRec.ended_reason; delete initialRec.transfer_status; delete initialRec.is_spam; delete initialRec.spam_reason; delete initialRec.call_language; initialRec.call_status = 'completed';
+        if (insertError.message && (insertError.message.includes('ended_reason') || insertError.message.includes('transfer_status') || insertError.message.includes('is_spam') || insertError.message.includes('spam_reason') || insertError.message.includes('call_language') || insertError.message.includes('conversation_id'))) {
+          console.log('↩️ Retrying insert without optional columns (ended_reason/transfer_status/is_spam/spam_reason/call_language/conversation_id)');
+          delete initialRec.ended_reason; delete initialRec.transfer_status; delete initialRec.is_spam; delete initialRec.spam_reason; delete initialRec.call_language; delete initialRec.conversation_id; initialRec.call_status = 'completed';
           const { data: retried, error: retryError } = await supabase.from('calls').insert([initialRec]).select();
           if (retryError) {
             console.error('❌ calls INSERT RETRY failed:', retryError.message, '| code:', retryError.code, '| details:', retryError.details, '| hint:', retryError.hint);
