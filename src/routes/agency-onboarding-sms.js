@@ -80,6 +80,16 @@ router.post('/agency-onboarding-sms', async (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // DISABLED 2026-10. This legacy sequence duplicated the primary activation
+  // sequence (activation-sms.js) and double-texted agencies with link-laden
+  // copy. It is now a no-op so it can't send even if the external cron still
+  // calls it. The onboarding_sms_* templates were also deleted from the DB.
+  // Safe to delete this route and its cron entirely once confirmed.
+  // ─────────────────────────────────────────────────────────────────────────
+  return res.json({ success: true, processed: 0, sent: 0, disabled: true });
+
+  /* eslint-disable no-unreachable */
   try {
     console.log('📨 Running legacy onboarding engagement SMS check...');
 
