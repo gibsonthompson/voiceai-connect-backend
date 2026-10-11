@@ -1110,7 +1110,7 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     const probe = clientBizInfo.trim().slice(0, 120);
     // Skip only if this exact info is already embedded (avoids a double include).
     if (!probe || !systemPrompt.includes(probe)) {
-      systemPrompt += `\n\n## CURRENT BUSINESS INFORMATION (authoritative)\nThis is the business's current information, provided by the business itself. Use it to answer callers directly. Never tell the caller you need to look something up or check on it. If something genuinely is not covered here, say you are not certain and offer to take a message.${clientBizInfo}`;
+      systemPrompt += `\n\n## CURRENT BUSINESS INFORMATION (authoritative)\nThis is the business's current information, provided directly by the business, and it is authoritative. Use it to answer callers directly, and never tell the caller you need to look something up or check on it. It overrides anything in your knowledge base or background notes: if those ever disagree with the information here, the information here is correct. If something genuinely is not covered anywhere, say you are not certain and offer to take a message.${clientBizInfo}`;
       businessInfoInjected = true;
     }
   }
@@ -1288,9 +1288,16 @@ SALES, SOLICITATIONS, AND SPAM: if the reason is a sales pitch, a marketing or a
   // Anti-fabrication guard (applies to every prompt path). Without this the
   // model invents plausible details it doesn't have, the classic "123 Main St"
   // address, which is worse than admitting it doesn't know.
+  // Information priority: the structured sections (services, hours, areas,
+  // staff, business info) are owner-entered and current; the knowledge base can
+  // be scraped from the website and out of date. State the hierarchy plainly so
+  // a wrong scraped fact never overrides the real business info.
+  systemPrompt += `\n\n# Information priority
+Everything given to you in these instructions, the services, hours, service areas, staff, and business information sections, is the business's current and verified information. It is authoritative. Your knowledge base and any background notes are a secondary reference only: they may have been pulled from the website and can be outdated or wrong. When the knowledge base disagrees with the sections in these instructions, the sections here are correct and you must follow them. Never tell a caller a fact from the knowledge base, such as hours, prices, services, or locations, that contradicts what the sections above give. Use the knowledge base only for extra detail the sections above do not cover.`;
+
   systemPrompt += `\n\n# Never make things up
 Only state facts you actually have from this business's information. Never invent or guess an address, phone number, price, hours, staff name, or any other detail. If a caller asks for something you do not have, say so plainly and offer to transfer them or take a message, for example "I don't have that in front of me, but I can have someone follow up." Never read out a placeholder or example value as if it were real.
-Only offer, mention, or ask about services this business actually provides. If you are not certain what they offer, look it up in your knowledge base or ask the caller what they need, instead of guessing or reading a generic list of services that may not apply here. If a related service genuinely fits what the caller asked for, you may suggest it, but never a canned or random add-on.`;
+Only offer, mention, or ask about services this business actually provides, which are the ones listed in the services section above. That list is the real menu and is authoritative. If you are not certain whether they offer something, check the sections above first, and only then the knowledge base for extra detail, or ask the caller what they need, instead of guessing or reading a generic list. If the knowledge base mentions a service that is not in the services section above, do not offer it. If a related service genuinely fits what the caller asked for, you may suggest it, but never a canned or random add-on.`;
 
   // Closing etiquette, always on so the AI never hangs up without a goodbye.
   if (!systemPrompt.includes('## ENDING THE CALL')) {
