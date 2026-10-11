@@ -119,10 +119,8 @@ const DEFAULT_TOOL_CONFIG = {
   // take a message and book instead of transferring. Harmless for clients with
   // no hours set (never triggers). 24/7 businesses turn it off.
   businessHoursRouting: true,
-  afterHoursMessage: "We're currently closed, but I'd be happy to take a message and have someone call you back during business hours.",
   speechTimeout: true,
   speechTimeoutSeconds: 12,
-  transferFallbackToMessage: true,
   // Krisp background-speech denoising. ON by default (biggest real-world phone
   // turn-taking win: strips background voices/noise so the transcriber only
   // hears the caller). Set tool_config.backgroundDenoising=false per client to
@@ -806,8 +804,6 @@ function buildCallerContextBlock(contact) {
 // BUILD AFTER-HOURS BLOCK
 // ============================================================================
 function buildAfterHoursBlock(client, toolConfig) {
-  const afterHoursMessage = toolConfig.afterHoursMessage || DEFAULT_TOOL_CONFIG.afterHoursMessage;
-
   let nextOpenInfo = '';
   if (client.business_hours) {
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
@@ -829,7 +825,8 @@ function buildAfterHoursBlock(client, toolConfig) {
 You are a 24/7 receptionist. Help this caller fully: answer their questions, take their details, book if they want an appointment, and assist them exactly as you would at any other time. Do NOT tell the caller the business is "closed" or "closed right now."
 
 A couple of things are simply different at this hour:
-- No one is available for a live transfer right now, so rather than transferring, capture what the caller needs and let them know the team will follow up.
+- You CAN still book appointments and take messages exactly as you would during the day, so go ahead and help the caller do that.
+- You CANNOT connect the caller to a person right now: no one is available for a live transfer outside business hours. Do not offer a transfer and do not attempt one. Instead, capture what the caller needs and let them know the team will follow up.
 - Only bring up the business hours if the caller asks, or if it genuinely helps set expectations on when they will hear back.${nextOpenInfo ? ` For example: "${nextOpenInfo}"` : ''}
 - Always get their name and a good callback number. If it sounds urgent, reassure them the team will reach out as soon as possible.`;
 }
@@ -1633,7 +1630,6 @@ function enforceAgencyPlanFeatures(toolConfig, client, agency) {
     caller_recognition: 'callerRecognition',
     spam_detection: 'spamDetection',
     call_transfer: 'transferCall',
-    transfer_fallback: 'transferFallbackToMessage',
     business_hours: 'businessHoursRouting',
   };
 

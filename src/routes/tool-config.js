@@ -18,10 +18,8 @@ const DEFAULT_TOOL_CONFIG = {
   // On by default (see assistant-config-builder DEFAULT_TOOL_CONFIG). Only has
   // an effect once business hours are set; 24/7 businesses turn it off.
   businessHoursRouting: true,
-  afterHoursMessage: "We're currently closed, but I'd be happy to take a message and have someone call you back during business hours.",
   speechTimeout: true,
   speechTimeoutSeconds: 12,
-  transferFallbackToMessage: true,
   smsToCaller: false,
   smsInstructions: '',
   smsSnippets: [],
@@ -102,9 +100,8 @@ router.put('/:id/tool-config', requirePermissionIfAuthed('ai_agent'), async (req
     // Whitelist allowed keys
     const allowed = [
       'callerRecognition', 'spamDetection', 'transferCall',
-      'businessHoursRouting', 'afterHoursMessage',
+      'businessHoursRouting',
       'speechTimeout', 'speechTimeoutSeconds',
-      'transferFallbackToMessage',
       'smsToCaller',
       'smsInstructions',
       'smsSnippets',
