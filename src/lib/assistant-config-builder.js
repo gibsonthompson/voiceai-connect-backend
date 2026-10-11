@@ -985,11 +985,56 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
 // instructions and transfer keywords. 'message' suppresses both and injects a
 // take-a-message block (missed-call variant when forwarding_mode is 'missed').
 // ============================================================================
+// ============================================================================
+// BUILD CLIENT BUSINESS-INFO BLOCK (clean, for in-prompt injection)
+// ----------------------------------------------------------------------------
+// Returns a small, CLEAN business-info block from the client's own data, so the
+// AI always has hours/FAQs/policies in context without a mid-call lookup.
+// Prefers the structured knowledge_base_data (small, authoritative) over the raw
+// knowledge_base_content, which can be tens of thousands of characters of
+// website scrape that buries the real facts. Returns '' when there is nothing.
+// ============================================================================
+function buildClientBusinessInfoBlock(client) {
+  // 1) Structured knowledge base (clean + small): same shape the agency template
+  //    uses. This is the reliable source for hours and FAQs.
+  const kbd = client && client.knowledge_base_data;
+  if (kbd && typeof kbd === 'object' && !Array.isArray(kbd)) {
+    let s = '';
+    if (kbd.businessHours && String(kbd.businessHours).trim()) s += `\n\n### Business Hours\n${String(kbd.businessHours).trim()}`;
+    if (kbd.services && String(kbd.services).trim()) s += `\n\n### Services\n${String(kbd.services).trim()}`;
+    if (kbd.faqs && String(kbd.faqs).trim()) s += `\n\n### Frequently Asked Questions\n${String(kbd.faqs).trim()}`;
+    if (kbd.additionalInfo && String(kbd.additionalInfo).trim()) s += `\n\n### Additional Information\n${String(kbd.additionalInfo).trim()}`;
+    if (s) return s;
+  }
+
+  const content = ((client && client.knowledge_base_content) || '').trim();
+  if (!content) return '';
+
+  // 2) The marked business-provided block at the top of knowledge_base_content:
+  //    the clean, business-entered section, WITHOUT the scraped remainder.
+  const si = content.indexOf('# Business-Provided Information');
+  const ei = content.indexOf('CLIENT_PROVIDED_INFO_END');
+  if (si !== -1 && ei !== -1 && ei > si) {
+    const block = content.slice(si, ei).replace(/<!--[\s\S]*?-->/g, '').trim();
+    if (block) return `\n\n${block}`;
+  }
+
+  // 3) No structured data and no marked block (e.g. a generated KB): a capped
+  //    slice, so a bloated scrape can never flood the prompt.
+  const MAX = 8000;
+  return `\n\n${content.length > MAX ? content.slice(0, MAX) + '\n\n[...additional details available via the knowledge base...]' : content}`;
+}
+
 async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook = false, handoff = 'transfer', transferStaff = []) {
   const hipaaMode = client.hipaa_mode === true;
   const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
   const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
   const businessName = client.business_name;
+
+  // The client's own clean business info (hours/FAQs/services from structured
+  // data, or the marked business-provided block). Injected fresh below on every
+  // call; also decides whether the agency template's generic KB is used.
+  const clientBizInfo = buildClientBusinessInfoBlock(client);
 
   // Whisper transfer applies to telnyx_cc clients (the backend owns the bridge).
   const isWhisperTransfer = client.voice_routing === 'telnyx_cc';
@@ -1024,10 +1069,9 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     systemPrompt = customTemplate.system_prompt.replace(/\{businessName\}/g, businessName);
 
     // Only use the agency template's generic KB when the client has no business
-    // info of their own. A configured client's own knowledge base (injected
-    // fresh below on every call) is authoritative and takes precedence, so we
-    // never layer generic agency defaults on top of a real client's info.
-    if (customTemplate.knowledge_base_data && !(client.knowledge_base_content || '').trim()) {
+    // info of its own. A configured client's own data (injected fresh below) is
+    // authoritative, so generic agency defaults never sit on top of it.
+    if (customTemplate.knowledge_base_data && !clientBizInfo) {
       const kb = customTemplate.knowledge_base_data;
       let kbSection = '\n\n## BUSINESS INFORMATION';
       if (kb.businessHours?.trim()) kbSection += `\n\n### Business Hours\n${kb.businessHours}`;
@@ -1055,34 +1099,28 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
   }
 
   // ── Current business information: injected FRESH on EVERY call ────────────
-  // The client's own "My Business" data (hours, FAQs, services, policies) is
-  // assembled into knowledge_base_content and already marked authoritative. Put
-  // it straight into the prompt on every call so the AI has the complete,
-  // current business info in context and never has to call a lookup tool
-  // mid-call. That means lower latency and no chance the model simply does not
-  // look it up. This is the source of truth for THIS business and takes
-  // precedence over any agency-template KB or older cached prompt text. Capped
-  // so a very large KB cannot bloat the prompt (the KB query tool, when present,
-  // still covers anything beyond the cap).
-  const clientKb = (client.knowledge_base_content || '').trim();
+  // The client's own clean business info (hours, FAQs, policies) goes straight
+  // into the prompt so the AI has it in context and never has to call a lookup
+  // tool mid-call. Services are injected separately (buildServicesBlock) from
+  // the live client_services table. This is the source of truth for THIS
+  // business and takes precedence over any agency-template KB or older cached
+  // prompt text.
   let businessInfoInjected = false;
-  if (clientKb) {
-    const MAX_KB = 15000;
-    const kbText = clientKb.length > MAX_KB ? clientKb.slice(0, MAX_KB) + '\n\n[...additional details omitted for length; use the knowledge base tool for more...]' : clientKb;
-    // Skip only if this exact KB is already embedded in the base prompt (avoids
-    // a double include when a cached prompt already baked it in).
-    if (!systemPrompt.includes(kbText.slice(0, 200))) {
-      systemPrompt += `\n\n## CURRENT BUSINESS INFORMATION (authoritative)\nThis is the business's current information, provided by the business itself. Use it to answer callers directly. It is already complete, so never tell the caller you need to look something up or check on it. If something genuinely is not covered here, say you are not certain and offer to take a message.\n\n${kbText}`;
+  if (clientBizInfo) {
+    const probe = clientBizInfo.trim().slice(0, 120);
+    // Skip only if this exact info is already embedded (avoids a double include).
+    if (!probe || !systemPrompt.includes(probe)) {
+      systemPrompt += `\n\n## CURRENT BUSINESS INFORMATION (authoritative)\nThis is the business's current information, provided by the business itself. Use it to answer callers directly. Never tell the caller you need to look something up or check on it. If something genuinely is not covered here, say you are not certain and offer to take a message.${clientBizInfo}`;
       businessInfoInjected = true;
     }
   }
 
   // Diagnostic: one line per call so a call that lacks business info is never a
-  // mystery again. Shows the prompt path, the client's KB size, whether it was
-  // injected, and whether the (now-secondary) KB query tool is attached.
+  // mystery. Shows the prompt path, the clean business-info size actually
+  // injected, the raw KB size, and whether the (secondary) KB query tool is on.
   try {
     const pathTaken = customTemplate ? 'enterprise-template' : (client.system_prompt ? 'cached-prompt' : 'industry-default');
-    console.log(`🧩 Prompt path=${pathTaken} | clientKB=${clientKb.length}c injected=${businessInfoInjected} | queryTool=${client.vapi_query_tool_id ? 'attached' : 'none'} | hours=${client.business_hours ? 'set' : 'none'}`);
+    console.log(`🧩 Prompt path=${pathTaken} | bizInfo=${clientBizInfo ? clientBizInfo.length + 'c' : 'none'} injected=${businessInfoInjected} | rawKB=${((client.knowledge_base_content || '').length)}c | kbData=${!!(client.knowledge_base_data)} | queryTool=${client.vapi_query_tool_id ? 'attached' : 'none'}`);
   } catch (e) { /* logging must never break a call */ }
 
   // Current date/time anchor (client timezone), computed fresh every call so the
