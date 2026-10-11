@@ -828,6 +828,73 @@ router.post('/leads', requireAdmin, async (req, res) => {
 });
 
 // ============================================================================
+// POST /api/admin/leads/save-scraped - Save results from the admin lead finder
+// (the agency Google Maps scraper, reused at the platform level) as YOUR own
+// leads. Written with agency_id = NULL so they live in the admin CRM, deduped
+// against existing admin leads by phone, then business name.
+// ============================================================================
+router.post('/leads/save-scraped', requireAdmin, async (req, res) => {
+  try {
+    const { leads } = req.body;
+    if (!Array.isArray(leads) || leads.length === 0) {
+      return res.status(400).json({ error: 'leads array is required' });
+    }
+
+    let saved = 0, skipped = 0, errors = 0;
+
+    for (const lead of leads) {
+      try {
+        const cleanPhone = lead.phone ? String(lead.phone).replace(/[^\d+]/g, '') : '';
+        let isDuplicate = false;
+
+        if (cleanPhone) {
+          const { data } = await supabase.from('leads').select('id')
+            .is('agency_id', null).eq('phone', cleanPhone).maybeSingle();
+          if (data) isDuplicate = true;
+        }
+        if (!isDuplicate && lead.companyName) {
+          const { data } = await supabase.from('leads').select('id')
+            .is('agency_id', null).ilike('business_name', lead.companyName).maybeSingle();
+          if (data) isDuplicate = true;
+        }
+        if (isDuplicate) { skipped++; continue; }
+
+        const notes = [
+          '🎯 Admin Lead Finder (call centers)',
+          lead.address ? `Address: ${lead.address}` : '',
+          lead.rating ? `Google Rating: ${lead.rating} (${lead.reviewCount || 0} reviews)` : '',
+          lead.businessStatus ? `Status: ${lead.businessStatus}` : '',
+        ].filter(Boolean).join('\n');
+
+        const { error: insertError } = await supabase.from('leads').insert({
+          agency_id: null,
+          business_name: lead.companyName || null,
+          contact_name: null,
+          email: lead.email ? String(lead.email).toLowerCase().trim() : null,
+          phone: cleanPhone || null,
+          website: lead.website || null,
+          industry: lead.industry || 'call center',
+          source: 'admin_scraper',
+          status: 'new',
+          estimated_value: null,
+          notes,
+        });
+
+        if (insertError) errors++; else saved++;
+      } catch (e) {
+        errors++;
+      }
+    }
+
+    console.log(`✅ Admin saved scraped leads: ${saved} saved, ${skipped} skipped, ${errors} errors`);
+    res.json({ success: true, saved, skipped, errors, total: leads.length });
+  } catch (error) {
+    console.error('Admin save-scraped error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
 // POST /api/admin/leads/import - Bulk CSV import as platform leads
 // No agency needed - these are YOUR prospective agency leads
 // ============================================================================
