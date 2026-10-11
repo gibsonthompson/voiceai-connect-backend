@@ -1215,8 +1215,17 @@ router.post('/api/voice/send-sms', async (req, res) => {
         } else {
           text = value;
         }
-      } else if (!text) {
-        return reply('That saved text is not set up, so nothing was sent. Read the information out loud instead.');
+      } else {
+        // Custom saved text ("+ Add a custom text"): the AI passes its name as
+        // the key. Match it (case-insensitive) and send the value WORD-FOR-WORD,
+        // exactly as the dashboard promises, without the friendly preset wrapper.
+        const snippets = (client && client.tool_config && Array.isArray(client.tool_config.smsSnippets)) ? client.tool_config.smsSnippets : [];
+        const snip = snippets.find(s => s && (s.label || '').toString().trim().toLowerCase() === savedKey.toLowerCase() && (s.value || '').toString().trim());
+        if (snip) {
+          text = snip.value.toString().trim();
+        } else if (!text) {
+          return reply('That saved text is not set up, so nothing was sent. Read the information out loud instead.');
+        }
       }
     }
 

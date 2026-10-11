@@ -876,11 +876,11 @@ function buildSmsBlock(toolConfig, isAfterHours) {
     }
   }
   if (snippets.length) {
-    block += `\n\nOther saved texts (call send_sms and copy the exact wording, never change a link or address):`;
+    block += `\n\nOther saved texts. To send one, call send_sms with saved_text set to its name in quotes. It is sent word-for-word, so never retype or change a link. Match the caller's request to the right one by its name:`;
     for (const s of snippets) {
       const label = (s.label || 'Text').toString().trim();
       const value = (s.value || '').toString().trim();
-      if (value) block += `\n- ${label}: ${value}`;
+      if (value) block += `\n- "${label}": ${value}`;
     }
   }
   if (instructions) block += `\n\nAdditional guidance: ${instructions}`;
@@ -1121,6 +1121,13 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
 
   // Phase 1: Priority rules
   systemPrompt += buildPriorityRulesBlock(client.priority_rules);
+
+  // Texting the caller: tell the AI which saved texts exist (address, website,
+  // review, payment presets plus any custom saved links) and when to send them,
+  // so it actually offers them. Without this the send_sms tool is attached but
+  // the AI has no idea the saved links exist. Gated inside buildSmsBlock to match
+  // the tool (smsToCaller + not after-hours).
+  systemPrompt += buildSmsBlock(toolConfig, isAfterHours);
 
   // Spam detection, check before appending (may already be in cached prompt)
   if (toolConfig.spamDetection && !systemPrompt.includes('# Spam Detection')) {
@@ -1519,17 +1526,25 @@ function buildTools(client, toolConfig, isAfterHours, canAutoBook = false, hando
     const enabledPresetKeys = Object.entries((toolConfig.smsPresets && typeof toolConfig.smsPresets === 'object') ? toolConfig.smsPresets : {})
       .filter(([, v]) => v && v.enabled && (v.value || '').toString().trim())
       .map(([k]) => k);
+    // Custom saved texts (the "+ Add a custom text" rows): their NAME is the key
+    // the AI passes as saved_text, and the send-sms route sends the value
+    // verbatim. Exposing them here is what lets the AI send a custom saved link
+    // exactly, instead of retyping it.
+    const snippetKeys = (Array.isArray(toolConfig.smsSnippets) ? toolConfig.smsSnippets : [])
+      .filter(s => s && (s.label || '').toString().trim() && (s.value || '').toString().trim())
+      .map(s => s.label.toString().trim());
+    const savedTextKeys = [...enabledPresetKeys, ...snippetKeys];
     const smsProperties = {
       message: {
         type: 'string',
         description: 'A short custom text to send when it is not one of the saved texts. Ignored if saved_text is set.',
       },
     };
-    if (enabledPresetKeys.length) {
+    if (savedTextKeys.length) {
       smsProperties.saved_text = {
         type: 'string',
-        enum: enabledPresetKeys,
-        description: 'To send one of the saved texts (address, website, review, payment), pass its key here. It is sent exactly as the business configured it, never reworded. Use this instead of message for saved texts.',
+        enum: savedTextKeys,
+        description: 'To send one of the saved texts, pass its exact name here (the built-in ones are address, website, review, payment; custom saved texts use their name). It is sent exactly as the business configured it, never reworded. Use this instead of message for saved texts.',
       };
     }
     tools.push({
