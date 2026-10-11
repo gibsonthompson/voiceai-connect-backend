@@ -258,12 +258,18 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
     const conversations = [];
 
     // ---- Agencies: in-app support thread + SMS, merged per agency ----
-    const [reqRes, smsRes] = await Promise.all([
+    const [reqRes, smsRes, fbRes] = await Promise.all([
       supabase.from('support_requests').select('agency_id, admin_unread').not('agency_id', 'is', null).limit(1000),
       supabase.from('sms_log').select('agency_id').eq('message_type', 'agency_reply_inbound').not('agency_id', 'is', null).limit(1000),
+      // Feedback (agency_feedback) is folded into each agency's thread below, so a
+      // reply goes back to that agency like any other message. Archived excluded.
+      supabase.from('agency_feedback').select('id, agency_id, message, status, created_at').not('agency_id', 'is', null).neq('status', 'archived').limit(1000),
     ]);
     const reqRows = reqRes.data || [], smsAgencyRows = smsRes.data || [];
-    const agencyIds = [...new Set([...reqRows.map(r => r.agency_id), ...smsAgencyRows.map(r => r.agency_id)])];
+    const fbRows = fbRes.data || [];
+    const fbByAgency = new Map();
+    for (const r of fbRows) { const g = fbByAgency.get(r.agency_id) || []; g.push(r); fbByAgency.set(r.agency_id, g); }
+    const agencyIds = [...new Set([...reqRows.map(r => r.agency_id), ...smsAgencyRows.map(r => r.agency_id), ...fbRows.map(r => r.agency_id)])];
 
     if (agencyIds.length) {
       const { data: agencies } = await supabase.from('agencies').select('id, name, phone, platform_replies_read_at').in('id', agencyIds);
@@ -283,6 +289,9 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
           .eq('agency_id', aid).eq('recipient_type', 'agency_owner')
           .order('created_at', { ascending: true }).limit(500);
         for (const r of (srows || [])) items.push({ id: `sms-${r.id}`, sender: adminSmsDir(r), body: r.message_body || '', at: r.created_at, kind: 'sms' });
+        const fbForAgency = fbByAgency.get(aid) || [];
+        for (const r of fbForAgency) items.push({ id: `fb-${r.id}`, sender: 'in', body: r.message || '', at: r.created_at, kind: 'feedback' });
+        const fbUnread = fbForAgency.filter(r => r.status !== 'reviewed').length;
         items.sort((a, b) => new Date(a.at) - new Date(b.at));
         if (!items.length) continue;
         const readAt = ag.platform_replies_read_at ? new Date(ag.platform_replies_read_at).getTime() : 0;
@@ -292,7 +301,7 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
         conversations.push({
           key: `agency-${aid}`, type: 'agency', agencyId: aid,
           name: ag.name || 'Unknown agency', phone: ag.phone || null,
-          messages: items, unread: (unreadByAgency[aid] || 0) + smsUnread,
+          messages: items, unread: (unreadByAgency[aid] || 0) + smsUnread + fbUnread,
           lastAt: last.at, lastDirection: last.sender, lastPreview: String(last.body || '').slice(0, 120),
           lastInboundKind: inbound.length ? inbound[inbound.length - 1].kind : 'inapp',
           needsReply: last.sender === 'in',
@@ -388,6 +397,8 @@ adminRouter.post('/inbox/read', requireAdmin, async (req, res) => {
     if (!agencyId) return res.json({ success: false });
     await supabase.from('support_requests').update({ admin_unread: 0 }).eq('agency_id', agencyId).gt('admin_unread', 0);
     await supabase.from('agencies').update({ platform_replies_read_at: new Date().toISOString() }).eq('id', agencyId);
+    // Opening an agency thread also reviews their feedback (now folded into it).
+    await supabase.from('agency_feedback').update({ status: 'reviewed', reviewed_at: new Date().toISOString() }).eq('agency_id', agencyId).neq('status', 'reviewed').neq('status', 'archived');
     res.json({ success: true });
   } catch (error) { res.json({ success: false }); }
 });

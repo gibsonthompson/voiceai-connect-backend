@@ -5,14 +5,25 @@
 //          to claude-sonnet-4-6. Old model retires June 15, 2026.
 // UPDATED: 2026-06-04 — Corrected stale pricing/trial copy: Pro is $99/mo
 //          (was $179), and Pro/Scale trials are now card-required (was no-card).
+// UPDATED: 2026-10-10 — Added POST /:agencyId/support/escalate. The AI chatbot
+//          used to dead-end at a phone number; now the agency can hand the
+//          conversation to a human. Escalation writes a support_requests seed
+//          row (same shape as the agency Inbox "platform" intake), so it lands
+//          in the admin inbox as a replyable thread AND in the agency's own
+//          Inbox platform thread. Best-effort SMS nudges the owner. The reply
+//          comes back in the Inbox, never on this endpoint.
 // ============================================================================
 const express = require('express');
 const router = express.Router();
 const fetch = require('node-fetch');
 const { requireAgencyAccess } = require('./auth');
 const { supabase } = require('../lib/supabase');
+const { sendAndLogSMS } = require('../lib/sms-logger');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+// Platform owner's number for the escalation heads-up (same resolution as
+// routes/help.js so the two support paths text the same place).
+const SUPPORT_PHONE = process.env.SUPPORT_PHONE_NUMBER || process.env.PLATFORM_OWNER_PHONE || '+16783161454';
 // Ownership guard: /support/chat proxies to the Anthropic API, so it must not
 // be callable anonymously (API-cost abuse). The handler ignores :agencyId for
 // data, but requiring a valid token that owns :agencyId is the right gate.
@@ -413,6 +424,95 @@ router.post('/:agencyId/support/chat', async (req, res) => {
     res.json({ success: true, reply });
   } catch (error) {
     console.error('Support chat error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// POST /:agencyId/support/escalate
+// Hand the chatbot conversation off to a human. Creates a support_requests
+// seed row — identical in shape to the agency Inbox "platform" intake and the
+// marketing widget escalation — so it surfaces in the admin inbox (grouped per
+// agency, admin_unread +1) as a replyable thread, and in the agency's own
+// Inbox platform conversation. The owner's reply returns through the inbox,
+// not here; this endpoint only opens the thread. DB insert and SMS are
+// independent best-effort so one failing never swallows the other.
+// Body: { message?: string (what the agency typed), transcript?: string
+//         (the bot conversation so far, pre-rendered "You:/Assistant:" lines) }
+// ============================================================================
+router.post('/:agencyId/support/escalate', async (req, res) => {
+  try {
+    const agencyId = req.params.agencyId;
+    const { message, transcript } = req.body || {};
+
+    const note = typeof message === 'string' ? message.trim() : '';
+    const convo = typeof transcript === 'string' ? transcript.trim() : '';
+    if (!note && !convo) {
+      return res.status(400).json({ error: 'Nothing to send' });
+    }
+
+    // Resolve the agency name so the owner's SMS is actionable (the admin inbox
+    // resolves the name itself from agency_id, so the record doesn't need it).
+    let agencyName = 'An agency';
+    try {
+      const { data } = await supabase.from('agencies').select('name').eq('id', agencyId).single();
+      if (data?.name) agencyName = data.name;
+    } catch { /* non-blocking */ }
+
+    // Compose the seed: the agency's typed note first (that's the actual ask),
+    // then a compact transcript of what they already tried with the bot so the
+    // owner has full context in one glance.
+    const parts = [];
+    parts.push(note || '(Escalated from the support assistant — see the conversation below.)');
+    if (convo) {
+      parts.push('');
+      parts.push('--- Conversation with the support assistant ---');
+      parts.push(convo);
+    }
+    const composed = parts.join('\n').slice(0, 4000);
+
+    // 1) Persist to support_requests (admin inbox + agency Inbox platform thread).
+    let requestId = null;
+    try {
+      const { data: created, error } = await supabase
+        .from('support_requests')
+        .insert({
+          agency_id: agencyId,
+          user_type: 'agency',
+          message: composed,
+          source: 'support_chat',
+          status: 'open',
+          last_sender: 'agency',
+          admin_unread: 1,
+        })
+        .select('id')
+        .single();
+      if (error) throw error;
+      requestId = created.id;
+    } catch (dbErr) {
+      console.error('support escalate insert failed:', dbErr.message);
+      return res.status(500).json({ error: 'Could not send to the team. Please try again.' });
+    }
+
+    // 2) Text the owner (best-effort; never blocks the success response).
+    if (SUPPORT_PHONE) {
+      try {
+        await sendAndLogSMS({
+          phone: SUPPORT_PHONE,
+          message: ['🆘 New support request', `Agency: ${agencyName}`, 'Check your admin inbox to view and reply.'].join('\n'),
+          agencyId,
+          recipientType: 'admin',
+          messageType: 'support_escalation',
+          metadata: { source: 'support_chat' },
+        });
+      } catch (smsErr) {
+        console.error('Support escalation SMS failed (non-blocking):', smsErr.message);
+      }
+    }
+
+    res.json({ success: true, request_id: requestId });
+  } catch (error) {
+    console.error('Support escalate error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
