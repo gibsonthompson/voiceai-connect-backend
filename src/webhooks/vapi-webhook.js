@@ -92,6 +92,7 @@ const { verifyVapiWebhook } = require('../lib/vapi-webhook-auth');
 const liveMonitor = require('../lib/live-monitor-bus');
 const { broadcastLiveEvent } = require('../lib/live-broadcast');
 const { isConciergeDemoNumber, sendConciergeDemoCallerSMS, consumeConciergeTransfer } = require('../lib/concierge-demo-sms');
+const { reserveLine, releaseLine, touchLine } = require('../lib/concurrency');
 
 // Live client subscription_status values that may take/save calls. 'manual' is
 // a first-class live status (billed by the agency outside Stripe), so it sits
@@ -1054,6 +1055,40 @@ async function handleAssistantRequest(req, res, message) {
       }});
     }
 
+    // ── Concurrency gate ──────────────────────────────────────────────────
+    // Reserve a line for this call against the account's simultaneous-call
+    // limit (agency.concurrent_lines; NULL = unlimited). Every admitted call is
+    // recorded in active_calls so the live floor and fleet-capacity views read
+    // real counts; the row is released on the end-of-call report and self-heals
+    // via the stale sweep inside try_reserve_line. A call that exceeds the limit
+    // gets a graceful "all lines busy" message instead of failing silently at
+    // the provider edge. Fails OPEN: a registry error never blocks a real call.
+    const vapiCallId = message.call?.id || null;
+    if (vapiCallId) {
+      try {
+        const reservation = await reserveLine({
+          agencyId: agency?.id || null,
+          clientId: client.id,
+          vapiCallId,
+          limit: (agency && agency.concurrent_lines != null) ? agency.concurrent_lines : null,
+        });
+        if (reservation && reservation.admitted === false) {
+          console.log(`🚦 Concurrency limit hit for agency ${agency?.id}: ${reservation.active}/${reservation.limit} lines in use, overflow`);
+          return res.status(200).json({ assistant: {
+            model: { provider: 'openai', model: 'gpt-4.1', temperature: 0.1,
+              messages: [{ role: 'system', content: `Say: "Thanks for calling ${client.business_name}. All of our lines are busy at the moment. Please call back in a few minutes." Then end the call.` }],
+              tools: [{ type: 'endCall' }] },
+            voice: { provider: 'openai', voiceId: 'alloy' },
+            firstMessage: `Thanks for calling ${client.business_name}. All of our lines are busy at the moment. Please call back in a few minutes.`,
+            maxDurationSeconds: 15, recordingEnabled: false
+          }});
+        }
+        console.log(`🚦 Line reserved (${reservation?.active ?? '?'}${reservation?.limit != null ? '/' + reservation.limit : ''} in use) for ${client.business_name}`);
+      } catch (e) {
+        console.warn('🚦 Concurrency reserve failed (admitting call):', e.message);
+      }
+    }
+
     let callerContext = null;
     if (callerPhone && callerPhone !== 'Unknown') {
       try {
@@ -1160,6 +1195,9 @@ async function handleVapiWebhook(req, res) {
     // response below, and a known call id is required so nothing leaks.
     try {
       const lmCall = message.call || {};
+      // Concurrency heartbeat: any event carrying a call id refreshes the
+      // active_calls row so a live call is never swept as stale. Fire-and-forget.
+      if (lmCall.id) touchLine(lmCall.id).catch(() => {});
       if (lmCall.id && lmCall.monitor && (lmCall.monitor.controlUrl || lmCall.monitor.listenUrl)) {
         liveMonitor.setMonitorUrls(lmCall.id, lmCall.monitor.controlUrl, lmCall.monitor.listenUrl);
       }
@@ -1187,6 +1225,12 @@ async function handleVapiWebhook(req, res) {
     if (message?.type !== 'end-of-call-report') return res.status(200).json({ received: true });
 
     const call = message.call;
+
+    // Concurrency release: the call has ended, so free its reserved line. On a
+    // bridged telnyx_cc transfer this fires when the VAPI leg ends (the VAPI
+    // line IS free then; the human bridge is a separate Telnyx channel), which
+    // is correct. Fire-and-forget; a missed release self-heals via the sweep.
+    if (call?.id) releaseLine(call.id).catch(() => {});
 
     // NOTE: the live-monitor "ended" event is emitted BELOW, after we know
     // whether this was a connected telnyx_cc transfer. On a bridged transfer

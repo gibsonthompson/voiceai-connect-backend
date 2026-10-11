@@ -1023,7 +1023,11 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     // Enterprise agency template, highest priority
     systemPrompt = customTemplate.system_prompt.replace(/\{businessName\}/g, businessName);
 
-    if (customTemplate.knowledge_base_data) {
+    // Only use the agency template's generic KB when the client has no business
+    // info of their own. A configured client's own knowledge base (injected
+    // fresh below on every call) is authoritative and takes precedence, so we
+    // never layer generic agency defaults on top of a real client's info.
+    if (customTemplate.knowledge_base_data && !(client.knowledge_base_content || '').trim()) {
       const kb = customTemplate.knowledge_base_data;
       let kbSection = '\n\n## BUSINESS INFORMATION';
       if (kb.businessHours?.trim()) kbSection += `\n\n### Business Hours\n${kb.businessHours}`;
@@ -1049,6 +1053,37 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
     // or if system_prompt was somehow cleared.
     systemPrompt = config.systemPrompt(businessName);
   }
+
+  // ── Current business information: injected FRESH on EVERY call ────────────
+  // The client's own "My Business" data (hours, FAQs, services, policies) is
+  // assembled into knowledge_base_content and already marked authoritative. Put
+  // it straight into the prompt on every call so the AI has the complete,
+  // current business info in context and never has to call a lookup tool
+  // mid-call. That means lower latency and no chance the model simply does not
+  // look it up. This is the source of truth for THIS business and takes
+  // precedence over any agency-template KB or older cached prompt text. Capped
+  // so a very large KB cannot bloat the prompt (the KB query tool, when present,
+  // still covers anything beyond the cap).
+  const clientKb = (client.knowledge_base_content || '').trim();
+  let businessInfoInjected = false;
+  if (clientKb) {
+    const MAX_KB = 15000;
+    const kbText = clientKb.length > MAX_KB ? clientKb.slice(0, MAX_KB) + '\n\n[...additional details omitted for length; use the knowledge base tool for more...]' : clientKb;
+    // Skip only if this exact KB is already embedded in the base prompt (avoids
+    // a double include when a cached prompt already baked it in).
+    if (!systemPrompt.includes(kbText.slice(0, 200))) {
+      systemPrompt += `\n\n## CURRENT BUSINESS INFORMATION (authoritative)\nThis is the business's current information, provided by the business itself. Use it to answer callers directly. It is already complete, so never tell the caller you need to look something up or check on it. If something genuinely is not covered here, say you are not certain and offer to take a message.\n\n${kbText}`;
+      businessInfoInjected = true;
+    }
+  }
+
+  // Diagnostic: one line per call so a call that lacks business info is never a
+  // mystery again. Shows the prompt path, the client's KB size, whether it was
+  // injected, and whether the (now-secondary) KB query tool is attached.
+  try {
+    const pathTaken = customTemplate ? 'enterprise-template' : (client.system_prompt ? 'cached-prompt' : 'industry-default');
+    console.log(`🧩 Prompt path=${pathTaken} | clientKB=${clientKb.length}c injected=${businessInfoInjected} | queryTool=${client.vapi_query_tool_id ? 'attached' : 'none'} | hours=${client.business_hours ? 'set' : 'none'}`);
+  } catch (e) { /* logging must never break a call */ }
 
   // Current date/time anchor (client timezone), computed fresh every call so the
   // AI never has to guess the day of week when answering hours/availability.
