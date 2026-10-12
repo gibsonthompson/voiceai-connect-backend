@@ -36,6 +36,9 @@ const WS_PATH = '/api/live/audio';
 const WS_EVENTS_PATH = '/api/live/events';
 const MAX_LISTEN_MS = 30 * 60 * 1000; // hard cap on a single listen session
 
+// Count of live events-WS viewers, for the connect/disconnect log below.
+let eventsViewers = 0;
+
 function decodeToken(token) {
   if (!token || !JWT_SECRET) return null;
   try { return jwt.verify(token, JWT_SECRET); } catch { return null; }
@@ -129,6 +132,13 @@ function attach(server) {
       return;
     }
 
+    // Confirm the browser's WebSocket actually reached the backend THROUGH
+    // DigitalOcean's ingress (not dropped/buffered on the way), and how many
+    // viewers are live. If the transcript lags while this never logs, the WS is
+    // being blocked upstream and the viewer is silently on the buffered SSE path.
+    eventsViewers += 1;
+    console.log(`🎧 events-WS connected client=${clientId} viewers=${eventsViewers}`);
+
     safeSend(browser, { type: 'hello', clientId, ts: Date.now() });
     // Catch a late-joining viewer up on the call already in progress.
     try { for (const ev of bus.snapshot(clientId)) safeSend(browser, ev); } catch {}
@@ -137,7 +147,15 @@ function attach(server) {
     const heartbeat = setInterval(() => { try { if (browser.readyState === browser.OPEN) browser.ping(); } catch {} }, 15000);
 
     let closed = false;
-    const cleanup = () => { if (closed) return; closed = true; clearInterval(heartbeat); try { unsub(); } catch {} try { browser.close(); } catch {} };
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      try { unsub(); } catch {}
+      try { browser.close(); } catch {}
+      eventsViewers = Math.max(0, eventsViewers - 1);
+      console.log(`🎧 events-WS closed client=${clientId} viewers=${eventsViewers}`);
+    };
     browser.on('close', cleanup);
     browser.on('error', cleanup);
   });

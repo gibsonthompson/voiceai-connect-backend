@@ -1040,10 +1040,18 @@ async function supervisorJumpIn(sessionId) {
 
   const caller = session.telnyx_caller_control_id;
   const vapi = session.telnyx_vapi_control_id;
-  // Remove the AI from the conference so the human fully takes over.
-  if (vapi) await hangupCall(vapi);
-  await conferenceUpdateParticipant(session.telnyx_conference_id, session.telnyx_agent_control_id, 'barge');
-  await conferenceUnmute(session.telnyx_conference_id, [session.telnyx_agent_control_id]);
+  // Remove the AI from the conference so the human fully takes over. Log each
+  // step: if the caller gets dropped ("couldn't find number"), these lines show
+  // whether it was the AI hangup collapsing the conference or a failed role flip.
+  console.log(`telnyx-voice: 🎧 jump-in begin (session ${sessionId}) conf=${session.telnyx_conference_id} caller=${caller} vapi=${vapi} seat=${session.telnyx_agent_control_id}`);
+  if (vapi) {
+    const hv = await hangupCall(vapi).catch((e) => { console.warn(`telnyx-voice: 🎧 jump-in hangup(vapi) threw: ${e.message}`); return null; });
+    console.log(`telnyx-voice: 🎧 jump-in hung up AI leg ${vapi} (session ${sessionId}) ok=${!!hv}`);
+  }
+  const flipped = await conferenceUpdateParticipant(session.telnyx_conference_id, session.telnyx_agent_control_id, 'barge');
+  console.log(`telnyx-voice: 🎧 jump-in flip seat->barge (session ${sessionId}) ok=${!!flipped}`);
+  const unmuted = await conferenceUnmute(session.telnyx_conference_id, [session.telnyx_agent_control_id]);
+  console.log(`telnyx-voice: 🎧 jump-in unmute seat (session ${sessionId}) ok=${!!unmuted}`);
 
   let hipaa = false;
   try {
@@ -1522,6 +1530,13 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
           // monitor or the session. Ignore it.
           if (role === 'vapi' && bargeState) {
             break;
+          }
+
+          // Diagnostic: a caller/AI-leg hangup during a conference is where a
+          // dropped-caller bug ("couldn't find number") surfaces. Log the cause
+          // and the branch about to run so the next jump-in test is conclusive.
+          if (s && (role === 'caller' || role === 'vapi')) {
+            console.log(`telnyx-voice: 🎧 hangup role=${role} status=${st} conf_active=${!!s.conference_active} barged=${!!s.barged} cause=${payload.hangup_cause || '?'} sip_cause=${payload.sip_hangup_cause || '?'} (session ${sessionId})`);
           }
 
           // Live monitor: a caller (or AI-leg) hangup is the TRUE end of the
