@@ -1253,13 +1253,21 @@ async function handleVapiWebhook(req, res) {
     if (call?.id) {
       const { data: session } = await supabase
         .from('call_sessions')
-        .select('client_id, status')
+        .select('client_id, status, barged')
         .eq('vapi_call_id', call.id)
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
       if (session?.client_id) {
-        if (session.status === 'bridged' || session.status === 'transfer_recapped') transferredViaTelnyx = true;
+        // Treat a connected warm transfer OR a browser human-barge as "handled
+        // off the VAPI leg": the caller is still on with a person (or being
+        // handed back to the AI) after this VAPI leg ends, so the telnyx-voice
+        // engine owns the single recap SMS + the real "ended" event. The durable
+        // `barged` flag covers both VAPI legs of a barge that returned to the AI.
+        if (session.status === 'bridged' || session.status === 'transfer_recapped'
+            || session.status === 'agent_dialing' || session.status === 'agent_bridged'
+            || session.status === 'returning_to_ai' || session.status === 'ending_after_barge'
+            || session.barged === true) transferredViaTelnyx = true;
         const { data: c } = await supabase.from('clients').select('*, agencies!clients_agency_id_fkey(*)').eq('id', session.client_id).single();
         if (c) { client = c; console.log('✅ Resolved client via call_sessions (telnyx_cc):', c.business_name, transferredViaTelnyx ? '[bridged transfer]' : ''); }
       }

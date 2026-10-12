@@ -69,6 +69,9 @@ const {
   startPlayback,
   stopPlayback,
   recordStart,
+  startTranscription,
+  stopTranscription,
+  deleteTelephonyCredential,
   decodeClientState,
 } = require('../lib/telnyx-voice');
 
@@ -363,6 +366,19 @@ async function handleVapiAnswered(sessionId) {
     call_control_id: vapi,
     park_after_unbridge: 'self',
   });
+
+  // If this VAPI leg is the fresh one dialed to hand a caller BACK to the AI
+  // after a human barge ended, flip the session back to the live state so the
+  // normal hangup/transfer logic applies again, and let the monitor show "live".
+  if (session.status === 'returning_to_ai') {
+    const back = await atomicTransition(sessionId, ['returning_to_ai'], 'active');
+    if (back) {
+      try {
+        broadcastLiveEvent(session.client_id, { type: 'status', status: 'in-progress', label: 'Back with the AI' });
+        broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_returned', label: 'Teammate handed the call back to the AI' });
+      } catch (e) {}
+    }
+  }
   console.log(`telnyx-voice: caller bridged to AI (session ${sessionId})`);
 }
 
@@ -571,6 +587,311 @@ async function returnToAI(sessionId, reason) {
   console.log(`telnyx-voice: office not reached (${reason || 'no_answer'}) - caller stays with AI (session ${sessionId})`);
 }
 
+// ============================================================================
+// BROWSER HUMAN BARGE-IN (live monitor / call-center "jump in")
+// ----------------------------------------------------------------------------
+// A human agent joins a live call and talks to the caller straight from the
+// browser (WebRTC), replacing the AI. This reuses the own-the-call bridge-swap:
+// the agent's browser registers as a Telnyx WebRTC endpoint, the backend dials
+// it as a new leg, and on answer we hang up the VAPI (AI) leg (the caller parks
+// alive via park_after_unbridge:'self' set at the original bridge) and bridge
+// the caller to the agent. The whole takeover is recorded and transcribed in
+// real time (unless HIPAA), and when the agent leaves the caller is either
+// handed back to the AI (default / on an unexpected drop) or the call is ended.
+//
+// State: active|transfer_returned -> agent_dialing -> agent_bridged ->
+//        (returning_to_ai -> active) | (ending_after_barge -> ended).
+//
+// These functions are exported on the router (bottom of file) so the live-
+// monitor jump-in/out endpoints can drive the barge while all session logic
+// stays in this one file.
+// ============================================================================
+
+// How long the browser endpoint is allowed to ring before we give up.
+const AGENT_RING_SECONDS = 30;
+// Backstop: if call.speak.ended never arrives after the end-of-barge goodbye,
+// hang the caller up anyway so a missing event cannot strand them.
+const BARGE_END_FALLBACK_MS = 7000;
+
+// Best-effort revoke of the per-barge WebRTC credential once the agent is gone.
+async function cleanupBargeCredential(session) {
+  try {
+    if (session && session.telnyx_agent_credential_id) {
+      await deleteTelephonyCredential(session.telnyx_agent_credential_id);
+    }
+  } catch (e) { /* credential auto-expires anyway */ }
+}
+
+// Start a barge: dial the agent's registered WebRTC endpoint as a new leg. The
+// atomic active->agent_dialing transition makes this safe against a double
+// jump-in (only the first wins) and against barging a call that is mid-transfer
+// or already ended. completeBarge (on the agent's call.answered) does the swap.
+async function startBarge({ sessionId, sipUsername, credentialId }) {
+  if (!sessionId || !sipUsername) return { ok: false, code: 400, error: 'Missing session or endpoint.' };
+
+  const won = await atomicTransition(sessionId, ['active', 'transfer_returned'], 'agent_dialing', {
+    telnyx_agent_sip_username: String(sipUsername),
+    telnyx_agent_credential_id: credentialId || null,
+    telnyx_agent_control_id: null,
+    agent_leave_mode: null,
+  });
+  if (!won) {
+    const s = await getSessionById(sessionId);
+    const st = (s && s.status) || 'unknown';
+    if (st === 'agent_dialing' || st === 'agent_bridged') {
+      return { ok: false, code: 409, error: 'A teammate is already on this call.' };
+    }
+    if (st === 'transferring' || st === 'ringing_gate' || st === 'confirming' || st === 'bridged') {
+      return { ok: false, code: 409, error: 'This call is being transferred to a person already.' };
+    }
+    return { ok: false, code: 409, error: `This call can't be joined right now (${st}).` };
+  }
+
+  const session = await getSessionById(sessionId);
+  const caller = session && session.telnyx_caller_control_id;
+  if (!caller) {
+    await atomicTransition(sessionId, ['agent_dialing'], 'active', { telnyx_agent_control_id: null });
+    return { ok: false, code: 409, error: 'That call is no longer live.' };
+  }
+
+  // Present the business line as the caller ID on the agent leg (cosmetic; the
+  // agent sees the call in their browser regardless).
+  let fromNumber = session.caller_number || null;
+  try {
+    const { data: client } = await supabase.from('clients').select('vapi_phone_number').eq('id', session.client_id).single();
+    if (client && client.vapi_phone_number) fromNumber = toE164(client.vapi_phone_number) || fromNumber;
+  } catch (e) {}
+
+  const { connectionId } = await getWhisperConfig();
+  const agentLeg = await dialCall({
+    to: `sip:${String(sipUsername)}@sip.telnyx.com`,
+    from: fromNumber || session.caller_number || '+10000000000',
+    connectionId,
+    timeoutSecs: AGENT_RING_SECONDS,
+    clientState: { role: 'agent', sessionId },
+  });
+
+  if (!agentLeg || !agentLeg.call_control_id) {
+    // Could not reach the browser endpoint: abort cleanly, caller stays with the
+    // AI (the VAPI leg was never touched).
+    await atomicTransition(sessionId, ['agent_dialing'], 'active', { telnyx_agent_control_id: null });
+    await cleanupBargeCredential(session);
+    return { ok: false, code: 502, error: 'Could not reach your browser audio. Check your mic permission and try again.' };
+  }
+
+  await updateSession(sessionId, { telnyx_agent_control_id: agentLeg.call_control_id });
+  try {
+    broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_dialing', label: 'A teammate is joining the call' });
+  } catch (e) {}
+  console.log(`telnyx-voice: 🎧 barge dialing sip:${sipUsername}@sip.telnyx.com from ${fromNumber} -> agent leg ${agentLeg.call_control_id} (session ${sessionId}); awaiting call.answered`);
+  return { ok: true };
+}
+
+// The agent's browser answered: swap the AI out for the human.
+//   1. Hang up the VAPI leg (the caller parks, alive, via park_after_unbridge).
+//   2. Bridge the caller to the agent, parking the caller again so it survives
+//      the agent leaving (so we can hand it back to the AI or end it cleanly).
+//   3. Record + transcribe the takeover for the recap + live monitor (non-HIPAA).
+async function completeBarge(sessionId) {
+  const won = await atomicTransition(sessionId, ['agent_dialing'], 'agent_bridged', { barged: true });
+  if (!won) {
+    // The call ended (or was torn down) while the browser was ringing. Drop the
+    // stray agent leg so it does not sit connected to nothing.
+    const s = await getSessionById(sessionId);
+    if (s && s.telnyx_agent_control_id) await hangupCall(s.telnyx_agent_control_id);
+    return;
+  }
+
+  const session = await getSessionById(sessionId);
+  if (!session) return;
+  const caller = session.telnyx_caller_control_id;
+  const vapi = session.telnyx_vapi_control_id;
+  const agent = session.telnyx_agent_control_id;
+  if (!caller || !agent) {
+    console.error(`telnyx-voice: completeBarge missing legs (session ${sessionId})`);
+    return;
+  }
+
+  // Swap: drop the AI, then connect the caller to the human. The caller was
+  // bridged to VAPI with park_after_unbridge:'self', so hanging up VAPI parks
+  // the caller (alive) instead of dropping it.
+  if (vapi) await hangupCall(vapi);
+  await bridgeCalls(caller, agent, { parkAfterUnbridge: 'self' });
+
+  // Record + transcribe the human takeover unless this client is HIPAA (no
+  // stored audio/transcripts). The recording is on the caller leg, which lives
+  // through the whole call, so it captures the takeover (and the AI before and
+  // after it) as one file; the real-time transcript keeps the live monitor
+  // flowing now that the VAPI transcript has stopped.
+  let hipaa = false;
+  try {
+    const { data: client } = await supabase.from('clients').select('hipaa_mode').eq('id', session.client_id).single();
+    hipaa = !!(client && client.hipaa_mode === true);
+  } catch (e) {}
+
+  if (!hipaa) {
+    await recordStart(caller, { channels: 'dual', clientState: { role: 'caller', sessionId } });
+    await startTranscription(caller, { tracks: 'both', interim: true, clientState: { role: 'caller', sessionId } });
+    console.log(`telnyx-voice: 🎧 barge recording + live transcription started on caller leg (session ${sessionId})`);
+  } else {
+    console.log(`telnyx-voice: 🎧 barge HIPAA client - not recorded/transcribed (session ${sessionId})`);
+  }
+
+  try {
+    broadcastLiveEvent(session.client_id, { type: 'status', status: 'agent_connected', label: 'Teammate on the call' });
+    broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_connected', label: 'A teammate joined and is talking to the caller' });
+  } catch (e) {}
+  console.log(`telnyx-voice: barge connected - caller bridged to agent browser (session ${sessionId})`);
+}
+
+// The agent left the call (clicked leave/end in the UI, or their browser leg
+// dropped). Decide what happens to the caller:
+//   - agent never connected (still 'agent_dialing'): the AI was never swapped
+//     out, so just clear the barge; the caller is still with the AI.
+//   - leave mode 'end_call': end the call (recap fires on the recording).
+//   - otherwise (explicit 'return_ai', or an unexpected drop): hand the caller
+//     back to the AI by dialing a fresh VAPI leg, so they are never abandoned.
+async function handleAgentLeave(sessionId, reason) {
+  const session = await getSessionById(sessionId);
+  if (!session) return;
+
+  // Agent leg went away before it ever connected: the caller never left the AI.
+  if (session.status === 'agent_dialing') {
+    const reverted = await atomicTransition(sessionId, ['agent_dialing'], 'active', { telnyx_agent_control_id: null });
+    if (reverted) {
+      await cleanupBargeCredential(session);
+      try { broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_canceled', label: 'Teammate did not connect, caller still with the AI' }); } catch (e) {}
+      console.log(`telnyx-voice: barge canceled before connect (${reason || 'drop'}) - caller stays with AI (session ${sessionId})`);
+    }
+    return;
+  }
+
+  if (session.status !== 'agent_bridged') return; // already ended / returning; nothing to do.
+
+  const mode = session.agent_leave_mode || 'return_ai';
+  const caller = session.telnyx_caller_control_id;
+
+  if (mode === 'end_call') {
+    const won = await atomicTransition(sessionId, ['agent_bridged'], 'ending_after_barge');
+    if (!won) return;
+    await stopTranscription(caller).catch(() => {});
+    await cleanupBargeCredential(session);
+    try { broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_ended', label: 'Teammate ended the call' }); } catch (e) {}
+    // Hang the caller up: this fires call.hangup (role caller) which finalizes
+    // the session as ended, and call.recording.saved then sends the one recap.
+    if (caller) await hangupCall(caller);
+    console.log(`telnyx-voice: barge ended by agent - hanging up caller (session ${sessionId})`);
+    return;
+  }
+
+  // Default: hand the caller back to the AI (also the safe path for an
+  // unexpected browser drop, so a caller is never left in silence).
+  const won = await atomicTransition(sessionId, ['agent_bridged'], 'returning_to_ai');
+  if (!won) return;
+  await stopTranscription(caller).catch(() => {});
+  await cleanupBargeCredential(session);
+  await reBridgeToAI(await getSessionById(sessionId), reason);
+}
+
+// Driven by the jump-out endpoint for an INTENTIONAL leave. We record the mode,
+// then hang up the agent's browser leg; the resulting call.hangup(role:agent)
+// runs handleAgentLeave with the right sequencing (agent gone -> caller parked
+// -> back to AI or end). An UNEXPECTED browser drop skips this and lands on the
+// same webhook handler directly (with the default return-to-AI mode).
+async function requestAgentLeave(sessionId, mode) {
+  const session = await getSessionById(sessionId);
+  if (!session) return { ok: false, error: 'No live session.' };
+  const leaveMode = mode === 'end_call' ? 'end_call' : 'return_ai';
+  await updateSession(sessionId, { agent_leave_mode: leaveMode });
+
+  if (session.telnyx_agent_control_id &&
+      (session.status === 'agent_bridged' || session.status === 'agent_dialing')) {
+    await hangupCall(session.telnyx_agent_control_id);
+  } else if (session.status === 'agent_bridged' || session.status === 'agent_dialing') {
+    // No agent leg id on record (shouldn't happen) but we are mid-barge: fall
+    // back to driving the leave directly so the caller is not left stranded.
+    await handleAgentLeave(sessionId, 'jump_out_no_leg');
+  }
+  return { ok: true, mode: leaveMode };
+}
+
+// Dial a fresh VAPI leg and hand the (parked) caller back to the AI. On answer,
+// handleVapiAnswered bridges them and flips the session back to 'active'.
+async function reBridgeToAI(session, reason) {
+  if (!session) return;
+  const sessionId = session.id;
+  const caller = session.telnyx_caller_control_id;
+  if (!caller) { await updateSession(sessionId, { status: 'ended' }); return; }
+
+  const { connectionId, sipUri } = await getWhisperConfig();
+  if (!sipUri) {
+    // No way to reach the AI: at least do not leave the caller in silence.
+    await speakToCall(caller, 'Thanks for calling. Goodbye.');
+    setTimeout(() => hangupCall(caller).catch(() => {}), 3000);
+    await updateSession(sessionId, { status: 'ending_after_barge' });
+    return;
+  }
+
+  const vapiLeg = await dialCall({
+    to: sipUri,
+    from: session.caller_number,
+    connectionId,
+    customHeaders: [
+      { name: 'X-Client-Id', value: String(session.client_id) },
+      { name: 'X-Session-Id', value: String(sessionId) },
+    ],
+    clientState: { role: 'vapi', sessionId, rebridge: true },
+  });
+
+  if (!vapiLeg || !vapiLeg.call_control_id) {
+    // Could not reach the AI: say goodbye and end rather than stranding the caller.
+    await speakToCall(caller, 'Sorry about that. Thanks for calling. Goodbye.');
+    setTimeout(() => hangupCall(caller).catch(() => {}), 3500);
+    await atomicTransition(sessionId, ['returning_to_ai'], 'ending_after_barge');
+    console.warn(`telnyx-voice: re-dial to AI failed (session ${sessionId}) - ending call`);
+    return;
+  }
+
+  await updateSession(sessionId, { telnyx_vapi_control_id: vapiLeg.call_control_id });
+  console.log(`telnyx-voice: handing caller back to AI (${reason || 'agent_left'}) - dialed fresh VAPI leg (session ${sessionId})`);
+}
+
+// A real-time transcription fragment arrived during a barge. Push it to the live
+// monitor and accumulate finals onto the session as a recap fallback.
+async function handleBargeTranscription(sessionId, payload) {
+  try {
+    const t = payload.transcription_data || payload.transcription || payload || {};
+    const text = (t.transcript || t.text || '').toString().trim();
+    if (!text) return;
+    const isFinal = (t.is_final === true) || (payload.is_final === true) || ((t.type || '').toString() === 'final');
+    // Telnyx labels the track: inbound = caller, outbound = the agent.
+    const track = (t.track || payload.track || '').toString();
+    const who = track === 'outbound' ? 'agent' : (track === 'inbound' ? 'caller' : 'unknown');
+
+    const session = await getSessionById(sessionId);
+    if (!session) return;
+
+    try {
+      broadcastLiveEvent(session.client_id, {
+        type: 'transcript', role: who === 'agent' ? 'assistant' : 'user', speaker: who,
+        text, final: !!isFinal, source: 'barge',
+      });
+    } catch (e) {}
+
+    // Keep a running transcript of the human takeover so the recap still has
+    // text even if the recording STT later fails. Finals only, to avoid churn.
+    if (isFinal) {
+      const prefix = who === 'agent' ? 'Agent' : (who === 'caller' ? 'Caller' : 'Speaker');
+      const line = `${prefix}: ${text}`;
+      const prev = (session.agent_transcript || '').trim();
+      const next = prev ? `${prev}\n${line}` : line;
+      await updateSession(sessionId, { agent_transcript: next.slice(0, 20000) });
+    }
+  } catch (e) {
+    console.warn(`telnyx-voice: handleBargeTranscription failed: ${e.message}`);
+  }
+}
+
 // ===========================================================================
 // TRANSFER-CALL RECAP: the caller<->agent conversation happens on Telnyx after
 // the AI is gone, so we record it, transcribe it with Telnyx Speech-to-Text,
@@ -721,7 +1042,9 @@ async function handleRecordingSaved(sessionId, recordingUrl) {
     const storedRecordingUrl = await persistTransferRecording(client.id, sessionId, buf);
 
     // Transcribe the human conversation, then summarize it for the owner recap.
-    const humanTranscript = await telnyxTranscribe(buf);
+    // If the recording STT is unavailable, fall back to the real-time transcript
+    // we accumulated during a browser barge so the recap still has something.
+    const humanTranscript = (await telnyxTranscribe(buf)) || (session.agent_transcript || '').trim() || null;
     const recap = humanTranscript ? await summarizeTransferCall(humanTranscript, client.business_name, session.whisper_summary) : null;
     console.log(`telnyx-voice: transfer recap (session ${sessionId}): stored=${storedRecordingUrl ? 'spaces' : 'no'} transcriptLen=${humanTranscript ? humanTranscript.length : 0} recap=${recap ? 'yes' : 'no'}`);
 
@@ -861,6 +1184,11 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
         if (role === 'office' && sessionId) {
           await startGate(sessionId, state && state.recipientName);
         }
+        // The agent's browser (WebRTC) answered a barge dial: swap the AI out.
+        if (role === 'agent' && sessionId) {
+          console.log(`telnyx-voice: 🎧 barge call.answered agent leg (session ${sessionId}) - browser is on the line`);
+          await completeBarge(sessionId);
+        }
         break;
 
       case 'call.gather.ended':
@@ -907,14 +1235,43 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
         }
         break;
 
+      case 'call.transcription':
+        // Real-time STT fragment. Only relevant during a human barge (the AI
+        // supplies its own transcript the rest of the time), so route it to the
+        // live monitor + recap accumulator. Harmless if it arrives otherwise.
+        if (sessionId) {
+          await handleBargeTranscription(sessionId, payload);
+        }
+        break;
+
       case 'call.hangup':
         if (sessionId) {
           const s = await getSessionById(sessionId);
           const st = s && s.status;
+          const bargeState = st === 'agent_dialing' || st === 'agent_bridged' || st === 'returning_to_ai';
+
+          // The human agent's browser leg dropped (clicked leave/end, closed the
+          // tab, or lost connection). Decide the caller's fate (back to AI / end).
+          // The hangup cause is the key signal when a browser dial never rings:
+          // a routing miss (e.g. the SIP username not reachable) shows here as a
+          // cause like "unallocated_number" BEFORE any call.answered arrives.
+          if (role === 'agent') {
+            console.log(`telnyx-voice: 🎧 barge call.hangup agent leg (session ${sessionId}) status=${st} cause=${payload.hangup_cause || '?'} sip_cause=${payload.sip_hangup_cause || '?'}`);
+            await handleAgentLeave(sessionId, 'agent_hangup');
+            break;
+          }
+
+          // A VAPI-leg hangup DURING a barge is expected (we swap the AI out, and
+          // the old AI leg drops again on a return-to-AI), so it must not end the
+          // monitor or the session. Ignore it.
+          if (role === 'vapi' && bargeState) {
+            break;
+          }
+
           // Live monitor: a caller (or AI-leg) hangup is the TRUE end of the
-          // call. On a connected transfer it fires after the human conversation
-          // wraps, so close the monitor here even though we deliberately leave
-          // the DB status as 'bridged' for vapi-webhook to read. Best-effort.
+          // call. On a connected transfer/barge it fires after the human
+          // conversation wraps, so close the monitor here even though we
+          // deliberately leave the DB status for vapi-webhook to read.
           if (s && (role === 'caller' || role === 'vapi')) {
             try { broadcastLiveEvent(s.client_id, { type: 'status', status: 'ended' }); } catch (e) {}
           }
@@ -925,9 +1282,15 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
               // Office dropped before we connected -> return caller to the AI.
               await returnToAI(sessionId, 'office_hangup');
             } else if (role === 'caller' || role === 'vapi') {
-              // Caller (or AI leg) ended. Tear down any outstanding office leg.
+              // Caller (or AI leg) ended. Tear down any outstanding office leg
+              // AND any pending/active agent (barge) leg so nothing is left
+              // ringing or connected to a dead call.
               if ((st === 'transferring' || st === 'ringing_gate' || st === 'confirming') && s.telnyx_office_control_id) {
                 await hangupCall(s.telnyx_office_control_id);
+              }
+              if ((st === 'agent_dialing' || st === 'agent_bridged' || st === 'ending_after_barge') && s.telnyx_agent_control_id) {
+                await hangupCall(s.telnyx_agent_control_id);
+                await cleanupBargeCredential(s);
               }
               await updateSession(sessionId, { status: 'ended' });
             }
@@ -1277,5 +1640,18 @@ router.get('/audio/ringback.mp3', (req, res) => {
     }
   });
 });
+
+// Expose the barge controls (and a couple of session helpers) on the router so
+// the live-monitor jump-in/out endpoints can drive a browser human-barge while
+// all of the call/session logic stays in this one file. server.js still mounts
+// the router itself (app.use('/', require('./routes/telnyx-voice'))); attaching
+// these as properties does not change that.
+router.barge = {
+  startBarge,
+  requestAgentLeave,
+  getSessionById,
+  getSessionByVapiCallId,
+  updateSession,
+};
 
 module.exports = router;

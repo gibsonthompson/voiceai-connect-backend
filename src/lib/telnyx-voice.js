@@ -397,6 +397,139 @@ async function recordStop(callControlId) {
   return callAction(callControlId, 'record_stop', {});
 }
 
+// ----------------------------------------------------------------------------
+// startTranscription / stopTranscription - real-time Speech-to-Text on a leg.
+//
+// Used during a browser human-barge: once the VAPI leg is gone, VAPI no longer
+// supplies a live transcript, so we transcribe the caller<->agent audio with
+// Telnyx real-time STT and stream the partial/final results to the live monitor
+// (they arrive as 'call.transcription' webhook events). transcription_tracks
+// 'both' captures both parties (inbound = caller, outbound = agent). Started on
+// the caller leg, which survives the whole call, so one transcription spans the
+// takeover (and the return to the AI, if that happens).
+//
+// opts:
+//   language     BCP-47 language (default 'en')
+//   interim      stream partial results too (default true)
+//   tracks       'inbound' | 'outbound' | 'both' (default 'both')
+//   engine       optional STT engine override (e.g. 'B' for the premium engine)
+//   clientState  echoed back on the call.transcription events
+// ----------------------------------------------------------------------------
+async function startTranscription(callControlId, opts = {}) {
+  const body = {
+    language: opts.language || 'en',
+    interim_results: opts.interim !== false,
+    transcription_tracks: opts.tracks || 'both',
+  };
+  if (opts.engine) body.transcription_engine = opts.engine;
+  const cs = encodeClientState(opts.clientState);
+  if (cs) body.client_state = cs;
+  const out = await callAction(callControlId, 'transcription_start', body);
+  if (out) console.log(`telnyx-voice: transcription started on ${callControlId}`);
+  return out;
+}
+
+async function stopTranscription(callControlId) {
+  return callAction(callControlId, 'transcription_stop', {});
+}
+
+// ----------------------------------------------------------------------------
+// WEBRTC CREDENTIAL MINTING (browser human-barge)
+// ----------------------------------------------------------------------------
+// To let a human agent join a live call and talk from the browser, the browser
+// registers as a Telnyx WebRTC endpoint using a short-lived telephony-credential
+// token. The backend then dials that endpoint (sip:<sip_username>@sip.telnyx.com)
+// as a normal Call Control leg and bridges it to the caller. These helpers mint
+// (and revoke) those credentials. They talk to the plain v2 REST resources, not
+// the /calls/{id}/actions path, so they use their own fetch wrapper.
+//
+// Nothing here stores a secret: the credential's SIP password never leaves
+// Telnyx (the browser authenticates with the minted JWT token, not a password),
+// and the token is returned to the authorized caller and never logged.
+// ----------------------------------------------------------------------------
+async function telnyxRest(method, path, body) {
+  if (!TELNYX_API_KEY) { console.warn('telnyx-voice: TELNYX_API_KEY not set'); return null; }
+  try {
+    const res = await fetch(`${TELNYX_BASE}${path}`, {
+      method,
+      headers: {
+        'Authorization': `Bearer ${TELNYX_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      console.error(`telnyx-voice: ${method} ${path} failed (HTTP ${res.status}): ${t.slice(0, 200)}`);
+      return null;
+    }
+    const data = await res.json().catch(() => ({}));
+    return data.data || data;
+  } catch (err) {
+    console.error(`telnyx-voice: ${method} ${path} error: ${err.message}`);
+    return null;
+  }
+}
+
+// Create a Credential Connection to parent the per-agent telephony credentials.
+// One is enough for the whole platform; the caller caches its id (we store it in
+// platform_settings). The connection's own user_name/password are never used for
+// WebRTC login (the browser logs in with a telephony-credential token), but the
+// API requires them, so we set long random values.
+async function createWebrtcConnection(name) {
+  const rand = () => require('crypto').randomBytes(18).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 24);
+  const out = await telnyxRest('POST', '/credential_connections', {
+    connection_name: name || `voiceai-webrtc-${Date.now()}`,
+    user_name: `va${rand()}`,
+    password: rand() + rand(),
+    // Receive inbound dials from our Call Control app and register WebRTC clients.
+    webrtc_enabled: true,
+  });
+  return out && out.id ? out : null;
+}
+
+// Mint a telephony credential (per agent-session) tied to the WebRTC connection.
+// Returns { id, sip_username, ... }. expiresInSecs auto-expires it so a leaked
+// credential is short-lived; we also delete it explicitly on jump-out.
+async function createTelephonyCredential(connectionId, opts = {}) {
+  if (!connectionId) { console.warn('telnyx-voice: createTelephonyCredential needs a connection id'); return null; }
+  const body = { connection_id: String(connectionId) };
+  if (opts.name) body.name = String(opts.name).slice(0, 80);
+  const secs = opts.expiresInSecs || 0;
+  if (secs > 0) body.expires_at = new Date(Date.now() + secs * 1000).toISOString();
+  const out = await telnyxRest('POST', '/telephony_credentials', body);
+  return out && out.id ? out : null;
+}
+
+// Mint a login token (JWT) for a telephony credential. The token endpoint returns
+// text/plain (the JWT itself), not JSON, so this reads text. The browser passes
+// it to TelnyxRTC({ login_token }). Never logged.
+async function mintCredentialToken(credentialId) {
+  if (!TELNYX_API_KEY || !credentialId) return null;
+  try {
+    const res = await fetch(`${TELNYX_BASE}/telephony_credentials/${encodeURIComponent(credentialId)}/token`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${TELNYX_API_KEY}` },
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      console.error(`telnyx-voice: mint token failed (HTTP ${res.status}): ${t.slice(0, 120)}`);
+      return null;
+    }
+    const token = (await res.text().catch(() => '')).trim();
+    return token || null;
+  } catch (err) {
+    console.error(`telnyx-voice: mint token error: ${err.message}`);
+    return null;
+  }
+}
+
+// Revoke a telephony credential (on jump-out / cleanup). Best-effort.
+async function deleteTelephonyCredential(credentialId) {
+  if (!credentialId) return null;
+  return telnyxRest('DELETE', `/telephony_credentials/${encodeURIComponent(credentialId)}`);
+}
+
 module.exports = {
   encodeClientState,
   decodeClientState,
@@ -414,4 +547,10 @@ module.exports = {
   stopPlayback,
   recordStart,
   recordStop,
+  startTranscription,
+  stopTranscription,
+  createWebrtcConnection,
+  createTelephonyCredential,
+  mintCredentialToken,
+  deleteTelephonyCredential,
 };
