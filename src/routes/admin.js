@@ -29,6 +29,8 @@
 //          login returns 503 until it is set.
 // ============================================================================
 const express = require('express');
+const Stripe = require('stripe');
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const jwt = require('jsonwebtoken');
@@ -1853,6 +1855,150 @@ router.patch('/error-reports/:id/resolve', requireAdmin, async (req, res) => {
     res.json({ success: true, resolved });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ============================================================================
+// GET /api/admin/agencies/:agencyId/stripe-billing
+// Live read from Stripe (the source of truth) for ONE agency so the owner can
+// verify the real per-client charge without trusting the computed Money page.
+// Returns the subscription's line items (base plan / per-client quantity /
+// metered usage), the recent invoices, and warnings for every reason a
+// per-client fee could be missing (billing off, trial, Scale plan, no
+// subscription, quantity out of sync with the real client count).
+// ============================================================================
+router.get('/agencies/:agencyId/stripe-billing', requireAdmin, async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const { data: agency, error } = await supabase
+      .from('agencies')
+      .select('id, name, email, plan_type, subscription_status, usage_billing_enabled, billable_clients_count, stripe_customer_id, stripe_subscription_id, stripe_client_meter_item_id')
+      .eq('id', agencyId)
+      .single();
+    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
+
+    // Live active, non-test client count (what the per-client quantity SHOULD be).
+    const { count: liveClients } = await supabase
+      .from('clients').select('id', { count: 'exact', head: true })
+      .eq('agency_id', agencyId).eq('status', 'active').eq('is_test_client', false);
+    const activeClients = liveClients || 0;
+
+    const out = {
+      agency: {
+        id: agency.id, name: agency.name, email: agency.email, plan_type: agency.plan_type,
+        subscription_status: agency.subscription_status,
+        usage_billing_enabled: !!agency.usage_billing_enabled,
+        db_billable_clients_count: agency.billable_clients_count != null ? agency.billable_clients_count : null,
+        active_non_test_clients: activeClients,
+        has_stripe_customer: !!agency.stripe_customer_id,
+        has_stripe_subscription: !!agency.stripe_subscription_id,
+      },
+      subscription: null,
+      per_client: null,
+      invoices: [],
+      warnings: [],
+    };
+
+    const isScale = ['scale', 'enterprise'].includes(agency.plan_type);
+    if (!agency.usage_billing_enabled) out.warnings.push('usage_billing_enabled is OFF — no per-client or per-minute charges are sent to Stripe for this agency.');
+    if (isScale) out.warnings.push('Plan is Scale/Enterprise — no per-client fee by design.');
+    if (['trial', 'trialing'].includes(agency.subscription_status)) out.warnings.push('Agency is in trial — per-client billing starts when they convert to a paid subscription.');
+
+    if (!agency.stripe_subscription_id) {
+      out.warnings.push('No Stripe subscription on this agency — nothing is being billed yet.');
+      return res.json(out);
+    }
+
+    let sub = null;
+    try {
+      sub = await stripe.subscriptions.retrieve(agency.stripe_subscription_id, { expand: ['items.data.price'] });
+    } catch (e) {
+      out.warnings.push(`Could not load the Stripe subscription (${e.message}).`);
+      return res.json(out);
+    }
+
+    const clientPriceMap = {
+      free: process.env.STRIPE_PRICE_FREE_CLIENT,
+      starter: process.env.STRIPE_PRICE_FREE_CLIENT,
+      pro: process.env.STRIPE_PRICE_PRO_CLIENT,
+      professional: process.env.STRIPE_PRICE_PRO_CLIENT,
+    };
+    const clientPriceId = clientPriceMap[agency.plan_type] || null;
+
+    const items = (sub.items && sub.items.data ? sub.items.data : []).map((it) => {
+      const price = it.price || {};
+      const metered = (price.recurring && (price.recurring.usage_type === 'metered' || !!price.recurring.meter)) || false;
+      let kind = 'base';
+      if (agency.stripe_client_meter_item_id && it.id === agency.stripe_client_meter_item_id) kind = 'per_client';
+      else if (clientPriceId && price.id === clientPriceId) kind = 'per_client';
+      else if (metered) kind = 'metered';
+      return {
+        id: it.id,
+        kind,
+        price_id: price.id || null,
+        nickname: price.nickname || null,
+        unit_amount: price.unit_amount != null ? price.unit_amount : null, // cents
+        currency: price.currency || sub.currency || 'usd',
+        interval: (price.recurring && price.recurring.interval) || null,
+        metered,
+        quantity: metered ? null : (it.quantity != null ? it.quantity : null),
+      };
+    });
+
+    const perClientItem = items.find((i) => i.kind === 'per_client') || null;
+    out.subscription = {
+      id: sub.id,
+      status: sub.status,
+      current_period_start: sub.current_period_start ? sub.current_period_start * 1000 : null,
+      current_period_end: sub.current_period_end ? sub.current_period_end * 1000 : null,
+      currency: sub.currency || 'usd',
+      items,
+    };
+    out.per_client = perClientItem ? {
+      quantity: perClientItem.quantity,
+      unit_amount: perClientItem.unit_amount,
+      currency: perClientItem.currency,
+      monthly_total: (perClientItem.unit_amount != null && perClientItem.quantity != null) ? perClientItem.unit_amount * perClientItem.quantity : null,
+    } : null;
+
+    // Reconcile Stripe vs the real client count.
+    if (perClientItem && perClientItem.quantity != null && perClientItem.quantity !== activeClients) {
+      out.warnings.push(`Stripe is billing for ${perClientItem.quantity} client(s) but this agency has ${activeClients} active non-test client(s) — the quantity is out of sync.`);
+    }
+    if (!perClientItem && activeClients > 0 && agency.usage_billing_enabled && !isScale) {
+      out.warnings.push(`No per-client line item on the subscription, but there are ${activeClients} active client(s). The per-client fee is NOT being charged.`);
+    }
+
+    // Recent invoices for this customer (where the money actually shows up).
+    if (agency.stripe_customer_id) {
+      try {
+        const inv = await stripe.invoices.list({ customer: agency.stripe_customer_id, limit: 6 });
+        out.invoices = (inv.data || []).map((i) => ({
+          number: i.number || null,
+          status: i.status,
+          created: i.created ? i.created * 1000 : null,
+          period_start: i.period_start ? i.period_start * 1000 : null,
+          period_end: i.period_end ? i.period_end * 1000 : null,
+          currency: i.currency || 'usd',
+          total: i.total,
+          amount_paid: i.amount_paid,
+          amount_due: i.amount_due,
+          hosted_invoice_url: i.hosted_invoice_url || null,
+          lines: (i.lines && i.lines.data ? i.lines.data : []).map((l) => ({
+            description: l.description || (l.price && l.price.nickname) || '',
+            quantity: l.quantity != null ? l.quantity : null,
+            amount: l.amount,
+          })),
+        }));
+      } catch (e) {
+        out.warnings.push(`Could not load invoices (${e.message}).`);
+      }
+    }
+
+    res.json(out);
+  } catch (err) {
+    console.error('Admin stripe-billing error:', err.message);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
