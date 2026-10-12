@@ -311,15 +311,18 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
 
     // ---- FAQ-bot prospect chats (read-only) ----
     try {
+      // user_type / source are newer columns (see widget_chat_log migration):
+      // select('*') so this keeps working whether or not they exist yet.
       const { data: wrows } = await supabase.from('widget_chat_log')
-        .select('session_id, role, content, created_at')
+        .select('*')
         .order('created_at', { ascending: false }).limit(1500);
       const bySession = new Map();
       for (const row of (wrows || [])) {
         let s = bySession.get(row.session_id);
-        if (!s) { s = { messages: [], escalated: false }; bySession.set(row.session_id, s); }
+        if (!s) { s = { messages: [], escalated: false, userType: null }; bySession.set(row.session_id, s); }
         s.messages.push(row);
         if (row.role === 'escalation') s.escalated = true;
+        if (!s.userType && row.user_type) s.userType = row.user_type;
       }
       let faqCount = 0;
       for (const [sid, s] of bySession) {
@@ -328,8 +331,13 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
           .map(m => ({ id: `faq-${sid}-${m.created_at}`, sender: m.role === 'user' ? 'in' : 'out', body: m.content || '', at: m.created_at, kind: 'faq' }));
         if (!msgs.length) continue;
         const last = msgs[msgs.length - 1];
+        // Label by where the chat actually came from (origin now captured on the
+        // log). Older rows with no user_type stay the generic "FAQ chat".
+        const audLabel = s.userType === 'agency' ? 'Agency' : s.userType === 'client' ? 'Client' : s.userType === 'prospect' ? 'Prospect' : null;
+        const baseName = audLabel ? `FAQ chat (${audLabel})` : 'FAQ chat';
         conversations.push({
-          key: `faq-${sid}`, type: 'faq', agencyId: null, name: s.escalated ? 'FAQ chat (escalated)' : 'FAQ chat',
+          key: `faq-${sid}`, type: 'faq', agencyId: null, name: s.escalated ? `${baseName} (escalated)` : baseName,
+          faqAudience: s.userType || null,
           phone: null, messages: msgs, unread: 0, lastAt: last.at, lastDirection: last.sender,
           lastPreview: String(last.body || '').slice(0, 120), readOnly: true, needsReply: false, escalated: s.escalated,
         });

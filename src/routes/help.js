@@ -39,19 +39,52 @@ const { supabase } = require('../lib/supabase');
 
 // Best-effort logging of marketing FAQ-bot conversations (see widget_chat_log).
 // Never blocks or fails the chat/escalation response.
-async function logWidgetChat(sessionId, role, content) {
+async function logWidgetChat(sessionId, role, content, origin = {}) {
   try {
     if (!sessionId || typeof sessionId !== 'string') return;
     if (!content || typeof content !== 'string' || !content.trim()) return;
-    await supabase.from('widget_chat_log').insert({
+    const base = {
       session_id: sessionId.slice(0, 100),
       role,
       content: content.trim().slice(0, 8000),
-    });
+    };
+    // Record WHERE the chat came from so the admin inbox can tell a marketing
+    // prospect from a logged-in agency/client, and so questions can be triaged
+    // correctly. Defensive: if the origin columns are not present yet (migration
+    // not applied), fall back to the original 3-column insert so logging never
+    // breaks.
+    const full = {
+      ...base,
+      user_type: origin.userType || null,       // prospect | agency | client
+      agency_id: origin.agencyId || null,
+      source: origin.source || null,            // marketing | agency_dashboard | client_dashboard
+    };
+    const { error } = await supabase.from('widget_chat_log').insert(full);
+    if (error) {
+      await supabase.from('widget_chat_log').insert(base);
+    }
   } catch (e) {
     console.error('widget chat log failed (non-blocking):', e.message);
   }
 }
+
+// Audience framing appended to the knowledge base per who is asking. Same KB,
+// different lens: a prospect on the marketing site needs to understand how the
+// product works (not dashboard navigation they can't follow), while a logged-in
+// agency needs concrete in-dashboard steps, and an end client has none of the
+// agency features at all.
+const AUDIENCE_PROMPTS = {
+  prospect: `
+=== WHO YOU ARE TALKING TO ===
+You are on the PUBLIC VoiceAI Connect marketing website, talking to a PROSPECT who does NOT have an account and cannot see any dashboard. Explain how the product WORKS and what they GET, never step-by-step dashboard navigation they cannot follow. Frame everything as what happens after they sign up.
+For "how do I edit my website" and similar: explain that every VoiceAI Connect agency gets its own white-label marketing website that is auto-generated and fully hosted for them, and that after signing up they control it entirely from their dashboard (logo, colors, content, pricing, demo phone line, and a custom domain). There is nothing to hand-code or host themselves. Keep it benefit-oriented and inviting, and offer to point them to start a free trial or talk to the team for specifics.`,
+  agency: `
+=== WHO YOU ARE TALKING TO ===
+You are inside the dashboard of a logged-in AGENCY owner. Give concrete, accurate in-dashboard directions (which page or tab to open) from the knowledge base. Assume they have the full agency toolset: clients, their white-label marketing website editor, branding, billing, leads, and outreach.`,
+  client: `
+=== WHO YOU ARE TALKING TO ===
+You are inside the dashboard of an END CLIENT: a local business using an agency's AI receptionist. They do NOT have agency features, a marketing website, pricing controls, or billing. Only help with their own dashboard: their calls, recordings, messages, greeting and knowledge, and their own settings. If they ask about anything agency-level (a marketing website, pricing, adding clients, white-label), explain that their provider manages that and they should reach out to them.`,
+};
 
 // Initialize Anthropic client
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -231,7 +264,7 @@ SUPPORT & FEEDBACK:
 // AI chatbot powered by Claude
 router.post('/chat', async (req, res) => {
   try {
-    const { message, history = [], sessionId } = req.body;
+    const { message, history = [], sessionId, audience, agencyId } = req.body;
 
     if (!message || typeof message !== 'string' || message.trim().length === 0) {
       return res.status(400).json({ error: 'Message is required' });
@@ -240,6 +273,13 @@ router.post('/chat', async (req, res) => {
     if (!process.env.ANTHROPIC_API_KEY) {
       return res.status(500).json({ error: 'AI service not configured' });
     }
+
+    // Who is asking decides how to frame the same knowledge base. Default to
+    // prospect (the public bot) when the caller did not say.
+    const aud = ['prospect', 'agency', 'client'].includes(audience) ? audience : 'prospect';
+    const systemPrompt = `${KB_CONTEXT}\n\n${AUDIENCE_PROMPTS[aud]}`;
+    const sourceMap = { prospect: 'marketing', agency: 'agency_dashboard', client: 'client_dashboard' };
+    const origin = { userType: aud, agencyId: agencyId || null, source: sourceMap[aud] };
 
     // Build conversation history for Claude
     const messages = [];
@@ -258,7 +298,7 @@ router.post('/chat', async (req, res) => {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 500,
-      system: KB_CONTEXT,
+      system: systemPrompt,
       messages,
     });
 
@@ -269,9 +309,9 @@ router.post('/chat', async (req, res) => {
 
     res.json({ response: assistantResponse });
 
-    // Log the exchange (fire-and-forget, non-blocking).
-    logWidgetChat(sessionId, 'user', message.trim());
-    logWidgetChat(sessionId, 'assistant', assistantResponse);
+    // Log the exchange with its origin (fire-and-forget, non-blocking).
+    logWidgetChat(sessionId, 'user', message.trim(), origin);
+    logWidgetChat(sessionId, 'assistant', assistantResponse, origin);
   } catch (err) {
     console.error('Support chat error:', err);
     res.status(500).json({ error: 'Failed to process message' });
