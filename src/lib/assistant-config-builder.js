@@ -2030,6 +2030,10 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
       structuredDataPlan: { enabled: false },
       successEvaluationPlan: { enabled: false },
     },
+    // No fake ambiance. VAPI defaults backgroundSound to 'office' (call-center
+    // chatter), which makes the receptionist sound like it is in a boiler room.
+    // A real receptionist answers from a quiet front desk, so turn it off.
+    backgroundSound: 'off',
     serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
     // clientId rides on the query so every server message (transcript, status,
     // end-of-call) carries it. The live monitor uses it to fan events to the
