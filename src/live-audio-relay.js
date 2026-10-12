@@ -33,11 +33,32 @@ const { fetchMonitorUrls } = require('./lib/vapi-call-monitor');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const WS_PATH = '/api/live/audio';
+const WS_EVENTS_PATH = '/api/live/events';
 const MAX_LISTEN_MS = 30 * 60 * 1000; // hard cap on a single listen session
 
 function decodeToken(token) {
   if (!token || !JWT_SECRET) return null;
   try { return jwt.verify(token, JWT_SECRET); } catch { return null; }
+}
+
+// Client-ownership check for the events stream (no specific call required): same
+// rule as the SSE monitor and the audio relay, minus the call-info requirement,
+// so a viewer can connect and wait for the next call.
+async function authorizeClientOnly(clientId, token) {
+  const decoded = decodeToken(token);
+  if (!decoded || !clientId) return null;
+  const { data: client } = await supabase
+    .from('clients')
+    .select('id, agency_id')
+    .eq('id', clientId)
+    .single();
+  if (!client) return null;
+  const role = decoded.role;
+  const ok =
+    role === 'super_admin' ||
+    ((role === 'agency_owner' || role === 'agency_staff') && decoded.agencyId && decoded.agencyId === client.agency_id) ||
+    (role === 'client_staff' && decoded.clientId && decoded.clientId === client.id);
+  return ok ? client : null;
 }
 
 // Same access rule as routes/live-monitor.js: super_admin, the owning agency, or
@@ -73,14 +94,52 @@ function safeSend(ws, obj) {
 
 function attach(server) {
   const wss = new WebSocketServer({ noServer: true });
+  const eventsWss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (req, socket, head) => {
     let pathname = '';
     try { pathname = urlLib.parse(req.url).pathname || ''; } catch { pathname = ''; }
-    // Only claim our own path. Nothing else in this app uses WebSocket upgrades;
-    // any other upgrade is unexpected, so close it rather than leave it hanging.
-    if (pathname !== WS_PATH) { try { socket.destroy(); } catch {} return; }
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+    // Route the two live-monitor WebSocket paths; close anything else.
+    if (pathname === WS_PATH) {
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+    } else if (pathname === WS_EVENTS_PATH) {
+      eventsWss.handleUpgrade(req, socket, head, (ws) => eventsWss.emit('connection', ws, req));
+    } else {
+      try { socket.destroy(); } catch {}
+    }
+  });
+
+  // ---- Live events push: transcript / status / activity over a direct WS ----
+  // The SSE monitor works, but DigitalOcean's proxy buffers the SSE stream, so
+  // events arrive late. A WebSocket upgrade is passed through frame by frame
+  // (that's how the audio relay already works), so this delivers the same live
+  // events the SSE route does, in real time. The browser prefers whichever
+  // arrives first and de-dupes by id, so this simply wins the race. Single
+  // instance, so the in-memory bus reaches every viewer.
+  eventsWss.on('connection', async (browser, req) => {
+    let query = {};
+    try { query = urlLib.parse(req.url, true).query || {}; } catch {}
+    const clientId = String(query.client || '');
+    const token = String(query.token || '');
+
+    const client = await authorizeClientOnly(clientId, token);
+    if (!client) {
+      safeSend(browser, { type: 'error', error: 'Not authorized' });
+      try { browser.close(); } catch {}
+      return;
+    }
+
+    safeSend(browser, { type: 'hello', clientId, ts: Date.now() });
+    // Catch a late-joining viewer up on the call already in progress.
+    try { for (const ev of bus.snapshot(clientId)) safeSend(browser, ev); } catch {}
+
+    const unsub = bus.subscribe(clientId, (ev) => safeSend(browser, ev));
+    const heartbeat = setInterval(() => { try { if (browser.readyState === browser.OPEN) browser.ping(); } catch {} }, 15000);
+
+    let closed = false;
+    const cleanup = () => { if (closed) return; closed = true; clearInterval(heartbeat); try { unsub(); } catch {} try { browser.close(); } catch {} };
+    browser.on('close', cleanup);
+    browser.on('error', cleanup);
   });
 
   wss.on('connection', async (browser, req) => {
@@ -144,7 +203,7 @@ function attach(server) {
     browser.on('error', shutdown);
   });
 
-  console.log(`🎧 Live audio relay attached at ${WS_PATH}`);
+  console.log(`🎧 Live audio relay attached at ${WS_PATH}; events relay at ${WS_EVENTS_PATH}`);
 }
 
 module.exports = { attach };

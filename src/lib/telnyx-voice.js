@@ -540,6 +540,74 @@ async function deleteTelephonyCredential(credentialId) {
   return telnyxRest('DELETE', `/telephony_credentials/${encodeURIComponent(credentialId)}`);
 }
 
+// ----------------------------------------------------------------------------
+// CONFERENCE helpers (live monitor: seat a supervisor on a real call).
+//
+// A watched call is promoted into a Telnyx conference so a third leg (the
+// supervisor's browser over WebRTC) can be added. The supervisor joins with
+// supervisor_role 'monitor' (muted, hears everyone) to listen, and is flipped to
+// 'barge' (talks to everyone) to jump in. comfort_noise is off and beep is never
+// so the caller hears nothing when the conference is created or joined.
+// ----------------------------------------------------------------------------
+async function createConference(callControlId, name, opts = {}) {
+  if (!callControlId || !name) { console.warn('telnyx-voice: createConference needs a leg id and name'); return null; }
+  const body = {
+    call_control_id: callControlId,
+    name: String(name),
+    beep_enabled: 'never',
+    comfort_noise: opts.comfortNoise === true, // default false: no hiss
+    start_conference_on_create: true,
+  };
+  const cs = encodeClientState(opts.clientState);
+  if (cs) body.client_state = cs;
+  const out = await telnyxRest('POST', '/conferences', body);
+  if (out && out.id) console.log(`telnyx-voice: conference created ${out.id} (${name})`);
+  return out && out.id ? out : null;
+}
+
+// Add a leg to a conference. opts.supervisorRole: 'monitor' | 'barge' | 'whisper'
+// | 'none'. opts.mute mutes on join. opts.endConferenceOnExit ends the whole
+// conference when this leg leaves (used for nothing by default; the caller leg
+// governs call end via normal hangup handling).
+async function conferenceJoin(conferenceId, callControlId, opts = {}) {
+  if (!conferenceId || !callControlId) { console.warn('telnyx-voice: conferenceJoin needs conference id + leg id'); return null; }
+  const body = { call_control_id: callControlId };
+  if (opts.supervisorRole) body.supervisor_role = opts.supervisorRole;
+  if (opts.mute === true) body.mute = true;
+  if (opts.hold === true) body.hold = true;
+  if (opts.startConferenceOnEnter === true) body.start_conference_on_enter = true;
+  if (opts.endConferenceOnExit === true) body.end_conference_on_exit = true;
+  if (opts.softEndConferenceOnExit === true) body.soft_end_conference_on_exit = true;
+  if (Array.isArray(opts.whisperCallControlIds)) body.whisper_call_control_ids = opts.whisperCallControlIds;
+  const cs = encodeClientState(opts.clientState);
+  if (cs) body.client_state = cs;
+  const out = await telnyxRest('POST', `/conferences/${encodeURIComponent(conferenceId)}/actions/join`, body);
+  if (out) console.log(`telnyx-voice: joined leg ${callControlId} to conference ${conferenceId}${opts.supervisorRole ? ' as ' + opts.supervisorRole : ''}`);
+  return out;
+}
+
+// Change a participant's supervisor role mid-call (monitor <-> barge).
+async function conferenceUpdateParticipant(conferenceId, callControlId, supervisorRole, opts = {}) {
+  if (!conferenceId || !callControlId || !supervisorRole) return null;
+  const body = { call_control_id: callControlId, supervisor_role: supervisorRole };
+  if (Array.isArray(opts.whisperCallControlIds)) body.whisper_call_control_ids = opts.whisperCallControlIds;
+  const out = await telnyxRest('POST', `/conferences/${encodeURIComponent(conferenceId)}/actions/update`, body);
+  if (out) console.log(`telnyx-voice: conference ${conferenceId} set ${callControlId} -> ${supervisorRole}`);
+  return out;
+}
+
+async function conferenceMute(conferenceId, callControlIds) {
+  if (!conferenceId) return null;
+  const body = Array.isArray(callControlIds) && callControlIds.length ? { call_control_ids: callControlIds } : {};
+  return telnyxRest('POST', `/conferences/${encodeURIComponent(conferenceId)}/actions/mute`, body);
+}
+
+async function conferenceUnmute(conferenceId, callControlIds) {
+  if (!conferenceId) return null;
+  const body = Array.isArray(callControlIds) && callControlIds.length ? { call_control_ids: callControlIds } : {};
+  return telnyxRest('POST', `/conferences/${encodeURIComponent(conferenceId)}/actions/unmute`, body);
+}
+
 module.exports = {
   encodeClientState,
   decodeClientState,
@@ -564,4 +632,9 @@ module.exports = {
   createTelephonyCredential,
   mintCredentialToken,
   deleteTelephonyCredential,
+  createConference,
+  conferenceJoin,
+  conferenceUpdateParticipant,
+  conferenceMute,
+  conferenceUnmute,
 };

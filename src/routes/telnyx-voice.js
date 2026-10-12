@@ -72,6 +72,10 @@ const {
   startTranscription,
   stopTranscription,
   deleteTelephonyCredential,
+  createConference,
+  conferenceJoin,
+  conferenceUpdateParticipant,
+  conferenceUnmute,
   decodeClientState,
 } = require('../lib/telnyx-voice');
 
@@ -361,6 +365,17 @@ async function handleVapiAnswered(sessionId) {
   const caller = session.telnyx_caller_control_id;
   const vapi = session.telnyx_vapi_control_id;
   if (!caller || !vapi) return;
+
+  // If the call is running as a conference (a supervisor is watching), a fresh
+  // AI leg re-dialed for hand-back joins the conference instead of bridging.
+  if (session.conference_active && session.telnyx_conference_id) {
+    await conferenceJoin(session.telnyx_conference_id, vapi, { clientState: { role: 'vapi', sessionId } });
+    if (session.status === 'agent_bridged') {
+      await atomicTransition(sessionId, ['agent_bridged'], 'active');
+    }
+    console.log(`telnyx-voice: AI re-joined conference ${session.telnyx_conference_id} (session ${sessionId})`);
+    return;
+  }
 
   await callAction(caller, 'bridge', {
     call_control_id: vapi,
@@ -892,6 +907,232 @@ async function handleBargeTranscription(sessionId, payload) {
   }
 }
 
+// ============================================================================
+// CONFERENCE LIVE-MONITOR SEAT (real-time listen + jump-in)
+// ----------------------------------------------------------------------------
+// When a supervisor opens a live own-the-call call to listen, we promote the
+// 2-leg caller<->VAPI bridge into a Telnyx conference and seat the supervisor's
+// browser (over WebRTC) in it. supervisor_role 'monitor' = listen (muted, hears
+// all); 'barge' = talk to the caller. Listening is real-time WebRTC audio (no
+// PCM relay, no sync slider). Jump-in drops the AI and flips the seat to barge;
+// hand-back re-dials the AI into the conference.
+//
+// SAFETY: promotion is fail-safe. We create the conference FROM the VAPI leg,
+// which unbridges the caller; the caller parks alive (park_after_unbridge:'self'
+// from the original bridge), then we join it into the conference. If any step
+// fails, we re-bridge caller<->VAPI so the call is never left broken.
+// ============================================================================
+const CONF_PREFIX = 'vac';
+const AGENT_RING_SECONDS_SEAT = 30;
+
+// Promote a live call into a conference (idempotent). Returns the conference id.
+async function ensureConference(session) {
+  if (!session) return null;
+  if (session.conference_active && session.telnyx_conference_id) return session.telnyx_conference_id;
+  const caller = session.telnyx_caller_control_id;
+  const vapi = session.telnyx_vapi_control_id;
+  if (!caller || !vapi) { console.warn(`telnyx-voice: 🎧 cannot promote, missing legs (session ${session.id})`); return null; }
+
+  // Only one promotion at a time, and only from a live AI state.
+  const won = await atomicTransition(session.id, ['active', 'transfer_returned'], 'conferencing');
+  if (!won) {
+    const s = await getSessionById(session.id);
+    return (s && s.conference_active && s.telnyx_conference_id) ? s.telnyx_conference_id : null;
+  }
+
+  const name = `${CONF_PREFIX}-${session.id}`;
+  const conf = await createConference(vapi, name, { clientState: { role: 'vapi', sessionId: session.id } });
+  if (!conf || !conf.id) {
+    console.error(`telnyx-voice: 🎧 conference create failed (session ${session.id}) - restoring bridge`);
+    await bridgeCalls(caller, vapi, { parkAfterUnbridge: 'self' }).catch(() => {});
+    await atomicTransition(session.id, ['conferencing'], 'active');
+    return null;
+  }
+  const joined = await conferenceJoin(conf.id, caller, { clientState: { role: 'caller', sessionId: session.id } });
+  if (!joined) {
+    console.error(`telnyx-voice: 🎧 caller join failed (session ${session.id}) - restoring bridge`);
+    await bridgeCalls(caller, vapi, { parkAfterUnbridge: 'self' }).catch(() => {});
+    await atomicTransition(session.id, ['conferencing'], 'active');
+    return null;
+  }
+
+  await updateSession(session.id, { telnyx_conference_id: conf.id, conference_active: true });
+  await atomicTransition(session.id, ['conferencing'], 'active');
+  console.log(`telnyx-voice: 🎧 call promoted to conference ${conf.id} (session ${session.id})`);
+  return conf.id;
+}
+
+// Start a listen seat: promote to a conference and dial the supervisor's browser.
+// On answer, completeSupervisorSeat joins it as a muted monitor.
+async function startSupervisorListen({ sessionId, sipUsername, credentialId }) {
+  if (!sessionId || !sipUsername) return { ok: false, code: 400, error: 'Missing session or endpoint.' };
+  const session = await getSessionById(sessionId);
+  if (!session) return { ok: false, code: 404, error: 'No live session.' };
+  if (session.telnyx_agent_control_id && session.supervisor_role) {
+    return { ok: false, code: 409, error: 'A teammate is already on this call.' };
+  }
+  if (!session.telnyx_caller_control_id || !session.telnyx_vapi_control_id) {
+    return { ok: false, code: 409, error: 'That call is no longer live.' };
+  }
+
+  const confId = await ensureConference(session);
+  if (!confId) return { ok: false, code: 502, error: 'Could not open the live audio for this call. Try again.' };
+
+  let fromNumber = session.caller_number || null;
+  try {
+    const { data: client } = await supabase.from('clients').select('vapi_phone_number').eq('id', session.client_id).single();
+    if (client && client.vapi_phone_number) fromNumber = toE164(client.vapi_phone_number) || fromNumber;
+  } catch (e) {}
+
+  await updateSession(sessionId, {
+    telnyx_agent_sip_username: String(sipUsername),
+    telnyx_agent_credential_id: credentialId || null,
+    telnyx_agent_control_id: null,
+    supervisor_role: null,
+    agent_leave_mode: null,
+  });
+
+  const { connectionId } = await getWhisperConfig();
+  const seatLeg = await dialCall({
+    to: `sip:${String(sipUsername)}@sip.telnyx.com`,
+    from: fromNumber || session.caller_number || '+10000000000',
+    connectionId,
+    timeoutSecs: AGENT_RING_SECONDS_SEAT,
+    clientState: { role: 'supervisor', sessionId },
+  });
+  if (!seatLeg || !seatLeg.call_control_id) {
+    return { ok: false, code: 502, error: 'Could not reach your browser audio. Check mic permission and try again.' };
+  }
+  await updateSession(sessionId, { telnyx_agent_control_id: seatLeg.call_control_id });
+  console.log(`telnyx-voice: 🎧 supervisor seat dialing sip:${sipUsername}@sip.telnyx.com -> leg ${seatLeg.call_control_id} (session ${sessionId})`);
+  return { ok: true };
+}
+
+// The supervisor browser answered: seat it in the conference as a muted monitor.
+async function completeSupervisorSeat(sessionId) {
+  const session = await getSessionById(sessionId);
+  if (!session || !session.telnyx_conference_id || !session.telnyx_agent_control_id) {
+    const s = session || await getSessionById(sessionId);
+    if (s && s.telnyx_agent_control_id) await hangupCall(s.telnyx_agent_control_id);
+    return;
+  }
+  await conferenceJoin(session.telnyx_conference_id, session.telnyx_agent_control_id, {
+    supervisorRole: 'monitor',
+    clientState: { role: 'supervisor', sessionId },
+  });
+  await updateSession(sessionId, { supervisor_role: 'monitor' });
+  try {
+    broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_dialing', label: 'A teammate is listening in' });
+  } catch (e) {}
+  console.log(`telnyx-voice: 🎧 supervisor seated as monitor in conference ${session.telnyx_conference_id} (session ${sessionId})`);
+}
+
+// Jump in: drop the AI and flip the supervisor seat to barge so the human talks
+// to the caller. Record + transcribe the takeover (unless HIPAA).
+async function supervisorJumpIn(sessionId) {
+  const session = await getSessionById(sessionId);
+  if (!session) return { ok: false, code: 404, error: 'No live session.' };
+  if (!session.telnyx_conference_id || session.supervisor_role !== 'monitor' || !session.telnyx_agent_control_id) {
+    return { ok: false, code: 409, error: 'Start listening first, then jump in.' };
+  }
+  const won = await atomicTransition(sessionId, ['active'], 'agent_bridged', { barged: true, supervisor_role: 'barge' });
+  if (!won) return { ok: false, code: 409, error: 'This call can’t be joined right now.' };
+
+  const caller = session.telnyx_caller_control_id;
+  const vapi = session.telnyx_vapi_control_id;
+  // Remove the AI from the conference so the human fully takes over.
+  if (vapi) await hangupCall(vapi);
+  await conferenceUpdateParticipant(session.telnyx_conference_id, session.telnyx_agent_control_id, 'barge');
+  await conferenceUnmute(session.telnyx_conference_id, [session.telnyx_agent_control_id]);
+
+  let hipaa = false;
+  try {
+    const { data: client } = await supabase.from('clients').select('hipaa_mode').eq('id', session.client_id).single();
+    hipaa = !!(client && client.hipaa_mode === true);
+  } catch (e) {}
+  if (!hipaa && caller) {
+    await recordStart(caller, { channels: 'dual', clientState: { role: 'caller', sessionId } });
+    await startTranscription(caller, { tracks: 'both', interim: true, clientState: { role: 'caller', sessionId } });
+    console.log(`telnyx-voice: 🎧 jump-in recording + transcription started (session ${sessionId})`);
+  }
+  try {
+    broadcastLiveEvent(session.client_id, { type: 'status', status: 'agent_connected', label: 'Teammate on the call' });
+    broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_connected', label: 'A teammate took over the call' });
+  } catch (e) {}
+  console.log(`telnyx-voice: 🎧 supervisor jumped in (session ${sessionId})`);
+  return { ok: true };
+}
+
+// Hand the caller back to the AI: re-dial a fresh VAPI leg into the conference
+// and flip the supervisor back to a muted monitor.
+async function supervisorHandBack(session) {
+  const sessionId = session.id;
+  const caller = session.telnyx_caller_control_id;
+  await stopTranscription(caller).catch(() => {});
+  if (session.telnyx_agent_control_id && session.telnyx_conference_id) {
+    await conferenceUpdateParticipant(session.telnyx_conference_id, session.telnyx_agent_control_id, 'monitor').catch(() => {});
+    await updateSession(sessionId, { supervisor_role: 'monitor' });
+  }
+  const { connectionId, sipUri } = await getWhisperConfig();
+  if (!sipUri) { await updateSession(sessionId, { status: 'active' }); return; }
+  const vapiLeg = await dialCall({
+    to: sipUri,
+    from: session.caller_number,
+    connectionId,
+    customHeaders: [
+      { name: 'X-Client-Id', value: String(session.client_id) },
+      { name: 'X-Session-Id', value: String(sessionId) },
+    ],
+    clientState: { role: 'vapi', sessionId, rebridge: true },
+  });
+  if (!vapiLeg || !vapiLeg.call_control_id) {
+    await atomicTransition(sessionId, ['agent_bridged'], 'active');
+    console.warn(`telnyx-voice: 🎧 hand-back re-dial failed (session ${sessionId})`);
+    return;
+  }
+  await updateSession(sessionId, { telnyx_vapi_control_id: vapiLeg.call_control_id });
+  console.log(`telnyx-voice: 🎧 handing caller back to AI in conference (session ${sessionId})`);
+}
+
+// Supervisor leaves the seat entirely (stop listening). Hang up their leg; the
+// caller + AI stay in the conference and the call continues.
+async function supervisorLeaveSeat(sessionId) {
+  const session = await getSessionById(sessionId);
+  if (!session) return { ok: true };
+  if (session.status === 'agent_bridged') {
+    // They were talking: hand back to the AI first so the caller is not dropped.
+    await supervisorHandBack(session);
+    await atomicTransition(sessionId, ['agent_bridged'], 'active');
+  }
+  const seat = session.telnyx_agent_control_id;
+  await updateSession(sessionId, { supervisor_role: null, telnyx_agent_control_id: null });
+  if (seat) await hangupCall(seat);
+  await cleanupBargeCredential(session);
+  try { broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_ended', label: 'Teammate stopped monitoring' }); } catch (e) {}
+  console.log(`telnyx-voice: 🎧 supervisor left the seat (session ${sessionId})`);
+  return { ok: true };
+}
+
+// Driven by jump-out endpoint. mode 'end_call' hangs up the caller (ends the
+// conference); 'return_ai' hands back to the AI and stays seated as monitor.
+async function supervisorJumpOut(sessionId, mode) {
+  const session = await getSessionById(sessionId);
+  if (!session) return { ok: false, error: 'No live session.' };
+  if (session.status !== 'agent_bridged') return { ok: true };
+  const leaveMode = mode === 'end_call' ? 'end_call' : 'return_ai';
+  if (leaveMode === 'end_call') {
+    await stopTranscription(session.telnyx_caller_control_id).catch(() => {});
+    await updateSession(sessionId, { status: 'ending_after_barge', agent_leave_mode: 'end_call' });
+    if (session.telnyx_caller_control_id) await hangupCall(session.telnyx_caller_control_id);
+    try { broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_ended', label: 'Teammate ended the call' }); } catch (e) {}
+    return { ok: true, mode: 'end_call' };
+  }
+  await supervisorHandBack(session);
+  await atomicTransition(sessionId, ['agent_bridged'], 'active');
+  try { broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_returned', label: 'Teammate handed the call back to the AI' }); } catch (e) {}
+  return { ok: true, mode: 'return_ai' };
+}
+
 // ===========================================================================
 // TRANSFER-CALL RECAP: the caller<->agent conversation happens on Telnyx after
 // the AI is gone, so we record it, transcribe it with Telnyx Speech-to-Text,
@@ -1189,6 +1430,12 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
           console.log(`telnyx-voice: 🎧 barge call.answered agent leg (session ${sessionId}) - browser is on the line`);
           await completeBarge(sessionId);
         }
+        // The supervisor's browser answered: seat it in the conference as a muted
+        // monitor (conference live-monitor seat, the phase-2 path).
+        if (role === 'supervisor' && sessionId) {
+          console.log(`telnyx-voice: 🎧 supervisor call.answered seat leg (session ${sessionId}) - browser is on the line`);
+          await completeSupervisorSeat(sessionId);
+        }
         break;
 
       case 'call.gather.ended':
@@ -1261,6 +1508,15 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
             break;
           }
 
+          // The supervisor's conference seat dropped (left, closed the tab, or
+          // lost connection). If they were talking, hand the caller back to the
+          // AI; otherwise just clear the seat. The call continues either way.
+          if (role === 'supervisor') {
+            console.log(`telnyx-voice: 🎧 supervisor call.hangup seat leg (session ${sessionId}) status=${st} cause=${payload.hangup_cause || '?'}`);
+            await supervisorLeaveSeat(sessionId);
+            break;
+          }
+
           // A VAPI-leg hangup DURING a barge is expected (we swap the AI out, and
           // the old AI leg drops again on a return-to-AI), so it must not end the
           // monitor or the session. Ignore it.
@@ -1291,6 +1547,14 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
               if ((st === 'agent_dialing' || st === 'agent_bridged' || st === 'ending_after_barge') && s.telnyx_agent_control_id) {
                 await hangupCall(s.telnyx_agent_control_id);
                 await cleanupBargeCredential(s);
+              }
+              // Conference call: nothing auto-ends when one leg leaves, so tear
+              // down the other legs (supervisor seat + the AI, or the caller) so
+              // nothing lingers in the conference.
+              if (s.conference_active) {
+                if (s.telnyx_agent_control_id) { await hangupCall(s.telnyx_agent_control_id); await cleanupBargeCredential(s); }
+                if (role === 'caller' && s.telnyx_vapi_control_id) await hangupCall(s.telnyx_vapi_control_id);
+                if (role === 'vapi' && s.telnyx_caller_control_id) await hangupCall(s.telnyx_caller_control_id);
               }
               await updateSession(sessionId, { status: 'ended' });
             }
@@ -1649,6 +1913,11 @@ router.get('/audio/ringback.mp3', (req, res) => {
 router.barge = {
   startBarge,
   requestAgentLeave,
+  // Conference live-monitor seat (phase 2): listen + jump-in.
+  startSupervisorListen,
+  supervisorJumpIn,
+  supervisorJumpOut,
+  supervisorLeaveSeat,
   getSessionById,
   getSessionByVapiCallId,
   updateSession,

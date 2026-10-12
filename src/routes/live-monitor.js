@@ -382,6 +382,55 @@ router.post('/:id/live/webrtc-token', async (req, res) => {
 // Step 2: the browser is registered (TelnyxRTC connected) and ready to receive
 // audio. Dial that endpoint and swap the AI out for the human. The endpoint to
 // dial is read from the session (set by webrtc-token), never from the client.
+// (phase 2) seat the supervisor in the conference. The browser registers first
+// (webrtc-token + TelnyxRTC), then this promotes the call to a conference and
+// dials the browser in as a muted monitor for real-time listen.
+router.post('/:id/live/listen-start', async (req, res) => {
+  const auth = await authorizeClient(req.params.id, req.headers.authorization);
+  if (!auth.ok) return res.status(auth.code).json({ success: false, error: errText(auth.code) });
+
+  const { callId } = req.body || {};
+  if (!callId) return res.status(400).json({ success: false, error: 'callId is required' });
+
+  const session = await resolveBargeSession(callId, auth.client.id);
+  if (!session) return res.status(404).json({ success: false, error: 'No live own-the-call session to join.' });
+  if (!session.telnyx_agent_sip_username) {
+    return res.status(409).json({ success: false, error: 'Browser audio is not ready. Reconnect and try again.' });
+  }
+
+  console.log(`live-monitor: 🎧 listen-start requested client=${auth.client.id} call=${callId} session=${session.id}`);
+  const result = await voiceRouter.barge.startSupervisorListen({
+    sessionId: session.id,
+    sipUsername: session.telnyx_agent_sip_username,
+    credentialId: session.telnyx_agent_credential_id,
+  });
+  if (!result.ok) {
+    console.warn(`live-monitor: 🎧 listen-start refused session=${session.id}: ${result.error}`);
+    return res.status(result.code || 409).json({ success: false, error: result.error || 'Could not open live audio.' });
+  }
+  return res.json({ success: true });
+});
+
+// (phase 2) stop listening: leave the conference seat. The call continues.
+router.post('/:id/live/listen-stop', async (req, res) => {
+  const auth = await authorizeClient(req.params.id, req.headers.authorization);
+  if (!auth.ok) return res.status(auth.code).json({ success: false, error: errText(auth.code) });
+
+  const { callId } = req.body || {};
+  if (!callId) return res.status(400).json({ success: false, error: 'callId is required' });
+
+  const session = await resolveBargeSession(callId, auth.client.id);
+  if (!session) return res.json({ success: true });
+
+  try { await voiceRouter.barge.supervisorLeaveSeat(session.id); }
+  catch (e) { console.error('live-monitor: listen-stop failed:', e.message); }
+  broadcastLiveEvent(auth.client.id, { callId, type: 'takeover', action: 'listen_stop' });
+  return res.json({ success: true });
+});
+
+// ---- POST /api/client/:id/live/jump-in ------------------------------------
+// (phase 2) flip the seated supervisor from listening to talking: drop the AI
+// and let the human take the caller. Requires an active listen seat.
 router.post('/:id/live/jump-in', async (req, res) => {
   const auth = await authorizeClient(req.params.id, req.headers.authorization);
   if (!auth.ok) return res.status(auth.code).json({ success: false, error: errText(auth.code) });
@@ -390,33 +439,21 @@ router.post('/:id/live/jump-in', async (req, res) => {
   if (!callId) return res.status(400).json({ success: false, error: 'callId is required' });
 
   const session = await resolveBargeSession(callId, auth.client.id);
-  if (!session) {
-    return res.status(404).json({ success: false, error: 'No live own-the-call session to join.' });
-  }
-  if (!session.telnyx_agent_sip_username) {
-    return res.status(409).json({ success: false, error: 'Browser audio is not ready. Reconnect and try again.' });
-  }
+  if (!session) return res.status(404).json({ success: false, error: 'No live own-the-call session to join.' });
 
-  console.log(`live-monitor: 🎧 barge jump-in requested client=${auth.client.id} call=${callId} session=${session.id}`);
-  const result = await voiceRouter.barge.startBarge({
-    sessionId: session.id,
-    sipUsername: session.telnyx_agent_sip_username,
-    credentialId: session.telnyx_agent_credential_id,
-  });
-
+  console.log(`live-monitor: 🎧 jump-in requested client=${auth.client.id} call=${callId} session=${session.id}`);
+  const result = await voiceRouter.barge.supervisorJumpIn(session.id);
   if (!result.ok) {
-    console.warn(`live-monitor: 🎧 barge jump-in refused session=${session.id}: ${result.error}`);
+    console.warn(`live-monitor: 🎧 jump-in refused session=${session.id}: ${result.error}`);
     return res.status(result.code || 409).json({ success: false, error: result.error || 'Could not join the call.' });
   }
-
   broadcastLiveEvent(auth.client.id, { callId, type: 'takeover', action: 'jump_in' });
   return res.json({ success: true });
 });
 
 // ---- POST /api/client/:id/live/jump-out -----------------------------------
-// Step 3: the agent leaves. mode 'end_call' ends the call; anything else hands
-// the caller back to the AI. We record the chosen mode on the session, then hang
-// up the agent's browser leg, which drives handleAgentLeave on the webhook.
+// (phase 2) the human stops talking. mode 'end_call' ends the call; anything
+// else hands the caller back to the AI and keeps the seat listening.
 router.post('/:id/live/jump-out', async (req, res) => {
   const auth = await authorizeClient(req.params.id, req.headers.authorization);
   if (!auth.ok) return res.status(auth.code).json({ success: false, error: errText(auth.code) });
@@ -425,22 +462,15 @@ router.post('/:id/live/jump-out', async (req, res) => {
   if (!callId) return res.status(400).json({ success: false, error: 'callId is required' });
 
   const session = await resolveBargeSession(callId, auth.client.id);
-  if (!session) {
-    return res.status(404).json({ success: false, error: 'No live session.' });
-  }
+  if (!session) return res.status(404).json({ success: false, error: 'No live session.' });
 
-  // Record the chosen mode and hang up the agent's browser leg server-side. The
-  // webhook's call.hangup(role:agent) then runs the leave with the correct
-  // sequencing (agent gone -> caller parked -> back to AI or end). This works
-  // even if the browser's own hangup event is lost.
   let result = { ok: true, mode: mode === 'end_call' ? 'end_call' : 'return_ai' };
   try {
-    result = await voiceRouter.barge.requestAgentLeave(session.id, mode);
+    result = await voiceRouter.barge.supervisorJumpOut(session.id, mode);
   } catch (e) {
     console.error('live-monitor: jump-out failed:', e.message);
     return res.status(500).json({ success: false, error: 'Could not leave the call.' });
   }
-
   broadcastLiveEvent(auth.client.id, { callId, type: 'takeover', action: 'jump_out', mode: result.mode });
   return res.json({ success: true, mode: result.mode });
 });
