@@ -40,6 +40,7 @@ const { fetchMonitorUrls } = require('../lib/vapi-call-monitor');
 const { channelFor, broadcastLiveEvent } = require('../lib/live-broadcast');
 const {
   createWebrtcConnection,
+  updateWebrtcConnection,
   createTelephonyCredential,
   mintCredentialToken,
   deleteTelephonyCredential,
@@ -54,19 +55,45 @@ const JWT_SECRET = process.env.JWT_SECRET;
 // enough to cover a lengthy takeover; we also delete it explicitly on jump-out.
 const WEBRTC_CREDENTIAL_TTL_SECS = parseInt(process.env.WEBRTC_CREDENTIAL_TTL_SECS || '', 10) || (3 * 3600);
 
+// SIP URI calling preference applied to the WebRTC credential connection so a
+// call dialed to a registered credential's sip:username@sip.telnyx.com is
+// ACCEPTED. Telnyx defaults this to 'disabled', which refuses the dial with a
+// 403 (the exact failure seen on the first live barge). The barge dial
+// originates from our own Call Control connection (same Telnyx account), so
+// 'internal' is the tight/correct value; 'unrestricted' is the guaranteed one
+// if Telnyx does not classify the Call Control origination as on-net. Default
+// 'unrestricted' so the call connects, overridable with TELNYX_WEBRTC_SIP_URI_CALLING.
+const WEBRTC_SIP_URI_PREF = process.env.TELNYX_WEBRTC_SIP_URI_CALLING || 'unrestricted';
+
 // Resolve (and lazily create) the single platform Credential Connection that
 // parents every per-agent telephony credential. Cached in platform_settings so
 // it is created once and shared across instances.
 let _webrtcConnId = null;
+let _webrtcCallingEnsured = false;
+
+// Ensure SIP URI calling is enabled on the connection. Runs once per process
+// (idempotent on Telnyx), so even a connection created before this fix gets the
+// setting applied on the next jump-in without any manual surgery.
+async function ensureWebrtcCalling(connId) {
+  if (_webrtcCallingEnsured || !connId) return;
+  const r = await updateWebrtcConnection(connId, { sip_uri_calling_preference: WEBRTC_SIP_URI_PREF });
+  if (r) {
+    _webrtcCallingEnsured = true;
+    console.log(`live-monitor: 🎧 barge WebRTC connection ${connId} sip_uri_calling_preference=${WEBRTC_SIP_URI_PREF}`);
+  } else {
+    console.warn(`live-monitor: 🎧 barge could NOT set sip_uri_calling_preference=${WEBRTC_SIP_URI_PREF} on ${connId} (dial may still 403)`);
+  }
+}
+
 async function getWebrtcConnectionId() {
-  if (_webrtcConnId) return _webrtcConnId;
+  if (_webrtcConnId) { await ensureWebrtcCalling(_webrtcConnId); return _webrtcConnId; }
   try {
     const { data } = await supabase
       .from('platform_settings')
       .select('value')
       .eq('key', 'telnyx_webrtc_connection_id')
       .maybeSingle();
-    if (data && data.value) { _webrtcConnId = data.value; return _webrtcConnId; }
+    if (data && data.value) { _webrtcConnId = data.value; await ensureWebrtcCalling(_webrtcConnId); return _webrtcConnId; }
   } catch (e) { /* fall through to create */ }
 
   const conn = await createWebrtcConnection('voiceai-connect-webrtc');
@@ -77,6 +104,7 @@ async function getWebrtcConnectionId() {
     await supabase.from('platform_settings')
       .upsert({ key: 'telnyx_webrtc_connection_id', value: conn.id }, { onConflict: 'key' });
   } catch (e) { console.warn('live-monitor: could not persist webrtc connection id:', e.message); }
+  await ensureWebrtcCalling(_webrtcConnId);
   return _webrtcConnId;
 }
 

@@ -2017,6 +2017,19 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     // monitor reads them); they do not change how the call runs. Off in HIPAA
     // mode so PHI is never opened to a live listen channel.
     ...(hipaaMode ? {} : { monitorPlan: { listenEnabled: true, controlEnabled: true } }),
+    // Speed up the owner's post-call SMS. VAPI runs a post-call analysis
+    // (summary + structured data + success evaluation, each an LLM pass) BEFORE
+    // it sends the end-of-call-report, and the report is what the owner text
+    // waits on. Measured: a call that ended at :09:49 only reported at :13:25,
+    // ~3.5 min later. Real client calls never use VAPI's analysis (we generate
+    // our own summary from the transcript), so disabling it makes the report,
+    // and the SMS, fire right after the call. Demos use a different builder and
+    // keep their analysis, so this does not touch demo business-name extraction.
+    analysisPlan: {
+      summaryPlan: { enabled: false },
+      structuredDataPlan: { enabled: false },
+      successEvaluationPlan: { enabled: false },
+    },
     serverMessages: ['end-of-call-report', 'transcript', 'status-update'],
     // clientId rides on the query so every server message (transcript, status,
     // end-of-call) carries it. The live monitor uses it to fan events to the

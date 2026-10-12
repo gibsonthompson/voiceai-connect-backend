@@ -1209,6 +1209,15 @@ async function handleVapiWebhook(req, res) {
       const lmClientId = (req.query && req.query.clientId)
         || (lmCall.id ? (liveMonitor.getCallInfo(lmCall.id) || {}).clientId : null);
       if (lmClientId && message?.type === 'transcript' && lmCall.id) {
+        // TEMP latency probe (barge_20261012c): shows partial/final cadence and
+        // how far VAPI's own delivery lags, so we can tell upstream (VAPI
+        // endpointing) latency apart from our relay. message.timestamp is VAPI's
+        // stamp for the event. Grep "🗣️" in the logs for one call, then remove.
+        try {
+          const ts = Number(message.timestamp);
+          const lag = (ts && ts > 1e12) ? ` vapi_lag=${Date.now() - ts}ms` : '';
+          console.log(`🗣️ transcript ${message.transcriptType || '?'} ${message.role || '?'}${lag} "${String(message.transcript || '').slice(0, 40)}"`);
+        } catch (e) {}
         broadcastLiveEvent(lmClientId, {
           callId: lmCall.id,
           type: 'transcript',

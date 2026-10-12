@@ -488,6 +488,16 @@ async function createWebrtcConnection(name) {
   return out && out.id ? out : null;
 }
 
+// Update the WebRTC credential connection (PATCH). Used to enable SIP URI
+// calling (sip_uri_calling_preference) so a call dialed to a registered
+// credential's sip:username@sip.telnyx.com is accepted instead of refused with
+// a 403. Disabled is the Telnyx default, which is why the first barge dial was
+// rejected. Best-effort; returns the updated connection or null.
+async function updateWebrtcConnection(connectionId, body) {
+  if (!connectionId) return null;
+  return telnyxRest('PATCH', `/credential_connections/${encodeURIComponent(connectionId)}`, body || {});
+}
+
 // Mint a telephony credential (per agent-session) tied to the WebRTC connection.
 // Returns { id, sip_username, ... }. expiresInSecs auto-expires it so a leaked
 // credential is short-lived; we also delete it explicitly on jump-out.
@@ -550,6 +560,7 @@ module.exports = {
   startTranscription,
   stopTranscription,
   createWebrtcConnection,
+  updateWebrtcConnection,
   createTelephonyCredential,
   mintCredentialToken,
   deleteTelephonyCredential,
