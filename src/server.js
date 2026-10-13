@@ -1778,6 +1778,8 @@ app.use('/api/agency', customIndustriesRoutes);
 app.use('/api/agency', require('./routes/discount-codes'));
 // Call-center wallboard: live calls across all of a call-center agency's businesses.
 app.use('/api/agency', require('./routes/agency-wallboard'));
+// Call-center analytics + live-ops overview for the dedicated /cc dashboard.
+app.use('/api/agency', require('./routes/cc-analytics'));
 app.use('/api/agency', testClientRoutes);
 app.use('/api/agency', agencyTemplatesRoutes);
 app.use('/api/agency', aiPlaygroundRoutes);
