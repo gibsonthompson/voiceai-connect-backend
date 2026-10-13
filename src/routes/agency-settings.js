@@ -210,6 +210,9 @@ function publicAgencyShape(agency) {
     // Account type: a call-center agency gets the live wallboard + agent roles.
     // Set at signup (not a toggle), so a plain reseller agency never sees it.
     is_call_center: agency.is_call_center === true,
+    // Call-center growth-tools add-on: re-enables the reseller/growth tabs that
+    // are stripped from the call-center nav by default. Defaults false.
+    cc_growth_addon: agency.cc_growth_addon === true,
     // Plan type (for feature gating)
     plan_type: agency.plan_type,
     // Comp overrides. access_plan is a feature-tier override (a comped partner
@@ -512,9 +515,12 @@ async function getAgencySettings(req, res) {
         
         // Account type: a call-center agency gets the live wallboard + agent
         // roles. The owner's authenticated dashboard reads this to show the Live
-        // Calls tab, so it must be on this (authenticated) shape, not only the
-        // public projection above.
+        // Calls tab and to gate the call-center nav, so it must be on this
+        // (authenticated) shape, not only the public projection above.
         is_call_center: agency.is_call_center === true,
+        // Call-center growth-tools add-on (re-enables the reseller tabs that are
+        // stripped from the call-center nav by default). Defaults false.
+        cc_growth_addon: agency.cc_growth_addon === true,
         // Status
         status: agency.status,
         subscription_status: agency.subscription_status,
