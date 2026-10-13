@@ -1519,6 +1519,18 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
           const st = s && s.status;
           const bargeState = st === 'agent_dialing' || st === 'agent_bridged' || st === 'returning_to_ai';
 
+          // Ignore a STALE VAPI-leg hangup. When a supervisor jumps in we hang up
+          // the AI leg, and hand-back re-dials a fresh one. The OLD leg's late
+          // hangup must never tear down the caller or the conference: only the
+          // CURRENT vapi leg is the live AI. Without this, an old leg's hangup
+          // arriving after a re-dial hit the conference teardown and hung up the
+          // caller (the "hung up again" cascade).
+          if (role === 'vapi' && s && s.telnyx_vapi_control_id && payload.call_control_id &&
+              payload.call_control_id !== s.telnyx_vapi_control_id) {
+            console.log(`telnyx-voice: 🎧 ignoring stale vapi-leg hangup ${payload.call_control_id} (current=${s.telnyx_vapi_control_id}, session ${sessionId})`);
+            break;
+          }
+
           // The human agent's browser leg dropped (clicked leave/end, closed the
           // tab, or lost connection). Decide the caller's fate (back to AI / end).
           // The hangup cause is the key signal when a browser dial never rings:

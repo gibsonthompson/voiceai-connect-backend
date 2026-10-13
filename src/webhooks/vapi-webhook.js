@@ -1226,7 +1226,18 @@ async function handleVapiWebhook(req, res) {
           final: message.transcriptType === 'final',
         });
       } else if (lmClientId && message?.type === 'status-update' && lmCall.id) {
-        broadcastLiveEvent(lmClientId, { callId: lmCall.id, type: 'status', status: message.status || 'unknown' });
+        // Never relay VAPI's 'ended' status to the monitor. On a telnyx_cc call
+        // the caller is on a SEPARATE Telnyx leg, so the VAPI leg ending is not
+        // the call ending. It ends the moment a supervisor jumps in (we drop the
+        // AI on purpose), and the monitor's 'ended' handler would tear down the
+        // live barge seat mid-takeover, dropping the human and then the caller.
+        // The true end is broadcast by the Telnyx caller hangup (telnyx-voice)
+        // and by the guarded end-of-call-report path below. Any other VAPI
+        // status (in-progress, forwarding, ...) is still useful, so relay those.
+        const vapiStatus = String(message.status || '').toLowerCase();
+        if (vapiStatus && vapiStatus !== 'ended') {
+          broadcastLiveEvent(lmClientId, { callId: lmCall.id, type: 'status', status: message.status });
+        }
       }
     } catch (e) { /* monitor must never break the webhook */ }
 
