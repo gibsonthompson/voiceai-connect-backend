@@ -1900,7 +1900,7 @@ async function getTelnyx10dlcCampaignId() {
 // Fully non-fatal: any failure is logged and returned, never thrown, so voice
 // provisioning is never blocked by an SMS-setup hiccup.
 // ============================================================================
-async function assignNumberForSMS(e164) {
+async function assignNumberForSMS(e164, country = 'US') {
   const result = { profileAssigned: false, campaignAssigned: false };
 
   if (!TELNYX_API_KEY) { console.warn('⚠️ assignNumberForSMS: TELNYX_API_KEY not set'); return result; }
@@ -1966,6 +1966,13 @@ async function assignNumberForSMS(e164) {
     }
 
     // 3. Assign the number to the approved 10DLC campaign.
+    // 10DLC is a US-only A2P registry. Canadian (and other non-US) numbers are
+    // not eligible and the campaign assignment would just error, so skip it. The
+    // messaging profile above is enough for the number to send/receive.
+    if (String(country || 'US').toUpperCase() !== 'US') {
+      console.log(`ℹ️ ${number} is a non-US (${country}) number, skipping US 10DLC campaign assignment`);
+      return result;
+    }
     const campaignId = await getTelnyx10dlcCampaignId();
     if (!campaignId) {
       console.warn(`⚠️ No 10DLC campaign id available, ${number} left unassigned to a campaign (outbound will be carrier-filtered)`);
@@ -2197,6 +2204,12 @@ async function provisionPhoneNumber(areaCode, options = {}) {
     throw new Error('TELNYX_API_KEY not configured — cannot provision phone numbers');
   }
 
+  // Country for the Telnyx search. US by default (every existing caller), CA for
+  // Canadian agencies/clients. NANP area codes are unique per country, so pairing
+  // the right country_code with a Canadian area code (e.g. 416) is what makes
+  // Telnyx actually return Canadian inventory instead of nothing.
+  const country = (options.country || 'US').toUpperCase();
+
   // ── Step 1: Search Telnyx for available numbers ───────────────────
   // Two passes. First we ask strictly for numbers that do BOTH sms + voice,
   // since we text call summaries and want SMS on the line. If that comes back
@@ -2206,7 +2219,7 @@ async function provisionPhoneNumber(areaCode, options = {}) {
   // still supports both features.
   async function searchTelnyx(bestEffort) {
     const params = [
-      'filter[country_code]=US',
+      `filter[country_code]=${country}`,
       `filter[national_destination_code]=${areaCode}`,
       'filter[features][]=sms',
       'filter[features][]=voice',
@@ -2307,7 +2320,7 @@ async function provisionPhoneNumber(areaCode, options = {}) {
   if ((options.voiceRouting || 'vapi_direct') === 'telnyx_cc') {
     const { connectionId } = await ensureWhisperInfra();
     const telnyxNumberId = await pointNumberAtCallControl(selectedNumber, connectionId);
-    await assignNumberForSMS(selectedNumber); // two-way SMS still applies
+    await assignNumberForSMS(selectedNumber, country); // two-way SMS still applies
     console.log(`✅ telnyx_cc number provisioned (whisper): ${selectedNumber} → Telnyx ${telnyxNumberId}`);
     return {
       number: selectedNumber,
@@ -2376,7 +2389,7 @@ async function provisionPhoneNumber(areaCode, options = {}) {
     console.log(`✅ Number imported to VAPI (byo-phone-number): ${retryData.number || selectedNumber} → ${retryData.id}`);
 
     // Assign for two-way SMS (messaging profile + 10DLC campaign). Non-fatal.
-    await assignNumberForSMS(selectedNumber);
+    await assignNumberForSMS(selectedNumber, country);
 
     await pinPhoneToDynamic(retryData.id);
     return retryData;
@@ -2386,7 +2399,7 @@ async function provisionPhoneNumber(areaCode, options = {}) {
   console.log(`✅ Number imported to VAPI: ${importData.number || selectedNumber} → ${importData.id}`);
 
   // Assign for two-way SMS (messaging profile + 10DLC campaign). Non-fatal.
-  await assignNumberForSMS(selectedNumber);
+  await assignNumberForSMS(selectedNumber, country);
 
   await pinPhoneToDynamic(importData.id);
   return importData;

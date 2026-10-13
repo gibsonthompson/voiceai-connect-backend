@@ -575,7 +575,7 @@ async function enableSMSForNumber(phoneNumber) {
 // ============================================================================
 // COUNTRY → PROVISIONING METHOD
 // ============================================================================
-const PLATFORM_PROVISIONING_COUNTRIES = ['US']; // Only US for now
+const PLATFORM_PROVISIONING_COUNTRIES = ['US', 'CA']; // US + Canada (both NANP, Telnyx-provisioned directly)
 
 function canPlatformProvision(countryCode) {
   return PLATFORM_PROVISIONING_COUNTRIES.includes(countryCode?.toUpperCase() || 'US');
@@ -606,6 +606,14 @@ function getFriendlyProvisioningError(error) {
   // No inventory in the requested area code.
   if (msg.includes('No numbers available in area code')) {
     return 'No phone numbers are available in that area code. Please try a different city or area code.';
+  }
+
+  // Telnyx regulatory / end-user requirement (can apply to some Canadian or
+  // other non-US numbers): the number exists but the account needs an address or
+  // identity on file before it can be ordered. Surface it as a setup step, not a
+  // "try again", so it does not look like a transient error.
+  if (/requirement|regulatory|address|identity|document/i.test(msg)) {
+    return 'That number needs a regulatory requirement (address/identity) on the telephony account before it can be activated. The platform team has been notified.';
   }
 
   return 'Phone provisioning failed. Please try again or contact support.';
@@ -734,10 +742,15 @@ async function extractQueryToolId(assistantId) {
 // ============================================================================
 async function provisionPhoneForClient(agency, clientData, assistantId, voiceRouting = 'vapi_direct', planType = 'starter') {
   const agencyCountry = (agency.country || 'US').toUpperCase();
+  // The number's country follows the CLIENT's location (its business country),
+  // falling back to the agency's. This is what lets a Canadian agency (or a
+  // Canadian client of any agency) get a Canadian number via the platform, now
+  // that CA is a platform-provisioning country. US is unchanged.
+  const provisionCountry = (clientData.country || agencyCountry || 'US').toUpperCase();
 
-  // PATH 1: Platform provisioning (US agencies)
-  if (canPlatformProvision(agencyCountry)) {
-    console.log(`📞 Platform provisioning (${agencyCountry}) for ${clientData.businessName} [routing: ${voiceRouting}]`);
+  // PATH 1: Platform provisioning (US + Canada, both NANP on Telnyx)
+  if (canPlatformProvision(provisionCountry)) {
+    console.log(`📞 Platform provisioning (${provisionCountry}) for ${clientData.businessName} [routing: ${voiceRouting}]`);
 
     const phoneData = await provisionLocalPhone(
       clientData.businessCity,
@@ -745,7 +758,7 @@ async function provisionPhoneForClient(agency, clientData, assistantId, voiceRou
       assistantId,
       clientData.businessName,
       clientData.phone,
-      { voiceRouting }
+      { voiceRouting, country: provisionCountry }
     );
 
     // telnyx_cc: the number is routed to the Call Control app, NOT imported
@@ -1180,7 +1193,8 @@ async function handleClientSignup(req, res) {
           businessCity,
           businessState,
           businessName,
-          phone
+          phone,
+          country: clientCountry
         }, assistant.id, voiceRouting, planType);
       } catch (phoneError) {
         await cleanupVapiResources(createdAssistantId, createdQueryToolId, businessName);
@@ -1788,7 +1802,8 @@ async function handleAgencyAddClient(req, res) {
         businessCity,
         businessState,
         businessName,
-        phone
+        phone,
+        country: clientCountry
       }, assistant.id, voiceRouting, resolvedPlanType);
     } catch (phoneError) {
       // Phone provisioning failed, clean up orphaned VAPI resources
@@ -2074,7 +2089,8 @@ async function provisionClient(clientId) {
         businessCity: client.business_city,
         businessState: client.business_state,
         businessName: client.business_name,
-        phone: client.owner_phone
+        phone: client.owner_phone,
+        country: client.country || agency.country
       }, assistant.id, voiceRouting, client.plan_type || 'starter');
     } catch (phoneError) {
       await cleanupVapiResources(createdAssistantId, createdQueryToolId, client.business_name);

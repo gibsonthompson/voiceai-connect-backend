@@ -103,7 +103,9 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
     // provisionLocalPhone keys off the phone's area code first; only fall back to a
     // region if the agency has no phone on file at all.
     const agencyCity = '';
-    const agencyState = agencyPhone ? '' : 'GA';
+    // Fallback region only used when the agency has no phone to key the area code
+    // off of. Keep it in-country so a Canadian agency never falls back to a US code.
+    const agencyState = agencyPhone ? '' : (agencyCountry === 'CA' ? 'ON' : 'GA');
 
     // Step 1: Create VAPI assistant. Defaults to plumbing: it's a concrete,
     // high-intent vertical that produces a far sharper test receptionist than the
@@ -128,7 +130,8 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
         agencyState,
         assistant.id,
         testBusinessName,
-        agencyPhone || ''
+        agencyPhone || '',
+        { country: agencyCountry }
       );
       phoneNumber = phoneData.number;
       vapiPhoneId = phoneData.id;
