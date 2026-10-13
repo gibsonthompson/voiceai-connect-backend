@@ -75,6 +75,7 @@ const {
   createConference,
   conferenceJoin,
   conferenceUpdateParticipant,
+  conferenceMute,
   conferenceUnmute,
   decodeClientState,
 } = require('../lib/telnyx-voice');
@@ -1016,8 +1017,16 @@ async function completeSupervisorSeat(sessionId) {
     if (s && s.telnyx_agent_control_id) await hangupCall(s.telnyx_agent_control_id);
     return;
   }
+  // Join as a normal participant that is server-MUTED, not as a Telnyx
+  // "monitor" supervisor. Jumping in later only unmutes this leg (server side),
+  // which does NOT change the browser's own media direction. The old monitor->
+  // barge role flip DID change it, which renegotiated the browser's WebRTC media
+  // and sent the @telnyx/webrtc SDK into a _dispatchNotification/setState loop
+  // ("Maximum call stack size exceeded") that crashed the page and dropped the
+  // seat the instant the agent jumped in. supervisor_role in our DB stays the
+  // logical 'monitor'/'barge' label the state machine checks.
   await conferenceJoin(session.telnyx_conference_id, session.telnyx_agent_control_id, {
-    supervisorRole: 'monitor',
+    mute: true,
     clientState: { role: 'supervisor', sessionId },
   });
   await updateSession(sessionId, { supervisor_role: 'monitor' });
@@ -1048,8 +1057,10 @@ async function supervisorJumpIn(sessionId) {
     const hv = await hangupCall(vapi).catch((e) => { console.warn(`telnyx-voice: 🎧 jump-in hangup(vapi) threw: ${e.message}`); return null; });
     console.log(`telnyx-voice: 🎧 jump-in hung up AI leg ${vapi} (session ${sessionId}) ok=${!!hv}`);
   }
-  const flipped = await conferenceUpdateParticipant(session.telnyx_conference_id, session.telnyx_agent_control_id, 'barge');
-  console.log(`telnyx-voice: 🎧 jump-in flip seat->barge (session ${sessionId}) ok=${!!flipped}`);
+  // Unmute the seat so the human is heard. We do NOT flip the Telnyx supervisor
+  // role (monitor->barge): that change renegotiated the browser's media and
+  // crashed the page SDK. The seat joined as a normal muted participant, so a
+  // plain server-side unmute is all it takes and the browser media never moves.
   const unmuted = await conferenceUnmute(session.telnyx_conference_id, [session.telnyx_agent_control_id]);
   console.log(`telnyx-voice: 🎧 jump-in unmute seat (session ${sessionId}) ok=${!!unmuted}`);
 
@@ -1077,8 +1088,11 @@ async function supervisorHandBack(session) {
   const sessionId = session.id;
   const caller = session.telnyx_caller_control_id;
   await stopTranscription(caller).catch(() => {});
+  // Re-mute the seat (server side) instead of flipping its supervisor role back
+  // to monitor. Same reason as jump-in: a role change renegotiates the browser
+  // media and crashes the SDK. Muting leaves the browser leg untouched.
   if (session.telnyx_agent_control_id && session.telnyx_conference_id) {
-    await conferenceUpdateParticipant(session.telnyx_conference_id, session.telnyx_agent_control_id, 'monitor').catch(() => {});
+    await conferenceMute(session.telnyx_conference_id, [session.telnyx_agent_control_id]).catch(() => {});
     await updateSession(sessionId, { supervisor_role: 'monitor' });
   }
   const { connectionId, sipUri } = await getWhisperConfig();
