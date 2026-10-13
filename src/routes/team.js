@@ -84,6 +84,35 @@ function sanitizePermissions(perms, entityType) {
 }
 
 // ============================================================================
+// AGENT → BUSINESS ASSIGNMENT (call center)
+// ----------------------------------------------------------------------------
+// A call-center manager assigns specific businesses (clients) to an agency_staff
+// member (an "agent") so the agent only sees/handles those businesses. Stored on
+// team_members.assigned_client_ids. Semantics:
+//   - null  → UNRESTRICTED. The field wasn't provided (or was explicitly null).
+//             Preserves the historical behavior where staff see everything their
+//             Page Access allows. Plain reseller agencies are unaffected.
+//   - []    → a real, restrictive empty scope: assigned to nothing yet.
+//   - [...] → only the provided ids that are genuinely clients of THIS agency
+//             (filters out anything from another agency or that no longer exists).
+// Always validated against the agency's own clients so a manager can never point
+// an agent at a business they don't own.
+// ============================================================================
+async function sanitizeAssignedClientIds(raw, agencyId) {
+  if (raw === undefined || raw === null) return null;
+  if (!Array.isArray(raw)) return null;
+  const wanted = [...new Set(raw.filter(x => typeof x === 'string' && x.trim()))];
+  if (wanted.length === 0) return [];
+  const { data: rows } = await supabase
+    .from('clients')
+    .select('id')
+    .eq('agency_id', agencyId)
+    .in('id', wanted);
+  const valid = new Set((rows || []).map(r => r.id));
+  return wanted.filter(id => valid.has(id));
+}
+
+// ============================================================================
 // CHECK TEAM LIMIT
 // Reads per-plan team_members from plan_features.
 // Trial clients get a minimum of 2 team members regardless of plan config.
@@ -230,14 +259,14 @@ router.get('/:agencyId/team', requireAgencyAccess('settings'), async (req, res) 
     const { agencyId } = req.params;
     const { data: members, error } = await supabase
       .from('team_members')
-      .select(`id, display_name, phone, visible_password, permissions, notification_prefs, status, created_at, updated_at, member_user_id, users:member_user_id (id, email, last_login, avatar_url)`)
+      .select(`id, display_name, phone, visible_password, permissions, notification_prefs, status, assigned_client_ids, created_at, updated_at, member_user_id, users:member_user_id (id, email, last_login, avatar_url)`)
       .eq('entity_type', 'agency').eq('entity_id', agencyId)
       .order('created_at', { ascending: true });
     if (error) { console.error('❌ Fetch team error:', error); return res.status(500).json({ error: 'Failed to fetch team members' }); }
     const limits = await checkTeamLimit('agency', agencyId);
     res.json({
       success: true,
-      members: (members || []).map(m => ({ id: m.id, display_name: m.display_name, phone: m.phone, email: m.users?.email || null, visible_password: m.visible_password, permissions: m.permissions, notification_prefs: m.notification_prefs, status: m.status, last_login: m.users?.last_login || null, avatar_url: m.users?.avatar_url || null, created_at: m.created_at })),
+      members: (members || []).map(m => ({ id: m.id, display_name: m.display_name, phone: m.phone, email: m.users?.email || null, visible_password: m.visible_password, permissions: m.permissions, notification_prefs: m.notification_prefs, status: m.status, assigned_client_ids: m.assigned_client_ids || null, last_login: m.users?.last_login || null, avatar_url: m.users?.avatar_url || null, created_at: m.created_at })),
       limits,
     });
   } catch (err) { console.error('❌ List team error:', err); res.status(500).json({ error: 'Failed to fetch team members' }); }
@@ -266,7 +295,10 @@ router.post('/:agencyId/team', requireAgencyAccess('settings'), async (req, res)
     const { data: newUser, error: userError } = await supabase.from('users').insert({ email: email.toLowerCase(), password_hash: passwordHash, first_name: name.split(' ')[0] || name, last_name: name.split(' ').slice(1).join(' ') || null, phone: phone || null, role: 'agency_staff', agency_id: agencyId, invited_by: ownerUserId }).select('id, email, first_name, last_name').single();
     if (userError) { console.error('❌ Create user error:', userError); return res.status(500).json({ error: 'Failed to create user account' }); }
     const sanitizedPerms = sanitizePermissions(permissions || {}, 'agency');
-    const { data: member, error: memberError } = await supabase.from('team_members').insert({ owner_user_id: ownerUserId, member_user_id: newUser.id, entity_type: 'agency', entity_id: agencyId, display_name: name, phone: phone || null, visible_password: tempPassword, permissions: sanitizedPerms, status: 'active' }).select().single();
+    // Call-center agent scoping set at creation (editable later via PUT). Only
+    // real clients of this agency survive; undefined/null leaves it unrestricted.
+    const assignedClientIds = await sanitizeAssignedClientIds(req.body.assigned_client_ids, agencyId);
+    const { data: member, error: memberError } = await supabase.from('team_members').insert({ owner_user_id: ownerUserId, member_user_id: newUser.id, entity_type: 'agency', entity_id: agencyId, display_name: name, phone: phone || null, visible_password: tempPassword, permissions: sanitizedPerms, assigned_client_ids: assignedClientIds, status: 'active' }).select().single();
     if (memberError) { console.error('❌ Create team member error:', memberError); await supabase.from('users').delete().eq('id', newUser.id); return res.status(500).json({ error: 'Failed to create team member' }); }
     await logActivity(member.id, ownerUserId, 'agency', agencyId, 'member_added', { name, email: email.toLowerCase(), phone });
     if (phone) {
@@ -285,7 +317,7 @@ router.post('/:agencyId/team', requireAgencyAccess('settings'), async (req, res)
       } catch (smsErr) { console.warn('⚠️ SMS send failed:', smsErr.message); }
     }
     console.log(`✅ Team member added: ${name} (${email}) → agency ${agencyId}`);
-    res.json({ success: true, member: { id: member.id, display_name: member.display_name, phone: member.phone, email: newUser.email, visible_password: tempPassword, permissions: member.permissions, notification_prefs: member.notification_prefs, status: member.status, created_at: member.created_at } });
+    res.json({ success: true, member: { id: member.id, display_name: member.display_name, phone: member.phone, email: newUser.email, visible_password: tempPassword, permissions: member.permissions, notification_prefs: member.notification_prefs, status: member.status, assigned_client_ids: member.assigned_client_ids || null, created_at: member.created_at } });
   } catch (err) { console.error('❌ Add team member error:', err); res.status(500).json({ error: 'Failed to add team member' }); }
 });
 
@@ -304,6 +336,9 @@ router.put('/:agencyId/team/:memberId', requireAgencyAccess('settings'), async (
     if (permissions !== undefined) updates.permissions = sanitizePermissions(permissions, 'agency');
     if (notification_prefs !== undefined) updates.notification_prefs = notification_prefs;
     if (status !== undefined && ['active', 'disabled'].includes(status)) updates.status = status;
+    // Editing an agent's assigned businesses later. Passing null clears the scope
+    // (back to unrestricted); an array re-scopes to those clients of this agency.
+    if (req.body.assigned_client_ids !== undefined) updates.assigned_client_ids = await sanitizeAssignedClientIds(req.body.assigned_client_ids, agencyId);
     const { data: updated, error } = await supabase.from('team_members').update(updates).eq('id', memberId).select().single();
     if (error) { console.error('❌ Update team member error:', error); return res.status(500).json({ error: 'Failed to update team member' }); }
     if (Object.keys(userUpdates).length > 0) await supabase.from('users').update(userUpdates).eq('id', existing.member_user_id);

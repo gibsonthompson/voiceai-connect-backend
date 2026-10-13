@@ -438,6 +438,11 @@ async function handleAgencySignup(req, res) {
       country
     } = req.body;
 
+    // Call-center account type, set at signup (the dedicated call-center signup
+    // form posts this). An agency that signs up as a call center IS a call
+    // center — it unlocks the live wallboard and agent model. Accepts either key.
+    const isCallCenter = req.body.is_call_center === true || req.body.isCallCenter === true;
+
     // Check for duplicate email (gmail-aware normalized match; DB unique index
     // is the hard backstop).
     if (await emailAlreadyTaken(email)) {
@@ -500,7 +505,8 @@ async function handleAgencySignup(req, res) {
         limit_pro: 150,
         limit_growth: 500,
         plan_features: DEFAULT_PLAN_FEATURES,
-        referral_code: slug
+        referral_code: slug,
+        is_call_center: isCallCenter
       })
       .select()
       .single();

@@ -145,6 +145,25 @@ async function authorizeClient(clientId, tokenRaw) {
     (role === 'client_staff' && decoded.clientId && decoded.clientId === client.id);
 
   if (!allowed) return { ok: false, code: 403 };
+
+  // Call-center agent scoping: an agency_staff member assigned a specific set of
+  // businesses may only monitor/control those. A null assignment is unrestricted
+  // (manager-like staff and every plain reseller staff member), so this never
+  // affects them. This closes the gap where an agent could open the monitor for
+  // an unassigned business by typing its /live/<clientId> URL.
+  if (role === 'agency_staff') {
+    const { data: member } = await supabase
+      .from('team_members')
+      .select('assigned_client_ids')
+      .eq('member_user_id', decoded.userId)
+      .eq('entity_type', 'agency')
+      .eq('entity_id', client.agency_id)
+      .single();
+    if (member && Array.isArray(member.assigned_client_ids) && !member.assigned_client_ids.includes(clientId)) {
+      return { ok: false, code: 403 };
+    }
+  }
+
   return { ok: true, client, decoded };
 }
 
