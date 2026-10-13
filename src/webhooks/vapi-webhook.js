@@ -1121,6 +1121,19 @@ async function handleAssistantRequest(req, res, message) {
             callerContext = contact;
             const who = contact.name && contact.name !== 'Unknown' ? contact.name : 'returning caller (name not captured)';
             console.log(`📇 Recognized: ${who} (${contact.total_calls || 0} prior call(s))`);
+            // Surface the recognition in the live monitor so a supervisor sees
+            // the AI knew this caller (a real lookup, not prompt knowledge).
+            try {
+              const prior = contact.total_calls || 0;
+              const named = contact.name && contact.name !== 'Unknown';
+              broadcastLiveEvent(client.id, {
+                type: 'activity',
+                tool: 'caller_recognized',
+                label: named
+                  ? `Recognized returning caller — ${contact.name}`
+                  : `Recognized a returning caller (${prior} prior call${prior !== 1 ? 's' : ''})`,
+              });
+            } catch (e) { /* monitor must never break the call */ }
           } else {
             console.log(`📇 New/unknown caller: ${callerPhone}`);
           }
@@ -1520,6 +1533,18 @@ async function handleVapiWebhook(req, res) {
       console.log(`⚠️ Spam flag overridden - call was successfully transferred (${endedReason})`);
       isSpam = false;
       spamReason = null;
+    }
+
+    // Surface a spam flag in the live monitor. Note this is a POST-call
+    // determination (the AI analyzes the whole transcript after the call ends),
+    // so it lands in the monitor's brief after-call window, not mid-call.
+    if (isSpam) {
+      try {
+        broadcastLiveEvent(client.id, {
+          type: 'activity', tool: 'spam_flagged',
+          label: 'Flagged as spam', detail: spamReason || null,
+        });
+      } catch (e) { /* best effort */ }
     }
 
     // ── STEP 5: UPDATE CALL RECORD WITH AI DATA ───────────────────────

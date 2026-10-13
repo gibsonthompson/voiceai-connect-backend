@@ -389,7 +389,7 @@ router.post('/:id/live/listen-start', async (req, res) => {
   const auth = await authorizeClient(req.params.id, req.headers.authorization);
   if (!auth.ok) return res.status(auth.code).json({ success: false, error: errText(auth.code) });
 
-  const { callId } = req.body || {};
+  const { callId, agentName } = req.body || {};
   if (!callId) return res.status(400).json({ success: false, error: 'callId is required' });
 
   const session = await resolveBargeSession(callId, auth.client.id);
@@ -403,6 +403,7 @@ router.post('/:id/live/listen-start', async (req, res) => {
     sessionId: session.id,
     sipUsername: session.telnyx_agent_sip_username,
     credentialId: session.telnyx_agent_credential_id,
+    agentName: typeof agentName === 'string' ? agentName : null,
   });
   if (!result.ok) {
     console.warn(`live-monitor: 🎧 listen-start refused session=${session.id}: ${result.error}`);

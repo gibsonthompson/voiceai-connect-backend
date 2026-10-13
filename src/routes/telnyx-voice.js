@@ -926,6 +926,17 @@ async function handleBargeTranscription(sessionId, payload) {
 const CONF_PREFIX = 'vac';
 const AGENT_RING_SECONDS_SEAT = 30;
 
+// The display name of the teammate seated on each live call (sessionId -> name),
+// set from the logged-in user when they start listening. Used to attribute the
+// listen/jump-in/hand-back events to the actual person instead of "a teammate",
+// which is what a call center needs (who is on which call). In-memory and
+// best-effort: a missing name just falls back to the generic wording.
+const supervisorNames = new Map();
+function nameFor(sessionId) {
+  const n = supervisorNames.get(sessionId);
+  return (typeof n === 'string' && n.trim()) ? n.trim() : null;
+}
+
 // Promote a live call into a conference (idempotent). Returns the conference id.
 async function ensureConference(session) {
   if (!session) return null;
@@ -965,8 +976,10 @@ async function ensureConference(session) {
 
 // Start a listen seat: promote to a conference and dial the supervisor's browser.
 // On answer, completeSupervisorSeat joins it as a muted monitor.
-async function startSupervisorListen({ sessionId, sipUsername, credentialId }) {
+async function startSupervisorListen({ sessionId, sipUsername, credentialId, agentName }) {
   if (!sessionId || !sipUsername) return { ok: false, code: 400, error: 'Missing session or endpoint.' };
+  // Remember who is seating in, so every event on this call names the person.
+  if (agentName && String(agentName).trim()) supervisorNames.set(sessionId, String(agentName).trim().slice(0, 80));
   const session = await getSessionById(sessionId);
   if (!session) return { ok: false, code: 404, error: 'No live session.' };
   if (session.telnyx_agent_control_id && session.supervisor_role) {
@@ -1031,7 +1044,7 @@ async function completeSupervisorSeat(sessionId) {
   });
   await updateSession(sessionId, { supervisor_role: 'monitor' });
   try {
-    broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_dialing', label: 'A teammate is listening in' });
+    broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_dialing', label: `${nameFor(session.id) || 'A teammate'} is listening in` });
   } catch (e) {}
   console.log(`telnyx-voice: 🎧 supervisor seated as monitor in conference ${session.telnyx_conference_id} (session ${sessionId})`);
 }
@@ -1075,8 +1088,8 @@ async function supervisorJumpIn(sessionId) {
     console.log(`telnyx-voice: 🎧 jump-in recording + transcription started (session ${sessionId})`);
   }
   try {
-    broadcastLiveEvent(session.client_id, { type: 'status', status: 'agent_connected', label: 'Teammate on the call' });
-    broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_connected', label: 'A teammate took over the call' });
+    broadcastLiveEvent(session.client_id, { type: 'status', status: 'agent_connected', label: `${nameFor(session.id) || 'A teammate'} is on the call` });
+    broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_connected', label: `${nameFor(session.id) || 'A teammate'} took over the call` });
   } catch (e) {}
   console.log(`telnyx-voice: 🎧 supervisor jumped in (session ${sessionId})`);
   return { ok: true };
@@ -1127,10 +1140,18 @@ async function supervisorLeaveSeat(sessionId) {
     await atomicTransition(sessionId, ['agent_bridged'], 'active');
   }
   const seat = session.telnyx_agent_control_id;
+  const who = nameFor(sessionId) || 'A teammate';
+  const wasBarged = session.status === 'agent_bridged';
   await updateSession(sessionId, { supervisor_role: null, telnyx_agent_control_id: null });
   if (seat) await hangupCall(seat);
   await cleanupBargeCredential(session);
-  try { broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_ended', label: 'Teammate stopped monitoring' }); } catch (e) {}
+  try {
+    // If they had taken over, the AI is back now, so flip the pill off "on the
+    // call" and back to the AI. (A plain listener leaving changes nothing.)
+    if (wasBarged) broadcastLiveEvent(session.client_id, { type: 'status', status: 'in-progress', label: 'AI on the call' });
+    broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_ended', label: `${who} stopped monitoring` });
+  } catch (e) {}
+  supervisorNames.delete(sessionId);
   console.log(`telnyx-voice: 🎧 supervisor left the seat (session ${sessionId})`);
   return { ok: true };
 }
@@ -1146,12 +1167,16 @@ async function supervisorJumpOut(sessionId, mode) {
     await stopTranscription(session.telnyx_caller_control_id).catch(() => {});
     await updateSession(sessionId, { status: 'ending_after_barge', agent_leave_mode: 'end_call' });
     if (session.telnyx_caller_control_id) await hangupCall(session.telnyx_caller_control_id);
-    try { broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_ended', label: 'Teammate ended the call' }); } catch (e) {}
+    try { broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_ended', label: `${nameFor(sessionId) || 'A teammate'} ended the call` }); } catch (e) {}
     return { ok: true, mode: 'end_call' };
   }
   await supervisorHandBack(session);
   await atomicTransition(sessionId, ['agent_bridged'], 'active');
-  try { broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_returned', label: 'Teammate handed the call back to the AI' }); } catch (e) {}
+  try {
+    // AI is back on the line now, so reset the pill off "on the call".
+    broadcastLiveEvent(session.client_id, { type: 'status', status: 'in-progress', label: 'AI on the call' });
+    broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_returned', label: `${nameFor(sessionId) || 'A teammate'} handed the call back to the AI` });
+  } catch (e) {}
   return { ok: true, mode: 'return_ai' };
 }
 
@@ -1859,9 +1884,23 @@ router.post('/api/voice/send-sms', async (req, res) => {
       : { data: null };
 
     try {
+      // Name which link/info was texted, so the monitor shows "Texted the caller
+      // the booking link" instead of a generic "Texting the caller".
+      const SMS_LABELS = {
+        website: 'Texted the caller the website link',
+        address: 'Texted the caller the address',
+        booking: 'Texted the caller the booking link',
+        booking_link: 'Texted the caller the booking link',
+        review: 'Texted the caller the review link',
+        review_link: 'Texted the caller the review link',
+        payment: 'Texted the caller the payment link',
+        payment_link: 'Texted the caller the payment link',
+      };
+      const smsLabel = (savedKey && SMS_LABELS[savedKey])
+        || (savedKey ? `Texted the caller the ${savedKey.replace(/_/g, ' ')}` : 'Texted the caller');
       broadcastLiveEvent(clientId, {
-        type: 'activity', tool: 'send_sms', label: 'Texting the caller',
-        detail: savedKey ? `saved: ${savedKey}` : (text ? 'custom message' : null),
+        type: 'activity', tool: 'send_sms', label: smsLabel,
+        detail: savedKey ? null : (text ? 'custom message' : null),
       });
     } catch (e) {}
 
