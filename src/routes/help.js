@@ -68,6 +68,37 @@ async function logWidgetChat(sessionId, role, content, origin = {}) {
   }
 }
 
+// Notify the platform owner when a LOGGED-IN agency or client starts a help-bot
+// chat, so a confused customer never asks the bot three questions in silence.
+// Fires once per session (the first user message only), never for anonymous
+// prospects, and never blocks the chat response. The chat itself is merged into
+// that agency's conversation in the admin inbox, so this text just flags it.
+async function notifyHelpChat({ sessionId, aud, agencyId, message }) {
+  try {
+    if (aud !== 'agency' && aud !== 'client') return; // logged-in users only
+    if (!agencyId || !sessionId) return;              // must know who it was
+    if (!SUPPORT_PHONE) return;
+    // Debounce: if this session already has rows, this is not the first message.
+    const { data: prior } = await supabase
+      .from('widget_chat_log').select('id').eq('session_id', sessionId).limit(1);
+    if (prior && prior.length) return;
+    const { data: agency } = await supabase.from('agencies').select('name').eq('id', agencyId).maybeSingle();
+    const who = (agency && agency.name) || 'An agency';
+    const roleLabel = aud === 'client' ? 'client' : 'agency';
+    const preview = String(message || '').trim().slice(0, 140);
+    await sendAndLogSMS({
+      phone: SUPPORT_PHONE,
+      message: `New help-bot chat from ${who} (${roleLabel}): "${preview}". It's in their conversation in the admin inbox.`,
+      agencyId,
+      recipientType: 'admin',
+      messageType: 'help_chat_alert',
+      metadata: { sessionId, userType: aud },
+    });
+  } catch (e) {
+    console.error('help chat notify failed (non-blocking):', e.message);
+  }
+}
+
 // Audience framing appended to the knowledge base per who is asking. Same KB,
 // different lens: a prospect on the marketing site needs to understand how the
 // product works (not dashboard navigation they can't follow), while a logged-in
@@ -203,6 +234,7 @@ OUTREACH (Pro/Scale):
 - Merge variables for personalization.
 - Sequence tracking with follow-up queue.
 - Create custom templates.
+- IMPORTANT, HOW OUTREACH ACTUALLY SENDS: VoiceAI Connect does NOT send lead outreach emails or SMS for you. It is not an email or text sender. For a lead, it writes the message (subject and body from your templates), copies it to your clipboard, and logs it so the follow-up queue and the lead's history know where you are in the sequence. You then send it yourself from your own email account (Gmail, Outlook, etc.) or your own phone, and come back and mark it logged. So: nothing goes out from VoiceAI Connect, nothing will appear in your Sent folder unless you sent it from your own email, and "Log as sent" / the email and SMS counts on a lead mean "you recorded that you reached out," not that the platform delivered anything. If someone asks why they can't find a sent email, or whether outreach goes out through VoiceAI Connect: it does not, they send from their own email and the platform only drafts and tracks. (This is different from the AI receptionist on a live phone CALL, which can text the caller directly from the client's own number. That is the only outbound messaging the platform does, and it is per call, not lead outreach.)
 
 TEAM MEMBERS:
 - Free: 0. Pro: 5 agency + 2 per client. Scale: unlimited.
@@ -308,6 +340,11 @@ router.post('/chat', async (req, res) => {
       .join('\n');
 
     res.json({ response: assistantResponse });
+
+    // Alert the owner on the FIRST message of a logged-in agency/client chat.
+    // Awaited (after the response is already sent) so its "is this a new session"
+    // check runs before the log inserts below, never seeing its own rows.
+    await notifyHelpChat({ sessionId, aud, agencyId: origin.agencyId, message: message.trim() });
 
     // Log the exchange with its origin (fire-and-forget, non-blocking).
     logWidgetChat(sessionId, 'user', message.trim(), origin);

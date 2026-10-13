@@ -269,7 +269,63 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
     const fbRows = fbRes.data || [];
     const fbByAgency = new Map();
     for (const r of fbRows) { const g = fbByAgency.get(r.agency_id) || []; g.push(r); fbByAgency.set(r.agency_id, g); }
-    const agencyIds = [...new Set([...reqRows.map(r => r.agency_id), ...smsAgencyRows.map(r => r.agency_id), ...fbRows.map(r => r.agency_id)])];
+
+    // ---- Help-bot chats (widget_chat_log) ----
+    // Every row here comes through /api/help/chat, which is ONLY the in-dashboard
+    // help widget (agency + client dashboards), never the public marketing site,
+    // so these are logged-in users asking for help, not anonymous prospects. We
+    // read the origin columns the chat endpoint records (user_type / agency_id /
+    // source) defensively: if the migration that adds them has not run yet, fall
+    // back to the base columns so the inbox never breaks. Sessions that carry an
+    // agency_id are MERGED into that agency's conversation below (so one place has
+    // everything from that agency); sessions with no agency_id stay as their own
+    // read-only item (a genuine prospect, a client with no agency on the row, or a
+    // legacy row from before attribution existed).
+    const helpSessions = new Map(); // session_id -> { messages, escalated, userType, agencyId, source }
+    try {
+      let wrows = null;
+      const withOrigin = await supabase.from('widget_chat_log')
+        .select('session_id, role, content, created_at, user_type, agency_id, source')
+        .order('created_at', { ascending: false }).limit(1500);
+      if (withOrigin.error) {
+        const base = await supabase.from('widget_chat_log')
+          .select('session_id, role, content, created_at')
+          .order('created_at', { ascending: false }).limit(1500);
+        wrows = base.data || [];
+      } else {
+        wrows = withOrigin.data || [];
+      }
+      for (const row of wrows) {
+        let s = helpSessions.get(row.session_id);
+        if (!s) { s = { messages: [], escalated: false, userType: null, agencyId: null, source: null }; helpSessions.set(row.session_id, s); }
+        s.messages.push(row);
+        if (row.role === 'escalation') s.escalated = true;
+        if (!s.userType && row.user_type) s.userType = row.user_type;
+        if (!s.agencyId && row.agency_id) s.agencyId = row.agency_id;
+        if (!s.source && row.source) s.source = row.source;
+      }
+    } catch (e) { console.warn('admin inbox help-chat fetch failed:', e.message); }
+
+    // Help sessions grouped by the agency they belong to (for the merge), and the
+    // leftovers that have no agency to attach to (shown separately further down).
+    const helpByAgency = new Map();
+    const orphanHelpSessions = [];
+    for (const [sid, s] of helpSessions) {
+      if (s.agencyId) {
+        const g = helpByAgency.get(s.agencyId) || [];
+        g.push([sid, s]);
+        helpByAgency.set(s.agencyId, g);
+      } else {
+        orphanHelpSessions.push([sid, s]);
+      }
+    }
+
+    const agencyIds = [...new Set([
+      ...reqRows.map(r => r.agency_id),
+      ...smsAgencyRows.map(r => r.agency_id),
+      ...fbRows.map(r => r.agency_id),
+      ...helpByAgency.keys(),
+    ])];
 
     if (agencyIds.length) {
       const { data: agencies } = await supabase.from('agencies').select('id, name, phone, platform_replies_read_at').in('id', agencyIds);
@@ -292,16 +348,31 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
         const fbForAgency = fbByAgency.get(aid) || [];
         for (const r of fbForAgency) items.push({ id: `fb-${r.id}`, sender: 'in', body: r.message || '', at: r.created_at, kind: 'feedback' });
         const fbUnread = fbForAgency.filter(r => r.status !== 'reviewed').length;
+        // Merge this agency's help-bot chats into the same conversation, as
+        // read-only 'help' bubbles tagged in the UI. The agency's question is 'in'
+        // and the bot's answer is 'out'. Gibson can reply to the agency in-app
+        // from the same thread, so a confused help chat is actionable instead of
+        // invisible.
+        const readAt = ag.platform_replies_read_at ? new Date(ag.platform_replies_read_at).getTime() : 0;
+        let helpUnread = 0;
+        for (const [sid, s] of (helpByAgency.get(aid) || [])) {
+          for (const m of s.messages) {
+            if (m.role === 'escalation') continue;
+            items.push({ id: `help-${sid}-${m.created_at}`, sender: m.role === 'user' ? 'in' : 'out', body: m.content || '', at: m.created_at, kind: 'help' });
+            // A help question the agency asked after Gibson last opened the
+            // conversation counts as unread, same watermark as SMS.
+            if (m.role === 'user' && new Date(m.created_at).getTime() > readAt) helpUnread++;
+          }
+        }
         items.sort((a, b) => new Date(a.at) - new Date(b.at));
         if (!items.length) continue;
-        const readAt = ag.platform_replies_read_at ? new Date(ag.platform_replies_read_at).getTime() : 0;
         const smsUnread = (srows || []).filter(r => adminSmsDir(r) === 'in' && new Date(r.created_at).getTime() > readAt).length;
         const inbound = items.filter(m => m.sender === 'in');
         const last = items[items.length - 1];
         conversations.push({
           key: `agency-${aid}`, type: 'agency', agencyId: aid,
           name: ag.name || 'Unknown agency', phone: ag.phone || null,
-          messages: items, unread: (unreadByAgency[aid] || 0) + smsUnread + fbUnread,
+          messages: items, unread: (unreadByAgency[aid] || 0) + smsUnread + fbUnread + helpUnread,
           lastAt: last.at, lastDirection: last.sender, lastPreview: String(last.body || '').slice(0, 120),
           lastInboundKind: inbound.length ? inbound[inbound.length - 1].kind : 'inapp',
           needsReply: last.sender === 'in',
@@ -309,35 +380,39 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
       }
     }
 
-    // ---- FAQ-bot prospect chats (read-only) ----
+    // ---- Unattributed help-bot chats (read-only) ----
+    // Only the help sessions that could NOT be attached to an agency above: a
+    // genuine marketing-site prospect, a client help chat with no agency on the
+    // row, or a legacy row from before attribution existed. Agency help chats are
+    // already merged into their agency's conversation, so they are NOT repeated
+    // here. These are read-only and NEVER labeled "prospect" unless the origin
+    // actually says so (nothing public is logged to this table today).
     try {
-      // user_type / source are newer columns (see widget_chat_log migration):
-      // select('*') so this keeps working whether or not they exist yet.
-      const { data: wrows } = await supabase.from('widget_chat_log')
-        .select('*')
-        .order('created_at', { ascending: false }).limit(1500);
-      const bySession = new Map();
-      for (const row of (wrows || [])) {
-        let s = bySession.get(row.session_id);
-        if (!s) { s = { messages: [], escalated: false, userType: null }; bySession.set(row.session_id, s); }
-        s.messages.push(row);
-        if (row.role === 'escalation') s.escalated = true;
-        if (!s.userType && row.user_type) s.userType = row.user_type;
-      }
+      const labelFor = (s) => {
+        const esc = s.escalated ? ' (escalated)' : '';
+        if (s.userType === 'prospect' || s.source === 'marketing') {
+          return { name: `Prospect, public site${esc}`, tag: 'Public site' };
+        }
+        if (s.userType === 'client') {
+          return { name: `Client help chat${esc}`, tag: 'Client help' };
+        }
+        if (s.userType === 'agency') {
+          return { name: `Agency help chat${esc}`, tag: 'Agency help' };
+        }
+        return { name: `In-app help chat${esc}`, tag: 'In-app help' };
+      };
+
       let faqCount = 0;
-      for (const [sid, s] of bySession) {
+      for (const [sid, s] of orphanHelpSessions) {
         if (faqCount++ >= 60) break;
         const msgs = s.messages.sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
           .map(m => ({ id: `faq-${sid}-${m.created_at}`, sender: m.role === 'user' ? 'in' : 'out', body: m.content || '', at: m.created_at, kind: 'faq' }));
         if (!msgs.length) continue;
         const last = msgs[msgs.length - 1];
-        // Label by where the chat actually came from (origin now captured on the
-        // log). Older rows with no user_type stay the generic "FAQ chat".
-        const audLabel = s.userType === 'agency' ? 'Agency' : s.userType === 'client' ? 'Client' : s.userType === 'prospect' ? 'Prospect' : null;
-        const baseName = audLabel ? `FAQ chat (${audLabel})` : 'FAQ chat';
+        const { name, tag } = labelFor(s);
         conversations.push({
-          key: `faq-${sid}`, type: 'faq', agencyId: null, name: s.escalated ? `${baseName} (escalated)` : baseName,
-          faqAudience: s.userType || null,
+          key: `faq-${sid}`, type: 'faq', agencyId: null, name,
+          faqOrigin: { userType: s.userType || null, source: s.source || null, agencyName: null, tag },
           phone: null, messages: msgs, unread: 0, lastAt: last.at, lastDirection: last.sender,
           lastPreview: String(last.body || '').slice(0, 120), readOnly: true, needsReply: false, escalated: s.escalated,
         });
