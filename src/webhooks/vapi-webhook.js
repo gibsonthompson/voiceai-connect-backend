@@ -1283,14 +1283,16 @@ async function handleVapiWebhook(req, res) {
     // keep it to ONE owner text per call. A transfer that was attempted but
     // returned to the AI (no answer) is NOT bridged, so it keeps the normal SMS.
     let transferredViaTelnyx = false;
+    let bargeSessionId = null; // call_sessions.id, for flushing the supervisor timeline
     if (call?.id) {
       const { data: session } = await supabase
         .from('call_sessions')
-        .select('client_id, status, barged')
+        .select('id, client_id, status, barged')
         .eq('vapi_call_id', call.id)
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
+      if (session?.id) bargeSessionId = session.id;
       if (session?.client_id) {
         // Treat a connected warm transfer OR a browser human-barge as "handled
         // off the VAPI leg": the caller is still on with a person (or being
@@ -1563,6 +1565,20 @@ async function handleVapiWebhook(req, res) {
       const { error: updateErr } = await supabase.from('calls').update(aiUpdate).eq('id', savedCallId);
       if (updateErr) console.warn('⚠️ Call AI update failed (non-fatal):', updateErr.message);
       else console.log('✅ Call updated with AI data');
+
+      // Persist who listened / jumped in onto the call for the post-call review.
+      // Covers listen-only calls (no takeover recording, so the telnyx-voice recap
+      // path never runs). Idempotent with that path: both write the full array.
+      try {
+        if (bargeSessionId) {
+          const events = require('../routes/telnyx-voice').barge.getSupervisorEvents(bargeSessionId);
+          if (events && events.length) {
+            const { data: row } = await supabase.from('calls').select('call_metadata').eq('id', savedCallId).single();
+            const meta = Object.assign({}, row?.call_metadata || {}, { supervisor_events: events });
+            await supabase.from('calls').update({ call_metadata: meta }).eq('id', savedCallId);
+          }
+        }
+      } catch (e) { /* best effort; never break the webhook */ }
     }
 
     // ── SPAM: notify and return early ─────────────────────────────────

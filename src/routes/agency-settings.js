@@ -207,6 +207,9 @@ function publicAgencyShape(agency) {
     // override column is written but never read on the public site.
     legal_overrides: (agency.legal_overrides && typeof agency.legal_overrides === 'object') ? agency.legal_overrides : null,
 
+    // Account type: a call-center agency gets the live wallboard + agent roles.
+    // Set at signup (not a toggle), so a plain reseller agency never sees it.
+    is_call_center: agency.is_call_center === true,
     // Plan type (for feature gating)
     plan_type: agency.plan_type,
     // Comp overrides. access_plan is a feature-tier override (a comped partner

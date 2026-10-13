@@ -1776,6 +1776,8 @@ app.use('/api/agency', demoPhoneRoutes);
 app.use('/api/agency', customIndustriesRoutes);
 // Discount codes (Pro/Scale): agencies create codes their clients redeem at checkout.
 app.use('/api/agency', require('./routes/discount-codes'));
+// Call-center wallboard: live calls across all of a call-center agency's businesses.
+app.use('/api/agency', require('./routes/agency-wallboard'));
 app.use('/api/agency', testClientRoutes);
 app.use('/api/agency', agencyTemplatesRoutes);
 app.use('/api/agency', aiPlaygroundRoutes);

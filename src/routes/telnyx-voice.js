@@ -937,6 +937,31 @@ function nameFor(sessionId) {
   return (typeof n === 'string' && n.trim()) ? n.trim() : null;
 }
 
+// Durable-for-the-call timeline of who listened / jumped in / handed back on
+// each call (sessionId -> [{ name, action, at }]). Accumulated in memory as the
+// events happen, then flushed onto the call record (calls.call_metadata) at save
+// time so the post-call review can show exactly who handled the call. Entries
+// are pruned by a TTL so a long-running process never grows unbounded.
+const supervisorEvents = new Map();
+const SUP_EVENTS_TTL_MS = 6 * 60 * 60 * 1000;
+function recordSupervisorEvent(sessionId, action) {
+  if (!sessionId || !action) return;
+  try {
+    const list = supervisorEvents.get(sessionId) || [];
+    list.push({ name: nameFor(sessionId) || null, action, at: new Date().toISOString() });
+    supervisorEvents.set(sessionId, list);
+    // Prune stale sessions.
+    const cutoff = Date.now() - SUP_EVENTS_TTL_MS;
+    for (const [sid, arr] of supervisorEvents) {
+      const last = arr.length ? Date.parse(arr[arr.length - 1].at) : 0;
+      if (last && last < cutoff) supervisorEvents.delete(sid);
+    }
+  } catch (e) { /* best effort */ }
+}
+function getSupervisorEvents(sessionId) {
+  try { return (supervisorEvents.get(sessionId) || []).slice(); } catch { return []; }
+}
+
 // Promote a live call into a conference (idempotent). Returns the conference id.
 async function ensureConference(session) {
   if (!session) return null;
@@ -1046,6 +1071,7 @@ async function completeSupervisorSeat(sessionId) {
   try {
     broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_dialing', label: `${nameFor(session.id) || 'A teammate'} is listening in` });
   } catch (e) {}
+  recordSupervisorEvent(sessionId, 'listening');
   console.log(`telnyx-voice: 🎧 supervisor seated as monitor in conference ${session.telnyx_conference_id} (session ${sessionId})`);
 }
 
@@ -1091,6 +1117,7 @@ async function supervisorJumpIn(sessionId) {
     broadcastLiveEvent(session.client_id, { type: 'status', status: 'agent_connected', label: `${nameFor(session.id) || 'A teammate'} is on the call` });
     broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_connected', label: `${nameFor(session.id) || 'A teammate'} took over the call` });
   } catch (e) {}
+  recordSupervisorEvent(sessionId, 'jumped_in');
   console.log(`telnyx-voice: 🎧 supervisor jumped in (session ${sessionId})`);
   return { ok: true };
 }
@@ -1126,6 +1153,7 @@ async function supervisorHandBack(session) {
     return;
   }
   await updateSession(sessionId, { telnyx_vapi_control_id: vapiLeg.call_control_id });
+  recordSupervisorEvent(sessionId, 'handed_back');
   console.log(`telnyx-voice: 🎧 handing caller back to AI in conference (session ${sessionId})`);
 }
 
@@ -1152,6 +1180,7 @@ async function supervisorLeaveSeat(sessionId) {
     broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_ended', label: `${who} stopped monitoring` });
   } catch (e) {}
   supervisorNames.delete(sessionId);
+  recordSupervisorEvent(sessionId, 'left');
   console.log(`telnyx-voice: 🎧 supervisor left the seat (session ${sessionId})`);
   return { ok: true };
 }
@@ -1167,6 +1196,7 @@ async function supervisorJumpOut(sessionId, mode) {
     await stopTranscription(session.telnyx_caller_control_id).catch(() => {});
     await updateSession(sessionId, { status: 'ending_after_barge', agent_leave_mode: 'end_call' });
     if (session.telnyx_caller_control_id) await hangupCall(session.telnyx_caller_control_id);
+    recordSupervisorEvent(sessionId, 'ended_call');
     try { broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_ended', label: `${nameFor(sessionId) || 'A teammate'} ended the call` }); } catch (e) {}
     return { ok: true, mode: 'end_call' };
   }
@@ -1401,6 +1431,9 @@ async function handleRecordingSaved(sessionId, recordingUrl) {
           transfer_recording_url: storedRecordingUrl || recordingUrl,
         });
         if (humanTranscript) meta.transfer_transcript = humanTranscript;
+        // Persist who listened / jumped in / handed back, for the post-call review.
+        const supEvents = getSupervisorEvents(sessionId);
+        if (supEvents.length) meta.supervisor_events = supEvents;
         const update = { call_metadata: meta };
         if (storedRecordingUrl) {
           if (callRow.recording_url && callRow.recording_url !== storedRecordingUrl) {
@@ -2001,6 +2034,7 @@ router.barge = {
   getSessionById,
   getSessionByVapiCallId,
   updateSession,
+  getSupervisorEvents,
 };
 
 module.exports = router;
