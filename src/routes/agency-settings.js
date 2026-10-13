@@ -510,6 +510,11 @@ async function getAgencySettings(req, res) {
         email: agency.email,
         phone: agency.phone,
         
+        // Account type: a call-center agency gets the live wallboard + agent
+        // roles. The owner's authenticated dashboard reads this to show the Live
+        // Calls tab, so it must be on this (authenticated) shape, not only the
+        // public projection above.
+        is_call_center: agency.is_call_center === true,
         // Status
         status: agency.status,
         subscription_status: agency.subscription_status,
