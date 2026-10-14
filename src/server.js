@@ -1780,6 +1780,10 @@ app.use('/api/agency', require('./routes/discount-codes'));
 app.use('/api/agency', require('./routes/agency-wallboard'));
 // Call-center analytics + live-ops overview for the dedicated /cc dashboard.
 app.use('/api/agency', require('./routes/cc-analytics'));
+// Call-center agent real-time plane: presence, escalation offer stream + claim.
+// Self-authenticating (JWT in header, or ?token= for the SSE stream), so it is
+// mounted on its own prefix with no shared gate.
+app.use('/api/cc', require('./routes/cc-agents'));
 app.use('/api/agency', testClientRoutes);
 app.use('/api/agency', agencyTemplatesRoutes);
 app.use('/api/agency', aiPlaygroundRoutes);

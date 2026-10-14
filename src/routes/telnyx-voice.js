@@ -57,6 +57,10 @@ const { sendCallNotificationSMS } = require('../lib/notifications');
 const spaces = require('../lib/spaces');
 const liveMonitor = require('../lib/live-monitor-bus');
 const { broadcastLiveEvent } = require('../lib/live-broadcast');
+// Call-center escalation routing (opt-in, call-center agencies only).
+const agentPresence = require('../lib/agent-presence');
+const escalationOffers = require('../lib/escalation-offers');
+const { broadcastToAgents } = require('../lib/agent-channel');
 const {
   callAction,
   answerCall,
@@ -107,6 +111,12 @@ const GATHER_TIMEOUT_MS = 10000;
 // (set to 25s on the request_human_transfer tool in the config builder) so VAPI
 // does not time the tool out first.
 const TRANSFER_WAIT_MS = 27000;
+// Call-center escalation: how long to wait for an assigned agent to take an
+// offered call (claim it, or jump in from the browser) before falling back to
+// the business's own line. A slice of the transfer budget, so the fallback dial
+// still fits. Once an agent actively claims, we extend the wait for them to
+// finish connecting (up to the shared transfer deadline).
+const ESCALATION_OFFER_WAIT_MS = Number(process.env.ESCALATION_OFFER_WAIT_MS || 10000);
 // Pause after the AI calls the transfer tool, before we take the caller off the
 // AI, so the AI's short "connecting you" line finishes instead of being cut off
 // mid sentence. The caller stays bridged to the AI during this pause.
@@ -1742,7 +1752,7 @@ router.post('/api/voice/request-transfer', async (req, res) => {
       const hit = transferTargets.find(x => x && x.label === transferToLabel);
       if (hit && hit.number) chosenNumber = hit.number;
     }
-    const officeNumber = toE164(chosenNumber || session.office_number || client?.transfer_phone || client?.owner_phone);
+    let officeNumber = toE164(chosenNumber || session.office_number || client?.transfer_phone || client?.owner_phone);
     const businessDid = toE164(client?.vapi_phone_number) || officeNumber;
     if (transferToLabel) console.log(`telnyx-voice: transfer_to="${transferToLabel}" -> ${officeNumber}${chosenNumber ? '' : ' (no match, used main line)'}`);
 
@@ -1750,7 +1760,7 @@ router.post('/api/voice/request-transfer', async (req, res) => {
     // name. A chosen staff label looks like "Jonathan, Stylist"; the main line
     // falls back to the owner's first name.
     const firstName = (s) => (s ? String(s).split(',')[0].trim().split(/\s+/)[0] : '') || '';
-    const recipientName = chosenNumber ? firstName(transferToLabel) : firstName(client?.owner_name);
+    let recipientName = chosenNumber ? firstName(transferToLabel) : firstName(client?.owner_name);
 
     if (!officeNumber) {
       return reply('There is no team phone number on file to transfer to. Apologize and offer to book an appointment or take a detailed message instead.');
@@ -1762,6 +1772,118 @@ router.post('/api/voice/request-transfer', async (req, res) => {
       console.warn(`telnyx-voice: transfer number equals business DID (session ${session.id}) - refusing to avoid a loop`);
       return reply('I am not able to connect that call right now. Apologize and offer to book an appointment or take a detailed message instead.');
     }
+
+    // Single budget shared by the escalation wait AND the dial poll below, so
+    // the whole handler stays within the VAPI tool timeout no matter the path.
+    const transferDeadline = Date.now() + TRANSFER_WAIT_MS;
+
+    // ---- Call-center escalation routing (opt-in; call-center agencies only) ----
+    // Before dialing the business's own line, offer the caller to the assigned,
+    // available agents - a screen-pop in their /cc console. A browser agent takes
+    // over through the existing jump-in (we keep the call 'active' and watch for
+    // them to bridge); a phone agent is dialed at their own number through the
+    // normal gate below. Fully gated: a non-call-center agency, or one with no
+    // agent online, skips this entire block and dials exactly as before. The
+    // whole block is best-effort - any error falls through to the business line.
+    try {
+      const escAgencyId = client?.agency_id || session.agency_id;
+      let isCallCenter = false;
+      if (escAgencyId) {
+        const { data: agency } = await supabase.from('agencies').select('is_call_center').eq('id', escAgencyId).maybeSingle();
+        isCallCenter = !!(agency && agency.is_call_center);
+      }
+      if (isCallCenter) {
+        const avail = await agentPresence.listAvailableForClient({ agencyId: escAgencyId, clientId: session.client_id });
+        if (avail.length) {
+          const offeredTo = avail.map((a) => a.memberUserId);
+          const offer = await escalationOffers.createOffer({
+            agencyId: escAgencyId, clientId: session.client_id, sessionId: session.id,
+            vapiCallId, callerNumber: session.caller_number || null,
+            businessName: client?.business_name || null,
+            reason: 'A caller asked to speak with a person', summary,
+            collected: null, offeredTo,
+          });
+          if (offer) {
+            const popPayload = {
+              id: offer.id, clientId: session.client_id, vapiCallId,
+              businessName: client?.business_name || null,
+              callerNumber: session.caller_number || null,
+              reason: offer.reason, summary,
+              createdAt: offer.created_at, expiresAt: offer.expires_at,
+            };
+            broadcastToAgents(offeredTo, { type: 'offer', offer: popPayload });
+            try {
+              broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'agent_offer', label: `Offered to ${offeredTo.length} agent${offeredTo.length === 1 ? '' : 's'}` });
+            } catch (e) {}
+
+            // Only 'agent_bridged' means a human actually took the caller. NOT
+            // 'conferencing': ensureConference flips to it transiently while a
+            // browser agent is merely LISTENING (then back to 'active'), so
+            // treating it as connected would hand off on a listen.
+            const BRIDGED = ['agent_bridged'];
+            let waitUntil = Date.now() + ESCALATION_OFFER_WAIT_MS;
+            let phoneRouted = false;    // a phone agent took it -> dial their number below
+            let browserClaimed = false; // a browser agent committed -> hold for their jump-in
+
+            while (Date.now() < Math.min(waitUntil, transferDeadline - 1500)) {
+              await new Promise((r) => setTimeout(r, 700));
+              const s = await getSessionById(session.id);
+              // A transient read miss (null) is not a hangup - a real hangup
+              // comes back as status 'ended' below. Just retry on null.
+              if (!s) { continue; }
+              if (s.status === 'ended') { await escalationOffers.resolveOffer(offer.id, 'cancelled'); return reply('The caller has hung up. The call is over.'); }
+              if (BRIDGED.includes(s.status)) {
+                await escalationOffers.resolveOffer(offer.id, 'connected');
+                return reply('Connecting you now. Do not say anything further; the team member is taking over the call.');
+              }
+              const o = await escalationOffers.getOffer(offer.id);
+              if (o && o.status === 'claimed') {
+                if (o.claimed_delivery === 'phone') {
+                  let ph = null;
+                  try {
+                    const { data: tm } = await supabase.from('team_members')
+                      .select('agent_phone, display_name')
+                      .eq('entity_type', 'agency').eq('entity_id', escAgencyId)
+                      .eq('member_user_id', o.claimed_by).maybeSingle();
+                    ph = tm?.agent_phone || null;
+                    if (tm?.display_name) recipientName = firstName(tm.display_name);
+                  } catch (e) {}
+                  const phE164 = toE164(ph);
+                  if (phE164 && !(businessDid && phE164 === businessDid)) {
+                    officeNumber = phE164;         // dial the agent, not the office
+                    phoneRouted = true;
+                    break;                          // fall through to the gate/dial below
+                  }
+                  // Unusable number: release the claim back to the pool and keep waiting.
+                  await escalationOffers.resolveOffer(offer.id, 'open');
+                } else if (!browserClaimed) {
+                  // Browser agent committed: give them the rest of the budget to
+                  // finish listen + jump-in (which flips status into BRIDGED above).
+                  browserClaimed = true;
+                  waitUntil = transferDeadline - 1500;
+                  try { broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'agent_taking', label: `${o.claimed_name || 'A teammate'} is taking the call` }); } catch (e) {}
+                }
+              }
+            }
+
+            if (!phoneRouted) {
+              if (browserClaimed) {
+                // An agent grabbed it but never connected - take a message rather
+                // than silently ringing the business owner.
+                await escalationOffers.resolveOffer(offer.id, 'expired').catch(() => {});
+                await returnToAI(session.id, 'agent_no_show');
+                return reply('I could not get a team member onto the line in time, so you are back with the caller. Apologize and offer to take a detailed message with their name, number, and reason for calling.');
+              }
+              // No agent responded: fall through to the business line, unchanged.
+              await escalationOffers.resolveOffer(offer.id, 'no_agents').catch(() => {});
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('telnyx-voice: call-center escalation routing skipped:', e.message);
+    }
+    // ---- end call-center escalation routing ----
 
     await updateSession(session.id, { status: 'transferring', whisper_summary: summary });
 
@@ -1814,8 +1936,10 @@ router.post('/api/voice/request-transfer', async (req, res) => {
     // Poll the session status (the shared store) until a Telnyx-driven handler
     // settles the transfer, or we time out. Polling the DB (rather than holding
     // an in-memory promise) means this resolves whether the Telnyx events land
-    // on this instance or another one.
-    const deadline = Date.now() + TRANSFER_WAIT_MS;
+    // on this instance or another one. Uses the shared transfer deadline so any
+    // time already spent offering the call to agents is counted against the same
+    // budget (the whole handler stays within the VAPI tool timeout).
+    const deadline = transferDeadline;
     let outcome = 'pending';
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 1000));
