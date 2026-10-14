@@ -208,7 +208,15 @@ When he asks you to add a task, book time, start a goal, add a step, create a bu
 
 Whatever he tells you on this call goes onto his On Deck list as a task, using hq_add_task. It does not matter how he phrases it. "Remind me to call Erik," "note that the invoice is due," or just "the Telnyx thing," all of it is a to-do on On Deck. There is no separate notes or reminders bucket here, never try to file something as a note or a reminder, it all becomes a task. The only things that are not plain to-dos are the specific actions below: booking time on his calendar, starting a goal or adding a step, creating a business or project, filing a task under a business, marking something done, or reading things back. Everything else is a task.
 
-Capture what he actually needs to do, in a few clear words. If he says "make a to-do for the Secretary business" or "add a task to fix the admin panel," the task is the real thing ("fix the admin panel" or "set up the Secretary business"), never the literal instruction like "make a to-do" or "create a task," which is meaningless on his list. Never create two tasks for the same thing, if he repeats himself or rephrases, it is one task, not two. Think about what he actually means and put that on the list.
+Capture what he actually needs to do, in a few clear words, in HIS words. This is the thing he gets wrong about you most, so get it exactly right:
+
+- Strip the command off the front and save only the real task. The words "make a to-do," "add a task," "create a task," "put on my list," "remind me to," "note that," "jot down," "set a reminder to" are NEVER part of the task text. They are how he asks, not what the task is.
+- "Make a to-do to fix the admin panel" saves as "fix the admin panel." "Remind me to call Erik about the septic pilot" saves as "call Erik about the septic pilot." "Add a task for the Telnyx invoice" saves as "Telnyx invoice" or "pay the Telnyx invoice." "Note that the Southern Peach site needs the new photos" saves as "add the new photos to the Southern Peach site."
+- If the task text you are about to save still contains "to-do," "task," "reminder," or "note" as a leading word, you got it wrong, fix it before you call the tool.
+- Save what he said, do not reword it into your own phrasing or invent detail he did not say. Keep his nouns and names.
+- Never create two tasks for the same thing; if he repeats himself or rephrases, it is one task, not two.
+
+After you add a task, say the actual task text you saved back to him in a few natural words, so if a word came through wrong he can catch it right then. For example, "Got it, call Erik about the septic pilot, on your list." If he says that is not what he meant or a word is off, fix it: complete or re-add so the list is right.
 
 # How you talk, so you never sound like a machine
 
@@ -365,6 +373,25 @@ const JARVIS_VOICE = {
   optimizeStreamingLatency: 3,
 };
 
+// Transcriber: Deepgram nova-3 (newer and more accurate than the nova-2 this
+// line used, and at least on par with the receptionist which runs nova-3) with
+// keyterm prompting to boost the proper nouns and domain words Gibson actually
+// says, so they stop getting mangled. Keyterm is nova-3 English-only, which is
+// why language is 'en' here (and why this is sharper than the receptionist's
+// multi-language config). smartFormat cleans up numbers, times, and the like.
+const JARVIS_TRANSCRIBER = {
+  provider: 'deepgram',
+  model: 'nova-3',
+  language: 'en',
+  smartFormat: true,
+  keyterm: [
+    'VoiceAI Connect', 'CallBird', 'ScopeBook', 'Haul It All', 'Rocket Solutions',
+    'GTC Group', 'Southern Beacon', 'Splash Restoration', 'Southern Peach', 'JB Lawn Care',
+    'Fir and Forge', 'Forward Fitness', 'Blasting Bins', 'Telnyx', 'Vapi', 'Supabase',
+    'Deepgram', 'ElevenLabs', 'Erik Schwab', 'Jacob Brewer', 'On Deck', 'Gibson',
+  ],
+};
+
 // Turn-taking: responds a little quicker than before but still holds through
 // his pauses instead of jumping in, so it feels attentive, not robotic.
 const JARVIS_SPEAKING_PLANS = {
@@ -389,11 +416,14 @@ async function buildJarvisConfig() {
   }
   return {
     name: 'Jarvis',
-    transcriber: { provider: 'deepgram', model: 'nova-2', language: 'en' },
+    transcriber: JARVIS_TRANSCRIBER,
     model: {
       provider: 'openai',
       model: JARVIS_MODEL,
-      temperature: 0.7,
+      // Lower than before so tool arguments (the task text he dictates) come out
+      // literal and reliable, not creatively reworded. Warmth lives in the voice
+      // and the prompt, not in a high sampling temperature.
+      temperature: 0.4,
       messages: [{ role: 'system', content: getJarvisSystemPrompt(plate) }],
       tools: getJarvisTools(),
     },
@@ -718,6 +748,7 @@ async function handleJarvisWebhook(req, res) {
 module.exports = {
   handleJarvisWebhook,
   JARVIS_VOICE,
+  JARVIS_TRANSCRIBER,
   JARVIS_SPEAKING_PLANS,
   JARVIS_MODEL,
   getJarvisTools,

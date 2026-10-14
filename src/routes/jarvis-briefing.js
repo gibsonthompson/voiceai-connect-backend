@@ -41,7 +41,7 @@ const items = require('../lib/hq-items');
 const news = require('../lib/briefing-news');
 const { getPlatformSetting } = require('../lib/vapi');
 const {
-  JARVIS_VOICE, JARVIS_SPEAKING_PLANS, JARVIS_MODEL, getJarvisTools,
+  JARVIS_VOICE, JARVIS_TRANSCRIBER, JARVIS_SPEAKING_PLANS, JARVIS_MODEL, getJarvisTools,
 } = require('../webhooks/vapi-jarvis-webhook');
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
@@ -90,7 +90,7 @@ async function buildBriefingAssistant(ctx, briefingText) {
   const text = briefingText || await renderBriefingText(ctx);
   return {
     name: 'Jarvis Briefing',
-    transcriber: { provider: 'deepgram', model: 'nova-2', language: 'en' },
+    transcriber: JARVIS_TRANSCRIBER,
     model: {
       provider: 'openai', model: JARVIS_MODEL, temperature: 0.6,
       messages: [{ role: 'system', content: briefingQASystemPrompt(ctx) }],
