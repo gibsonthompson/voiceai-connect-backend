@@ -1784,6 +1784,8 @@ app.use('/api/agency', require('./routes/cc-analytics'));
 app.use('/api/agency', require('./routes/cc-calls'));
 // Call-center messages & callbacks inbox: the follow-up worklist agents clear.
 app.use('/api/agency', require('./routes/cc-messages'));
+// Call-center business config: configure a business's AI from inside /cc.
+app.use('/api/agency', require('./routes/cc-business-config'));
 // Call-center agent real-time plane: presence, escalation offer stream + claim.
 // Self-authenticating (JWT in header, or ?token= for the SSE stream), so it is
 // mounted on its own prefix with no shared gate.
