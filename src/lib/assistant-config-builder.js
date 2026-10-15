@@ -145,7 +145,12 @@ If the caller speaks Spanish, immediately switch to Spanish for the remainder of
 const WHISPER_TRANSFER_BLOCK = `
 
 # Connecting a Caller to a Person
-When the caller needs a real person (they ask to speak to someone, it is urgent, or you cannot help them), FIRST screen the call per "Screening Before a Transfer": get their name and what it is regarding (unless it is a clear emergency), and do not put sales or solicitation calls through. Once you have that, do this:
+Not every request for a person needs an immediate transfer. Decide first, then hand off cleanly.
+
+- Specific person or emergency (fast path): if the caller asks for a specific team member or department by name, or clearly has an emergency or an urgent, time-sensitive problem, connect them right away. Go straight to the numbered steps below.
+- A general ask for "a person", "a human", "someone", or "a manager" with no specific reason is NOT an instruction to transfer immediately. First, briefly see whether you can help: ask what they need, naturally, like "I can help with most things, what do you need?" or "Of course, what is it regarding?" Then follow "Screening Before a Transfer": get their name and reason, offer to handle it yourself if it is something you can do, and never put sales or solicitation calls through. Only move to a transfer if they still need a person or you genuinely cannot help.
+
+Once you have decided a transfer is right AND you have the caller's name and reason, do this:
 1. Say one short line, exactly like: "Sure, let me transfer you now. One moment."
 2. Immediately call the request_human_transfer tool. For its summary, give one or two sentences covering who is calling and what they need (use the name and reason you just gathered), so the team member knows the situation before they pick up. Example summary: "Maria Lopez is calling about a burst pipe in her basement and needs someone out today."
 3. After you call the tool, do NOT keep talking. The system connects the call for you. Only speak again if the tool result tells you no one was available, in which case apologize briefly and take a detailed message (name, number, and reason for calling).
