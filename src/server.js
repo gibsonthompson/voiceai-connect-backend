@@ -1269,6 +1269,25 @@ app.put('/api/agency/:agencyId/clients/:clientId', requireAgencyAccess('clients'
       }
     }
 
+    // Post-call recap SMS, per-business on/off the agency sets for this client.
+    // false = never send; true or unset = send. No agency-wide default.
+    if (req.body.post_call_sms_enabled !== undefined) {
+      const v = req.body.post_call_sms_enabled;
+      updates.post_call_sms_enabled = !(v === false || v === 'off');
+    }
+    // Optional recap recipient override, normalized to E.164 (empty clears it,
+    // falling back to owner_phone). Always the business owner, never a CC line.
+    if (req.body.notification_phone !== undefined) {
+      const raw = String(req.body.notification_phone || '').trim();
+      let p = null;
+      if (raw) {
+        if (/^\+[1-9]\d{6,14}$/.test(raw)) p = raw;
+        else { const d = raw.replace(/\D/g, ''); p = d.length === 10 ? `+1${d}` : (d.length === 11 && d.startsWith('1')) ? `+${d}` : null; }
+        if (!p) return res.status(400).json({ error: 'Notification phone is not a valid number.' });
+      }
+      updates.notification_phone = p;
+    }
+
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ error: 'No valid fields to update' });
     }

@@ -211,6 +211,24 @@ router.put('/:id/settings', requirePermissionIfAuthed('settings'), async (req, r
     if (hipaa_mode !== undefined) updates.hipaa_mode = hipaa_mode === true;
     if (onboarding_completed !== undefined) updates.onboarding_completed = onboarding_completed === true;
     if (typeof timezone === 'string' && timezone.trim()) updates.timezone = timezone.trim();
+    // Post-call recap SMS, per-business on/off. Accepts a boolean or the
+    // 'on'/'off' strings; false = never send, anything else = send.
+    if (req.body.post_call_sms_enabled !== undefined) {
+      const v = req.body.post_call_sms_enabled;
+      updates.post_call_sms_enabled = !(v === false || v === 'off');
+    }
+    // Optional recap recipient override (business owner's line). Normalized to
+    // E.164; empty clears it and the recap falls back to owner_phone.
+    if (req.body.notification_phone !== undefined) {
+      const raw = String(req.body.notification_phone || '').trim();
+      let p = null;
+      if (raw) {
+        if (/^\+[1-9]\d{6,14}$/.test(raw)) p = raw;
+        else { const d = raw.replace(/\D/g, ''); p = d.length === 10 ? `+1${d}` : (d.length === 11 && d.startsWith('1')) ? `+${d}` : null; }
+        if (!p) return res.status(400).json({ error: 'Notification phone is not a valid number.' });
+      }
+      updates.notification_phone = p;
+    }
     const { data, error } = await supabase.from('clients').update(updates).eq('id', id).select().single();
     if (error) return res.status(400).json({ error: error.message });
     res.json({ success: true, client: data });

@@ -122,9 +122,13 @@ router.get('/clients/:id', async (req, res) => {
 router.patch('/clients/:id', requireScope('read_write'), async (req, res) => {
   try {
     const b = req.body || {};
-    const allowed = ['business_name', 'industry', 'business_city', 'business_state', 'country', 'business_website', 'owner_name', 'owner_phone', 'notification_phone', 'email'];
+    const allowed = ['business_name', 'industry', 'business_city', 'business_state', 'country', 'business_website', 'owner_name', 'owner_phone', 'notification_phone', 'email', 'post_call_sms_enabled'];
     const updates = {};
     for (const f of allowed) if (b[f] !== undefined) updates[f] = b[f];
+    // Post-call recap SMS override: coerce to a strict boolean (false = off).
+    if (updates.post_call_sms_enabled !== undefined) {
+      updates.post_call_sms_enabled = updates.post_call_sms_enabled !== false;
+    }
     if (Object.keys(updates).length === 0) {
       return fail(res, 400, 'invalid_request', 'No updatable fields provided.');
     }

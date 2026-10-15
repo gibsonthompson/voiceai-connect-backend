@@ -249,6 +249,27 @@ async function sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName, 
 // CLIENT SMS NOTIFICATIONS
 // ============================================================================
 async function sendCallNotificationSMS(client, agency, callData) {
+  // Post-call recap SMS gate. Single choke point for BOTH call paths (the VAPI
+  // webhook and the Telnyx warm-transfer recap). Per-business switch:
+  //   clients.post_call_sms_enabled === false -> never send
+  //   true or unset (null)                     -> send (unset preserves the
+  //                                               original always-on behavior)
+  // Set per business either by the owner in their own dashboard or by the agency
+  // from that client's settings. Recipient is the business owner, NEVER a
+  // call-center operator line: notification_phone wins, otherwise owner_phone.
+  // For a call-center client this keeps the recap pointed at the end business;
+  // the call center's agents are alerted separately via the live / team path.
+  const enabled = !client || client.post_call_sms_enabled !== false;
+  const recipient = (client && (client.notification_phone || client.owner_phone)) || null;
+  if (!enabled) {
+    console.log(`📵 Post-call SMS off for ${client?.business_name || client?.id}`);
+    return false;
+  }
+  if (!recipient) {
+    console.log(`📵 Post-call SMS: no recipient phone for ${client?.business_name || client?.id}`);
+    return false;
+  }
+
   const { customerName, customerPhone, urgency, summary } = callData;
   const brandName = agency?.name || 'VoiceAI Connect';
   let smsMessage = `🔔 New Call - ${client.business_name}\nCustomer: ${customerName}\nPhone: ${customerPhone}\n`;
@@ -259,7 +280,7 @@ async function sendCallNotificationSMS(client, agency, callData) {
   // messaging profile well before any call, so it's registered by call-time. If
   // the client has no AI number on record, fall to the agency's warm demo number
   // before ever touching the platform number, so the owner never sees 505.
-  const sent = await _logSMS({ phone: client.owner_phone, message: smsMessage, from: client.vapi_phone_number || agency?.demo_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_call_notification', metadata: { clientName: client.business_name, customerName, urgency } });
+  const sent = await _logSMS({ phone: recipient, message: smsMessage, from: client.vapi_phone_number || agency?.demo_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_call_notification', metadata: { clientName: client.business_name, customerName, urgency } });
   if (!sent && client.vapi_phone_number) {
     // The client's own number isn't SMS-ready yet (not on the messaging profile /
     // 10DLC campaign). Retry from the platform number so the owner still gets the
@@ -276,7 +297,7 @@ async function sendCallNotificationSMS(client, agency, callData) {
         .then((r) => console.log(`\ud83d\udd27 SMS self-heal ${client.vapi_phone_number}: profile=${r.profileAssigned} campaign=${r.campaignAssigned}`))
         .catch((e) => console.warn(`SMS self-heal failed for ${client.vapi_phone_number}:`, e.message));
     } catch (e) { console.warn('SMS self-heal could not start:', e.message); }
-    return _logSMS({ phone: client.owner_phone, message: smsMessage, from: agency?.demo_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_call_notification', metadata: { clientName: client.business_name, customerName, urgency, fallback: agency?.demo_phone_number ? 'demo' : 'platform' } });
+    return _logSMS({ phone: recipient, message: smsMessage, from: agency?.demo_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_call_notification', metadata: { clientName: client.business_name, customerName, urgency, fallback: agency?.demo_phone_number ? 'demo' : 'platform' } });
   }
   return sent;
 }

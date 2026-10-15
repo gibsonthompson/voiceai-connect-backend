@@ -61,7 +61,7 @@ function sanitizeHours(input) {
 async function scopedClient(agencyId, clientId) {
   const { data: client } = await supabase
     .from('clients')
-    .select('id, agency_id, business_name, owner_name, owner_phone, transfer_phone, timezone, greeting_message, business_hours, forwarding_mode, human_handoff, service_areas, vapi_phone_number, forwarding_confirmed, voice_routing')
+    .select('id, agency_id, business_name, owner_name, owner_phone, notification_phone, post_call_sms_enabled, transfer_phone, timezone, greeting_message, business_hours, forwarding_mode, human_handoff, service_areas, vapi_phone_number, forwarding_confirmed, voice_routing')
     .eq('id', clientId).maybeSingle();
   if (!client) return { error: 'Business not found', code: 404 };
   if (client.agency_id !== agencyId) return { error: 'Business not found', code: 404 };
@@ -80,6 +80,12 @@ router.get('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
         businessName: c.business_name || '',
         ownerName: c.owner_name || '',
         ownerPhone: c.owner_phone || '',
+        // Post-call recap SMS to the business owner. Per-business on/off; unset
+        // (null) is treated as on, preserving the original always-on behavior.
+        postCallSms: c.post_call_sms_enabled !== false,
+        // Where the recap goes: the business owner. notification_phone overrides
+        // owner_phone when set, so it can be pinned to the owner's own cell.
+        notificationPhone: c.notification_phone || '',
         transferPhone: c.transfer_phone || '',
         timezone: c.timezone || '',
         greeting: c.greeting_message || '',
@@ -123,6 +129,15 @@ router.put('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
         return res.status(400).json({ success: false, error: 'Escalation number cannot be the business’s own AI number.' });
       }
       updates.transfer_phone = p;
+    }
+    if (b.postCallSms !== undefined) {
+      // Explicit per-business on/off (true/false). No inherit state.
+      updates.post_call_sms_enabled = (b.postCallSms === true || b.postCallSms === 'on');
+    }
+    if (b.notificationPhone !== undefined) {
+      const p = toE164(b.notificationPhone);
+      if (b.notificationPhone && !p) return res.status(400).json({ success: false, error: 'Notification phone is not a valid number.' });
+      updates.notification_phone = p;
     }
     if (b.forwardingMode !== undefined) updates.forwarding_mode = b.forwardingMode === 'missed' ? 'missed' : 'all';
     if (b.humanHandoff !== undefined) updates.human_handoff = b.humanHandoff === 'message' ? 'message' : 'transfer';

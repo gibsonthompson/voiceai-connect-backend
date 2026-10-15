@@ -1344,7 +1344,7 @@ async function handleRecordingSaved(sessionId, recordingUrl) {
 
     const { data: client } = await supabase
       .from('clients')
-      .select('id, agency_id, business_name, owner_phone, vapi_phone_number, industry, hipaa_mode')
+      .select('id, agency_id, business_name, owner_phone, notification_phone, post_call_sms_enabled, vapi_phone_number, industry, hipaa_mode')
       .eq('id', session.client_id).single();
     if (!client) return;
 
