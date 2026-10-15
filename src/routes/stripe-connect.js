@@ -1091,7 +1091,7 @@ async function getConnectFinancials(req, res) {
       connected: true,
       charges_enabled: account.charges_enabled,
       payouts_enabled: account.payouts_enabled,
-      display_currency: agency.display_currency || agency.currency || 'usd',
+      display_currency: (agency.display_currency || agency.currency || 'usd').toLowerCase(),
       available: mapAmounts(balance.available),
       pending: mapAmounts(balance.pending),
       instant_available: mapAmounts(balance.instant_available),
