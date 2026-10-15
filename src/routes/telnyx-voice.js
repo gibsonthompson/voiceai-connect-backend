@@ -1980,6 +1980,39 @@ router.post('/api/voice/request-transfer', async (req, res) => {
 });
 
 
+// Compose a saved-link/info SMS. A business can save either a full message
+// ("Hi! Here's our booking link: https://...  See you soon!") or just a bare
+// value (a lone link, an address, a short token). A full message is sent
+// verbatim, exactly as written. A BARE value is wrapped in a short, friendly
+// message so the caller gets "Thanks for calling Bella's Salon! Here's the
+// coloring website you asked about: <link> ..." instead of a naked URL.
+//   biz        - business name (no wrapper if we don't have it)
+//   key        - the preset/snippet key (for a tailored lead line)
+//   descriptor - human label for the generic lead ("coloring website")
+//   value      - the saved value to send
+function composeSavedSms(biz, key, descriptor, value) {
+  const val = (value || '').toString().trim();
+  if (!val || !biz) return val;
+  // Bare = a lone token (a URL of any length, no spaces) OR a short value with
+  // no sentence punctuation or line breaks. Anything else is already prose and
+  // is sent word-for-word.
+  const bare = !/\s/.test(val) || (val.length <= 120 && !/[.!?]\s/.test(val) && !/\n/.test(val));
+  if (!bare) return val;
+  const k = (key || '').toString().toLowerCase();
+  const lead = ({
+    website: `Thanks for calling ${biz}! Here's our website:`,
+    address: `Thanks for calling ${biz}! Here's where to find us:`,
+    booking: `Thanks for calling ${biz}! Here's the link to book:`,
+    booking_link: `Thanks for calling ${biz}! Here's the link to book:`,
+    payment: `Here's your secure payment link from ${biz}:`,
+    payment_link: `Here's your secure payment link from ${biz}:`,
+    review: `It was great talking with you! If you have a moment, we'd really appreciate a quick review for ${biz}:`,
+    review_link: `It was great talking with you! If you have a moment, we'd really appreciate a quick review for ${biz}:`,
+  })[k] || `Thanks for calling ${biz}! Here's the ${(descriptor || 'link').toString().trim()} you asked about:`;
+  const closer = (k === 'review' || k === 'review_link') ? 'Thank you!' : "Let us know if there's anything else we can help with!";
+  return `${lead}\n${val}\n\n${closer}`;
+}
+
 // ============================================================================
 // AI SENDS SMS TO CALLER
 // The assistant's send_sms function tool calls this to text the person on the
@@ -2062,31 +2095,22 @@ router.post('/api/voice/send-sms', async (req, res) => {
     } catch (e) {}
 
     if (savedKey) {
+      const biz = client && client.business_name;
       const preset = client && client.tool_config && client.tool_config.smsPresets && client.tool_config.smsPresets[savedKey];
       if (preset && preset.enabled && (preset.value || '').toString().trim()) {
-        const value = preset.value.toString().trim();
-        const looksBare = value.length <= 90 && !/[.!?]\s/.test(value) && !/\n/.test(value);
-        if (looksBare && client.business_name) {
-          const biz = client.business_name;
-          const lead = {
-            website: `Thanks for calling ${biz}! Here's our website so you can take a look:`,
-            address: `Thanks for calling ${biz}! Here's where to find us:`,
-            payment: `Here's your secure payment link from ${biz}:`,
-            review: `It was great talking with you! If you have a moment, we'd really appreciate a quick review for ${biz}:`,
-          }[savedKey] || `Thanks for calling ${biz}! Here's what you asked for:`;
-          const closer = savedKey === 'review' ? 'Thank you!' : 'Let us know if there\'s anything else we can help with!';
-          text = `${lead}\n${value}\n\n${closer}`;
-        } else {
-          text = value;
-        }
+        // Built-in preset (website / address / booking / payment / review): a
+        // bare link gets the friendly wrapper; a full message is sent verbatim.
+        text = composeSavedSms(biz, savedKey, savedKey.replace(/_/g, ' '), preset.value.toString().trim());
       } else {
         // Custom saved text ("+ Add a custom text"): the AI passes its name as
-        // the key. Match it (case-insensitive) and send the value WORD-FOR-WORD,
-        // exactly as the dashboard promises, without the friendly preset wrapper.
+        // the key. Match it (case-insensitive). A business that wrote a full
+        // message gets it word-for-word; one that saved just a link gets the
+        // same friendly wrapper, keyed off the snippet's own label (e.g.
+        // "coloring website"), so the caller never receives a naked URL.
         const snippets = (client && client.tool_config && Array.isArray(client.tool_config.smsSnippets)) ? client.tool_config.smsSnippets : [];
         const snip = snippets.find(s => s && (s.label || '').toString().trim().toLowerCase() === savedKey.toLowerCase() && (s.value || '').toString().trim());
         if (snip) {
-          text = snip.value.toString().trim();
+          text = composeSavedSms(biz, savedKey, (snip.label || '').toString().trim() || 'link', snip.value.toString().trim());
         } else if (!text) {
           return reply('That saved text is not set up, so nothing was sent. Read the information out loud instead.');
         }
