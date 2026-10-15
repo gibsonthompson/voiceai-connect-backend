@@ -164,7 +164,32 @@ async function authorizeClient(clientId, tokenRaw) {
     }
   }
 
+  // Attach the owning agency's plan + call-center flag so the barge/jump-in gate
+  // can decide whether live take-over is available (Scale plan or call center).
+  try {
+    const { data: ag } = await supabase
+      .from('agencies')
+      .select('plan_type, is_call_center')
+      .eq('id', client.agency_id)
+      .single();
+    client.agency_plan_type = ag ? ag.plan_type : null;
+    client.agency_is_call_center = !!(ag && ag.is_call_center);
+  } catch (e) {
+    client.agency_plan_type = null;
+    client.agency_is_call_center = false;
+  }
+
   return { ok: true, client, decoded };
+}
+
+// Live take-over (listen + jump-in) is a premium capability: available to call
+// centers (it is their core workflow) and to Scale-plan reseller agencies. Every
+// agency is still free to WATCH the live monitor; only the take-over controls are
+// gated. Requires an own-the-call (telnyx_cc) number, which is where a browser
+// endpoint can be bridged onto the caller.
+function bargeAllowed(client) {
+  if (!client || client.voice_routing !== 'telnyx_cc') return false;
+  return client.agency_is_call_center === true || client.agency_plan_type === 'scale';
 }
 
 function errText(code) {
@@ -213,7 +238,7 @@ router.get('/:id/live/info', async (req, res) => {
     // Browser human-barge ("jump in and talk") only works on own-the-call
     // (telnyx_cc) numbers, where we own the caller leg and can bridge a browser
     // endpoint to it. The UI shows/hides the jump-in control on this flag.
-    barge_supported: auth.client.voice_routing === 'telnyx_cc',
+    barge_supported: bargeAllowed(auth.client),
     // Supabase Realtime channel this viewer subscribes to for live events. The
     // name is an unguessable keyed HMAC of the client id, issued only here (to
     // an authorized viewer); the webhook broadcasts to the same name.
@@ -344,8 +369,8 @@ router.post('/:id/live/webrtc-token', async (req, res) => {
   const auth = await authorizeClient(req.params.id, req.headers.authorization);
   if (!auth.ok) return res.status(auth.code).json({ success: false, error: errText(auth.code) });
 
-  if (auth.client.voice_routing !== 'telnyx_cc') {
-    return res.status(409).json({ success: false, error: 'Live jump-in is available on own-the-call numbers only.' });
+  if (!bargeAllowed(auth.client)) {
+    return res.status(403).json({ success: false, error: 'Live jump-in is available on the Scale plan (and call-center accounts).' });
   }
 
   const { callId } = req.body || {};
@@ -407,6 +432,7 @@ router.post('/:id/live/webrtc-token', async (req, res) => {
 router.post('/:id/live/listen-start', async (req, res) => {
   const auth = await authorizeClient(req.params.id, req.headers.authorization);
   if (!auth.ok) return res.status(auth.code).json({ success: false, error: errText(auth.code) });
+  if (!bargeAllowed(auth.client)) return res.status(403).json({ success: false, error: 'Live take-over is available on the Scale plan (and call-center accounts).' });
 
   const { callId, agentName } = req.body || {};
   if (!callId) return res.status(400).json({ success: false, error: 'callId is required' });
@@ -454,6 +480,7 @@ router.post('/:id/live/listen-stop', async (req, res) => {
 router.post('/:id/live/jump-in', async (req, res) => {
   const auth = await authorizeClient(req.params.id, req.headers.authorization);
   if (!auth.ok) return res.status(auth.code).json({ success: false, error: errText(auth.code) });
+  if (!bargeAllowed(auth.client)) return res.status(403).json({ success: false, error: 'Live take-over is available on the Scale plan (and call-center accounts).' });
 
   const { callId } = req.body || {};
   if (!callId) return res.status(400).json({ success: false, error: 'callId is required' });
