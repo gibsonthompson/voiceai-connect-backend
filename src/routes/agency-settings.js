@@ -1113,6 +1113,7 @@ async function updateAgencySettings(req, res) {
     }
 
     // ── Plans array (Path B): validate keys, fields, and guard deletions ──────
+    let derivedPlanFeatures = null;
     if (sanitizedUpdates.plans !== undefined) {
       const incoming = sanitizedUpdates.plans;
       if (!Array.isArray(incoming) || incoming.length === 0) {
@@ -1197,6 +1198,17 @@ async function updateAgencySettings(req, res) {
       }
 
       sanitizedUpdates.plans = normalized;
+
+      // Keep the legacy plan_features object in sync with the plans editor. The
+      // client-side feature gate (useClientPlanFeatures) and server enforcement
+      // read agency.plan_features[plan_type], NOT plans[].features. Saving only
+      // plans[].features let the two drift: a feature the agency toggled on in
+      // the plans editor still read as locked for their clients (e.g. custom
+      // voice showing on in pricing but locked on the client). Derive
+      // plan_features from the normalized plans (keys already assigned above) so
+      // the gate always matches what the agency configured. Applied AFTER the
+      // legacy plan_features validation below so arbitrary plan keys are allowed.
+      derivedPlanFeatures = Object.fromEntries(normalized.map((p) => [p.key, p.features || {}]));
     }
 
     for (const field of ['included_minutes_starter', 'included_minutes_pro', 'included_minutes_growth']) {
@@ -1327,7 +1339,15 @@ async function updateAgencySettings(req, res) {
         return res.status(400).json({ error: 'Invalid plan_features structure' });
       }
     }
-    
+
+    // Apply the plans-derived plan_features (computed when plans were normalized
+    // above) AFTER the legacy validation, which only accepts starter/pro/growth
+    // keys. This keeps the gate in sync for agencies with any plan keys and wins
+    // over any stale plan_features so the two can never drift again.
+    if (derivedPlanFeatures) {
+      sanitizedUpdates.plan_features = derivedPlanFeatures;
+    }
+
     // Sanitize calendar_enabled_plans if provided. In Path B each plan's own
     // google_calendar feature is the real gate (see gca.js checkPlanAccess), so
     // this column is only a legacy cache. Validate the shape, then keep only
