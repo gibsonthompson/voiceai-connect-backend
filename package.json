@@ -10,6 +10,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.95.2",
     "@aws-sdk/client-s3": "^3.1115.0",
+    "@stripe/connect-js": "^3.4.6",
+    "@stripe/react-connect-js": "^3.4.4",
     "@supabase/supabase-js": "^2.39.0",
     "axios": "^1.6.0",
     "bcryptjs": "^2.4.3",
@@ -22,8 +24,10 @@
     "googleapis": "^171.4.0",
     "jsonwebtoken": "^9.0.2",
     "jszip": "^3.10.1",
+    "mammoth": "^1.6.0",
     "multer": "^2.1.1",
     "node-fetch": "^2.7.0",
+    "pdf-parse": "^1.1.1",
     "puppeteer-core": "^24.40.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
@@ -32,8 +36,6 @@
     "stripe": "^14.0.0",
     "svg-to-pdfkit": "^0.1.8",
     "uuid": "^13.0.0",
-    "pdf-parse": "^1.1.1",
-    "mammoth": "^1.6.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
