@@ -506,7 +506,11 @@ async function handleAgencySignup(req, res) {
         limit_growth: 500,
         plan_features: DEFAULT_PLAN_FEATURES,
         referral_code: slug,
-        is_call_center: isCallCenter
+        is_call_center: isCallCenter,
+        // Call centers bill the businesses they serve offline (invoices), not via
+        // Stripe Connect, so their clients are created in manual billing mode
+        // (live immediately, no card/trial per client).
+        ...(isCallCenter ? { client_billing_mode: 'manual' } : {})
       })
       .select()
       .single();

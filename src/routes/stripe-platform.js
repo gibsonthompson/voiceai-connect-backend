@@ -1474,7 +1474,7 @@ async function warnExpiringAgencyTrials() {
 async function canAgencyAddClient(agencyId) {
   const { data: agency, error } = await supabase
     .from('agencies')
-    .select('id, plan_type, status, stripe_customer_id')
+    .select('id, plan_type, status, stripe_customer_id, is_call_center')
     .eq('id', agencyId)
     .single();
 
@@ -1495,6 +1495,14 @@ async function canAgencyAddClient(agencyId) {
     .eq('is_test_client', false);
 
   const current = count || 0;
+
+  // Call centers bill the businesses they serve offline (manual billing), so
+  // there is no per-client Stripe subscription item to attach and therefore no
+  // payment source required. They onboard businesses straight away; the
+  // reseller card gate below does not apply to them.
+  if (agency.is_call_center === true) {
+    return { allowed: true, current, limit: -1 };
+  }
 
   // Free agencies need a Stripe customer before they can add real clients,
   // because per-client billing attaches a subscription item that requires
