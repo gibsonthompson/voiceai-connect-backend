@@ -990,6 +990,39 @@ async function syncConnectBrandingHandler(req, res) {
 //   recent_charges  : last 10 charges with light customer info for a
 //                     "recent client payments" list
 // ============================================================================
+// Pull this agency's client payments from our own payments table (written by
+// the Stripe webhook), joined to the paying client's business. This is the
+// authoritative record and shows reliably with the business name even when the
+// live Stripe charge list is empty (test-mode data, or subscription invoice
+// charges that don't surface as standalone charges on the connected account).
+// Best-effort: never let it block the rest of the payload.
+async function getAgencyClientPayments(agencyId) {
+  try {
+    const { data: pays } = await supabase
+      .from('payments')
+      .select('id, amount, currency, status, type, description, plan_type, created_at, client_id, clients(business_name, email)')
+      .eq('agency_id', agencyId)
+      .order('created_at', { ascending: false })
+      .limit(25);
+    return (pays || []).map((p) => ({
+      id: p.id,
+      amount: p.amount || 0,
+      currency: p.currency || 'usd',
+      status: p.status || null,
+      type: p.type || null,
+      description: p.description || null,
+      plan_type: p.plan_type || null,
+      created: p.created_at ? new Date(p.created_at).getTime() : null,
+      business_name: (p.clients && p.clients.business_name) || null,
+      customer_email: (p.clients && p.clients.email) || null,
+      is_trial: (p.amount || 0) === 0,
+    }));
+  } catch (e) {
+    console.error('client payments query failed (non-blocking):', e.message);
+    return [];
+  }
+}
+
 async function getConnectFinancials(req, res) {
   try {
     const { agencyId } = req.params;
@@ -1001,16 +1034,29 @@ async function getConnectFinancials(req, res) {
       .single();
 
     if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
-    if (!agency.stripe_account_id) return res.json({ connected: false });
+
+    // Client payments come from our DB and are independent of the Stripe
+    // connection state, so they load even before Stripe payouts are set up.
+    const clientPayments = await getAgencyClientPayments(agencyId);
+
+    if (!agency.stripe_account_id) return res.json({ connected: false, client_payments: clientPayments });
 
     const acct = agency.stripe_account_id;
 
-    const [balance, payoutList, chargeList, account] = await Promise.all([
+    // Each Stripe call is independent and best-effort: one failing (balance,
+    // payouts, charges, or account) must not blank the whole page. A single
+    // rejected call used to 500 the endpoint, which is why the Payments tab
+    // showed nothing at all.
+    const [balanceR, payoutR, chargeR, accountR] = await Promise.allSettled([
       stripe.balance.retrieve({ stripeAccount: acct }),
       stripe.payouts.list({ limit: 8 }, { stripeAccount: acct }),
       stripe.charges.list({ limit: 10 }, { stripeAccount: acct }),
       stripe.accounts.retrieve(acct),
     ]);
+    const balance = balanceR.status === 'fulfilled' ? balanceR.value : { available: [], pending: [], instant_available: [] };
+    const payoutList = payoutR.status === 'fulfilled' ? payoutR.value : { data: [] };
+    const chargeList = chargeR.status === 'fulfilled' ? chargeR.value : { data: [] };
+    const account = accountR.status === 'fulfilled' ? accountR.value : {};
 
     const mapAmounts = (arr) => (arr || []).map((b) => ({ amount: b.amount, currency: b.currency }));
 
@@ -1053,6 +1099,7 @@ async function getConnectFinancials(req, res) {
       next_payout: upcoming[0] || null,
       recent_payouts: payouts,
       recent_charges: charges,
+      client_payments: clientPayments,
     });
   } catch (error) {
     console.error('Connect financials error:', error);
