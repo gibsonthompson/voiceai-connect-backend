@@ -211,7 +211,11 @@ async function nextFalconsGame() {
 async function answerWithWebSearch(query, todayStr) {
   if (!process.env.ANTHROPIC_API_KEY || !query) return null;
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 25000);
+  // Give the search real room to work so it can actually run a thorough,
+  // multi-step lookup, but still finish before VAPI's tool window (set to 40s on
+  // the research_topic tool) gives up and drops the call. Abort at 35s and return
+  // null so the caller speaks a quick retry line rather than the line hanging.
+  const t = setTimeout(() => ctrl.abort(), 35000);
   try {
     const sys = `You are Gibson's secretary on a phone call, looking something up for him live.${todayStr ? ` Today is ${todayStr}.` : ''} Search the web, then answer in one to three short spoken sentences, plain and factual, the way you would say it out loud. No markdown, no lists, no links or citations read aloud, no em dashes. Say numbers and times as words. If the web does not clearly answer, say that plainly instead of guessing.`;
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -228,7 +232,7 @@ async function answerWithWebSearch(query, todayStr) {
         temperature: 0.3,
         system: sys,
         messages: [{ role: 'user', content: query }],
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 4 }],
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
       }),
     });
     if (!res.ok) { console.warn('⚠️ web search failed:', res.status); return null; }

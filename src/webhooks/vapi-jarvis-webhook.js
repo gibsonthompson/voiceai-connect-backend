@@ -208,15 +208,7 @@ When he asks you to add a task, book time, start a goal, add a step, create a bu
 
 Whatever he tells you on this call goes onto his On Deck list as a task, using hq_add_task. It does not matter how he phrases it. "Remind me to call Erik," "note that the invoice is due," or just "the Telnyx thing," all of it is a to-do on On Deck. There is no separate notes or reminders bucket here, never try to file something as a note or a reminder, it all becomes a task. The only things that are not plain to-dos are the specific actions below: booking time on his calendar, starting a goal or adding a step, creating a business or project, filing a task under a business, marking something done, or reading things back. Everything else is a task.
 
-Capture what he actually needs to do, in a few clear words, in HIS words. This is the thing he gets wrong about you most, so get it exactly right:
-
-- Strip the command off the front and save only the real task. The words "make a to-do," "add a task," "create a task," "put on my list," "remind me to," "note that," "jot down," "set a reminder to" are NEVER part of the task text. They are how he asks, not what the task is.
-- "Make a to-do to fix the admin panel" saves as "fix the admin panel." "Remind me to call Erik about the septic pilot" saves as "call Erik about the septic pilot." "Add a task for the Telnyx invoice" saves as "Telnyx invoice" or "pay the Telnyx invoice." "Note that the Southern Peach site needs the new photos" saves as "add the new photos to the Southern Peach site."
-- If the task text you are about to save still contains "to-do," "task," "reminder," or "note" as a leading word, you got it wrong, fix it before you call the tool.
-- Save what he said, do not reword it into your own phrasing or invent detail he did not say. Keep his nouns and names.
-- Never create two tasks for the same thing; if he repeats himself or rephrases, it is one task, not two.
-
-After you add a task, say the actual task text you saved back to him in a few natural words, so if a word came through wrong he can catch it right then. For example, "Got it, call Erik about the septic pilot, on your list." If he says that is not what he meant or a word is off, fix it: complete or re-add so the list is right.
+Capture what he actually needs to do, in a few clear words. If he says "make a to-do for the Secretary business" or "add a task to fix the admin panel," the task is the real thing ("fix the admin panel" or "set up the Secretary business"), never the literal instruction like "make a to-do" or "create a task," which is meaningless on his list. Never create two tasks for the same thing, if he repeats himself or rephrases, it is one task, not two. Think about what he actually means and put that on the list.
 
 # How you talk, so you never sound like a machine
 
@@ -351,8 +343,13 @@ function getJarvisTools() {
       { query: { type: 'string', description: 'What the caller said to identify the task' } }, ['query']),
     fn('hq_highest_leverage', 'Return open tasks with age and business so you can pick the single highest-leverage move.',
       {}, []),
-    fn('research_topic', 'Search the web live to answer anything he asks: business or store hours, a phone number or address, a price, a score, a fact, or current news. Use it whenever he asks a question you do not already know the answer to.',
+    Object.assign(fn('research_topic', 'Search the web live to answer anything he asks: business or store hours, a phone number or address, a price, a score, a fact, or current news. Use it whenever he asks a question you do not already know the answer to.',
       { query: { type: 'string', description: 'What to look up, phrased as a clear search, e.g. "what time does Home Depot in Lawrenceville close today"' } }, ['query']),
+      // A live web lookup runs longer than VAPI's default ~20s tool window, which
+      // is what made the line go silent and hang up mid-search. Give this tool a
+      // 40s window so a thorough multi-step search has room to finish and answer
+      // before VAPI gives up on it (the search itself aborts at 35s to stay under).
+      { server: { url: JARVIS_SERVER_URL, secret: process.env.VAPI_WEBHOOK_SECRET, timeoutSeconds: 40 } }),
     fn('hq_todays_briefing', "Assemble and deliver today's full briefing on demand: his calendar, top move, weather, and AI, local, and politics news. Use when he asks for his briefing or rundown.",
       {}, []),
     { type: 'endCall' },
@@ -371,25 +368,6 @@ const JARVIS_VOICE = {
   useSpeakerBoost: true,
   speed: 1.0,
   optimizeStreamingLatency: 3,
-};
-
-// Transcriber: Deepgram nova-3 (newer and more accurate than the nova-2 this
-// line used, and at least on par with the receptionist which runs nova-3) with
-// keyterm prompting to boost the proper nouns and domain words Gibson actually
-// says, so they stop getting mangled. Keyterm is nova-3 English-only, which is
-// why language is 'en' here (and why this is sharper than the receptionist's
-// multi-language config). smartFormat cleans up numbers, times, and the like.
-const JARVIS_TRANSCRIBER = {
-  provider: 'deepgram',
-  model: 'nova-3',
-  language: 'en',
-  smartFormat: true,
-  keyterm: [
-    'VoiceAI Connect', 'CallBird', 'ScopeBook', 'Haul It All', 'Rocket Solutions',
-    'GTC Group', 'Southern Beacon', 'Splash Restoration', 'Southern Peach', 'JB Lawn Care',
-    'Fir and Forge', 'Forward Fitness', 'Blasting Bins', 'Telnyx', 'Vapi', 'Supabase',
-    'Deepgram', 'ElevenLabs', 'Erik Schwab', 'Jacob Brewer', 'On Deck', 'Gibson',
-  ],
 };
 
 // Turn-taking: responds a little quicker than before but still holds through
@@ -416,14 +394,11 @@ async function buildJarvisConfig() {
   }
   return {
     name: 'Jarvis',
-    transcriber: JARVIS_TRANSCRIBER,
+    transcriber: { provider: 'deepgram', model: 'nova-2', language: 'en' },
     model: {
       provider: 'openai',
       model: JARVIS_MODEL,
-      // Lower than before so tool arguments (the task text he dictates) come out
-      // literal and reliable, not creatively reworded. Warmth lives in the voice
-      // and the prompt, not in a high sampling temperature.
-      temperature: 0.4,
+      temperature: 0.7,
       messages: [{ role: 'system', content: getJarvisSystemPrompt(plate) }],
       tools: getJarvisTools(),
     },
@@ -627,13 +602,12 @@ async function tool_research_topic(args) {
   // only if the web search comes back empty.
   const web = (typeof news.answerWithWebSearch === 'function') ? await news.answerWithWebSearch(q, etToday()) : null;
   if (web) return web;
-  const list = await news.gatherTopic([q, q + ' news', q + ' latest'], 4, 10);
-  if (!list.length) return "I looked but couldn't find a clear answer on that.";
-  const summary = await news.summarize(
-    `Gibson asked you to look up and tell him more about: "${q}". In two to four spoken sentences give him the substance of what is going on, specific and factual, like you just read the coverage. If there is little out there, say so plainly.`,
-    list, 420,
-  );
-  return summary || 'I found some coverage but could not pull it together clearly.';
+  // Web search came back empty or was aborted for time. Do NOT chain the slower
+  // RSS-gather + second-Claude-pass fallback here: that compounding is exactly
+  // what pushed the tool past VAPI's response window, so the call got no result
+  // and dropped into silence. Return immediately so Jarvis can speak and he can
+  // simply ask again.
+  return "I couldn't pull that up just now. Say it once more and I'll try it again.";
 }
 
 async function tool_hq_todays_briefing() {
@@ -748,7 +722,6 @@ async function handleJarvisWebhook(req, res) {
 module.exports = {
   handleJarvisWebhook,
   JARVIS_VOICE,
-  JARVIS_TRANSCRIBER,
   JARVIS_SPEAKING_PLANS,
   JARVIS_MODEL,
   getJarvisTools,
