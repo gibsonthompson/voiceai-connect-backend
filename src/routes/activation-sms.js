@@ -8,6 +8,17 @@
 // CREATED: 2026-05-09
 // UPDATED: 2026-05-14 - Fixed phone formatting for international agencies,
 //          added E.164 validation, advance step on permanent send failures
+// UPDATED: 2026-10-15 - Three fixes after agencies got texts at 11pm / 1:30am:
+//          (1) QUIET HOURS: never send outside the agency's local daytime
+//              window (default 9:00-20:00 in agency.timezone). Outside the
+//              window the step is held, not advanced, so it goes out the next
+//              daytime run instead of in the middle of the night.
+//          (2) CALL CENTERS are excluded entirely. The agency activation drip
+//              is for reseller agencies, not call-center operators.
+//          (3) At most one text per day: the minimum gap between any two sends
+//              is raised from 2h to 24h so steps can't bunch up.
+//          Windows/gap are env-tunable (ACTIVATION_SMS_HOUR_START / _HOUR_END /
+//          _MIN_GAP_MIN) so cadence can change without a code deploy.
 // ============================================================================
 
 const express = require('express');
@@ -27,6 +38,46 @@ const STEP_MINUTES = {
   1: 10, 2: 120, 3: 360, 4: 1440, 5: 2160,
   6: 2880, 7: 4320, 8: 7200, 9: 10080, 10: 14400,
 };
+
+// Minimum minutes between any two activation sends to one agency. Set to 1440
+// (24h) so an agency never gets more than one activation text per day, even
+// when several steps come due at once. Combined with quiet hours, that one text
+// also only ever lands during the day.
+const MIN_GAP_MIN = parseInt(process.env.ACTIVATION_SMS_MIN_GAP_MIN || '1440', 10);
+
+// Quiet hours: only send during the agency's local daytime. Inclusive start,
+// exclusive end (hour < END), 24h clock in the agency's timezone.
+const HOUR_START = parseInt(process.env.ACTIVATION_SMS_HOUR_START || '9', 10);
+const HOUR_END = parseInt(process.env.ACTIVATION_SMS_HOUR_END || '20', 10);
+
+// ============================================================================
+// LOCAL HOUR IN THE AGENCY'S TIMEZONE
+// ============================================================================
+// Returns the current hour (0-23) in the given IANA timezone, or null if it
+// can't be resolved (in which case the caller treats the window as open so a
+// bad tz value never silently blocks the whole sequence).
+function localHourInTz(tz) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz || 'America/New_York',
+      hour: 'numeric',
+      hour12: false,
+    }).formatToParts(new Date());
+    const h = parts.find((p) => p.type === 'hour');
+    let hr = h ? parseInt(h.value, 10) : NaN;
+    if (hr === 24) hr = 0; // some runtimes render midnight as "24"
+    return Number.isFinite(hr) ? hr : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// True when it is an acceptable (daytime) hour to text this agency.
+function withinQuietWindow(agency) {
+  const hr = localHourInTz(agency.timezone);
+  if (hr === null) return true; // unknown tz: don't block, fall back to open
+  return hr >= HOUR_START && hr < HOUR_END;
+}
 
 // ============================================================================
 // E.164 VALIDATION
@@ -115,7 +166,7 @@ async function getNextEligibleStep(agency) {
 
   if (agency.activation_sms_last_sent_at) {
     const minutesSinceLastSent = (Date.now() - new Date(agency.activation_sms_last_sent_at).getTime()) / (1000 * 60);
-    if (minutesSinceLastSent < 120) return null;
+    if (minutesSinceLastSent < MIN_GAP_MIN) return null;
   }
 
   const stats = await getAgencyStats(agency.id);
@@ -267,12 +318,21 @@ router.post('/activation-sms', async (req, res) => {
     }
 
     console.log(`📋 Found ${agencies.length} agencies to check for activation SMS`);
-    let sent = 0, skipped = 0;
+    let sent = 0, skipped = 0, quietHeld = 0, callCenters = 0;
     const results = [];
 
     for (const agency of agencies) {
+      // Call centers run an operations console, not the reseller growth funnel,
+      // so they never get the agency activation drip.
+      if (agency.is_call_center) { callCenters++; skipped++; continue; }
+
       if (agency.subscription_status === 'pending' && (agency.abandoned_cart_step || 0) < 5) { skipped++; continue; }
       if (agency.status === 'suspended') { skipped++; continue; }
+
+      // Quiet hours: outside the agency's local daytime window, hold the step
+      // (do NOT advance) so it goes out on the next daytime run instead of at
+      // night. This is the fix for texts landing at 11pm / 1:30am.
+      if (!withinQuietWindow(agency)) { quietHeld++; skipped++; continue; }
 
       const result = await getNextEligibleStep(agency);
       if (!result) { skipped++; continue; }
@@ -328,8 +388,8 @@ router.post('/activation-sms', async (req, res) => {
       }
     }
 
-    console.log(`🚀 Activation SMS complete: ${sent} sent, ${skipped} skipped out of ${agencies.length}`);
-    res.json({ success: true, processed: agencies.length, sent, skipped, results });
+    console.log(`🚀 Activation SMS complete: ${sent} sent, ${skipped} skipped (${quietHeld} held for quiet hours, ${callCenters} call centers) out of ${agencies.length}`);
+    res.json({ success: true, processed: agencies.length, sent, skipped, quietHeld, callCenters, results });
   } catch (error) {
     console.error('❌ Activation SMS cron error:', error);
     res.status(500).json({ error: 'Cron job failed', message: error.message });
