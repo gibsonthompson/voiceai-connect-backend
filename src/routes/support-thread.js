@@ -410,9 +410,26 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
         if (!msgs.length) continue;
         const last = msgs[msgs.length - 1];
         const { name, tag } = labelFor(s);
+        // The public FAQ widget writes a leading "Visitor: <name> / Email: <contact>"
+        // row when it captures a prospect's identity (before chatting, or on a
+        // callback request), so surface that name in the inbox title instead of a
+        // generic "public site". Falls back to the generic label when absent.
+        let visitorName = null, visitorContact = null;
+        for (const m of s.messages) {
+          const c = m.content || '';
+          if (/(^|\n)\s*Visitor:/i.test(c)) {
+            const nm = /(?:^|\n)\s*Visitor:\s*(.+)/i.exec(c);
+            const ct = /(?:^|\n)\s*(?:Email|Contact):\s*(.+)/i.exec(c);
+            if (nm && nm[1].trim() && nm[1].trim().toLowerCase() !== 'not given') visitorName = nm[1].trim();
+            if (ct && ct[1].trim() && ct[1].trim().toLowerCase() !== 'not given') visitorContact = ct[1].trim();
+            if (visitorName) break;
+          }
+        }
+        const isProspectSession = s.userType === 'prospect' || s.source === 'marketing';
+        const convName = (isProspectSession && visitorName) ? `${visitorName} \u00b7 public site` : name;
         conversations.push({
-          key: `faq-${sid}`, type: 'faq', agencyId: null, name,
-          faqOrigin: { userType: s.userType || null, source: s.source || null, agencyName: null, tag },
+          key: `faq-${sid}`, type: 'faq', agencyId: null, name: convName,
+          faqOrigin: { userType: s.userType || null, source: s.source || null, agencyName: null, tag, visitorName, visitorContact },
           phone: null, messages: msgs, unread: 0, lastAt: last.at, lastDirection: last.sender,
           lastPreview: String(last.body || '').slice(0, 120), readOnly: true, needsReply: false, escalated: s.escalated,
         });
