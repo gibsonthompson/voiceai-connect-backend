@@ -30,6 +30,17 @@ function addDaysInTz(days, timeZone) {
   base.setUTCDate(base.getUTCDate() + Number(days));
   return base.toISOString().slice(0, 10);
 }
+
+// Display a US phone as (XXX) XXX-XXXX inside composed messages. Leaves a number
+// that isn't 10 digits (or 1 + 10) untouched so international/short numbers and
+// placeholders aren't mangled.
+function formatPhoneDisplay(phone) {
+  if (!phone) return '';
+  const digits = String(phone).replace(/\D/g, '');
+  const ten = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+  if (ten.length === 10) return `(${ten.slice(0, 3)}) ${ten.slice(3, 6)}-${ten.slice(6)}`;
+  return String(phone);
+}
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
@@ -139,6 +150,23 @@ router.get('/:agencyId/templates', async (req, res) => {
       } catch (seedError) {
         console.error('Auto-seed failed (non-blocking):', seedError);
       }
+    }
+
+    // Deterministic ordering for call scripts. The seed stores them with a null
+    // sequence_order, so without this they fall to created_at and render with the
+    // last-seeded script (Demo Close) on top and Intro at the bottom. Rank the
+    // known default scripts intro -> follow-up -> close; anything else keeps its
+    // own sequence_order, then falls back to created_at. Email/SMS already carry
+    // a real sequence_order so they're unaffected.
+    const CALL_SCRIPT_RANK = { 'Intro / Discovery Call': 1, 'Follow-Up Call': 2, 'Demo Close Call': 3 };
+    const _ord = (t) => (t.sequence_order != null ? t.sequence_order : (CALL_SCRIPT_RANK[t.name] != null ? CALL_SCRIPT_RANK[t.name] : 999));
+    if (Array.isArray(templates)) {
+      templates.sort((a, b) => {
+        if (a.type !== b.type) return 0; // only order within a type; the UI splits by type anyway
+        const d = _ord(a) - _ord(b);
+        if (d !== 0) return d;
+        return new Date(a.created_at || 0) - new Date(b.created_at || 0);
+      });
     }
 
     // Get unique sequence names
@@ -453,7 +481,7 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
       '{lead_contact_first_name}': lead?.contact_name?.split(' ')[0] || '[First Name]',
       '{lead_industry}': lead?.industry || '[Industry]',
       '{lead_email}': lead?.email || '[Email]',
-      '{lead_phone}': lead?.phone || '[Phone]',
+      '{lead_phone}': formatPhoneDisplay(lead?.phone) || '[Phone]',
       '{lead_website}': lead?.website || '[Website]',
       '{lead_source}': lead?.source || '[Source]',
       
@@ -462,15 +490,15 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
       '{agency_owner_name}': ownerFullName,
       '{agency_caller_name}': ownerFullName,
       '{agency_email}': agency?.email || owner?.email || '[Email]',
-      '{agency_phone}': agency?.phone || '[Phone]',
+      '{agency_phone}': formatPhoneDisplay(agency?.phone) || '[Phone]',
       '{agency_website}': agency?.marketing_domain || `${agency?.slug}.${platformDomain}`,
       '{signup_link}': signupLink,
       '{agency_starter_price}': formatPrice(agency?.price_starter) + '/mo',
       '{agency_pro_price}': formatPrice(agency?.price_pro) + '/mo',
       '{agency_growth_price}': formatPrice(agency?.price_growth) + '/mo',
-      '{agency_demo_number}': agency?.demo_phone_number || '[your demo line]',
+      '{agency_demo_number}': formatPhoneDisplay(agency?.demo_phone_number) || '[your demo line]',
       '{demo_cta}': agency?.demo_phone_number
-        ? `Give it a call: ${agency.demo_phone_number}. It'll answer like it's picking up for ${leadBiz}.`
+        ? `Give it a call: ${formatPhoneDisplay(agency.demo_phone_number)}. It'll answer like it's picking up for ${leadBiz}.`
         : `Reply and I'll send you a number to call, you'll hear it answer like it's picking up for ${leadBiz}.`,
       
       // Dynamic variables
