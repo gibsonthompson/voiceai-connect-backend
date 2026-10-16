@@ -10,9 +10,11 @@
 // hmac = HMAC-SHA256(secret, "<t>.<body>"). Consumers recompute and compare.
 
 const crypto = require('crypto');
+const dns = require('dns').promises;
 const { supabase } = require('./supabase');
 
 const EVENT_TYPES = [
+  'call.started',
   'call.completed',
   'call.transferred',
   'appointment.booked',
@@ -51,6 +53,51 @@ function isSafeWebhookUrl(url) {
   } catch (e) { return false; }
 }
 
+// IP denylist shared by the delivery-time guard: loopback, private, link-local,
+// CGNAT, and the cloud metadata address (169.254.169.254). isSafeWebhookUrl()
+// above only sees the hostname, so a public name that RESOLVES to one of these
+// (DNS rebinding) would slip past it. This is the check that actually runs
+// against the resolved address right before we POST.
+function isBlockedIp(ip) {
+  const s = String(ip).toLowerCase();
+  const m = s.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (m) {
+    const a = +m[1], b = +m[2];
+    if (a === 0 || a === 127 || a === 10) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 169 && b === 254) return true;            // link-local + metadata
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;  // CGNAT
+    return false;
+  }
+  if (s === '::1' || s === '::') return true;
+  if (s.startsWith('fc') || s.startsWith('fd')) return true;  // ULA (incl. fd00:ec2 metadata)
+  if (s.startsWith('fe80')) return true;                      // link-local
+  const mapped = s.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);     // IPv4-mapped IPv6
+  if (mapped) return isBlockedIp(mapped[1]);
+  return false;
+}
+
+// Resolve the endpoint host and reject if ANY resolved address is in a blocked
+// range. Returns null when safe, or a short reason string when blocked. The
+// reason is safe to store (it never contains a fetched response body), so a
+// rebind attempt cannot be used to read internal/metadata content back out
+// through the deliveries log.
+async function resolvedHostBlockReason(url) {
+  let host;
+  try { host = new URL(url).hostname; } catch (e) { return 'invalid url'; }
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(':')) {
+    return isBlockedIp(host) ? `blocked address ${host}` : null;
+  }
+  let addrs;
+  try { addrs = await dns.lookup(host, { all: true, verbatim: true }); }
+  catch (e) { return `dns lookup failed for ${host}`; }
+  for (const a of addrs) {
+    if (isBlockedIp(a.address)) return `${host} resolves to a blocked address`;
+  }
+  return null;
+}
+
 function isSubscribed(webhook, eventType) {
   const ev = webhook.events || [];
   return ev.includes('*') || ev.includes(eventType);
@@ -66,10 +113,16 @@ async function attemptDelivery(delivery, hook) {
 
   let ok = false, respStatus = null, respBody = null;
   try {
+    // SSRF guard at the moment of delivery: resolve the host and refuse if it
+    // points anywhere internal. redirect:'error' stops a 3xx from bouncing the
+    // request to an unchecked (internal) URL after the guard has run.
+    const blocked = await resolvedHostBlockReason(hook.url);
+    if (blocked) throw new Error(`refused: ${blocked}`);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), DELIVERY_TIMEOUT_MS);
     const res = await fetch(hook.url, {
       method: 'POST',
+      redirect: 'error',
       headers: {
         'Content-Type': 'application/json',
         'User-Agent': 'VoiceAIConnect-Webhooks/1',
@@ -119,14 +172,66 @@ async function dispatchWebhook(agencyId, eventType, data) {
       .from('agency_webhooks').select('*')
       .eq('agency_id', agencyId).eq('status', 'active');
     const targets = (hooks || []).filter((h) => isSubscribed(h, eventType));
+    if (targets.length === 0) return;
+
+    // Enrich COMPLETED/TRANSFERRED call events with the same public fields the
+    // REST API returns, so a consumer can ingest a whole call from the webhook
+    // alone, with no follow-up GET /calls/:id. (call.started is a live event
+    // carrying a call_session_id, not a calls row id, so it is left as-is.)
+    // Computed once, identical for every subscribed hook. Best effort: if the
+    // lookup fails the lean payload still ships.
+    let eventData = data;
+    if ((eventType === 'call.completed' || eventType === 'call.transferred') && data && data.id) {
+      try {
+        const { data: call } = await supabase.from('calls').select('*').eq('id', data.id).single();
+        if (call) {
+          let recordingUrl = call.recording_url || null;
+          if (recordingUrl) {
+            try { recordingUrl = await require('./vapi-recording').resolveVapiRecordingUrl(recordingUrl); }
+            catch (e) {}
+          }
+          eventData = {
+            ...data,
+            caller_phone: call.caller_phone,
+            customer_name: call.customer_name,
+            customer_phone: call.customer_phone,
+            customer_email: call.customer_email,
+            customer_address: call.customer_address,
+            service_requested: call.service_requested,
+            urgency_level: call.urgency_level,
+            sentiment: call.sentiment,
+            appointment_booked: call.appointment_booked,
+            appointment_time: call.appointment_time,
+            ai_summary: call.ai_summary,
+            summary: call.summary,
+            transcript: call.transcript,
+            recording_url: recordingUrl,
+            ended_reason: call.ended_reason,
+            transfer_status: call.transfer_status,
+            is_spam: call.is_spam,
+            spam_reason: call.spam_reason,
+            call_language: call.call_language,
+            started_at: call.started_at,
+            ended_at: call.ended_at,
+          };
+        }
+      } catch (e) { /* fall back to the lean payload */ }
+    }
+
     for (const hook of targets) {
       const eventId = crypto.randomUUID();
-      const payload = { id: eventId, type: eventType, created_at: new Date().toISOString(), data };
+      const payload = { id: eventId, type: eventType, created_at: new Date().toISOString(), data: eventData };
+      const nowIso = new Date().toISOString();
+      // Insert as 'processing' (not 'pending') for the immediate attempt so the
+      // retry cron, which claims due 'pending' rows, cannot grab and re-send this
+      // same row while the first POST is in flight. last_attempt_at is set so the
+      // stale-'processing' reclaim can still rescue it if this process dies.
       const { data: delivery } = await supabase
         .from('webhook_deliveries')
         .insert({
           webhook_id: hook.id, agency_id: agencyId, event_type: eventType,
-          event_id: eventId, payload, status: 'pending', next_attempt_at: new Date().toISOString(),
+          event_id: eventId, payload, status: 'processing',
+          last_attempt_at: nowIso, next_attempt_at: nowIso,
         })
         .select().single();
       if (delivery) attemptDelivery(delivery, hook).catch(() => {});
@@ -140,11 +245,13 @@ async function dispatchWebhook(agencyId, eventType, data) {
 async function sendPing(hook) {
   const eventId = crypto.randomUUID();
   const payload = { id: eventId, type: 'ping', created_at: new Date().toISOString(), data: { message: 'Test event from VoiceAI Connect.' } };
+  const nowIso = new Date().toISOString();
   const { data: delivery } = await supabase
     .from('webhook_deliveries')
     .insert({
       webhook_id: hook.id, agency_id: hook.agency_id, event_type: 'ping',
-      event_id: eventId, payload, status: 'pending', next_attempt_at: new Date().toISOString(),
+      event_id: eventId, payload, status: 'processing',
+      last_attempt_at: nowIso, next_attempt_at: nowIso,
     })
     .select().single();
   if (!delivery) return { ok: false };

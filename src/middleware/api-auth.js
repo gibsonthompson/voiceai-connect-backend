@@ -138,7 +138,7 @@ async function apiKeyAuth(req, res, next) {
 
     const { data: agency, error: agencyErr } = await supabase
       .from('agencies')
-      .select('id, name, slug, plan_type, subscription_status, status')
+      .select('id, name, slug, plan_type, subscription_status, status, is_call_center')
       .eq('id', keyRow.agency_id)
       .single();
 
@@ -148,7 +148,14 @@ async function apiKeyAuth(req, res, next) {
     if (agency.status === 'suspended') {
       return fail(res, 403, 'account_suspended', 'This agency account is suspended. Contact support to restore API access.');
     }
-    if (!hasScale(agency)) {
+    // API access is a Scale-plan feature, but CALL-CENTER agencies get it at any
+    // plan. Call centers are the integration-first customers (they often run on
+    // their own system and only pull/receive data), and this mirrors the
+    // "is_call_center || scale" gate already used for live monitoring in
+    // live-monitor.js. Without this a call center on the pro plan gets 403 on
+    // every request even though the whole point of their tier is the API.
+    const apiAllowed = hasScale(agency) || agency.is_call_center === true;
+    if (!apiAllowed) {
       return res.status(403).json({
         error: {
           type: 'upgrade_required',

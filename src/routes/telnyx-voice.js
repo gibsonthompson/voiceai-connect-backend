@@ -335,6 +335,22 @@ async function handleInbound(payload) {
 
   const sessionId = session.id;
 
+  // Live event: a call just started (caller leg up, session row created). Lets a
+  // call center drive a real-time wallboard straight from webhooks instead of
+  // polling. Scoped to the telnyx own-the-call path, which is how call-center
+  // inbound calls arrive. Non-blocking: never let a webhook delay answering.
+  try {
+    const { dispatchWebhook } = require('../lib/webhooks');
+    dispatchWebhook(agencyId, 'call.started', {
+      call_session_id: sessionId,
+      client_id: client.id,
+      caller_phone: fromNumber,
+      office_number: officeNumber,
+      started_at: new Date().toISOString(),
+      status: 'in_progress',
+    });
+  } catch (e) { console.error('webhook emit (call.started):', e.message); }
+
   await answerCall(callerLeg, { role: 'caller', sessionId });
 
   const { connectionId, sipUri } = await getWhisperConfig();
