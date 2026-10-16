@@ -232,7 +232,7 @@ async function notifyOwnerOfInboundSMS(client, callerPhone, messageContent) {
 
     await sendAndLogSMS({
       phone: client.owner_phone,
-      message: `💬 New text from ${formatted}:\n"${preview}"\n\nReply from your dashboard.`,
+      message: `New text for ${client.business_name || 'your business'} from ${formatted}:\n"${preview}"\n\nThis came in on your AI receptionist number. Log in to your dashboard and open Messages to reply. Replying to this text won't reach them.`,
       from: client.vapi_phone_number || null,
       agencyId: client.agency_id,
       recipientType: 'client_owner',

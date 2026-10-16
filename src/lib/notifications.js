@@ -304,7 +304,7 @@ async function sendCallNotificationSMS(client, agency, callData) {
 
 async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency) {
   const brandName = agency?.name || 'VoiceAI Connect';
-  const message = `🎉 Welcome to ${brandName}!\nYour AI receptionist for ${businessName} is ready!\n📞 Your AI Phone: ${formatPhoneDisplay(aiPhoneNumber)}`;
+  const message = `Welcome to ${brandName}!\nYour AI receptionist for ${businessName} is ready.\nYour AI phone number: ${formatPhoneDisplay(aiPhoneNumber)}`;
   // Send FROM the agency's demo number, not the client's brand-new AI number.
   // The demo number was SMS-provisioned (messaging profile + approved 10DLC
   // campaign) when the agency onboarded, so it is already carrier-propagated and
