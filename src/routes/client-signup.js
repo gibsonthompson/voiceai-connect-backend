@@ -1831,7 +1831,12 @@ async function handleAgencyAddClient(req, res) {
     // window (trial_ends_at set, stays 'manual', auto-suspended without release
     // at the gate when it passes); trialDays=0 keeps a manual client live and
     // permanent (trial_ends_at=null). Connect uses it as the trial length.
-    const trialDays = resolveClientTrialDays(agency);
+    // Per-client override: the agency add-client form can pass trialDays to set
+    // this client's window explicitly (0..365); falls back to the agency default.
+    const _bodyTrialDays = Number(req.body && req.body.trialDays);
+    const trialDays = Number.isFinite(_bodyTrialDays) && _bodyTrialDays >= 0
+      ? Math.min(Math.floor(_bodyTrialDays), 365)
+      : resolveClientTrialDays(agency);
     const trialEndsAt = trialDays > 0
       ? new Date(Date.now() + trialDays * 24 * 60 * 60 * 1000)
       : new Date();
