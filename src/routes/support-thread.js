@@ -328,7 +328,7 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
     ])];
 
     if (agencyIds.length) {
-      const { data: agencies } = await supabase.from('agencies').select('id, name, phone, platform_replies_read_at').in('id', agencyIds);
+      const { data: agencies } = await supabase.from('agencies').select('id, name, phone, platform_replies_read_at, plan_type, access_plan').in('id', agencyIds);
       const agMap = new Map((agencies || []).map(a => [a.id, a]));
       const unreadByAgency = {};
       for (const r of reqRows) unreadByAgency[r.agency_id] = (unreadByAgency[r.agency_id] || 0) + (r.admin_unread || 0);
@@ -372,6 +372,7 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
         conversations.push({
           key: `agency-${aid}`, type: 'agency', agencyId: aid,
           name: ag.name || 'Unknown agency', phone: ag.phone || null,
+          planType: ag.access_plan || ag.plan_type || null,
           messages: items, unread: (unreadByAgency[aid] || 0) + smsUnread + fbUnread + helpUnread,
           lastAt: last.at, lastDirection: last.sender, lastPreview: String(last.body || '').slice(0, 120),
           lastInboundKind: inbound.length ? inbound[inbound.length - 1].kind : 'inapp',
