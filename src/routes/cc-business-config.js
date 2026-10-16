@@ -61,7 +61,7 @@ function sanitizeHours(input) {
 async function scopedClient(agencyId, clientId) {
   const { data: client } = await supabase
     .from('clients')
-    .select('id, agency_id, business_name, owner_name, owner_phone, notification_phone, post_call_sms_enabled, transfer_phone, timezone, greeting_message, business_hours, forwarding_mode, human_handoff, service_areas, vapi_phone_number, forwarding_confirmed, voice_routing')
+    .select('id, agency_id, business_name, owner_name, owner_phone, email, business_city, business_state, business_website, notification_phone, post_call_sms_enabled, transfer_phone, timezone, greeting_message, business_hours, forwarding_mode, human_handoff, service_areas, ai_tone, booking_mode, min_booking_notice_minutes, max_booking_days_ahead, tool_config, hipaa_mode, recording_enabled, vapi_phone_number, forwarding_confirmed, voice_routing')
     .eq('id', clientId).maybeSingle();
   if (!client) return { error: 'Business not found', code: 404 };
   if (client.agency_id !== agencyId) return { error: 'Business not found', code: 404 };
@@ -80,6 +80,10 @@ router.get('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
         businessName: c.business_name || '',
         ownerName: c.owner_name || '',
         ownerPhone: c.owner_phone || '',
+        email: c.email || '',
+        businessCity: c.business_city || '',
+        businessState: c.business_state || '',
+        businessWebsite: c.business_website || '',
         // Post-call recap SMS to the business owner. Per-business on/off; unset
         // (null) is treated as on, preserving the original always-on behavior.
         postCallSms: c.post_call_sms_enabled !== false,
@@ -93,6 +97,21 @@ router.get('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
         forwardingMode: c.forwarding_mode || 'all',
         humanHandoff: c.human_handoff || 'transfer',
         serviceAreas: Array.isArray(c.service_areas) ? c.service_areas : [],
+        // AI behavior
+        aiTone: c.ai_tone || 'professional',
+        // Booking (null = inherit the agency default)
+        bookingMode: c.booking_mode || 'collect_request',
+        minBookingNotice: c.min_booking_notice_minutes ?? null,
+        maxBookingDays: c.max_booking_days_ahead ?? null,
+        // Call-handling toggles live in tool_config; defaults match the builder.
+        spamDetection: (c.tool_config && c.tool_config.spamDetection) !== false,
+        callerRecognition: (c.tool_config && c.tool_config.callerRecognition) !== false,
+        transferCall: (c.tool_config && c.tool_config.transferCall) !== false,
+        afterHoursRouting: (c.tool_config && c.tool_config.businessHoursRouting) !== false,
+        smsToCaller: !!(c.tool_config && c.tool_config.smsToCaller === true),
+        // Compliance
+        hipaaMode: c.hipaa_mode === true,
+        recordingEnabled: c.recording_enabled !== false,
         vapiPhoneNumber: c.vapi_phone_number || null,
         forwardingConfirmed: c.forwarding_confirmed === true,
       },
@@ -115,6 +134,43 @@ router.put('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
     if (typeof b.ownerName === 'string') updates.owner_name = b.ownerName.trim() || null;
     if (typeof b.timezone === 'string' && b.timezone.trim()) updates.timezone = b.timezone.trim();
     if (typeof b.greeting === 'string') updates.greeting_message = b.greeting.trim() || null;
+    if (typeof b.businessCity === 'string') updates.business_city = b.businessCity.trim() || null;
+    if (typeof b.businessState === 'string') updates.business_state = b.businessState.trim() || null;
+    if (b.businessWebsite !== undefined) updates.business_website = String(b.businessWebsite || '').trim() || null;
+
+    // AI tone (enum, guarded).
+    if (b.aiTone !== undefined && ['professional', 'friendly', 'casual', 'clinical'].includes(b.aiTone)) updates.ai_tone = b.aiTone;
+
+    // Booking: mode (enum) + optional window (null = inherit the agency default).
+    if (b.bookingMode !== undefined && ['auto_book', 'collect_request', 'disabled'].includes(b.bookingMode)) updates.booking_mode = b.bookingMode;
+    if (b.minBookingNotice !== undefined) {
+      const n = Number(b.minBookingNotice);
+      updates.min_booking_notice_minutes = (b.minBookingNotice === null || b.minBookingNotice === '' || Number.isNaN(n)) ? null : Math.max(0, Math.floor(n));
+    }
+    if (b.maxBookingDays !== undefined) {
+      const n = Number(b.maxBookingDays);
+      updates.max_booking_days_ahead = (b.maxBookingDays === null || b.maxBookingDays === '' || Number.isNaN(n)) ? null : Math.max(1, Math.floor(n));
+    }
+
+    // Compliance. HIPAA mode is the master switch (the builder also forces
+    // recording + caller recognition off when it is on); recording_enabled is a
+    // standalone off switch that works independently of HIPAA.
+    if (b.hipaaMode !== undefined) updates.hipaa_mode = (b.hipaaMode === true);
+    if (b.recordingEnabled !== undefined) updates.recording_enabled = !(b.recordingEnabled === false || b.recordingEnabled === 'off');
+
+    // Call-handling toggles are stored inside the tool_config jsonb. MERGE into
+    // the existing object so keys this UI does not show (smsSnippets, smsPresets,
+    // speechTimeout, and so on) are never wiped.
+    const _tcKeys = ['spamDetection', 'callerRecognition', 'transferCall', 'afterHoursRouting', 'smsToCaller'];
+    if (_tcKeys.some((k) => b[k] !== undefined)) {
+      const tc = { ...(chk.client.tool_config && typeof chk.client.tool_config === 'object' && !Array.isArray(chk.client.tool_config) ? chk.client.tool_config : {}) };
+      if (b.spamDetection !== undefined) tc.spamDetection = b.spamDetection === true;
+      if (b.callerRecognition !== undefined) tc.callerRecognition = b.callerRecognition === true;
+      if (b.transferCall !== undefined) tc.transferCall = b.transferCall === true;
+      if (b.afterHoursRouting !== undefined) tc.businessHoursRouting = b.afterHoursRouting === true;
+      if (b.smsToCaller !== undefined) tc.smsToCaller = b.smsToCaller === true;
+      updates.tool_config = tc;
+    }
 
     if (b.ownerPhone !== undefined) {
       const p = toE164(b.ownerPhone);

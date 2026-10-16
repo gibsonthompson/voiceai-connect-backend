@@ -2016,7 +2016,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     // leg; vapi_direct keeps VAPI's default.
     ...(client.voice_routing === 'telnyx_cc' ? { silenceTimeoutSeconds: 60 } : {}),
     firstMessage,
-    recordingEnabled: hipaaMode ? false : true,
+    recordingEnabled: (hipaaMode || client.recording_enabled === false) ? false : true,
     // Live monitor: provision VAPI's listen + control channels so the AI Lab
     // monitor can stream the call audio and take over the AI if needed. These
     // only expose monitor.listenUrl / monitor.controlUrl on call events (the
