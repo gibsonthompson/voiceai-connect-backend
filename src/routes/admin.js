@@ -260,7 +260,7 @@ router.get('/agencies', requireAdmin, async (req, res) => {
     // agency DETAIL endpoint still returns the full row.
     let query = supabase
       .from('agencies')
-      .select('id, name, email, phone, slug, country, plan_type, access_plan, subscription_status, status, created_at, trial_ends_at, current_period_end, referral_source, stripe_charges_enabled, stripe_account_id, marketing_domain, byot_enabled, usage_billing_enabled, minute_pass_through')
+      .select('id, name, email, phone, slug, country, plan_type, access_plan, subscription_status, status, created_at, trial_ends_at, current_period_end, last_login_at, last_active_at, referral_source, stripe_charges_enabled, stripe_account_id, marketing_domain, byot_enabled, usage_billing_enabled, minute_pass_through')
       .order('created_at', { ascending: false })
       .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
 
@@ -379,7 +379,12 @@ router.get('/agencies/:agencyId', requireAdmin, async (req, res) => {
       .eq('agency_id', agencyId)
       .order('created_at', { ascending: false });
 
-    res.json({ agency, clients: clients || [] });
+    // Overlay live monthly call counts (calls table is the source of truth).
+    const { callsThisMonthForClients } = require('../lib/call-usage');
+    const liveCalls = await callsThisMonthForClients((clients || []).map(c => c.id));
+    const clientsLive = (clients || []).map(c => ({ ...c, calls_this_month: liveCalls[c.id] || 0 }));
+
+    res.json({ agency, clients: clientsLive });
 
   } catch (error) {
     console.error('Admin agency detail error:', error);
@@ -430,11 +435,16 @@ router.get('/clients', requireAdmin, async (req, res) => {
 
     if (error) throw error;
 
-    console.log(`📋 Admin fetched ${clients?.length || 0} clients`);
+    // Overlay live monthly call counts (calls table is the source of truth).
+    const { callsThisMonthForClients } = require('../lib/call-usage');
+    const liveCalls = await callsThisMonthForClients((clients || []).map(c => c.id));
+    const clientsLive = (clients || []).map(c => ({ ...c, calls_this_month: liveCalls[c.id] || 0 }));
 
-    res.json({ 
-      clients: clients || [],
-      total: count || clients?.length || 0
+    console.log(`📋 Admin fetched ${clientsLive.length} clients`);
+
+    res.json({
+      clients: clientsLive,
+      total: count || clientsLive.length || 0
     });
 
   } catch (error) {
@@ -473,6 +483,12 @@ router.get('/clients/:clientId', requireAdmin, async (req, res) => {
       .eq('client_id', clientId)
       .order('created_at', { ascending: false })
       .limit(20);
+
+    // Live monthly call count (calls table is the source of truth).
+    try {
+      const { callsThisMonthForClient } = require('../lib/call-usage');
+      client.calls_this_month = await callsThisMonthForClient(client.id);
+    } catch (e) { console.warn('live calls_this_month enrich failed:', e.message); }
 
     res.json({ client, calls: calls || [] });
 

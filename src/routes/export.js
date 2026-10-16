@@ -224,7 +224,13 @@ router.get('/agency/:agencyId/clients', async (req, res) => {
       { key: 'trial_ends_at', label: 'Trial Ends', format: (v) => formatDate(v) },
     ];
 
-    const csv = generateCsv(clients || [], columns);
+    // Overlay live monthly call counts (calls table is the source of truth) so
+    // the export matches the dashboards.
+    const { callsThisMonthForClients } = require('../lib/call-usage');
+    const liveCalls = await callsThisMonthForClients((clients || []).map(c => c.id));
+    const clientRows = (clients || []).map(c => ({ ...c, calls_this_month: liveCalls[c.id] || 0 }));
+
+    const csv = generateCsv(clientRows, columns);
     const dateSlug = new Date().toISOString().split('T')[0];
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');

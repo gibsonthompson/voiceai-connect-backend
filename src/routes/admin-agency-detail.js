@@ -57,6 +57,13 @@ router.get('/agencies/:agencyId/expanded', requireAdmin, async (req, res) => {
       .order('created_at', { ascending: false });
 
     const clientList = clients || [];
+    // Overlay live monthly call counts (calls table is the source of truth) so
+    // the test-client "calls used" and any per-client numbers match everywhere.
+    try {
+      const { callsThisMonthForClients } = require('../lib/call-usage');
+      const _liveCalls = await callsThisMonthForClients(clientList.map(c => c.id));
+      for (const c of clientList) c.calls_this_month = _liveCalls[c.id] || 0;
+    } catch (e) { console.warn('live calls_this_month enrich failed:', e.message); }
     const testClient = clientList.find(c => c.is_test_client);
     const billableClients = clientList.filter(c => !c.is_test_client);
 

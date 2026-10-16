@@ -253,6 +253,54 @@ adminRouter.post('/support-requests/:id/reply', requireAdmin, async (req, res) =
 const ADMIN_PLATFORM_SMS_NUMBER = process.env.TELNYX_SMS_FROM_NUMBER || '+15054317109';
 function adminSmsDir(r) { return (r.message_type === 'agency_reply_inbound' || (r.metadata && r.metadata.direction === 'inbound')) ? 'in' : 'out'; }
 
+// The support CONVERSATION is only the genuine two-way exchange: the agency's
+// inbound replies (direction = in) and the admin's own manual replies. Every
+// other agency SMS (welcome, billing, trial, engagement, demo, client sends) is
+// automated and belongs in the Platform activity log, not the conversation, so
+// it doesn't crowd the thread.
+const CONVERSATION_ADMIN_SMS_TYPES = new Set(['admin_reply', 'platform_support_reply']);
+function isConversationSms(r) {
+  return adminSmsDir(r) === 'in' || CONVERSATION_ADMIN_SMS_TYPES.has(r.message_type);
+}
+// SMS that are part of the conversation and so are EXCLUDED from the activity
+// log (everything else sent under this agency is platform activity).
+const ACTIVITY_EXCLUDE_TYPES = ['admin_reply', 'platform_support_reply', 'agency_reply_inbound', 'agency_reply'];
+const SMS_TYPE_LABELS = {
+  agency_welcome: 'Agency welcome',
+  admin_agency_signup: 'New agency signup',
+  agency_client_signup: 'Client signed up',
+  agency_trial_ending_stripe: 'Trial ending',
+  agency_payment_failed: 'Payment failed',
+  agency_subscription_canceled: 'Subscription canceled',
+  agency_payment_succeeded: 'Payment succeeded',
+  agency_broadcast: 'Broadcast',
+  platform_notification: 'Platform notification',
+  demo_followup: 'Demo follow-up',
+  demo_followup_industry: 'Demo follow-up',
+  demo_followup_custom: 'Demo follow-up',
+  demo_reply_outbound: 'Demo reply',
+  demo_reply_inbound: 'Demo reply (inbound)',
+  client_welcome: 'Client welcome',
+  client_trial_expired: 'Client trial expired',
+  client_payment_failed: 'Client payment failed',
+  client_subscription_activated: 'Client activated',
+  client_inbound_sms_notify: 'Client inbound-text alert',
+  client_call_notification: 'Client call notification',
+  client_spam_blocked: 'Spam blocked',
+  client_password_reset: 'Client password reset',
+};
+function labelSmsType(t) {
+  return SMS_TYPE_LABELS[t] || String(t || 'message').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+function smsActivityCategory(t) {
+  const s = String(t || '');
+  if (/^demo/.test(s)) return 'Demo';
+  if (/payment|subscription|trial|invoice|billing/.test(s)) return 'Billing';
+  if (/^client/.test(s)) return 'Client';
+  if (/welcome|signup|onboard|activation/.test(s)) return 'Onboarding';
+  return 'Platform';
+}
+
 adminRouter.get('/inbox', requireAdmin, async (req, res) => {
   try {
     const conversations = [];
@@ -344,7 +392,12 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
           .select('id, message_body, message_type, metadata, created_at')
           .eq('agency_id', aid).eq('recipient_type', 'agency_owner')
           .order('created_at', { ascending: true }).limit(500);
-        for (const r of (srows || [])) items.push({ id: `sms-${r.id}`, sender: adminSmsDir(r), body: r.message_body || '', at: r.created_at, kind: 'sms' });
+        // Keep only the two-way conversation here; automated/transactional sends
+        // move to the Platform activity tab (see /agencies/:id/platform-activity).
+        for (const r of (srows || [])) {
+          if (!isConversationSms(r)) continue;
+          items.push({ id: `sms-${r.id}`, sender: adminSmsDir(r), body: r.message_body || '', at: r.created_at, kind: 'sms' });
+        }
         const fbForAgency = fbByAgency.get(aid) || [];
         for (const r of fbForAgency) items.push({ id: `fb-${r.id}`, sender: 'in', body: r.message || '', at: r.created_at, kind: 'feedback' });
         const fbUnread = fbForAgency.filter(r => r.status !== 'reviewed').length;
@@ -502,6 +555,44 @@ adminRouter.post('/inbox/read', requireAdmin, async (req, res) => {
     await supabase.from('agency_feedback').update({ status: 'reviewed', reviewed_at: new Date().toISOString() }).eq('agency_id', agencyId).neq('status', 'reviewed').neq('status', 'archived');
     res.json({ success: true });
   } catch (error) { res.json({ success: false }); }
+});
+
+// ---------------------------------------------------------------------------
+// PLATFORM ACTIVITY (admin), the read-only log of everything the platform sent
+// under an agency that is NOT part of the two-way support conversation:
+// onboarding, billing/trial notices, engagement/broadcasts, demo follow-ups,
+// and the agency's client-facing transactional texts. Kept out of the inbox
+// thread so the conversation stays clean; surfaced here as its own tab.
+// ---------------------------------------------------------------------------
+adminRouter.get('/agencies/:agencyId/platform-activity', requireAdmin, async (req, res) => {
+  try {
+    const agencyId = clean(req.params.agencyId, 64);
+    if (!agencyId) return res.status(400).json({ error: 'agencyId required' });
+    const { data: rows, error } = await supabase
+      .from('sms_log')
+      .select('id, message_body, message_type, recipient_phone, recipient_type, delivery_status, metadata, created_at')
+      .eq('agency_id', agencyId)
+      .not('message_type', 'in', `(${ACTIVITY_EXCLUDE_TYPES.join(',')})`)
+      .order('created_at', { ascending: false })
+      .limit(300);
+    if (error) throw error;
+    const activity = (rows || []).map((r) => ({
+      id: r.id,
+      type: r.message_type,
+      label: labelSmsType(r.message_type),
+      category: smsActivityCategory(r.message_type),
+      body: r.message_body || '',
+      recipientPhone: r.recipient_phone || null,
+      recipientType: r.recipient_type || null,
+      direction: (r.message_type === 'demo_reply_inbound' || (r.metadata && r.metadata.direction === 'inbound')) ? 'in' : 'out',
+      deliveryStatus: r.delivery_status || null,
+      at: r.created_at,
+    }));
+    res.json({ activity });
+  } catch (error) {
+    console.error('platform-activity error:', error.message);
+    res.status(500).json({ error: 'Failed to load platform activity' });
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -661,6 +661,11 @@ agencyRouter.get('/:agencyId/inbox/facts', requireAgencyAccess('dashboard'), asy
         ? Number(client.custom_price_cents)
         : (plan && plan.price_cents != null ? Number(plan.price_cents) : null);
 
+      // Live monthly call count (calls table), so the inbox "Calls this mo."
+      // matches the client's own dashboard rather than the drift-prone counter.
+      const { callsThisMonthForClient } = require('../lib/call-usage');
+      const liveCallsThisMonth = await callsThisMonthForClient(client.id);
+
       return res.json({ success: true, type: 'client', facts: {
         businessName: client.business_name || null,
         ownerName: client.owner_name || null,
@@ -670,7 +675,7 @@ agencyRouter.get('/:agencyId/inbox/facts', requireAgencyAccess('dashboard'), asy
         aiPhone: client.vapi_phone_number || null,
         ownerPhone: client.owner_phone || null,
         memberSince: client.created_at || null,
-        callsThisMonth: client.calls_this_month != null ? client.calls_this_month : null,
+        callsThisMonth: liveCallsThisMonth,
         monthlyCallLimit: client.monthly_call_limit != null ? client.monthly_call_limit : null,
         lastCallAt,
         priceCents,

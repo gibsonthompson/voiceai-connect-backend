@@ -48,8 +48,12 @@ router.post('/expire-test-clients', async (req, res) => {
       return res.status(500).json({ error: error.message });
     }
 
-    // Spare any test client that's actually been used this billing period.
-    const candidates = (aged || []).filter((c) => !c.calls_this_month || c.calls_this_month === 0);
+    // Spare any test client that's actually been used this month. Count live
+    // from the calls table (source of truth), not the drift-prone counter, so a
+    // genuinely-used test client is never expired because the counter lagged.
+    const { callsThisMonthForClients } = require('../lib/call-usage');
+    const liveCalls = await callsThisMonthForClients((aged || []).map((c) => c.id));
+    const candidates = (aged || []).filter((c) => !(liveCalls[c.id] > 0));
     const sparedInUse = (aged || []).length - candidates.length;
 
     const results = [];

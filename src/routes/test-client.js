@@ -248,6 +248,14 @@ router.get('/:agencyId/test-client', async (req, res) => {
       .eq('id', agency.test_client_id)
       .single();
 
+    // Live monthly call count (calls table is the source of truth).
+    if (client) {
+      try {
+        const { callsThisMonthForClient } = require('../lib/call-usage');
+        client.calls_this_month = await callsThisMonthForClient(client.id);
+      } catch (e) { console.warn('live calls_this_month enrich failed:', e.message); }
+    }
+
     res.json({ client: client || null });
 
   } catch (error) {

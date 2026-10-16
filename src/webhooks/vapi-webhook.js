@@ -88,6 +88,7 @@ async function sendDemoProspectSMS(agency, params) {
 }
 const { formatPhone, getPhoneLocation, formatDuration } = require('../lib/area-codes');
 const { insertUsageRecord, updateClientBillingQuantity } = require('../lib/usage-tracker');
+const { callsThisMonthForClient } = require('../lib/call-usage');
 const { verifyVapiWebhook } = require('../lib/vapi-webhook-auth');
 const liveMonitor = require('../lib/live-monitor-bus');
 const { broadcastLiveEvent } = require('../lib/live-broadcast');
@@ -1042,7 +1043,9 @@ async function handleAssistantRequest(req, res, message) {
       return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
     }
 
-    const currentCallCount = client.calls_this_month || 0;
+    // Live count from the calls table (source of truth), not the drift-prone
+    // calls_this_month counter, so the cap is actually enforced.
+    const currentCallCount = await callsThisMonthForClient(client.id);
     const callLimit = client.monthly_call_limit ?? 50;
     if (callLimit !== -1 && currentCallCount >= callLimit) {
       return res.status(200).json({ assistant: {
@@ -1394,7 +1397,10 @@ async function handleVapiWebhook(req, res) {
       return res.status(200).json({ received: true, blocked: true, reason: 'Manual access window ended' });
     }
 
-    const currentCallCount = client.calls_this_month || 0;
+    // Live count from the calls table (source of truth). The current call is
+    // not saved yet, so this is the count of prior calls this month; the
+    // increment below (currentCallCount + 1) therefore self-heals the counter.
+    const currentCallCount = await callsThisMonthForClient(client.id);
     const callLimit = client.monthly_call_limit ?? 50;
     if (callLimit !== -1 && currentCallCount >= callLimit) {
       console.log(`🚫 BLOCKED at call-limit gate: ${currentCallCount}/${callLimit}`);

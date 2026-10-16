@@ -982,8 +982,13 @@ app.get('/api/agency/:agencyId/dashboard', requireAgencyAccess('dashboard'), asy
       }
     });
 
-    const totalCalls = clientList.reduce((sum, c) => sum + (c.calls_this_month || 0), 0);
-    const recentClients = clientList.slice(0, 5);
+    // Live monthly call counts from the calls table (source of truth), overlaid
+    // onto each client so the dashboard total and the per-client numbers match
+    // the client's own dashboard instead of the drift-prone counter.
+    const { callsThisMonthForClients } = require('./lib/call-usage');
+    const liveCalls = await callsThisMonthForClients(clientList.map(c => c.id));
+    const totalCalls = clientList.reduce((sum, c) => sum + (liveCalls[c.id] || 0), 0);
+    const recentClients = clientList.slice(0, 5).map(c => ({ ...c, calls_this_month: liveCalls[c.id] || 0 }));
 
     console.log(`📊 Dashboard loaded for agency ${agencyId}: ${clientList.length} clients (${realClients.length} real), $${mrr/100} MRR`);
 
@@ -1013,16 +1018,20 @@ app.get('/api/agency/:agencyId/clients', requireAgencyAccess('clients'), async (
     // array price (custom wins) with any signup discount code applied to the
     // ongoing monthly. One source of truth for the dashboard and analytics.
     const { effectiveMonthlyCents } = require('./lib/plans');
+    const { callsThisMonthForClients } = require('./lib/call-usage');
     const { data: agencyRow } = await supabase.from('agencies').select('*').eq('id', agencyId).single();
     const codesByName = {};
     if (agencyRow) {
       const { data: codes } = await supabase.from('discount_codes').select('code, percent_off, duration, duration_months').eq('agency_id', agencyId);
       for (const dc of (codes || [])) codesByName[String(dc.code || '').toUpperCase()] = dc;
     }
+    // Live monthly call count per client, overlaid so this list agrees with the
+    // client's own dashboard (the calls table is the source of truth).
+    const liveCalls = await callsThisMonthForClients((clients || []).map(c => c.id));
     const enriched = (clients || []).map((c) => {
       const dc = c.signup_discount_code ? codesByName[String(c.signup_discount_code).toUpperCase()] : null;
       const p = agencyRow ? effectiveMonthlyCents(c, agencyRow, dc) : { base_cents: 0, effective_cents: 0, discount: null };
-      return { ...c, base_price_cents: p.base_cents, effective_price_cents: p.effective_cents, price_discount: p.discount };
+      return { ...c, calls_this_month: liveCalls[c.id] || 0, base_price_cents: p.base_cents, effective_price_cents: p.effective_cents, price_discount: p.discount };
     });
     console.log(`📋 Fetched ${enriched.length} clients for agency ${agencyId}`);
     res.json({ clients: enriched });
@@ -1107,6 +1116,12 @@ app.get('/api/agency/:agencyId/clients/:clientId', requireAgencyAccess('clients'
       client.login_email = client.email || null;
       client.login_password = null;
     }
+
+    // Live monthly call count (calls table is the source of truth).
+    try {
+      const { callsThisMonthForClient } = require('./lib/call-usage');
+      client.calls_this_month = await callsThisMonthForClient(client.id);
+    } catch (e) { console.warn('live calls_this_month enrich failed:', e.message); }
 
     res.json({ client });
   } catch (error) {
@@ -1502,12 +1517,17 @@ app.get('/api/export/agency/:agencyId/clients', requireAgencyAccess('settings'),
     const cols = ['business_name', 'owner_name', 'email', 'owner_phone', 'industry', 'plan_type', 'subscription_status', 'status', 'vapi_phone_number', 'calls_this_month', 'monthly_call_limit', 'trial_ends_at', 'created_at'];
     const { data: clients, error } = await supabase
       .from('clients')
-      .select(cols.join(', '))
+      .select(['id', ...cols].join(', '))
       .eq('agency_id', agencyId)
       .order('created_at', { ascending: false });
     if (error) { console.error('❌ Export clients query failed:', error.message); return res.status(500).json({ error: 'Failed to export clients' }); }
 
-    const csv = toCsv(cols, clients || []);
+    // Overlay live monthly call counts (calls table is the source of truth).
+    const { callsThisMonthForClients } = require('./lib/call-usage');
+    const liveCalls = await callsThisMonthForClients((clients || []).map(c => c.id));
+    const clientRows = (clients || []).map(c => ({ ...c, calls_this_month: liveCalls[c.id] || 0 }));
+
+    const csv = toCsv(cols, clientRows);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="clients-export.csv"');
     return res.send(csv);

@@ -483,13 +483,18 @@ async function getAgencySettings(req, res) {
       .select('id, subscription_status, plan_type, calls_this_month')
       .eq('agency_id', agencyId);
     
+    // Live monthly call counts (calls table is the source of truth), so this
+    // total matches the client/agency dashboards rather than the stored counter.
+    const { callsThisMonthForClients } = require('../lib/call-usage');
+    const liveCalls = await callsThisMonthForClients((clients || []).map(c => c.id));
+
     const stats = {
       total_clients: clients?.length || 0,
       // A manual client (subscription_status 'manual') is live, so it counts as
       // active here alongside connect 'active' clients. Trial is unchanged.
       active_clients: clients?.filter(c => ACTIVE_STAT_STATUSES.has(c.subscription_status)).length || 0,
       trial_clients: clients?.filter(c => c.subscription_status === 'trial').length || 0,
-      total_calls_this_month: clients?.reduce((sum, c) => sum + (c.calls_this_month || 0), 0) || 0,
+      total_calls_this_month: Object.values(liveCalls).reduce((sum, n) => sum + n, 0),
       mrr_cents: clients?.reduce((sum, c) => {
         // Count active AND manual clients at their plan price. If you would
         // rather exclude manual clients from platform-computed MRR (a manual
