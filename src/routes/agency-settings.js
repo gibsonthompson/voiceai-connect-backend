@@ -465,6 +465,8 @@ async function getAgencySettings(req, res) {
           client_header_mode: agency.client_header_mode || 'agency_name',
           allow_client_branding: agency.allow_client_branding || false,
           hide_client_billing: agency.hide_client_billing === true,
+          show_client_call_usage: agency.show_client_call_usage !== false,
+          show_client_subscription: agency.show_client_subscription !== false,
           custom_features: Array.isArray(agency.custom_features) ? agency.custom_features : [],
           feature_overrides: (agency.feature_overrides && typeof agency.feature_overrides === 'object') ? agency.feature_overrides : {},
           calendar_enabled_plans: agency.calendar_enabled_plans || ['pro', 'growth'],
@@ -562,6 +564,8 @@ async function getAgencySettings(req, res) {
         client_header_mode: agency.client_header_mode || 'agency_name',
         allow_client_branding: agency.allow_client_branding || false,
         hide_client_billing: agency.hide_client_billing === true,
+        show_client_call_usage: agency.show_client_call_usage !== false,
+        show_client_subscription: agency.show_client_subscription !== false,
           custom_features: Array.isArray(agency.custom_features) ? agency.custom_features : [],
           feature_overrides: (agency.feature_overrides && typeof agency.feature_overrides === 'object') ? agency.feature_overrides : {},
         
@@ -628,6 +632,8 @@ async function getAgencySettings(req, res) {
         client_billing_mode: agency.client_billing_mode || 'connect',
         allow_client_plan_changes: agency.allow_client_plan_changes === true,
         hide_client_billing: agency.hide_client_billing === true,
+        show_client_call_usage: agency.show_client_call_usage !== false,
+        show_client_subscription: agency.show_client_subscription !== false,
         paystack_connected: agency.paystack_connected === true,
         paystack_currency: agency.paystack_currency || null,
         flutterwave_connected: agency.flutterwave_connected === true,
@@ -804,6 +810,10 @@ async function updateAgencySettings(req, res) {
       'hide_client_billing',
       // Let clients change their own plan (self-serve upgrade via Stripe)
       'allow_client_plan_changes',
+      // Show/hide the plan & subscription section and the call-usage meter
+      // on the client dashboard (independent of the master hide_client_billing).
+      'show_client_call_usage',
+      'show_client_subscription',
       // Client plan feature gating
       'plan_features',
       // Calendar plan gating (which client plans can connect Google Calendar)
@@ -861,6 +871,8 @@ async function updateAgencySettings(req, res) {
     if (updates.bill_minutes_during_trial !== undefined) updates.bill_minutes_during_trial = updates.bill_minutes_during_trial === true;
     if (updates.allow_client_plan_changes !== undefined) updates.allow_client_plan_changes = updates.allow_client_plan_changes === true;
     if (updates.hide_client_billing !== undefined) updates.hide_client_billing = updates.hide_client_billing === true;
+    if (updates.show_client_call_usage !== undefined) updates.show_client_call_usage = updates.show_client_call_usage === true;
+    if (updates.show_client_subscription !== undefined) updates.show_client_subscription = updates.show_client_subscription === true;
     if (updates.signup_logo_align !== undefined && !['left', 'center', 'right'].includes(updates.signup_logo_align)) {
       updates.signup_logo_align = 'left';
     }
