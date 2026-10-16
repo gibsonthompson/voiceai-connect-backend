@@ -18,6 +18,7 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { requireAgencyAccess } = require('./auth');
+const { getAgencyCapacity } = require('../lib/concurrency');
 
 // Session statuses that mean the call is still live (not finished).
 const LIVE_STATUSES = [
@@ -60,6 +61,15 @@ router.get('/:agencyId/live-calls', requireAgencyAccess('dashboard'), async (req
   try {
     const { agencyId } = req.params;
 
+    // Live concurrency: how many of this account's lines are in use right now vs
+    // its cap (agencies.concurrent_lines; null = no app cap, the VAPI pool is the
+    // real ceiling). Reads the active-call registry. Best-effort, never blocks.
+    let capacity = null;
+    try {
+      const { data: ag } = await supabase.from('agencies').select('concurrent_lines').eq('id', agencyId).maybeSingle();
+      capacity = await getAgencyCapacity(agencyId, ag ? ag.concurrent_lines : null);
+    } catch { capacity = null; }
+
     // The businesses this call center serves.
     const { data: clients, error: cErr } = await supabase
       .from('clients')
@@ -78,7 +88,7 @@ router.get('/:agencyId/live-calls', requireAgencyAccess('dashboard'), async (req
 
     const clientIds = visibleClients.map(c => c.id);
     const nameById = new Map(visibleClients.map(c => [c.id, c.business_name]));
-    if (clientIds.length === 0) return res.json({ success: true, calls: [], businesses: [] });
+    if (clientIds.length === 0) return res.json({ success: true, calls: [], businesses: [], capacity });
 
     // Live sessions for those businesses. A 2-hour floor guards against a stale
     // row that never got a terminal status.
@@ -116,7 +126,7 @@ router.get('/:agencyId/live-calls', requireAgencyAccess('dashboard'), async (req
       .map(c => ({ clientId: c.id, businessName: c.business_name || 'Business', live: liveClientIds.has(c.id) }))
       .sort((a, b) => a.businessName.localeCompare(b.businessName));
 
-    res.json({ success: true, calls, businesses });
+    res.json({ success: true, calls, businesses, capacity });
   } catch (e) {
     console.error('agency-wallboard live-calls error:', e.message);
     res.status(500).json({ success: false, error: 'Server error' });

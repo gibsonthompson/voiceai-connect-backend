@@ -266,7 +266,7 @@ router.get('/:agencyId/team', requireAgencyAccess('settings'), async (req, res) 
     const limits = await checkTeamLimit('agency', agencyId);
     res.json({
       success: true,
-      members: (members || []).map(m => ({ id: m.id, display_name: m.display_name, phone: m.phone, email: m.users?.email || null, visible_password: m.visible_password, permissions: m.permissions, notification_prefs: m.notification_prefs, status: m.status, assigned_client_ids: m.assigned_client_ids || null, call_delivery: m.call_delivery || 'browser', agent_phone: m.agent_phone || null, last_login: m.users?.last_login || null, avatar_url: m.users?.avatar_url || null, created_at: m.created_at })),
+      members: (members || []).map(m => ({ id: m.id, user_id: m.member_user_id, display_name: m.display_name, phone: m.phone, email: m.users?.email || null, visible_password: m.visible_password, permissions: m.permissions, notification_prefs: m.notification_prefs, status: m.status, assigned_client_ids: m.assigned_client_ids || null, call_delivery: m.call_delivery || 'browser', agent_phone: m.agent_phone || null, last_login: m.users?.last_login || null, avatar_url: m.users?.avatar_url || null, created_at: m.created_at })),
       limits,
     });
   } catch (err) { console.error('❌ List team error:', err); res.status(500).json({ error: 'Failed to fetch team members' }); }
