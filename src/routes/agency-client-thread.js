@@ -269,7 +269,7 @@ clientRouter.get('/:clientId/provider-inbox', async (req, res) => {
     // (a) In-app threads + their messages, flattened into one list.
     const { data: requests } = await supabase
       .from('agency_support_requests')
-      .select('id, message, created_at, client_unread')
+      .select('id, message, created_at, client_unread, source')
       .eq('client_id', clientId)
       .order('created_at', { ascending: true })
       .limit(100);
@@ -282,7 +282,10 @@ clientRouter.get('/:clientId/provider-inbox', async (req, res) => {
       unreadTotal += r.client_unread || 0;
       const t = new Date(r.created_at).getTime();
       if (t >= replyTargetAt) { replyTargetAt = t; replyTargetId = r.id; }
-      if (r.message) items.push({ id: `seed-${r.id}`, sender: 'client', body: r.message, at: r.created_at, kind: 'thread' });
+      // The seed is the first message on the thread. If the agency opened the
+      // thread (agency_outreach), that first message is the agency's, so the
+      // client sees it as received. Otherwise the client wrote it.
+      if (r.message) items.push({ id: `seed-${r.id}`, sender: r.source === 'agency_outreach' ? 'agency' : 'client', body: r.message, at: r.created_at, kind: 'thread' });
       const msgs = await threadMessages(r.id);
       for (const m of msgs) items.push({ id: m.id, sender: m.sender, body: m.body, at: m.created_at, kind: 'thread' });
     }
@@ -456,7 +459,7 @@ agencyRouter.get('/:agencyId/inbox', requireAgencyAccess('dashboard'), async (re
     // 2) CLIENTS + PROSPECTS (in-app agency threads)
     try {
       const { data: areqs } = await supabase
-        .from('agency_support_requests').select('id, client_id, requester_name, contact, message, status, created_at, agency_unread')
+        .from('agency_support_requests').select('id, client_id, requester_name, contact, message, status, created_at, agency_unread, source')
         .eq('agency_id', agencyId).order('created_at', { ascending: true }).limit(500);
       const aids = (areqs || []).map(r => r.id);
       let amsgs = [];
@@ -468,7 +471,9 @@ agencyRouter.get('/:agencyId/inbox', requireAgencyAccess('dashboard'), async (re
       const clientConvos = {};
       for (const r of (areqs || [])) {
         const items = [];
-        if (r.message) items.push({ id: `aseed-${r.id}`, sender: 'in', body: r.message, at: r.created_at });
+        // Seed direction: a thread the agency started (agency_outreach) means
+        // the seed is the agency's own outgoing message, so it sits on the right.
+        if (r.message) items.push({ id: `aseed-${r.id}`, sender: r.source === 'agency_outreach' ? 'out' : 'in', body: r.message, at: r.created_at });
         for (const m of (msgsByReq[r.id] || [])) items.push({ id: m.id, sender: m.sender === 'agency' ? 'out' : 'in', body: m.body, at: m.created_at });
         if (r.client_id) {
           const k = `client-${r.client_id}`;
