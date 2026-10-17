@@ -239,6 +239,19 @@ router.get('/callback', async (req, res) => {
     }
 
     const tokens = await tokenResponse.json();
+
+    // Granular consent: Google lets the user UNCHECK the calendar scope on the
+    // consent screen while still granting openid/email. If they did, we have
+    // tokens but no calendar access, so auto-booking would silently fail while
+    // the card showed "connected". Reject it and send them back to reconnect
+    // (and actually allow calendar access this time).
+    const grantedScopes = String(tokens.scope || '').split(/\s+/).filter(Boolean);
+    if (!grantedScopes.includes('https://www.googleapis.com/auth/calendar.events')) {
+      console.warn(`⚠️ Calendar scope not granted for client ${clientId}; not marking connected.`);
+      const back = safeReturnUrl(returnTo, null);
+      return res.redirect(`${back || `${redirectBase}/client/settings`}?error=calendar_scope_missing`);
+    }
+
     const expiresAt = new Date(Date.now() + tokens.expires_in * 1000).toISOString();
 
     console.log('✅ Google Calendar tokens received for client:', clientId);
@@ -418,21 +431,36 @@ router.get('/status/:clientId', async (req, res) => {
     // revoked or expired, which is the only case where a reconnect is actually
     // needed, so the banner now appears only then.
     let tokenValid = false;
+    let calendarAccess = false;
     if (client.google_calendar_connected && client.google_refresh_token) {
       try {
         const freshToken = await refreshAccessToken(client);
         tokenValid = !!freshToken;
+        if (freshToken) {
+          // Confirm the calendar.events scope is actually usable. A user can
+          // uncheck it during consent, leaving a "connected" record that can't
+          // book. A 401/403 here means connected-but-no-calendar-access, so the
+          // UI can prompt a reconnect instead of showing a false green status.
+          try {
+            const probe = await fetch('https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=1', {
+              headers: { Authorization: `Bearer ${freshToken}` },
+            });
+            calendarAccess = probe.ok;
+          } catch (e) { calendarAccess = false; }
+        }
       } catch (e) {
         console.warn(`Calendar status: live token check failed for ${clientId}, treating connection as valid (refresh token present):`, e.message);
         // Network/transient failure on our side should not nag the client to
         // reconnect a connection that still has a refresh token on file.
         tokenValid = true;
+        calendarAccess = true;
       }
     }
 
     res.json({
       connected: client.google_calendar_connected || false,
       token_valid: tokenValid,
+      calendar_access: calendarAccess,
       email: client.google_calendar_email || null,
       plan_allowed: planCheck.allowed,
       plan_message: planCheck.allowed ? null : planCheck.reason,
