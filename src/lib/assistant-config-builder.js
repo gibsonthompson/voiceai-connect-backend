@@ -1000,16 +1000,60 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
 // knowledge_base_content, which can be tens of thousands of characters of
 // website scrape that buries the real facts. Returns '' when there is nothing.
 // ============================================================================
+// Format a time stored in the business_hours column ("09:00" 24h or "9:00 AM")
+// into a spoken-friendly 12-hour string for the prompt.
+function to12Hour(t) {
+  if (typeof t !== 'string') return String(t || '');
+  const s = t.trim();
+  if (/[AaPp][Mm]/.test(s)) return s.toUpperCase().replace(/\s*([AP]M)/i, ' $1').trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return s;
+  let h = parseInt(m[1], 10); const min = m[2];
+  const ap = h >= 12 ? 'PM' : 'AM';
+  h = h % 12; if (h === 0) h = 12;
+  return `${h}:${min} ${ap}`;
+}
+
+// Build a recitable weekly-hours schedule from the business_hours COLUMN (the
+// authoritative store that also drives open/closed routing). Shape per day is
+// { open, close } for an open day or null/closed for a closed day. Returns ''
+// when no hours are set or every day is closed.
+function formatColumnHours(client) {
+  const bh = client && client.business_hours;
+  if (!bh || typeof bh !== 'object' || Array.isArray(bh)) return '';
+  const order = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+  const lines = [];
+  let anyOpen = false;
+  for (const day of order) {
+    const v = bh[day];
+    const label = day.charAt(0).toUpperCase() + day.slice(1);
+    if (!v || typeof v !== 'object' || v.closed === true || !v.open || !v.close) {
+      lines.push(`${label}: Closed`);
+    } else {
+      anyOpen = true;
+      lines.push(`${label}: ${to12Hour(v.open)} - ${to12Hour(v.close)}`);
+    }
+  }
+  return anyOpen ? lines.join('\n') : '';
+}
+
 function buildClientBusinessInfoBlock(client) {
   // 1) Structured knowledge base (clean + small): same shape the agency template
-  //    uses. This is the reliable source for hours and FAQs.
+  //    uses. This is the reliable source for FAQs/services. Business hours come
+  //    from the business_hours COLUMN first: it is the single source of truth and
+  //    also drives open/closed routing, so the hours the AI recites always match
+  //    the hours it routes by (the KB structured hours are the fallback only).
+  const colHours = formatColumnHours(client);
   const kbd = client && client.knowledge_base_data;
-  if (kbd && typeof kbd === 'object' && !Array.isArray(kbd)) {
+  const hasKbd = kbd && typeof kbd === 'object' && !Array.isArray(kbd);
+  if (hasKbd || colHours) {
+    const k = hasKbd ? kbd : {};
     let s = '';
-    if (kbd.businessHours && String(kbd.businessHours).trim()) s += `\n\n### Business Hours\n${String(kbd.businessHours).trim()}`;
-    if (kbd.services && String(kbd.services).trim()) s += `\n\n### Services\n${String(kbd.services).trim()}`;
-    if (kbd.faqs && String(kbd.faqs).trim()) s += `\n\n### Frequently Asked Questions\n${String(kbd.faqs).trim()}`;
-    if (kbd.additionalInfo && String(kbd.additionalInfo).trim()) s += `\n\n### Additional Information\n${String(kbd.additionalInfo).trim()}`;
+    const hoursText = colHours || (k.businessHours && String(k.businessHours).trim());
+    if (hoursText) s += `\n\n### Business Hours\n${hoursText}`;
+    if (k.services && String(k.services).trim()) s += `\n\n### Services\n${String(k.services).trim()}`;
+    if (k.faqs && String(k.faqs).trim()) s += `\n\n### Frequently Asked Questions\n${String(k.faqs).trim()}`;
+    if (k.additionalInfo && String(k.additionalInfo).trim()) s += `\n\n### Additional Information\n${String(k.additionalInfo).trim()}`;
     if (s) return s;
   }
 
@@ -2016,7 +2060,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     // leg; vapi_direct keeps VAPI's default.
     ...(client.voice_routing === 'telnyx_cc' ? { silenceTimeoutSeconds: 60 } : {}),
     firstMessage,
-    recordingEnabled: (hipaaMode || client.recording_enabled === false) ? false : true,
+    recordingEnabled: hipaaMode ? false : true,
     // Live monitor: provision VAPI's listen + control channels so the AI Lab
     // monitor can stream the call audio and take over the AI if needed. These
     // only expose monitor.listenUrl / monitor.controlUrl on call events (the
