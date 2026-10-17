@@ -24,6 +24,7 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { requireAgencyAccess } = require('./auth');
+const { resolveVapiRecordingUrl } = require('../lib/vapi-recording');
 
 // Agent scoping (mirrors cc-analytics): a non-null assigned_client_ids array
 // limits an agency_staff viewer to those clients. Null = unrestricted.
@@ -218,6 +219,15 @@ router.get('/:agencyId/cc/calls/:callId', requireAgencyAccess('dashboard'), asyn
     // Defense in depth: never ship the recording or transcript for a HIPAA
     // business, even if an older record still has them stored.
     if (hipaa) { call.recording_url = null; call.transcript = null; }
+
+    // Resolve the recording URL to a playable signed URL, mirroring the client
+    // and v1 single-call paths (server.js, client.js, v1/index.js). The call
+    // center was shipping the raw stored URL, so the player failed to load it
+    // ("Error loading audio file"). resolveVapiRecordingUrl passes non-VAPI URLs
+    // through unchanged. Best effort: on failure keep the stored URL.
+    if (call.recording_url) {
+      try { call.recording_url = await resolveVapiRecordingUrl(call.recording_url); } catch (e) {}
+    }
 
     res.json({
       success: true,
