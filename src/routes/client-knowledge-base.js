@@ -210,7 +210,7 @@ router.get('/:agencyId/clients/:clientId/knowledge-base', async (req, res) => {
 
     const { data: client, error } = await supabase
       .from('clients')
-      .select('id, vapi_assistant_id, industry, business_name, knowledge_base_content, business_website')
+      .select('id, vapi_assistant_id, industry, business_name, knowledge_base_content, knowledge_base_data, knowledge_base_updated_at, business_website')
       .eq('id', clientId)
       .eq('agency_id', agencyId)
       .single();
@@ -221,11 +221,30 @@ router.get('/:agencyId/clients/:clientId/knowledge-base', async (req, res) => {
 
     const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
 
+    // Structured editable copy (hours/services/FAQs/additional info). The legacy
+    // {fileId, toolId} shape is NOT typed content, so ignore it and return empty
+    // fields in that case. This is what the call-center / agency KB editor reads
+    // to render the FAQ rows and the website field (parity with the end-client
+    // "My Business" editor).
+    const kbData = client.knowledge_base_data || {};
+    const structured = (kbData.fileId || kbData.toolId) ? {} : kbData;
+    const data = {
+      faqs: structured.faqs || '',
+      services: structured.services || '',
+      businessHours: structured.businessHours || '',
+      additionalInfo: structured.additionalInfo || '',
+    };
+    const websiteUrl = client.business_website || '';
+    const updated_at = client.knowledge_base_updated_at || null;
+
     // 1. Return cached content if available
     if (client.knowledge_base_content) {
       return res.json({
         success: true,
         content: client.knowledge_base_content,
+        data,
+        websiteUrl,
+        updated_at,
         industry: industryKey,
         business_name: client.business_name,
         has_website: !!client.business_website,
@@ -249,6 +268,9 @@ router.get('/:agencyId/clients/:clientId/knowledge-base', async (req, res) => {
         return res.json({
           success: true,
           content: vapiData.content,
+          data,
+          websiteUrl,
+          updated_at,
           industry: industryKey,
           business_name: client.business_name,
           has_website: !!client.business_website,
@@ -268,6 +290,9 @@ router.get('/:agencyId/clients/:clientId/knowledge-base', async (req, res) => {
     return res.json({
       success: true,
       content: defaultContent,
+      data,
+      websiteUrl,
+      updated_at,
       industry: industryKey,
       business_name: client.business_name,
       has_website: !!client.business_website,
@@ -319,7 +344,35 @@ async function updateClientKnowledgeBase(agencyId, clientId, content) {
 router.put('/:agencyId/clients/:clientId/knowledge-base', async (req, res) => {
   try {
     const { agencyId, clientId } = req.params;
-    const result = await updateClientKnowledgeBase(agencyId, clientId, req.body && req.body.content);
+    const b = req.body || {};
+
+    // Structured save (website + FAQs + additional info, optionally a website
+    // re-scan): the agency / call-center KB editor sends the same typed fields
+    // the end-client "My Business" editor does. Delegate to the shared handler
+    // so the document is assembled, the structured copy is kept in
+    // knowledge_base_data (so FAQs survive a re-scrape), and VAPI is re-provisioned
+    // exactly as on the client side. That handler is NOT agency-scoped (it looks
+    // the client up by id alone), and requireAgencyAccess only proves the caller
+    // owns :agencyId, so verify the client belongs to this agency first to keep
+    // the tenant boundary.
+    const STRUCTURED_KEYS = ['faqs', 'services', 'businessHours', 'additionalInfo', 'websiteUrl', 'scrapeWebsite'];
+    const isStructured = STRUCTURED_KEYS.some((k) => b[k] !== undefined);
+    if (isStructured) {
+      const { data: owned, error: ownErr } = await supabase
+        .from('clients')
+        .select('id')
+        .eq('id', clientId)
+        .eq('agency_id', agencyId)
+        .single();
+      if (ownErr || !owned) return res.status(404).json({ success: false, error: 'Client not found' });
+      const { updateKnowledgeBase } = require('./knowledge-base');
+      req.body.clientId = clientId;
+      return updateKnowledgeBase(req, res);
+    }
+
+    // Legacy blob save (content only), kept for the v1 API and any caller that
+    // still sends the whole assembled document.
+    const result = await updateClientKnowledgeBase(agencyId, clientId, b.content);
     if (!result.ok) return res.status(result.status || 400).json({ success: false, error: result.error });
     res.json({ success: true, content: result.content });
   } catch (error) {
