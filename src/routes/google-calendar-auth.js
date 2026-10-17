@@ -246,7 +246,11 @@ router.get('/callback', async (req, res) => {
     // the card showed "connected". Reject it and send them back to reconnect
     // (and actually allow calendar access this time).
     const grantedScopes = String(tokens.scope || '').split(/\s+/).filter(Boolean);
-    if (!grantedScopes.includes('https://www.googleapis.com/auth/calendar.events')) {
+    // Accept calendar.events (what we request) or the broader calendar scope
+    // (a superset that also lets the AI write events), so a user who grants the
+    // wider permission is never wrongly rejected.
+    const hasCalendarWrite = grantedScopes.includes('https://www.googleapis.com/auth/calendar.events') || grantedScopes.includes('https://www.googleapis.com/auth/calendar');
+    if (!hasCalendarWrite) {
       console.warn(`⚠️ Calendar scope not granted for client ${clientId}; not marking connected.`);
       const back = safeReturnUrl(returnTo, null);
       return res.redirect(`${back || `${redirectBase}/client/settings`}?error=calendar_scope_missing`);
@@ -341,10 +345,17 @@ router.post('/disconnect', async (req, res) => {
       .eq('id', clientId)
       .single();
 
-    // Revoke token with Google (best effort)
-    if (client?.google_access_token) {
+    // Revoke the grant with Google (best effort). Prefer the REFRESH token:
+    // revoking it drops the entire authorization, so the next connect is a clean
+    // re-grant and Google re-shows the full consent screen (with the calendar
+    // checkbox) instead of silently reusing a prior partial grant. Revoke the
+    // access token too when present. Revoking either revokes the whole grant,
+    // but the access token is often already expired, so the refresh token is the
+    // reliable one.
+    const tokensToRevoke = [client?.google_refresh_token, client?.google_access_token].filter(Boolean);
+    for (const tok of tokensToRevoke) {
       try {
-        await fetch(`https://oauth2.googleapis.com/revoke?token=${client.google_access_token}`, {
+        await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(tok)}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         });
@@ -441,8 +452,17 @@ router.get('/status/:clientId', async (req, res) => {
           // uncheck it during consent, leaving a "connected" record that can't
           // book. A 401/403 here means connected-but-no-calendar-access, so the
           // UI can prompt a reconnect instead of showing a false green status.
+          //
+          // IMPORTANT: probe the EVENTS endpoint, not calendarList. The scope we
+          // request (and that booking needs) is calendar.events, which does NOT
+          // authorize calendarList.list (that needs the broader calendar /
+          // calendar.readonly scope). Probing calendarList therefore 403'd even
+          // when calendar.events was correctly granted, producing a false
+          // "connected, but no calendar access". events.list on the primary
+          // calendar is exactly what calendar.events grants and what booking
+          // (events.insert on primary) uses, so it is the correct access test.
           try {
-            const probe = await fetch('https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=1', {
+            const probe = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=1&timeMin=' + encodeURIComponent(new Date().toISOString()), {
               headers: { Authorization: `Bearer ${freshToken}` },
             });
             calendarAccess = probe.ok;
