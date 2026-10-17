@@ -288,6 +288,50 @@ For "faqs": pull real question-and-answer pairs the site actually states (FAQ/he
 }
 
 // ============================================================================
+// FOCUSED FAQ EXTRACTION
+// The combined extraction above shares one ~40k-char budget across every page
+// and every field, so on a multi-page site the FAQ pages get truncated out and
+// no FAQs come back even when the site clearly has them. This runs a separate
+// pass over the FAQ pages' OWN content, so FAQ coverage never depends on a page
+// winning that shared budget. Returns [{question, answer}] or [].
+// ============================================================================
+async function extractFaqsFocused(faqContent, businessName) {
+  if (!faqContent || !faqContent.trim()) return [];
+  const prompt = `You are reading FAQ / help content from the website of a business called "${businessName}".
+
+Pull EVERY distinct question-and-answer pair the content actually states, across all of it. Phrase each question the way a caller would ask it on the phone, and keep each answer factual and under ~300 characters. Include up to 25. Do NOT invent or infer FAQs that are not stated on the page. Return ONLY valid JSON, no markdown, no backticks:
+{ "faqs": [{ "question": "the question as a caller would ask it", "answer": "concise answer" }] }
+
+Content to analyze (may be several FAQ pages):
+${faqContent.substring(0, 50000)}`;
+
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 4000,
+        temperature: 0.1,
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+    if (!response.ok) { console.warn(`⚠️ Focused FAQ extraction failed: ${response.status}`); return []; }
+    const data = await response.json();
+    const text = data.content[0].text.trim().replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed.faqs) ? parsed.faqs.filter(f => f && f.question && f.answer) : [];
+  } catch (e) {
+    console.warn('⚠️ Focused FAQ extraction error:', e.message);
+    return [];
+  }
+}
+
+// ============================================================================
 // FORMAT STRUCTURED DATA — Convert extracted JSON to KB-friendly text
 // ============================================================================
 function formatStructuredSection(data, websiteUrl) {
@@ -407,7 +451,15 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
     const sitemapLinks = await fetchSitemapUrls(websiteUrl);
 
     const allLinks = new Set([...internalLinks, ...sitemapLinks]);
-    console.log(`   🔗 Discovered ${allLinks.size} unique internal links (${internalLinks.length} from page, ${sitemapLinks.length} from sitemap)`);
+    // Always probe common FAQ/help paths. FAQ pages are the highest-value
+    // content for a receptionist and are often linked only from a nav or a
+    // sub-page the homepage markdown misses. Dead guesses just return no content
+    // from Jina and get dropped, so this only ever adds real pages.
+    try {
+      const origin = new URL(websiteUrl).origin;
+      ['faq', 'faqs', 'frequently-asked-questions', 'frequently-asked', 'questions', 'help', 'support'].forEach(p => allLinks.add(`${origin}/${p}`));
+    } catch { /* ignore */ }
+    console.log(`   🔗 Discovered ${allLinks.size} unique internal links (${internalLinks.length} from page, ${sitemapLinks.length} from sitemap, + FAQ path probes)`);
 
     // ── Step 3: Classify and prioritize ──────────────────────────────────
     const scoredLinks = [];
@@ -420,18 +472,19 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
 
     scoredLinks.sort((a, b) => b.priority - a.priority);
 
-    const seenTypes = new Set();
+    const typeCounts = {};
     const pagesToScrape = [];
-    const MAX_PAGES = 15;
+    const MAX_PAGES = 18;
+    // One page per type keeps coverage broad, EXCEPT FAQ: sites routinely split
+    // FAQs across several pages and they are the highest-value content here, so
+    // let several FAQ pages through. ('other' pages were never deduped.)
+    const typeCap = (t) => (t === 'faq' ? 4 : t === 'other' ? Infinity : 1);
 
     for (const link of scoredLinks) {
       if (pagesToScrape.length >= MAX_PAGES) break;
-
-      if (link.type !== 'other') {
-        if (seenTypes.has(link.type)) continue;
-        seenTypes.add(link.type);
-      }
-
+      const c = typeCounts[link.type] || 0;
+      if (c >= typeCap(link.type)) continue;
+      typeCounts[link.type] = c + 1;
       pagesToScrape.push(link);
     }
 
@@ -476,6 +529,30 @@ async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
     let structuredSection = '';
     try {
       structuredData = await extractStructuredData(combinedRaw, businessName, 'business');
+
+      // Focused FAQ pass over the FAQ pages' own content, so FAQ coverage does
+      // not depend on those pages winning the shared extraction budget above.
+      // Merge into structuredData.faqs (dedup by question); that field feeds both
+      // the assembled KB document and the "found on your website" FAQ suggestions.
+      try {
+        const faqPages = pageContents.filter(p => p.type === 'faq');
+        const faqRaw = faqPages.map(p => p.content).join('\n\n---\n\n');
+        if (faqRaw.trim()) {
+          const focusedFaqs = await extractFaqsFocused(faqRaw, businessName);
+          if (focusedFaqs.length) {
+            if (!structuredData) structuredData = {};
+            const existing = Array.isArray(structuredData.faqs) ? structuredData.faqs : [];
+            const seen = new Set(existing.map(f => String(f.question || '').trim().toLowerCase()));
+            for (const f of focusedFaqs) {
+              const key = String(f.question || '').trim().toLowerCase();
+              if (key && !seen.has(key)) { existing.push(f); seen.add(key); }
+            }
+            structuredData.faqs = existing;
+            console.log(`   ❓ Focused FAQ pass: +${focusedFaqs.length} from ${faqPages.length} FAQ page(s), ${existing.length} total`);
+          }
+        }
+      } catch (e) { console.warn('⚠️ Focused FAQ pass failed (non-blocking):', e.message); }
+
       structuredSection = formatStructuredSection(structuredData, websiteUrl);
       if (structuredSection) {
         console.log(`   ✅ Extracted structured data (${structuredSection.length} chars)`);
