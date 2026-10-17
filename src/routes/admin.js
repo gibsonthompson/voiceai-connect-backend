@@ -260,7 +260,7 @@ router.get('/agencies', requireAdmin, async (req, res) => {
     // agency DETAIL endpoint still returns the full row.
     let query = supabase
       .from('agencies')
-      .select('id, name, email, phone, slug, country, plan_type, access_plan, subscription_status, status, created_at, trial_ends_at, current_period_end, last_login_at, last_active_at, referral_source, stripe_charges_enabled, stripe_account_id, marketing_domain, byot_enabled, usage_billing_enabled, minute_pass_through')
+      .select('id, name, email, phone, slug, country, plan_type, access_plan, subscription_status, status, created_at, trial_ends_at, current_period_end, last_login_at, last_active_at, last_admin_outreach_at, referral_source, stripe_charges_enabled, stripe_account_id, marketing_domain, byot_enabled, usage_billing_enabled, minute_pass_through')
       .order('created_at', { ascending: false })
       .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
 

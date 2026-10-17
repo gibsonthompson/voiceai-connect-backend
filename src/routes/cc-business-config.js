@@ -61,7 +61,7 @@ function sanitizeHours(input) {
 async function scopedClient(agencyId, clientId) {
   const { data: client } = await supabase
     .from('clients')
-    .select('id, agency_id, business_name, owner_name, owner_phone, email, business_city, business_state, business_website, notification_phone, post_call_sms_enabled, transfer_phone, timezone, greeting_message, business_hours, forwarding_mode, human_handoff, service_areas, ai_tone, booking_mode, min_booking_notice_minutes, max_booking_days_ahead, tool_config, hipaa_mode, recording_enabled, vapi_phone_number, forwarding_confirmed, voice_routing')
+    .select('id, agency_id, business_name, owner_name, owner_phone, email, industry, business_city, business_state, business_website, notification_phone, post_call_sms_enabled, transfer_phone, timezone, greeting_message, business_hours, forwarding_mode, human_handoff, service_areas, ai_tone, booking_mode, min_booking_notice_minutes, max_booking_days_ahead, hipaa_mode, recording_enabled, tool_config, vapi_phone_number, forwarding_confirmed, voice_routing')
     .eq('id', clientId).maybeSingle();
   if (!client) return { error: 'Business not found', code: 404 };
   if (client.agency_id !== agencyId) return { error: 'Business not found', code: 404 };
@@ -74,13 +74,52 @@ router.get('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
     const chk = await scopedClient(req.params.agencyId, req.params.clientId);
     if (chk.error) return res.status(chk.code).json({ success: false, error: chk.error });
     const c = chk.client;
+    const tc = (c.tool_config && typeof c.tool_config === 'object') ? c.tool_config : {};
+
+    // Booking-window defaults the business inherits when it sets no override
+    // (null min/max). These come from the agency (Settings), falling back to the
+    // platform default of 30 min notice / 60 days ahead. Surfaced so the editor
+    // can show the business owner exactly what "blank = agency default" means.
+    let agencyDefaults = { minNotice: 30, maxDays: 60 };
+    try {
+      const { data: ag } = await supabase.from('agencies')
+        .select('default_min_booking_notice_minutes, default_max_booking_days_ahead')
+        .eq('id', req.params.agencyId).maybeSingle();
+      if (ag) {
+        agencyDefaults = {
+          minNotice: ag.default_min_booking_notice_minutes ?? 30,
+          maxDays: ag.default_max_booking_days_ahead ?? 60,
+        };
+      }
+    } catch (e) { /* keep platform fallback */ }
+
+    // Opt-out status for the recap recipient (notification_phone, else owner
+    // phone). If they replied STOP they get no texts, including the recap, until
+    // they text START, so the editor warns next to the toggle. Best effort.
+    const recipientPhone = c.notification_phone || c.owner_phone || null;
+    let optOut = null;
+    if (recipientPhone) {
+      try {
+        const { getOptOut } = require('../lib/sms-opt-out');
+        const [platform, scoped] = await Promise.all([
+          getOptOut(recipientPhone, null),
+          getOptOut(recipientPhone, req.params.agencyId),
+        ]);
+        const activeRow = (platform && platform.opted_out) ? platform : ((scoped && scoped.opted_out) ? scoped : null);
+        optOut = { optedOut: !!activeRow, phone: recipientPhone, since: activeRow ? activeRow.opted_out_at : null };
+      } catch (e) { optOut = null; }
+    }
+
     res.json({
       success: true,
+      agencyDefaults,
       config: {
+        optOut,
         businessName: c.business_name || '',
         ownerName: c.owner_name || '',
         ownerPhone: c.owner_phone || '',
         email: c.email || '',
+        industry: c.industry || '',
         businessCity: c.business_city || '',
         businessState: c.business_state || '',
         businessWebsite: c.business_website || '',
@@ -97,19 +136,18 @@ router.get('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
         forwardingMode: c.forwarding_mode || 'all',
         humanHandoff: c.human_handoff || 'transfer',
         serviceAreas: Array.isArray(c.service_areas) ? c.service_areas : [],
-        // AI behavior
         aiTone: c.ai_tone || 'professional',
-        // Booking (null = inherit the agency default)
-        bookingMode: c.booking_mode || 'collect_request',
+        bookingMode: c.booking_mode || 'auto_book',
         minBookingNotice: c.min_booking_notice_minutes ?? null,
         maxBookingDays: c.max_booking_days_ahead ?? null,
-        // Call-handling toggles live in tool_config; defaults match the builder.
-        spamDetection: (c.tool_config && c.tool_config.spamDetection) !== false,
-        callerRecognition: (c.tool_config && c.tool_config.callerRecognition) !== false,
-        transferCall: (c.tool_config && c.tool_config.transferCall) !== false,
-        afterHoursRouting: (c.tool_config && c.tool_config.businessHoursRouting) !== false,
-        smsToCaller: !!(c.tool_config && c.tool_config.smsToCaller === true),
-        // Compliance
+        // tool_config toggles, read with the same defaults the assistant uses
+        // (on, except caller-text which is opt-in). The page's "afterHoursRouting"
+        // is stored as tool_config.businessHoursRouting.
+        spamDetection: tc.spamDetection !== false,
+        callerRecognition: tc.callerRecognition !== false,
+        transferCall: tc.transferCall !== false,
+        afterHoursRouting: tc.businessHoursRouting !== false,
+        smsToCaller: tc.smsToCaller === true,
         hipaaMode: c.hipaa_mode === true,
         recordingEnabled: c.recording_enabled !== false,
         vapiPhoneNumber: c.vapi_phone_number || null,
@@ -134,43 +172,6 @@ router.put('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
     if (typeof b.ownerName === 'string') updates.owner_name = b.ownerName.trim() || null;
     if (typeof b.timezone === 'string' && b.timezone.trim()) updates.timezone = b.timezone.trim();
     if (typeof b.greeting === 'string') updates.greeting_message = b.greeting.trim() || null;
-    if (typeof b.businessCity === 'string') updates.business_city = b.businessCity.trim() || null;
-    if (typeof b.businessState === 'string') updates.business_state = b.businessState.trim() || null;
-    if (b.businessWebsite !== undefined) updates.business_website = String(b.businessWebsite || '').trim() || null;
-
-    // AI tone (enum, guarded).
-    if (b.aiTone !== undefined && ['professional', 'friendly', 'casual', 'clinical'].includes(b.aiTone)) updates.ai_tone = b.aiTone;
-
-    // Booking: mode (enum) + optional window (null = inherit the agency default).
-    if (b.bookingMode !== undefined && ['auto_book', 'collect_request', 'disabled'].includes(b.bookingMode)) updates.booking_mode = b.bookingMode;
-    if (b.minBookingNotice !== undefined) {
-      const n = Number(b.minBookingNotice);
-      updates.min_booking_notice_minutes = (b.minBookingNotice === null || b.minBookingNotice === '' || Number.isNaN(n)) ? null : Math.max(0, Math.floor(n));
-    }
-    if (b.maxBookingDays !== undefined) {
-      const n = Number(b.maxBookingDays);
-      updates.max_booking_days_ahead = (b.maxBookingDays === null || b.maxBookingDays === '' || Number.isNaN(n)) ? null : Math.max(1, Math.floor(n));
-    }
-
-    // Compliance. HIPAA mode is the master switch (the builder also forces
-    // recording + caller recognition off when it is on); recording_enabled is a
-    // standalone off switch that works independently of HIPAA.
-    if (b.hipaaMode !== undefined) updates.hipaa_mode = (b.hipaaMode === true);
-    if (b.recordingEnabled !== undefined) updates.recording_enabled = !(b.recordingEnabled === false || b.recordingEnabled === 'off');
-
-    // Call-handling toggles are stored inside the tool_config jsonb. MERGE into
-    // the existing object so keys this UI does not show (smsSnippets, smsPresets,
-    // speechTimeout, and so on) are never wiped.
-    const _tcKeys = ['spamDetection', 'callerRecognition', 'transferCall', 'afterHoursRouting', 'smsToCaller'];
-    if (_tcKeys.some((k) => b[k] !== undefined)) {
-      const tc = { ...(chk.client.tool_config && typeof chk.client.tool_config === 'object' && !Array.isArray(chk.client.tool_config) ? chk.client.tool_config : {}) };
-      if (b.spamDetection !== undefined) tc.spamDetection = b.spamDetection === true;
-      if (b.callerRecognition !== undefined) tc.callerRecognition = b.callerRecognition === true;
-      if (b.transferCall !== undefined) tc.transferCall = b.transferCall === true;
-      if (b.afterHoursRouting !== undefined) tc.businessHoursRouting = b.afterHoursRouting === true;
-      if (b.smsToCaller !== undefined) tc.smsToCaller = b.smsToCaller === true;
-      updates.tool_config = tc;
-    }
 
     if (b.ownerPhone !== undefined) {
       const p = toE164(b.ownerPhone);
@@ -205,6 +206,47 @@ router.put('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
     }
     if (b.serviceAreas !== undefined && Array.isArray(b.serviceAreas)) {
       updates.service_areas = b.serviceAreas.map((s) => String(s || '').trim()).filter(Boolean).slice(0, 50);
+    }
+
+    // Identity extras.
+    if (typeof b.email === 'string') updates.email = b.email.trim() || null;
+    if (typeof b.businessCity === 'string') updates.business_city = b.businessCity.trim() || null;
+    if (typeof b.businessState === 'string') updates.business_state = b.businessState.trim() || null;
+    if (typeof b.businessWebsite === 'string') updates.business_website = b.businessWebsite.trim() || null;
+
+    // Tone.
+    if (b.aiTone !== undefined && ['professional', 'friendly', 'casual', 'clinical'].includes(b.aiTone)) updates.ai_tone = b.aiTone;
+
+    // Booking. null/'' clears the per-business override so it inherits the agency
+    // default; a value is range-clamped.
+    if (b.bookingMode !== undefined && ['auto_book', 'collect_request', 'disabled'].includes(b.bookingMode)) updates.booking_mode = b.bookingMode;
+    if (b.minBookingNotice !== undefined) {
+      if (b.minBookingNotice === null || b.minBookingNotice === '') updates.min_booking_notice_minutes = null;
+      else { const n = parseInt(b.minBookingNotice, 10); if (!isNaN(n) && n >= 0 && n <= 20160) updates.min_booking_notice_minutes = n; }
+    }
+    if (b.maxBookingDays !== undefined) {
+      if (b.maxBookingDays === null || b.maxBookingDays === '') updates.max_booking_days_ahead = null;
+      else { const n = parseInt(b.maxBookingDays, 10); if (!isNaN(n) && n >= 1 && n <= 365) updates.max_booking_days_ahead = n; }
+    }
+
+    // Compliance. recording_enabled is written as-is; the config builder still
+    // force-disables recording (and caller recognition) under HIPAA at call time.
+    if (b.hipaaMode !== undefined) updates.hipaa_mode = b.hipaaMode === true;
+    if (b.recordingEnabled !== undefined) updates.recording_enabled = b.recordingEnabled === true;
+
+    // Call-handling toggles live in tool_config (jsonb). MERGE so we never clobber
+    // other keys (smsPresets, backgroundDenoising, etc.). The page's
+    // "afterHoursRouting" is stored as businessHoursRouting.
+    const tcKeys = ['spamDetection', 'callerRecognition', 'transferCall', 'afterHoursRouting', 'smsToCaller'];
+    if (tcKeys.some((k) => b[k] !== undefined)) {
+      const existingTc = (chk.client.tool_config && typeof chk.client.tool_config === 'object') ? chk.client.tool_config : {};
+      const mergedTc = { ...existingTc };
+      if (b.spamDetection !== undefined) mergedTc.spamDetection = b.spamDetection === true;
+      if (b.callerRecognition !== undefined) mergedTc.callerRecognition = b.callerRecognition === true;
+      if (b.transferCall !== undefined) mergedTc.transferCall = b.transferCall === true;
+      if (b.afterHoursRouting !== undefined) mergedTc.businessHoursRouting = b.afterHoursRouting === true;
+      if (b.smsToCaller !== undefined) mergedTc.smsToCaller = b.smsToCaller === true;
+      updates.tool_config = mergedTc;
     }
 
     if (Object.keys(updates).length === 0) {

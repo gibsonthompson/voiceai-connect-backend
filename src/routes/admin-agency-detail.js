@@ -321,6 +321,11 @@ router.post('/agencies/:agencyId/log-email', requireAdmin, async (req, res) => {
       return res.status(500).json({ error: 'Failed to log email' });
     }
 
+    // Stamp the agency so the admin dashboard can show "reached out Xd ago".
+    try {
+      await supabase.from('agencies').update({ last_admin_outreach_at: new Date().toISOString() }).eq('id', agencyId);
+    } catch (e) { console.warn('last_admin_outreach_at stamp failed (non-blocking):', e.message); }
+
     res.json({ success: true, email: data });
   } catch (error) {
     console.error('Log email error:', error);
