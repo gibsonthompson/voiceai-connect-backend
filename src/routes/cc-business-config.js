@@ -148,6 +148,10 @@ router.get('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
         transferCall: tc.transferCall !== false,
         afterHoursRouting: tc.businessHoursRouting !== false,
         smsToCaller: tc.smsToCaller === true,
+        // Call-center escalation policies (only meaningful for call-center
+        // agencies; the agent layer is what they gate).
+        overflowAction: ['message', 'callback', 'ring_business'].includes(tc.overflowAction) ? tc.overflowAction : 'message',
+        aiDirectRouting: tc.aiDirectRouting === true,
         hipaaMode: c.hipaa_mode === true,
         recordingEnabled: c.recording_enabled !== false,
         vapiPhoneNumber: c.vapi_phone_number || null,
@@ -237,7 +241,7 @@ router.put('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
     // Call-handling toggles live in tool_config (jsonb). MERGE so we never clobber
     // other keys (smsPresets, backgroundDenoising, etc.). The page's
     // "afterHoursRouting" is stored as businessHoursRouting.
-    const tcKeys = ['spamDetection', 'callerRecognition', 'transferCall', 'afterHoursRouting', 'smsToCaller'];
+    const tcKeys = ['spamDetection', 'callerRecognition', 'transferCall', 'afterHoursRouting', 'smsToCaller', 'overflowAction', 'aiDirectRouting'];
     if (tcKeys.some((k) => b[k] !== undefined)) {
       const existingTc = (chk.client.tool_config && typeof chk.client.tool_config === 'object') ? chk.client.tool_config : {};
       const mergedTc = { ...existingTc };
@@ -246,6 +250,8 @@ router.put('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
       if (b.transferCall !== undefined) mergedTc.transferCall = b.transferCall === true;
       if (b.afterHoursRouting !== undefined) mergedTc.businessHoursRouting = b.afterHoursRouting === true;
       if (b.smsToCaller !== undefined) mergedTc.smsToCaller = b.smsToCaller === true;
+      if (b.overflowAction !== undefined && ['message', 'callback', 'ring_business'].includes(b.overflowAction)) mergedTc.overflowAction = b.overflowAction;
+      if (b.aiDirectRouting !== undefined) mergedTc.aiDirectRouting = b.aiDirectRouting === true;
       updates.tool_config = mergedTc;
     }
 

@@ -1793,6 +1793,18 @@ router.post('/api/voice/request-transfer', async (req, res) => {
     // the whole handler stays within the VAPI tool timeout no matter the path.
     const transferDeadline = Date.now() + TRANSFER_WAIT_MS;
 
+    // Call-center escalation policies (per business, stored in tool_config):
+    //  - aiDirectRouting: the AI may transfer straight to a department it matched,
+    //    skipping the agent offer. Default off = agents own all routing.
+    //  - overflowAction: what happens when no agent takes the call. Default
+    //    'message' (and 'callback') keep the call center in front of the business;
+    //    'ring_business' preserves the old behavior of dialing the client's line.
+    const _tc = (client && client.tool_config && typeof client.tool_config === 'object') ? client.tool_config : {};
+    const aiDirectRouting = _tc.aiDirectRouting === true;
+    const overflowAction = ['message', 'callback', 'ring_business'].includes(_tc.overflowAction) ? _tc.overflowAction : 'message';
+    let ccIsCallCenter = false;
+    let ccAgentPathExhausted = false;
+
     // ---- Call-center escalation routing (opt-in; call-center agencies only) ----
     // Before dialing the business's own line, offer the caller to the assigned,
     // available agents - a screen-pop in their /cc console. A browser agent takes
@@ -1808,8 +1820,15 @@ router.post('/api/voice/request-transfer', async (req, res) => {
         const { data: agency } = await supabase.from('agencies').select('is_call_center').eq('id', escAgencyId).maybeSingle();
         isCallCenter = !!(agency && agency.is_call_center);
       }
-      if (isCallCenter) {
+      ccIsCallCenter = isCallCenter;
+      if (isCallCenter && aiDirectRouting && chosenNumber) {
+        // AI-direct-to-department is on AND the AI matched a specific person /
+        // department: skip the agent offer and let the transfer go straight to
+        // them (officeNumber is already the chosen number).
+        console.log(`telnyx-voice: AI-direct routing on + department matched ("${transferToLabel}") - bypassing agent offer`);
+      } else if (isCallCenter) {
         const avail = await agentPresence.listAvailableForClient({ agencyId: escAgencyId, clientId: session.client_id });
+        if (!avail.length) ccAgentPathExhausted = true;
         if (avail.length) {
           const offeredTo = avail.map((a) => a.memberUserId);
           const offer = await escalationOffers.createOffer({
@@ -1890,8 +1909,9 @@ router.post('/api/voice/request-transfer', async (req, res) => {
                 await returnToAI(session.id, 'agent_no_show');
                 return reply('I could not get a team member onto the line in time, so you are back with the caller. Apologize and offer to take a detailed message with their name, number, and reason for calling.');
               }
-              // No agent responded: fall through to the business line, unchanged.
+              // No agent responded: the overflow policy below decides what happens.
               await escalationOffers.resolveOffer(offer.id, 'no_agents').catch(() => {});
+              ccAgentPathExhausted = true;
             }
           }
         }
@@ -1900,6 +1920,18 @@ router.post('/api/voice/request-transfer', async (req, res) => {
       console.warn('telnyx-voice: call-center escalation routing skipped:', e.message);
     }
     // ---- end call-center escalation routing ----
+
+    // Overflow: a call-center escalation that reached no agent. Unless the
+    // business opted into ringing its own line, do NOT dial the business - that
+    // is what keeps the call center in front of it. Hand the caller back to the
+    // AI to take a message (or set a callback expectation and capture details).
+    if (ccIsCallCenter && ccAgentPathExhausted && overflowAction !== 'ring_business') {
+      await returnToAI(session.id, 'overflow_no_agent').catch(() => {});
+      if (overflowAction === 'callback') {
+        return reply('No team member is available right now. Apologize, tell the caller a team member will call them back shortly, and confirm the best callback number and a short reason for the call.');
+      }
+      return reply('No team member is available right now. Apologize and take a detailed message with the caller name, number, and reason for calling.');
+    }
 
     await updateSession(session.id, { status: 'transferring', whisper_summary: summary });
 

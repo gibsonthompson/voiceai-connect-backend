@@ -89,6 +89,26 @@ async function sendAndLogSMS({ phone, message, agencyId, recipientType, messageT
     return false;
   }
 
+  // ── Opt-out suppression ─────────────────────────────────────────────
+  // If this recipient replied STOP, the carrier blocks the send anyway, so
+  // skip it (and record it clearly) instead of generating a guaranteed
+  // failure. Scope matches the transport: a BYOT agency texts its own brand
+  // (agency scope); platform texts share one profile (platform / null scope).
+  // Fails open: an opt-out lookup error never blocks a real notification.
+  try {
+    const { isOptedOut } = require('./sms-opt-out');
+    const optScope = useAgencyTwilio ? agencyId : null;
+    if (await isOptedOut(formattedPhone, optScope)) {
+      console.log(`📵 SMS suppressed (recipient opted out): ${formattedPhone} for ${messageType || 'unknown'}`);
+      await logSMS({
+        agencyId, phone: formattedPhone, recipientType, messageType, message,
+        telnyxMessageId: null, status: 'skipped_opt_out',
+        metadata: { ...(metadata || {}), suppressed: 'recipient_opted_out' },
+      });
+      return false;
+    }
+  } catch (e) { /* fail open */ }
+
   let sent = false;
   let telnyxMessageId = null;
   let sendMeta = { ...(metadata || {}) };

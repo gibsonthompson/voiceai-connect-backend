@@ -232,7 +232,7 @@ async function notifyOwnerOfInboundSMS(client, callerPhone, messageContent) {
 
     await sendAndLogSMS({
       phone: client.owner_phone,
-      message: `New text for ${client.business_name || 'your business'} from ${formatted}:\n"${preview}"\n\nThis came in on your AI receptionist number. Log in to your dashboard and open Messages to reply. Replying to this text won't reach them.`,
+      message: `💬 New text from ${formatted}:\n"${preview}"\n\nReply from your dashboard.`,
       from: client.vapi_phone_number || null,
       agencyId: client.agency_id,
       recipientType: 'client_owner',
@@ -684,9 +684,21 @@ module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(re
       if (telnyxMessageId) {
         const update = { status };
         if (status === 'failed') {
-          update.error_message = event.payload?.errors?.[0]?.detail
+          const detail = event.payload?.errors?.[0]?.detail
             || event.payload?.to?.[0]?.status
             || 'delivery failed';
+          update.error_message = detail;
+          // Bulletproof opt-out capture: a carrier opt-out surfaces here as a
+          // delivery error even when the inbound STOP never reached our webhook.
+          // Flag the number (platform scope) so we stop trying and can show why.
+          try {
+            const { errorIndicatesOptOut, recordOptOut } = require('../lib/sms-opt-out');
+            const errCode = event.payload?.errors?.[0]?.code;
+            const toNum = event.payload?.to?.[0]?.phone_number;
+            if (toNum && errorIndicatesOptOut(detail, errCode)) {
+              await recordOptOut(toNum, { agencyId: null, source: 'delivery_receipt', keyword: null });
+            }
+          } catch (e) { /* non-blocking */ }
         }
         await supabase
           .from('sms_messages')
@@ -729,6 +741,25 @@ module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(re
     }
 
     console.log(`Inbound SMS: ${callerPhone} -> ${clientPhone}: "${messageText.substring(0, 50)}..."`);
+
+    // Carrier control keywords (STOP/START/HELP) on the shared Telnyx profile.
+    // Telnyx enforces the opt-out itself, but it does not reliably forward the
+    // keyword as a webhook, so we also catch it here when it does arrive and
+    // mirror the state (platform scope) so our own send path can skip opted-out
+    // numbers and the dashboard can show status. On a control word we never
+    // thread it or notify an owner.
+    const control = classifyControlKeyword(messageText);
+    if (control === 'stop') {
+      try { await require('../lib/sms-opt-out').recordOptOut(callerPhone, { agencyId: null, source: 'inbound_keyword', keyword: messageText.trim().toLowerCase() }); } catch (e) {}
+      return res.status(200).json({ received: true, optOut: true });
+    }
+    if (control === 'start') {
+      try { await require('../lib/sms-opt-out').clearOptOut(callerPhone, { agencyId: null, source: 'inbound_keyword' }); } catch (e) {}
+      return res.status(200).json({ received: true, optIn: true });
+    }
+    if (control === 'help') {
+      return res.status(200).json({ received: true, help: true });
+    }
 
     // Reply to the PLATFORM number (activation/engagement SMS to agency owners).
     // Not a client conversation: capture for the admin inbox and ping the owner.
@@ -872,6 +903,14 @@ module.exports.handleTwilioSMSWebhook = async function handleTwilioSMSWebhook(re
     // send anything nor notify the owner. Just acknowledge with empty TwiML.
     const control = classifyControlKeyword(messageText);
     if (control) {
+      // Mirror the opt-out on our side so our send path can skip this number and
+      // the dashboard can show status. BYOT is the agency's own Twilio brand, so
+      // scope it to that agency. Twilio still enforces the opt-out itself.
+      try {
+        const { recordOptOut, clearOptOut } = require('../lib/sms-opt-out');
+        if (control === 'stop') await recordOptOut(callerPhone, { agencyId: client.agency_id || null, source: 'inbound_keyword', keyword: messageText.trim().toLowerCase() });
+        else if (control === 'start') await clearOptOut(callerPhone, { agencyId: client.agency_id || null, source: 'inbound_keyword' });
+      } catch (e) { /* non-blocking */ }
       console.log(`Twilio inbound control keyword '${control}' from ${callerPhone} for ${client.business_name} - not stored, owner not notified`);
       return emptyTwiml(res);
     }
