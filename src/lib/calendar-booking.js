@@ -598,6 +598,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
       staff_name: staffName || null,
       notes,
       status: 'confirmed',
+      booking_source: 'ai_receptionist',
     };
     let insertedApptId = null;
     {
@@ -614,15 +615,30 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     try {
       if (client.agency_id) {
         const { dispatchWebhook } = require('./webhooks');
+        // Full payload so a business/call-center CRM can sync everything about
+        // the booking without a second API call: who, what, when (start + end +
+        // timezone), where it landed on Google, and how it was booked.
+        const startIso = appointmentRecord.appointment_time;
+        const endIso = new Date(new Date(startIso).getTime() + (duration || 0) * 60000).toISOString();
         dispatchWebhook(client.agency_id, 'appointment.booked', {
           id: insertedApptId,
           client_id: clientId,
+          business_name: client.business_name || null,
           customer_name: customerName,
           customer_phone: customerPhone,
-          appointment_time: appointmentRecord.appointment_time,
-          service_type: serviceType,
+          appointment_time: startIso,
+          end_time: endIso,
+          duration_minutes: duration || null,
+          timezone: client.timezone || null,
+          service_type: serviceType || null,
           staff_name: staffName || null,
+          notes: notes || null,
           status: 'confirmed',
+          booking_source: 'ai_receptionist',
+          google_event_id: createdEvent.id,
+          google_calendar_id: client.google_calendar_id || 'primary',
+          calendar_link: createdEvent.htmlLink || null,
+          created_at: new Date().toISOString(),
         });
       }
     } catch (e) { console.error('webhook emit (appointment.booked):', e.message); }
@@ -640,6 +656,47 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
 
     let confirmMsg = `Appointment confirmed for ${customerName} on ${formattedDate} at ${formattedTime}`;
     if (staffName) confirmMsg += ` with ${staffName}`;
+
+    // Appointment-booked texts, both from the business's own AI number. Fire and
+    // forget so booking latency is unaffected.
+    //   - Customer confirmation: opt-in per business (upgrade-gated in the UI),
+    //     default OFF. tool_config.apptCustomerSms = { enabled, template }.
+    //   - Owner alert: a distinct "new appointment booked" notification, separate
+    //     from the general call recap. tool_config.apptOwnerSms = { enabled }.
+    try {
+      const tc = (client.tool_config && typeof client.tool_config === 'object') ? client.tool_config : {};
+      const fromNum = client.vapi_phone_number || null;
+      if (fromNum) {
+        const { sendTelnyxSMS } = require('./notifications');
+
+        if (tc.apptCustomerSmsEnabled === true && customerPhone) {
+          const vars = {
+            name: customerName || 'there',
+            business: client.business_name || 'us',
+            service: serviceType || 'appointment',
+            date: formattedDate,
+            time: formattedTime,
+            staff: staffName || '',
+          };
+          const tmpl = (typeof tc.apptCustomerSmsTemplate === 'string' && tc.apptCustomerSmsTemplate.trim())
+            ? tc.apptCustomerSmsTemplate
+            : 'Hi {name}, your {service} with {business} is confirmed for {date} at {time}. Reply here if you need to change anything.';
+          const msg = tmpl
+            .replace(/\{(\w+)\}/g, (_, k) => (vars[k] != null ? String(vars[k]) : ''))
+            .replace(/[ \t]{2,}/g, ' ').replace(/ +([.,!?])/g, '$1').trim();
+          Promise.resolve(sendTelnyxSMS(customerPhone, msg, fromNum)).catch((e) => console.warn('appt customer SMS failed:', e.message));
+        }
+
+        if (tc.apptOwnerSmsEnabled === true) {
+          const ownerTo = client.notification_phone || client.owner_phone || null;
+          if (ownerTo) {
+            let ownerMsg = `📅 New appointment booked - ${client.business_name || ''}\n${customerName || 'Customer'}${customerPhone ? ` (${customerPhone})` : ''}\n${serviceType || 'Appointment'} on ${formattedDate} at ${formattedTime}`;
+            if (staffName) ownerMsg += ` with ${staffName}`;
+            Promise.resolve(sendTelnyxSMS(ownerTo, ownerMsg, fromNum)).catch((e) => console.warn('appt owner SMS failed:', e.message));
+          }
+        }
+      }
+    } catch (e) { console.warn('appointment SMS block error:', e.message); }
 
     return {
       success: true,
