@@ -214,12 +214,16 @@ router.post('/availability/:clientId', async function(req, res) {
           var slots = checkResult.slots;
           var suggested = slots.length <= 4 ? slots : [slots[0], slots[Math.floor(slots.length / 2)], slots[Math.floor(slots.length * 0.75)]];
           var dateLabel = friendlyDate(checkStr);
-          
-          return res.json({ 
-            results: [{ 
+
+          return res.json({
+            results: [{
               toolCallId: toolCallId,
-              result: 'Date to use: ' + dateLabel + '. Open times: ' + suggested.join(', ') + '. Offer the caller this date and these times in natural speech and ask which works best. Use this exact date, not any other.'
-            }] 
+              // Give the AI a few times to offer aloud AND the COMPLETE open list,
+              // so if the caller asks for a specific time that is actually open
+              // (but not one of the few we suggested) the AI honors it instead of
+              // wrongly saying it is taken.
+              result: 'Date to use: ' + dateLabel + '. Suggest these times to the caller in natural speech and ask which works best: ' + suggested.join(', ') + '. COMPLETE list of open times on this date: ' + slots.join(', ') + '. If the caller asks for a specific time, book it whenever it appears in that complete list, even if you did not say it aloud; only if it is NOT in the list, say that time is not open and offer the nearest ones. Use this exact date, not any other.'
+            }]
           });
         }
       }
@@ -260,11 +264,14 @@ router.post('/availability/:clientId', async function(req, res) {
       }
     }
 
-    return res.json({ 
-      results: [{ 
+    return res.json({
+      results: [{
         toolCallId: toolCallId,
-        result: 'Date to use: ' + dateLabel2 + '. Open times: ' + suggested2.join(', ') + '. Offer the caller this date and these times in natural speech and ask which works best. Use this exact date, not any other.'
-      }] 
+        // Give the AI a few times to offer aloud AND the COMPLETE open list, so a
+        // caller who asks for a specific open time that we did not read aloud is
+        // booked instead of being wrongly told it is taken.
+        result: 'Date to use: ' + dateLabel2 + '. Suggest these times to the caller in natural speech and ask which works best: ' + suggested2.join(', ') + '. COMPLETE list of open times on this date: ' + slots2.join(', ') + '. If the caller asks for a specific time, book it whenever it appears in that complete list, even if you did not say it aloud; only if it is NOT in the list, say that time is not open and offer the nearest ones. Use this exact date, not any other.'
+      }]
     });
 
   } catch (error) {
