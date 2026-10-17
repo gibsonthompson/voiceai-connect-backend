@@ -2060,7 +2060,10 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     // leg; vapi_direct keeps VAPI's default.
     ...(client.voice_routing === 'telnyx_cc' ? { silenceTimeoutSeconds: 60 } : {}),
     firstMessage,
-    recordingEnabled: hipaaMode ? false : true,
+    // Record unless HIPAA mode is on OR the business turned recording off in its
+    // compliance settings (recording_enabled column). Default is on (the column
+    // is only false when explicitly disabled), so existing clients are unchanged.
+    recordingEnabled: (hipaaMode || client.recording_enabled === false) ? false : true,
     // Live monitor: provision VAPI's listen + control channels so the AI Lab
     // monitor can stream the call audio and take over the AI if needed. These
     // only expose monitor.listenUrl / monitor.controlUrl on call events (the
