@@ -62,6 +62,7 @@ router.post('/:agencyId/feedback', async (req, res) => {
         source: 'feedback',
         user_type: 'agency',
         status: 'open',
+        admin_unread: 1,
       })
       .select()
       .single();

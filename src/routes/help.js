@@ -310,8 +310,33 @@ router.post('/chat', async (req, res) => {
     // prospect (the public bot) when the caller did not say.
     const aud = ['prospect', 'agency', 'client'].includes(audience) ? audience : 'prospect';
     const systemPrompt = `${KB_CONTEXT}\n\n${AUDIENCE_PROMPTS[aud]}`;
+
+    // Attribution for the admin inbox comes from the auth token, not the
+    // client-supplied body: an in-app help chat must always carry its agency,
+    // and a client's chat resolves to the client's agency so it is never
+    // orphaned. Falls back to the body values only for an anonymous prospect.
+    let originUserType = aud;
+    let originAgencyId = agencyId || null;
+    try {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      if (token) {
+        const jwt = require('jsonwebtoken');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const role = decoded.role || null;
+        const tokAgency = decoded.agencyId || decoded.agency_id || null;
+        const tokClient = decoded.clientId || decoded.client_id || null;
+        if (tokClient && !tokAgency) {
+          originUserType = 'client';
+          const { data: c } = await supabase.from('clients').select('agency_id').eq('id', tokClient).single();
+          originAgencyId = (c && c.agency_id) || null;
+        } else if (tokAgency) {
+          originUserType = (role && String(role).startsWith('client')) ? 'client' : 'agency';
+          originAgencyId = tokAgency;
+        }
+      }
+    } catch { /* no/invalid token: anonymous prospect, keep body values */ }
     const sourceMap = { prospect: 'marketing', agency: 'agency_dashboard', client: 'client_dashboard' };
-    const origin = { userType: aud, agencyId: agencyId || null, source: sourceMap[aud] };
+    const origin = { userType: originUserType, agencyId: originAgencyId, source: sourceMap[originUserType] || sourceMap[aud] };
 
     // Build conversation history for Claude
     const messages = [];
@@ -372,11 +397,9 @@ router.post('/message', async (req, res) => {
   try {
     const { message, name, contact, conversationSummary, sessionId } = req.body || {};
 
-    // Flag the originating FAQ-bot session as escalated (non-blocking).
-    logWidgetChat(sessionId, 'escalation', `Escalated to support. Name: ${(typeof name === 'string' && name.trim()) || '(none)'} / Contact: ${(typeof contact === 'string' && contact.trim()) || '(none)'}`);
-
-    // Pull identity from the auth token when present. generateToken mints
-    // { userId, email, role, agencyId, clientId } (camelCase); fall back to
+    // Pull identity from the auth token FIRST (moved above the escalation log so
+    // the log row carries the agency, instead of landing as an orphan). generateToken
+    // mints { userId, email, role, agencyId, clientId } (camelCase); fall back to
     // snake_case defensively. role distinguishes agency vs client callers.
     let userEmail = 'Unknown';
     let agencyId = null;
@@ -397,6 +420,17 @@ router.post('/message', async (req, res) => {
     } catch {
       // Token parsing failed, continue as anonymous.
     }
+    // A client escalation resolves to the client's agency so it is never orphaned.
+    if (clientId && !agencyId) {
+      try { const { data: c } = await supabase.from('clients').select('agency_id').eq('id', clientId).single(); agencyId = (c && c.agency_id) || null; } catch {}
+    }
+    const escUserType = hasToken ? ((role && String(role).startsWith('client')) ? 'client' : 'agency') : null;
+    const escSource = hasToken ? (escUserType === 'client' ? 'client_dashboard' : 'agency_dashboard') : 'marketing';
+
+    // Flag the originating FAQ-bot session as escalated, WITH attribution so an
+    // in-app escalation merges into the right agency's conversation. (The admin
+    // inbox also filters these marker rows out of the visible thread.)
+    logWidgetChat(sessionId, 'escalation', `Escalated to support. Name: ${(typeof name === 'string' && name.trim()) || '(none)'} / Contact: ${(typeof contact === 'string' && contact.trim()) || '(none)'}`, { userType: escUserType, agencyId, source: escSource });
 
     // Anonymous marketing-site prospect: no valid token but name/contact given
     // by the /api/widget/escalate forwarder. Contact is required upstream.
@@ -473,6 +507,7 @@ router.post('/message', async (req, res) => {
         message: cleanMessage,
         source: 'widget',
         status: 'open',
+        admin_unread: 1,
       });
       if (insertErr) console.error('support_requests insert failed (non-blocking):', insertErr.message);
       else persisted = true;

@@ -253,6 +253,16 @@ adminRouter.post('/support-requests/:id/reply', requireAdmin, async (req, res) =
 const ADMIN_PLATFORM_SMS_NUMBER = process.env.TELNYX_SMS_FROM_NUMBER || '+15054317109';
 function adminSmsDir(r) { return (r.message_type === 'agency_reply_inbound' || (r.metadata && r.metadata.direction === 'inbound')) ? 'in' : 'out'; }
 
+// Format a US phone for display in the inbox; leaves anything non-standard as-is.
+function fmtPhone(p) {
+  if (!p) return null;
+  const d = String(p).replace(/\D/g, '');
+  if (d.length === 11 && d[0] === '1') return `(${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7)}`;
+  if (d.length === 10) return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  return p;
+}
+function looksLikeEmail(s) { return !!s && /@/.test(String(s)); }
+
 // The support CONVERSATION is only the genuine two-way exchange: the agency's
 // inbound replies (direction = in) and the admin's own manual replies. Every
 // other agency SMS (welcome, billing, trial, engagement, demo, client sends) is
@@ -304,6 +314,23 @@ function smsActivityCategory(t) {
 adminRouter.get('/inbox', requireAdmin, async (req, res) => {
   try {
     const conversations = [];
+
+    // Admin support/resolved state per conversation. Resolved persists until a
+    // message newer than resolved_at arrives (then it reopens to 'support').
+    const threadStateMap = new Map();
+    try {
+      const { data: tsRows } = await supabase.from('inbox_thread_state').select('thread_key, status, resolved_at');
+      for (const r of (tsRows || [])) threadStateMap.set(r.thread_key, r);
+    } catch (e) { /* table missing: everyone is 'none' */ }
+    const supportStatusFor = (key, lastAt) => {
+      const st = threadStateMap.get(key);
+      if (!st || !st.status) return 'none';
+      if (st.status === 'resolved') {
+        if (lastAt && st.resolved_at && new Date(lastAt).getTime() > new Date(st.resolved_at).getTime()) return 'support';
+        return 'resolved';
+      }
+      return 'support';
+    };
 
     // ---- Agencies: in-app support thread + SMS, merged per agency ----
     const [reqRes, smsRes, fbRes] = await Promise.all([
@@ -376,7 +403,7 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
     ])];
 
     if (agencyIds.length) {
-      const { data: agencies } = await supabase.from('agencies').select('id, name, phone, platform_replies_read_at, plan_type, access_plan').in('id', agencyIds);
+      const { data: agencies } = await supabase.from('agencies').select('id, name, email, phone, platform_replies_read_at, plan_type, access_plan').in('id', agencyIds);
       const agMap = new Map((agencies || []).map(a => [a.id, a]));
       const unreadByAgency = {};
       for (const r of reqRows) unreadByAgency[r.agency_id] = (unreadByAgency[r.agency_id] || 0) + (r.admin_unread || 0);
@@ -392,11 +419,13 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
           .select('id, message_body, message_type, metadata, created_at')
           .eq('agency_id', aid).eq('recipient_type', 'agency_owner')
           .order('created_at', { ascending: true }).limit(500);
-        // Keep only the two-way conversation here; automated/transactional sends
-        // move to the Platform activity tab (see /agencies/:id/platform-activity).
+        // All messages together in one thread (platform/transactional sends
+        // included), so no context is split off into a separate tab. Blank-body
+        // rows are skipped so they never render as an empty bubble.
         for (const r of (srows || [])) {
-          if (!isConversationSms(r)) continue;
-          items.push({ id: `sms-${r.id}`, sender: adminSmsDir(r), body: r.message_body || '', at: r.created_at, kind: 'sms' });
+          const body = r.message_body || '';
+          if (!body.trim()) continue;
+          items.push({ id: `sms-${r.id}`, sender: adminSmsDir(r), body, at: r.created_at, kind: 'sms' });
         }
         const fbForAgency = fbByAgency.get(aid) || [];
         for (const r of fbForAgency) items.push({ id: `fb-${r.id}`, sender: 'in', body: r.message || '', at: r.created_at, kind: 'feedback' });
@@ -417,19 +446,23 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
             if (m.role === 'user' && new Date(m.created_at).getTime() > readAt) helpUnread++;
           }
         }
-        items.sort((a, b) => new Date(a.at) - new Date(b.at));
-        if (!items.length) continue;
+        // Drop any blank-body bubbles from every source (empty seeds, empty
+        // SMS receipts, null help content) so the thread never shows a blank.
+        const kept = items.filter(m => m.body && String(m.body).trim());
+        kept.sort((a, b) => new Date(a.at) - new Date(b.at));
+        if (!kept.length) continue;
         const smsUnread = (srows || []).filter(r => adminSmsDir(r) === 'in' && new Date(r.created_at).getTime() > readAt).length;
-        const inbound = items.filter(m => m.sender === 'in');
-        const last = items[items.length - 1];
+        const inbound = kept.filter(m => m.sender === 'in');
+        const last = kept[kept.length - 1];
         conversations.push({
           key: `agency-${aid}`, type: 'agency', agencyId: aid,
-          name: ag.name || 'Unknown agency', phone: ag.phone || null,
+          name: ag.name || 'Unknown agency', phone: ag.phone || null, contactPhone: fmtPhone(ag.phone), email: ag.email || null,
           planType: ag.access_plan || ag.plan_type || null,
-          messages: items, unread: (unreadByAgency[aid] || 0) + smsUnread + fbUnread + helpUnread,
+          messages: kept, unread: (unreadByAgency[aid] || 0) + smsUnread + fbUnread + helpUnread,
           lastAt: last.at, lastDirection: last.sender, lastPreview: String(last.body || '').slice(0, 120),
           lastInboundKind: inbound.length ? inbound[inbound.length - 1].kind : 'inapp',
           needsReply: last.sender === 'in',
+          supportStatus: supportStatusFor(`agency-${aid}`, last.at),
         });
       }
     }
@@ -459,8 +492,11 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
       let faqCount = 0;
       for (const [sid, s] of orphanHelpSessions) {
         if (faqCount++ >= 60) break;
-        const msgs = s.messages.sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-          .map(m => ({ id: `faq-${sid}-${m.created_at}`, sender: m.role === 'user' ? 'in' : 'out', body: m.content || '', at: m.created_at, kind: 'faq' }));
+        const msgs = s.messages
+          .filter(m => m.role !== 'escalation')
+          .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+          .map(m => ({ id: `faq-${sid}-${m.created_at}`, sender: m.role === 'user' ? 'in' : 'out', body: m.content || '', at: m.created_at, kind: 'faq' }))
+          .filter(m => m.body && m.body.trim());
         if (!msgs.length) continue;
         const last = msgs[msgs.length - 1];
         const { name, tag } = labelFor(s);
@@ -481,11 +517,15 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
         }
         const isProspectSession = s.userType === 'prospect' || s.source === 'marketing';
         const convName = (isProspectSession && visitorName) ? `${visitorName} \u00b7 public site` : name;
+        const vcPhone = (visitorContact && !looksLikeEmail(visitorContact)) ? fmtPhone(visitorContact) : null;
+        const vcEmail = looksLikeEmail(visitorContact) ? visitorContact : null;
         conversations.push({
           key: `faq-${sid}`, type: 'faq', agencyId: null, name: convName,
           faqOrigin: { userType: s.userType || null, source: s.source || null, agencyName: null, tag, visitorName, visitorContact },
-          phone: null, messages: msgs, unread: 0, lastAt: last.at, lastDirection: last.sender,
+          phone: null, contactPhone: vcPhone, email: vcEmail,
+          messages: msgs, unread: 0, lastAt: last.at, lastDirection: last.sender,
           lastPreview: String(last.body || '').slice(0, 120), readOnly: true, needsReply: false, escalated: s.escalated,
+          supportStatus: supportStatusFor(`faq-${sid}`, last.at),
         });
       }
     } catch (e) { console.warn('admin inbox FAQ build failed:', e.message); }
@@ -555,6 +595,43 @@ adminRouter.post('/inbox/read', requireAdmin, async (req, res) => {
     await supabase.from('agency_feedback').update({ status: 'reviewed', reviewed_at: new Date().toISOString() }).eq('agency_id', agencyId).neq('status', 'reviewed').neq('status', 'archived');
     res.json({ success: true });
   } catch (error) { res.json({ success: false }); }
+});
+
+// ---------------------------------------------------------------------------
+// INBOX THREAD STATE (admin): mark a conversation as a support item, resolve
+// it, or reopen it. Keyed by the conversation key ('agency-<id>'/'faq-<sid>').
+// Resolved persists until a newer message arrives (computed at read time in the
+// inbox GET), so a handled thread never silently comes back on its own.
+// ---------------------------------------------------------------------------
+async function upsertThreadState(threadKey, patch) {
+  const agencyId = threadKey.startsWith('agency-') ? threadKey.slice('agency-'.length) : null;
+  const row = { thread_key: threadKey, agency_id: agencyId, updated_at: new Date().toISOString(), ...patch };
+  const { error } = await supabase.from('inbox_thread_state').upsert(row, { onConflict: 'thread_key' });
+  if (error) throw error;
+}
+adminRouter.post('/inbox/mark-support', requireAdmin, async (req, res) => {
+  try {
+    const threadKey = clean(req.body && req.body.threadKey, 128);
+    if (!threadKey) return res.status(400).json({ error: 'threadKey required' });
+    await upsertThreadState(threadKey, { status: 'support', marked_at: new Date().toISOString(), resolved_at: null });
+    res.json({ success: true, supportStatus: 'support' });
+  } catch (e) { console.error('mark-support error:', e.message); res.status(500).json({ error: 'Failed to update' }); }
+});
+adminRouter.post('/inbox/resolve', requireAdmin, async (req, res) => {
+  try {
+    const threadKey = clean(req.body && req.body.threadKey, 128);
+    if (!threadKey) return res.status(400).json({ error: 'threadKey required' });
+    await upsertThreadState(threadKey, { status: 'resolved', resolved_at: new Date().toISOString() });
+    res.json({ success: true, supportStatus: 'resolved' });
+  } catch (e) { console.error('resolve error:', e.message); res.status(500).json({ error: 'Failed to update' }); }
+});
+adminRouter.post('/inbox/reopen', requireAdmin, async (req, res) => {
+  try {
+    const threadKey = clean(req.body && req.body.threadKey, 128);
+    if (!threadKey) return res.status(400).json({ error: 'threadKey required' });
+    await upsertThreadState(threadKey, { status: 'support', resolved_at: null });
+    res.json({ success: true, supportStatus: 'support' });
+  } catch (e) { console.error('reopen error:', e.message); res.status(500).json({ error: 'Failed to update' }); }
 });
 
 // ---------------------------------------------------------------------------
