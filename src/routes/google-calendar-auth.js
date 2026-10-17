@@ -93,8 +93,10 @@ function safeReturnUrl(returnTo, agency) {
   // agency's own slug/custom domain. This keeps the client on the EXACT origin
   // they started on so their origin-scoped session is not dropped.
   if (!isPlatformHost(host) && !allowedReturnHosts(agency).has(host)) return null;
-  // Only client pages; drop any query/hash the caller tacked on.
-  const path = (u.pathname && u.pathname.startsWith('/client')) ? u.pathname : '/client/ai-agent';
+  // Only client or call-center console pages; drop any query/hash the caller
+  // tacked on. The call center connects calendars from /cc/businesses/[id], so
+  // without /cc here the return path was rewritten to the default client page.
+  const path = (u.pathname && (u.pathname.startsWith('/client') || u.pathname.startsWith('/cc'))) ? u.pathname : '/client/ai-agent';
   return `${u.protocol}//${u.host}${path}`;
 }
 
