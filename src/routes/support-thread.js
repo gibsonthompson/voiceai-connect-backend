@@ -322,11 +322,15 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
       const { data: tsRows } = await supabase.from('inbox_thread_state').select('thread_key, status, resolved_at');
       for (const r of (tsRows || [])) threadStateMap.set(r.thread_key, r);
     } catch (e) { /* table missing: everyone is 'none' */ }
-    const supportStatusFor = (key, lastAt) => {
+    // lastInboundAt is the time of the newest message FROM the agency/visitor.
+    // Resolved reopens only when THEY send something new after it was resolved,
+    // never when the admin's own closing reply is the newest message (that was
+    // the bug that made "resolved" flip back to "support" on the next refresh).
+    const supportStatusFor = (key, lastInboundAt) => {
       const st = threadStateMap.get(key);
       if (!st || !st.status) return 'none';
       if (st.status === 'resolved') {
-        if (lastAt && st.resolved_at && new Date(lastAt).getTime() > new Date(st.resolved_at).getTime()) return 'support';
+        if (lastInboundAt && st.resolved_at && new Date(lastInboundAt).getTime() > new Date(st.resolved_at).getTime()) return 'support';
         return 'resolved';
       }
       return 'support';
@@ -462,7 +466,7 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
           lastAt: last.at, lastDirection: last.sender, lastPreview: String(last.body || '').slice(0, 120),
           lastInboundKind: inbound.length ? inbound[inbound.length - 1].kind : 'inapp',
           needsReply: last.sender === 'in',
-          supportStatus: supportStatusFor(`agency-${aid}`, last.at),
+          supportStatus: supportStatusFor(`agency-${aid}`, inbound.length ? inbound[inbound.length - 1].at : null),
         });
       }
     }
@@ -499,6 +503,7 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
           .filter(m => m.body && m.body.trim());
         if (!msgs.length) continue;
         const last = msgs[msgs.length - 1];
+        const faqInbound = msgs.filter(m => m.sender === 'in');
         const { name, tag } = labelFor(s);
         // The public FAQ widget writes a leading "Visitor: <name> / Email: <contact>"
         // row when it captures a prospect's identity (before chatting, or on a
@@ -525,7 +530,7 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
           phone: null, contactPhone: vcPhone, email: vcEmail,
           messages: msgs, unread: 0, lastAt: last.at, lastDirection: last.sender,
           lastPreview: String(last.body || '').slice(0, 120), readOnly: true, needsReply: false, escalated: s.escalated,
-          supportStatus: supportStatusFor(`faq-${sid}`, last.at),
+          supportStatus: supportStatusFor(`faq-${sid}`, faqInbound.length ? faqInbound[faqInbound.length - 1].at : null),
         });
       }
     } catch (e) { console.warn('admin inbox FAQ build failed:', e.message); }

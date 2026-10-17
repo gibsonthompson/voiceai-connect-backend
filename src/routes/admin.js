@@ -530,6 +530,91 @@ router.patch('/agencies/:agencyId/status', requireAdmin, async (req, res) => {
 });
 
 // ============================================================================
+// EXTEND AGENCY TRIAL
+// Pushes an agency's trial end out by N days, keeping Stripe and our DB in
+// sync. A DB-only bump (the old by-hand fix) desynced from Stripe, which would
+// still end the trial on the original date and charge any card on file. So
+// when the agency has a Stripe subscription we move its trial_end FIRST and
+// only touch our row if Stripe succeeded, so the two can never drift apart.
+// ============================================================================
+router.post('/agencies/:agencyId/extend-trial', requireAdmin, async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const days = Math.floor(Number(req.body?.days));
+    if (!Number.isFinite(days) || days < 1 || days > 90) {
+      return res.status(400).json({ error: 'days must be a whole number between 1 and 90' });
+    }
+
+    const { data: agency, error } = await supabase
+      .from('agencies')
+      .select('id, name, trial_ends_at, stripe_subscription_id, subscription_status, status')
+      .eq('id', agencyId)
+      .single();
+    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
+
+    // Extend from the later of (current trial end, now): a still-running trial
+    // is pushed out from its real end, a lapsed one still gets a full N days.
+    const now = Date.now();
+    const base = agency.trial_ends_at ? new Date(agency.trial_ends_at).getTime() : now;
+    const fromMs = Number.isFinite(base) && base > now ? base : now;
+    const newEndMs = fromMs + days * 86400000;
+    const newEndIso = new Date(newEndMs).toISOString();
+
+    // Sync Stripe first. On failure we change NOTHING in our DB, so a card on
+    // file never gets charged on the old date while our UI shows a later one.
+    let stripeSynced = false;
+    let note = null;
+    let flipToTrial = true; // also restore trial status when it's genuinely a trial
+    if (agency.stripe_subscription_id) {
+      let sub;
+      try {
+        sub = await stripe.subscriptions.retrieve(agency.stripe_subscription_id);
+      } catch (e) {
+        return res.status(502).json({ error: `Could not read the Stripe subscription: ${e.message}. Nothing was changed.` });
+      }
+      if (sub && sub.status === 'trialing') {
+        try {
+          await stripe.subscriptions.update(agency.stripe_subscription_id, {
+            trial_end: Math.floor(newEndMs / 1000),
+            proration_behavior: 'none',
+          });
+          stripeSynced = true;
+        } catch (e) {
+          return res.status(502).json({ error: `Could not move the Stripe trial: ${e.message}. Nothing was changed.` });
+        }
+      } else {
+        // Stripe isn't running a trial on this subscription (already active,
+        // past_due, canceled, etc.). We can't move a trial that isn't there, so
+        // don't flip the agency back to 'trial' — just report it.
+        flipToTrial = false;
+        note = `Heads up: the Stripe subscription is '${sub ? sub.status : 'missing'}', not trialing, so only our records were updated. Check Stripe before relying on this date.`;
+      }
+    } else {
+      // No-card / manually granted trial: no Stripe side to move.
+      note = 'This is a no-card trial (no Stripe subscription), so nothing will auto-charge; our trial date was updated.';
+    }
+
+    const updates = { trial_ends_at: newEndIso, updated_at: new Date().toISOString() };
+    if (flipToTrial) { updates.subscription_status = 'trial'; updates.status = 'trial'; }
+
+    const { data: updated, error: updErr } = await supabase
+      .from('agencies')
+      .update(updates)
+      .eq('id', agencyId)
+      .select('id, trial_ends_at, subscription_status, status')
+      .single();
+    if (updErr) throw updErr;
+
+    console.log(`🗓️  Admin extended trial for ${agency.name} (${agencyId}) by ${days}d -> ${newEndIso} (stripeSynced=${stripeSynced})`);
+
+    res.json({ success: true, trial_ends_at: updated.trial_ends_at, stripe_synced: stripeSynced, note });
+  } catch (error) {
+    console.error('Admin extend-trial error:', error);
+    res.status(500).json({ error: 'Failed to extend trial' });
+  }
+});
+
+// ============================================================================
 // UPDATE CLIENT STATUS (suspend/activate)
 // ============================================================================
 router.patch('/clients/:clientId/status', requireAdmin, async (req, res) => {
