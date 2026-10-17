@@ -2219,8 +2219,95 @@ router.get('/audio/ringback.mp3', (req, res) => {
 // all of the call/session logic stays in this one file. server.js still mounts
 // the router itself (app.use('/', require('./routes/telnyx-voice'))); attaching
 // these as properties does not change that.
+// ============================================================================
+// AGENT ONWARD TRANSFER (call-center agent -> business owner / staff / number)
+// ----------------------------------------------------------------------------
+// A browser agent who took a caller (status 'agent_bridged') can hand the caller
+// onward to the business: the owner, a named staff member, or a one-off number.
+// Reuses the own-the-call office dial + press-1 gate + bridge that the AI uses,
+// so the recipient hears a whispered summary before they are connected. The agent
+// drops off once the dial starts; if no one answers, the caller is handed back to
+// the AI to take a message (the same fallback as every other transfer).
+// ============================================================================
+async function startAgentTransfer({ sessionId, to, recipientName, summary }) {
+  if (!sessionId || !to) return { ok: false, code: 400, error: 'Missing call or destination.' };
+  const toE = toE164(to);
+  if (!toE) return { ok: false, code: 400, error: 'That transfer number is not valid.' };
+
+  const session = await getSessionById(sessionId);
+  if (!session) return { ok: false, code: 404, error: 'That call is no longer live.' };
+  if (session.status !== 'agent_bridged') {
+    return { ok: false, code: 409, error: 'You can only transfer while you are on the call.' };
+  }
+
+  // Loop guard: never dial the business's own AI number.
+  let businessDid = null;
+  try {
+    const { data: client } = await supabase.from('clients').select('vapi_phone_number').eq('id', session.client_id).single();
+    businessDid = toE164(client && client.vapi_phone_number);
+  } catch (e) {}
+  if (businessDid && toE === businessDid) {
+    return { ok: false, code: 400, error: 'That is the business AI number; pick a person instead.' };
+  }
+
+  // Claim the transfer: agent_bridged -> transferring (atomic, so a double tap or
+  // a race with a hang-up cannot double-dial).
+  const won = await atomicTransition(sessionId, ['agent_bridged'], 'transferring', {
+    whisper_summary: summary || 'A caller is being transferred to you.',
+  });
+  if (!won) {
+    const s = await getSessionById(sessionId);
+    return { ok: false, code: 409, error: `This call can't be transferred right now (${(s && s.status) || 'unknown'}).` };
+  }
+
+  // Drop the agent leg. The caller is parked (park_after_unbridge was set when the
+  // agent bridged), so it survives and can be bridged to the destination.
+  if (session.telnyx_agent_control_id) { try { await hangupCall(session.telnyx_agent_control_id); } catch (e) {} }
+
+  // Hold audio to the caller while the destination rings.
+  const caller = session.telnyx_caller_control_id;
+  if (caller) { try { await startRingback(caller); } catch (e) {} }
+
+  const { connectionId } = await getWhisperConfig();
+  const officeLeg = await dialCall({
+    to: toE,
+    from: businessDid || session.caller_number,
+    connectionId,
+    timeoutSecs: OFFICE_RING_SECONDS,
+    clientState: { role: 'office', sessionId, recipientName: recipientName || '' },
+  });
+  if (!officeLeg || !officeLeg.call_control_id) {
+    // Could not even dial: hand the caller back to the AI to take a message.
+    await returnToAI(sessionId, 'agent_transfer_dial_failed').catch(() => {});
+    return { ok: false, code: 502, error: 'Could not reach that number. The caller was handed back to take a message.' };
+  }
+  await updateSession(sessionId, { telnyx_office_control_id: officeLeg.call_control_id });
+
+  // The press-1 gate + bridge run on the existing Telnyx event handlers (role
+  // 'office'). A detached watchdog covers the NO-answer case so a parked caller is
+  // never stranded: if the transfer has not connected by the deadline, hand the
+  // caller back to the AI to take a message.
+  (async () => {
+    const deadline = Date.now() + TRANSFER_WAIT_MS;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const s = await getSessionById(sessionId);
+      if (!s) return;
+      // Connected, ended, or already handed back elsewhere: nothing to do.
+      if (['bridged', 'transfer_recapped', 'confirming', 'ended', 'active', 'transfer_returned'].includes(s.status)) return;
+    }
+    const s = await getSessionById(sessionId);
+    if (s && !['bridged', 'transfer_recapped', 'confirming', 'ended', 'active'].includes(s.status)) {
+      await returnToAI(sessionId, 'agent_transfer_no_answer').catch(() => {});
+    }
+  })().catch(() => {});
+
+  return { ok: true };
+}
+
 router.barge = {
   startBarge,
+  startAgentTransfer,
   requestAgentLeave,
   // Conference live-monitor seat (phase 2): listen + jump-in.
   startSupervisorListen,

@@ -498,6 +498,60 @@ router.post('/:id/live/jump-in', async (req, res) => {
   return res.json({ success: true });
 });
 
+// ---- GET /api/client/:id/live/transfer-targets ----------------------------
+// The people a browser agent can hand the live caller onward to: the business
+// owner and any active, transferable staff member who has a phone number.
+router.get('/:id/live/transfer-targets', async (req, res) => {
+  const auth = await authorizeClient(req.params.id, req.headers.authorization || req.query.token);
+  if (!auth.ok) return res.status(auth.code).json({ success: false, error: errText(auth.code) });
+  let owner = null, staff = [];
+  try {
+    const { data: c } = await supabase.from('clients').select('owner_name, owner_phone, transfer_phone').eq('id', auth.client.id).single();
+    const ownerNum = (c && (c.transfer_phone || c.owner_phone)) || null;
+    if (ownerNum) owner = { label: c.owner_name ? `${c.owner_name} (owner)` : 'Business owner', number: ownerNum };
+    const { data: sm } = await supabase.from('staff_members')
+      .select('id, name, role, phone')
+      .eq('client_id', auth.client.id).eq('is_active', true).eq('transferable', true)
+      .not('phone', 'is', null);
+    staff = (sm || []).filter((s) => s.phone).map((s) => ({ id: s.id, label: s.role ? `${s.name} (${s.role})` : s.name, number: s.phone }));
+  } catch (e) { /* best effort */ }
+  return res.json({ success: true, owner, staff });
+});
+
+// ---- POST /api/client/:id/live/transfer -----------------------------------
+// A browser agent hands the live caller onward to the owner, a staff member, or
+// a one-off number. Reuses the own-the-call transfer engine (whisper + gate),
+// with take-a-message fallback if no one answers.
+router.post('/:id/live/transfer', async (req, res) => {
+  const auth = await authorizeClient(req.params.id, req.headers.authorization);
+  if (!auth.ok) return res.status(auth.code).json({ success: false, error: errText(auth.code) });
+  if (!bargeAllowed(auth.client)) return res.status(403).json({ success: false, error: 'Live transfers are available on call-center accounts.' });
+
+  const { callId, target, staffId, number, note } = req.body || {};
+  if (!callId) return res.status(400).json({ success: false, error: 'callId is required' });
+
+  const session = await resolveBargeSession(callId, auth.client.id);
+  if (!session) return res.status(404).json({ success: false, error: 'No live call to transfer.' });
+
+  // Resolve the destination number + a first name for the whisper.
+  let to = null, recipientName = '';
+  try {
+    const { data: c } = await supabase.from('clients').select('owner_name, owner_phone, transfer_phone').eq('id', auth.client.id).single();
+    if (target === 'owner') { to = (c && (c.transfer_phone || c.owner_phone)) || null; recipientName = ((c && c.owner_name) || '').split(' ')[0] || ''; }
+    else if (target === 'staff' && staffId) {
+      const { data: s } = await supabase.from('staff_members').select('name, phone').eq('id', staffId).eq('client_id', auth.client.id).maybeSingle();
+      to = (s && s.phone) || null; recipientName = ((s && s.name) || '').split(' ')[0] || '';
+    } else if (target === 'custom' && number) { to = number; }
+  } catch (e) {}
+  if (!to) return res.status(400).json({ success: false, error: 'No valid number to transfer to.' });
+
+  const summary = (typeof note === 'string' && note.trim()) ? note.trim().slice(0, 300) : (session.whisper_summary || 'A caller is being transferred to you.');
+  const result = await voiceRouter.barge.startAgentTransfer({ sessionId: session.id, to, recipientName, summary });
+  if (!result.ok) return res.status(result.code || 409).json({ success: false, error: result.error || 'Could not start the transfer.' });
+  try { broadcastLiveEvent(auth.client.id, { callId, type: 'takeover', action: 'agent_transfer' }); } catch (e) {}
+  return res.json({ success: true });
+});
+
 // ---- POST /api/client/:id/live/jump-out -----------------------------------
 // (phase 2) the human stops talking. mode 'end_call' ends the call; anything
 // else hands the caller back to the AI and keeps the seat listening.
