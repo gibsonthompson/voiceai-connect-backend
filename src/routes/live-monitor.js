@@ -504,18 +504,20 @@ router.post('/:id/live/jump-in', async (req, res) => {
 router.get('/:id/live/transfer-targets', async (req, res) => {
   const auth = await authorizeClient(req.params.id, req.headers.authorization || req.query.token);
   if (!auth.ok) return res.status(auth.code).json({ success: false, error: errText(auth.code) });
-  let owner = null, staff = [];
+  let owner = null, staff = [], consultMode = false;
   try {
-    const { data: c } = await supabase.from('clients').select('owner_name, owner_phone, transfer_phone').eq('id', auth.client.id).single();
+    const { data: c } = await supabase.from('clients').select('owner_name, owner_phone, transfer_phone, tool_config').eq('id', auth.client.id).single();
     const ownerNum = (c && (c.transfer_phone || c.owner_phone)) || null;
     if (ownerNum) owner = { label: c.owner_name ? `${c.owner_name} (owner)` : 'Business owner', number: ownerNum };
+    // Consult mode (agent briefs the recipient first) vs whisper transfer, per business.
+    consultMode = !!(c && c.tool_config && typeof c.tool_config === 'object' && c.tool_config.consultTransfer === true);
     const { data: sm } = await supabase.from('staff_members')
       .select('id, name, role, phone')
       .eq('client_id', auth.client.id).eq('is_active', true).eq('transferable', true)
       .not('phone', 'is', null);
     staff = (sm || []).filter((s) => s.phone).map((s) => ({ id: s.id, label: s.role ? `${s.name} (${s.role})` : s.name, number: s.phone }));
   } catch (e) { /* best effort */ }
-  return res.json({ success: true, owner, staff });
+  return res.json({ success: true, owner, staff, consultMode });
 });
 
 // ---- POST /api/client/:id/live/transfer -----------------------------------
@@ -549,6 +551,67 @@ router.post('/:id/live/transfer', async (req, res) => {
   const result = await voiceRouter.barge.startAgentTransfer({ sessionId: session.id, to, recipientName, summary });
   if (!result.ok) return res.status(result.code || 409).json({ success: false, error: result.error || 'Could not start the transfer.' });
   try { broadcastLiveEvent(auth.client.id, { callId, type: 'takeover', action: 'agent_transfer' }); } catch (e) {}
+  return res.json({ success: true });
+});
+
+// Shared destination resolver for the consult routes.
+async function resolveTransferTo(clientId, target, staffId, number) {
+  let to = null, recipientName = '';
+  try {
+    const { data: c } = await supabase.from('clients').select('owner_name, owner_phone, transfer_phone').eq('id', clientId).single();
+    if (target === 'owner') { to = (c && (c.transfer_phone || c.owner_phone)) || null; recipientName = ((c && c.owner_name) || '').split(' ')[0] || ''; }
+    else if (target === 'staff' && staffId) {
+      const { data: s } = await supabase.from('staff_members').select('name, phone').eq('id', staffId).eq('client_id', clientId).maybeSingle();
+      to = (s && s.phone) || null; recipientName = ((s && s.name) || '').split(' ')[0] || '';
+    } else if (target === 'custom' && number) { to = number; }
+  } catch (e) {}
+  return { to, recipientName };
+}
+
+// ---- POST /api/client/:id/live/consult/start ------------------------------
+// Consult (warm) transfer: hold the caller and dial the recipient so the agent
+// can brief them live before connecting. Then /complete or /cancel.
+router.post('/:id/live/consult/start', async (req, res) => {
+  const auth = await authorizeClient(req.params.id, req.headers.authorization);
+  if (!auth.ok) return res.status(auth.code).json({ success: false, error: errText(auth.code) });
+  if (!bargeAllowed(auth.client)) return res.status(403).json({ success: false, error: 'Live transfers are available on call-center accounts.' });
+  const { callId, target, staffId, number } = req.body || {};
+  if (!callId) return res.status(400).json({ success: false, error: 'callId is required' });
+  const session = await resolveBargeSession(callId, auth.client.id);
+  if (!session) return res.status(404).json({ success: false, error: 'No live call to transfer.' });
+  const { to, recipientName } = await resolveTransferTo(auth.client.id, target, staffId, number);
+  if (!to) return res.status(400).json({ success: false, error: 'No valid number to transfer to.' });
+  const result = await voiceRouter.barge.startConsult({ sessionId: session.id, to, recipientName });
+  if (!result.ok) return res.status(result.code || 409).json({ success: false, error: result.error || 'Could not start the consult.' });
+  try { broadcastLiveEvent(auth.client.id, { callId, type: 'takeover', action: 'consult_start' }); } catch (e) {}
+  return res.json({ success: true });
+});
+
+// ---- POST /api/client/:id/live/consult/complete --------------------------
+router.post('/:id/live/consult/complete', async (req, res) => {
+  const auth = await authorizeClient(req.params.id, req.headers.authorization);
+  if (!auth.ok) return res.status(auth.code).json({ success: false, error: errText(auth.code) });
+  const { callId } = req.body || {};
+  if (!callId) return res.status(400).json({ success: false, error: 'callId is required' });
+  const session = await resolveBargeSession(callId, auth.client.id);
+  if (!session) return res.status(404).json({ success: false, error: 'No live call.' });
+  const result = await voiceRouter.barge.completeConsult({ sessionId: session.id });
+  if (!result.ok) return res.status(result.code || 409).json({ success: false, error: result.error || 'Could not complete the transfer.' });
+  try { broadcastLiveEvent(auth.client.id, { callId, type: 'takeover', action: 'consult_complete' }); } catch (e) {}
+  return res.json({ success: true });
+});
+
+// ---- POST /api/client/:id/live/consult/cancel ----------------------------
+router.post('/:id/live/consult/cancel', async (req, res) => {
+  const auth = await authorizeClient(req.params.id, req.headers.authorization);
+  if (!auth.ok) return res.status(auth.code).json({ success: false, error: errText(auth.code) });
+  const { callId } = req.body || {};
+  if (!callId) return res.status(400).json({ success: false, error: 'callId is required' });
+  const session = await resolveBargeSession(callId, auth.client.id);
+  if (!session) return res.status(404).json({ success: false, error: 'No live call.' });
+  const result = await voiceRouter.barge.cancelConsult({ sessionId: session.id });
+  if (!result.ok) return res.status(result.code || 409).json({ success: false, error: result.error || 'Could not cancel the consult.' });
+  try { broadcastLiveEvent(auth.client.id, { callId, type: 'takeover', action: 'consult_cancel' }); } catch (e) {}
   return res.json({ success: true });
 });
 

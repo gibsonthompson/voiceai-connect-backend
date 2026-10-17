@@ -608,6 +608,22 @@ async function conferenceUnmute(conferenceId, callControlIds) {
   return telnyxRest('POST', `/conferences/${encodeURIComponent(conferenceId)}/actions/unmute`, body);
 }
 
+// Hold participants in a conference: they are removed from the audio mix (hear
+// hold audio, not the other legs, and are not heard). Used to park the caller
+// while an agent briefs the transfer recipient (consult transfer). unhold puts
+// them back in the mix.
+async function conferenceHold(conferenceId, callControlIds, audioUrl) {
+  if (!conferenceId) return null;
+  const body = Array.isArray(callControlIds) && callControlIds.length ? { call_control_ids: callControlIds } : {};
+  if (audioUrl) body.audio_url = audioUrl;
+  return telnyxRest('POST', `/conferences/${encodeURIComponent(conferenceId)}/actions/hold`, body);
+}
+async function conferenceUnhold(conferenceId, callControlIds) {
+  if (!conferenceId) return null;
+  const body = Array.isArray(callControlIds) && callControlIds.length ? { call_control_ids: callControlIds } : {};
+  return telnyxRest('POST', `/conferences/${encodeURIComponent(conferenceId)}/actions/unhold`, body);
+}
+
 module.exports = {
   encodeClientState,
   decodeClientState,
@@ -637,4 +653,6 @@ module.exports = {
   conferenceUpdateParticipant,
   conferenceMute,
   conferenceUnmute,
+  conferenceHold,
+  conferenceUnhold,
 };

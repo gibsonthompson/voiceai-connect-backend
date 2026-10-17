@@ -81,6 +81,8 @@ const {
   conferenceUpdateParticipant,
   conferenceMute,
   conferenceUnmute,
+  conferenceHold,
+  conferenceUnhold,
   decodeClientState,
 } = require('../lib/telnyx-voice');
 
@@ -1531,6 +1533,18 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
         if (role === 'office' && sessionId) {
           await startGate(sessionId, state && state.recipientName);
         }
+        // Consult transfer: the recipient answered. Join them to the conference
+        // so the agent can brief them (the caller is held). If the consult was
+        // cancelled before they answered, just drop the leg.
+        if (role === 'consult' && sessionId) {
+          const sc = await getSessionById(sessionId);
+          if (sc && sc.status === 'agent_consulting' && sc.telnyx_conference_id) {
+            await conferenceJoin(sc.telnyx_conference_id, payload.call_control_id, { clientState: { role: 'consult', sessionId } });
+            try { broadcastLiveEvent(sc.client_id, { type: 'activity', tool: 'consult_connected', label: 'Recipient on the line' }); } catch (e) {}
+          } else {
+            try { await hangupCall(payload.call_control_id); } catch (e) {}
+          }
+        }
         // The agent's browser (WebRTC) answered a barge dial: swap the AI out.
         if (role === 'agent' && sessionId) {
           console.log(`telnyx-voice: 🎧 barge call.answered agent leg (session ${sessionId}) - browser is on the line`);
@@ -1621,8 +1635,31 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
           // a routing miss (e.g. the SIP username not reachable) shows here as a
           // cause like "unallocated_number" BEFORE any call.answered arrives.
           if (role === 'agent') {
+            // If the agent drops mid-consult, the recipient is already on the
+            // line: complete the transfer (unhold the caller) rather than losing
+            // them to a dead hold.
+            if (s && s.status === 'agent_consulting') {
+              if (s.telnyx_caller_control_id && s.telnyx_conference_id) await conferenceUnhold(s.telnyx_conference_id, [s.telnyx_caller_control_id]).catch(() => {});
+              await atomicTransition(sessionId, ['agent_consulting'], 'bridged');
+              await updateSession(sessionId, { telnyx_agent_control_id: null, supervisor_role: null });
+              await cleanupBargeCredential(s);
+              break;
+            }
             console.log(`telnyx-voice: 🎧 barge call.hangup agent leg (session ${sessionId}) status=${st} cause=${payload.hangup_cause || '?'} sip_cause=${payload.sip_hangup_cause || '?'}`);
             await handleAgentLeave(sessionId, 'agent_hangup');
+            break;
+          }
+
+          // Consult recipient's leg dropped (declined, voicemail ended, or rang
+          // out). If still consulting, cancel: unhold the caller and hand them
+          // back to the agent.
+          if (role === 'consult') {
+            if (s && s.status === 'agent_consulting') {
+              if (s.telnyx_caller_control_id && s.telnyx_conference_id) await conferenceUnhold(s.telnyx_conference_id, [s.telnyx_caller_control_id]).catch(() => {});
+              await atomicTransition(sessionId, ['agent_consulting'], 'agent_bridged');
+              await updateSession(sessionId, { telnyx_office_control_id: null });
+              try { broadcastLiveEvent(s.client_id, { type: 'activity', tool: 'consult_cancelled', label: 'Could not reach them, back with the caller' }); } catch (e) {}
+            }
             break;
           }
 
@@ -1666,10 +1703,10 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
               // Caller (or AI leg) ended. Tear down any outstanding office leg
               // AND any pending/active agent (barge) leg so nothing is left
               // ringing or connected to a dead call.
-              if ((st === 'transferring' || st === 'ringing_gate' || st === 'confirming') && s.telnyx_office_control_id) {
+              if ((st === 'transferring' || st === 'ringing_gate' || st === 'confirming' || st === 'agent_consulting') && s.telnyx_office_control_id) {
                 await hangupCall(s.telnyx_office_control_id);
               }
-              if ((st === 'agent_dialing' || st === 'agent_bridged' || st === 'ending_after_barge') && s.telnyx_agent_control_id) {
+              if ((st === 'agent_dialing' || st === 'agent_bridged' || st === 'ending_after_barge' || st === 'agent_consulting') && s.telnyx_agent_control_id) {
                 await hangupCall(s.telnyx_agent_control_id);
                 await cleanupBargeCredential(s);
               }
@@ -2305,9 +2342,101 @@ async function startAgentTransfer({ sessionId, to, recipientName, summary }) {
   return { ok: true };
 }
 
+// ============================================================================
+// CONSULT (true warm) TRANSFER - agent briefs the recipient live, then connects
+// ----------------------------------------------------------------------------
+// From 'agent_bridged' (agent talking to the caller in the conference):
+//   startConsult    -> hold the caller, dial the recipient, and (on answer) join
+//                      them to the conference so the agent and recipient talk
+//                      privately while the caller hears hold audio.
+//   completeConsult -> unhold the caller and drop the agent seat: the caller and
+//                      recipient stay connected ('bridged').
+//   cancelConsult   -> drop the recipient and unhold the caller: back with the
+//                      agent ('agent_bridged').
+// No answer, or the recipient hanging up mid-brief, is handled by the 'consult'
+// call.hangup branch, which cancels automatically so the caller is never
+// stranded on hold.
+// ============================================================================
+async function startConsult({ sessionId, to, recipientName }) {
+  if (!sessionId || !to) return { ok: false, code: 400, error: 'Missing call or destination.' };
+  const toE = toE164(to);
+  if (!toE) return { ok: false, code: 400, error: 'That transfer number is not valid.' };
+  const session = await getSessionById(sessionId);
+  if (!session) return { ok: false, code: 404, error: 'That call is no longer live.' };
+  if (session.status !== 'agent_bridged') return { ok: false, code: 409, error: 'You can only transfer while you are on the call.' };
+  if (!session.telnyx_conference_id) return { ok: false, code: 409, error: 'A consult transfer is not available on this call.' };
+
+  let businessDid = null, holdAudio = null;
+  try {
+    const { data: client } = await supabase.from('clients').select('vapi_phone_number, tool_config, agency_id').eq('id', session.client_id).single();
+    businessDid = toE164(client && client.vapi_phone_number);
+    let mk = null;
+    if (client && client.agency_id) { const { data: ag } = await supabase.from('agencies').select('marketing_config').eq('id', client.agency_id).single(); mk = ag && ag.marketing_config; }
+    holdAudio = resolveHoldAudioUrl(client && client.tool_config, mk);
+  } catch (e) {}
+  if (businessDid && toE === businessDid) return { ok: false, code: 400, error: 'That is the business AI number; pick a person instead.' };
+
+  const won = await atomicTransition(sessionId, ['agent_bridged'], 'agent_consulting');
+  if (!won) { const s = await getSessionById(sessionId); return { ok: false, code: 409, error: `This call can't be transferred right now (${(s && s.status) || 'unknown'}).` }; }
+
+  // Hold the caller so they do not hear the agent brief the recipient.
+  if (session.telnyx_caller_control_id) await conferenceHold(session.telnyx_conference_id, [session.telnyx_caller_control_id], holdAudio).catch(() => {});
+
+  // Dial the recipient; the 'consult' role joins them to the conference on answer.
+  const { connectionId } = await getWhisperConfig();
+  const leg = await dialCall({
+    to: toE, from: businessDid || session.caller_number, connectionId,
+    timeoutSecs: OFFICE_RING_SECONDS,
+    clientState: { role: 'consult', sessionId },
+  });
+  if (!leg || !leg.call_control_id) {
+    if (session.telnyx_caller_control_id) await conferenceUnhold(session.telnyx_conference_id, [session.telnyx_caller_control_id]).catch(() => {});
+    await atomicTransition(sessionId, ['agent_consulting'], 'agent_bridged');
+    return { ok: false, code: 502, error: 'Could not reach that number. You are back with the caller.' };
+  }
+  await updateSession(sessionId, { telnyx_office_control_id: leg.call_control_id });
+  try { broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'consult_dialing', label: `Briefing ${recipientName || 'the recipient'}...` }); } catch (e) {}
+  return { ok: true };
+}
+
+async function completeConsult({ sessionId }) {
+  const session = await getSessionById(sessionId);
+  if (!session) return { ok: false, code: 404, error: 'No live call.' };
+  if (session.status !== 'agent_consulting') return { ok: false, code: 409, error: 'No consult in progress.' };
+  const won = await atomicTransition(sessionId, ['agent_consulting'], 'bridged', { barged: false });
+  if (!won) return { ok: false, code: 409, error: 'This consult can no longer be completed.' };
+  // Caller back into the mix, then drop the agent seat: caller + recipient remain.
+  if (session.telnyx_caller_control_id) await conferenceUnhold(session.telnyx_conference_id, [session.telnyx_caller_control_id]).catch(() => {});
+  if (session.telnyx_agent_control_id) { try { await hangupCall(session.telnyx_agent_control_id); } catch (e) {} }
+  await updateSession(sessionId, { telnyx_agent_control_id: null, supervisor_role: null });
+  await cleanupBargeCredential(session);
+  try {
+    broadcastLiveEvent(session.client_id, { type: 'status', status: 'bridged', label: 'Connected to the team' });
+    broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'consult_completed', label: 'Transferred the caller to the team' });
+  } catch (e) {}
+  return { ok: true };
+}
+
+async function cancelConsult({ sessionId }) {
+  const session = await getSessionById(sessionId);
+  if (!session) return { ok: false, code: 404, error: 'No live call.' };
+  if (session.status !== 'agent_consulting') return { ok: false, code: 409, error: 'No consult in progress.' };
+  const won = await atomicTransition(sessionId, ['agent_consulting'], 'agent_bridged');
+  if (!won) return { ok: false, code: 409, error: 'This consult can no longer be cancelled.' };
+  // Drop the recipient, unhold the caller: agent + caller talk again.
+  if (session.telnyx_office_control_id) { try { await hangupCall(session.telnyx_office_control_id); } catch (e) {} }
+  if (session.telnyx_caller_control_id) await conferenceUnhold(session.telnyx_conference_id, [session.telnyx_caller_control_id]).catch(() => {});
+  await updateSession(sessionId, { telnyx_office_control_id: null });
+  try { broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'consult_cancelled', label: 'Back with the caller' }); } catch (e) {}
+  return { ok: true };
+}
+
 router.barge = {
   startBarge,
   startAgentTransfer,
+  startConsult,
+  completeConsult,
+  cancelConsult,
   requestAgentLeave,
   // Conference live-monitor seat (phase 2): listen + jump-in.
   startSupervisorListen,
