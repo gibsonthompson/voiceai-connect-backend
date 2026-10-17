@@ -2068,6 +2068,30 @@ async function cancelClientSubscription(req, res) {
     const agency = client.agencies;
     if (!agency) return res.status(404).json({ error: 'Agency not found' });
 
+    // Record the cancellation and whatever reason the person typed, in one
+    // place for every billing branch (Stripe, Paystack, Flutterwave, manual)
+    // and for both client self-cancels and agency/admin cancels. Non-blocking:
+    // logging must never stop a cancellation, and resume=true is an undo.
+    if (resume !== true) {
+      const cxSource = isOwnClient ? 'client_self' : (isManagingAgency ? 'agency' : 'admin');
+      const cxReason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 100) : null;
+      const cxFeedback = typeof req.body?.feedback === 'string' ? req.body.feedback.trim().slice(0, 1000) : null;
+      try {
+        await supabase.from('subscription_cancellations').insert({
+          client_id: client.id,
+          agency_id: client.agency_id,
+          stripe_subscription_id: client.stripe_connected_subscription_id || null,
+          source: `client:${cxSource}`,
+          reason: cxReason || null,
+          feedback: cxFeedback || null,
+          plan_type: client.plan_type || null,
+          canceled_at: new Date().toISOString(),
+        });
+      } catch (e) {
+        console.warn('cancelClientSubscription: feedback log skipped:', e.message);
+      }
+    }
+
     // Immediate teardown is agency/admin only. A client cancelling their own plan
     // does so at period end (they keep what they paid for), so they can never
     // instantly wipe out paid service by mistake.
