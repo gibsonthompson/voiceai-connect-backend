@@ -734,7 +734,10 @@ async function handleAgencyCardSetupCompleted(session) {
       }
     }
   } catch (e) { console.error('⚠️ Could not set default payment method after setup:', e.message); }
-  const { error } = await supabase.from('agencies').update({ stripe_customer_id: customerId }).eq('id', agencyId);
+  // Persist both the customer id AND a durable has_payment_method flag, so the
+  // billing tab reflects the card on EVERY load, not just the post-checkout
+  // redirect that carried ?card_added=true.
+  const { error } = await supabase.from('agencies').update({ stripe_customer_id: customerId, has_payment_method: true }).eq('id', agencyId);
   if (error) { console.error('⚠️ Failed to save stripe_customer_id after card setup:', error.message); return; }
   console.log(`✅ Payment method added for agency ${agencyId} (customer ${customerId})`);
 }
@@ -775,6 +778,49 @@ async function createAgencySetupCheckout(req, res) {
   } catch (e) {
     console.error('❌ Agency setup checkout error:', e.message);
     res.status(500).json({ error: 'Could not start payment setup. Please try again.' });
+  }
+}
+
+// GET /api/agency/:agencyId/card-status  ->  { hasPaymentMethod }
+// The billing tab's source of truth for whether a card is on file, so the
+// prompt reflects reality on every load (not just the ?card_added redirect).
+// Self-heals: if the flag is not set but Stripe actually has a card (an older
+// setup whose flag predates this column, or a webhook that did not persist it),
+// it promotes the card to default and records the flag. A Stripe customer with
+// NO card (e.g. an abandoned paid checkout that created the customer first)
+// correctly returns false.
+async function getAgencyCardStatus(req, res) {
+  try {
+    const agencyId = req.params.agencyId || (req.body && req.body.agency_id);
+    if (!agencyId) return res.status(400).json({ error: 'agencyId required' });
+    const { data: agency, error } = await supabase
+      .from('agencies').select('id, has_payment_method, stripe_customer_id').eq('id', agencyId).single();
+    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
+
+    if (agency.has_payment_method === true) return res.json({ hasPaymentMethod: true });
+    if (!agency.stripe_customer_id) return res.json({ hasPaymentMethod: false });
+
+    let has = false;
+    try {
+      const cust = await stripe.customers.retrieve(agency.stripe_customer_id);
+      if (cust && !cust.deleted) {
+        has = !!(cust.invoice_settings?.default_payment_method || cust.default_source);
+        if (!has) {
+          const pms = await stripe.paymentMethods.list({ customer: agency.stripe_customer_id, type: 'card', limit: 1 });
+          if (pms && pms.data && pms.data.length) {
+            has = true;
+            // Promote to default so per-client invoices actually charge it.
+            try { await stripe.customers.update(agency.stripe_customer_id, { invoice_settings: { default_payment_method: pms.data[0].id } }); } catch {}
+          }
+        }
+      }
+    } catch (e) { console.warn('card-status Stripe check failed:', e.message); }
+
+    if (has) { try { await supabase.from('agencies').update({ has_payment_method: true }).eq('id', agencyId); } catch {} }
+    return res.json({ hasPaymentMethod: has });
+  } catch (e) {
+    console.error('❌ card-status error:', e.message);
+    return res.status(500).json({ error: 'Failed to check card status' });
   }
 }
 
@@ -1553,6 +1599,7 @@ const CANCELLATION_REASON_LABELS = {
 module.exports = {
   createAgencyCheckout,
   createAgencySetupCheckout,
+  getAgencyCardStatus,
   createAgencyPortal,
   handlePlatformStripeWebhook,
   warnExpiringAgencyTrials,

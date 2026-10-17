@@ -269,9 +269,10 @@ const { handleConciergeWebhook } = require('./webhooks/vapi-concierge-webhook');
 // Jarvis / Secretary AI personal line (isolated from the receptionist).
 const { handleJarvisWebhook } = require('./webhooks/vapi-jarvis-webhook');
 
-const { 
-  createAgencyCheckout, 
+const {
+  createAgencyCheckout,
   createAgencySetupCheckout,
+  getAgencyCardStatus,
   createAgencyPortal,
   handlePlatformStripeWebhook,
   warnExpiringAgencyTrials
@@ -589,6 +590,7 @@ app.post('/api/agency/:agencyId/domain/verify', verifyAgencyDomain);
 app.post('/api/agency/checkout', requirePermissionIfAuthed('billing'), createAgencyCheckout);
 app.post('/api/agency/portal', requireAgencyAccessFromBody('billing'), createAgencyPortal);
 app.post('/api/agency/add-payment-method', requireAgencyAccessFromBody('billing'), createAgencySetupCheckout);
+app.get('/api/agency/:agencyId/card-status', requireAgencyAccess('billing'), getAgencyCardStatus);
 // In-app plan switch (Pro <-> Scale) so agencies can upgrade without the Stripe
 // portal's cancel-only dead end. See routes/change-plan.js.
 app.post('/api/agency/change-plan', requireAgencyAccessFromBody('billing'), changeAgencyPlan);
