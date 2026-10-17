@@ -13,7 +13,7 @@ const { hasScale, sha256 } = require('../middleware/api-auth');
 
 async function getAgencyPlan(agencyId) {
   const { data } = await supabase
-    .from('agencies').select('id, plan_type, subscription_status').eq('id', agencyId).single();
+    .from('agencies').select('id, plan_type, subscription_status, is_call_center').eq('id', agencyId).single();
   return data || null;
 }
 
@@ -23,7 +23,9 @@ async function createApiKey(req, res) {
     const { agencyId } = req.params;
     const agency = await getAgencyPlan(agencyId);
     if (!agency) return res.status(404).json({ error: 'Agency not found' });
-    if (!hasScale(agency)) {
+    // API access is a Scale feature, but CALL-CENTER agencies get it at any plan
+    // (mirrors the hasScale || is_call_center gate in api-auth.js for /api/v1).
+    if (!hasScale(agency) && agency.is_call_center !== true) {
       return res.status(403).json({
         error: 'upgrade_required',
         upgrade_required: true,
