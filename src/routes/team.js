@@ -60,6 +60,22 @@ function decodeToken(req) {
 }
 
 function isAgencyOwnerRole(role) { return role === 'agency_owner' || role === 'super_admin'; }
+// Who may manage a team: a real agency owner / super_admin, OR an admin
+// impersonation token (type:'agency'), which requireAgencyAccess already treats
+// as an authorized agency actor. The inner guard used to accept only
+// agency_owner, so viewing an agency via admin impersonation 403'd on every
+// team write even though the middleware let it through.
+function canManageTeam(decoded) {
+  return !!decoded && (isAgencyOwnerRole(decoded.role) || decoded.type === 'agency');
+}
+async function resolveActingUserId(decoded, agencyId) {
+  if (decoded && decoded.userId) return decoded.userId;
+  const { data: users } = await supabase.from('users').select('id, role').eq('agency_id', agencyId);
+  const u = (users || []).find((x) => x.role === 'agency_owner')
+    || (users || []).find((x) => x.role === 'agency_staff')
+    || (users || [])[0];
+  return u ? u.id : null;
+}
 function isClientOwnerRole(role) { return role === 'client'; }
 
 function generateTempPassword() {
@@ -121,7 +137,7 @@ async function checkTeamLimit(entityType, entityId) {
   if (entityType === 'agency') {
     const { data: agency } = await supabase
       .from('agencies')
-      .select('max_team_members_agency, subscription_status, plan_type')
+      .select('max_team_members_agency, subscription_status, plan_type, is_call_center')
       .eq('id', entityId)
       .single();
 
@@ -143,8 +159,13 @@ async function checkTeamLimit(entityType, entityId) {
       // TEAM_MEMBER_LIMITS in stripe-platform.js) are both respected.
       const plan = (agency?.plan_type || 'free').toLowerCase();
 
+      // Call centers are agent-pool businesses: their agents ARE the product, so
+      // they get unlimited agent seats regardless of plan (an explicit
+      // max_team_members_agency still overrides, handled above).
+      if (agency?.is_call_center === true) {
+        maxAllowed = -1;
       // Seat caps follow the SELECTED plan: Scale unlimited, Pro 3, Free 0.
-      if (plan === 'scale' || plan === 'enterprise') {
+      } else if (plan === 'scale' || plan === 'enterprise') {
         maxAllowed = -1;
       } else if (plan === 'pro' || plan === 'professional') {
         maxAllowed = 3;
@@ -277,8 +298,8 @@ router.post('/:agencyId/team', requireAgencyAccess('settings'), async (req, res)
     const { agencyId } = req.params;
     const { name, email, phone, permissions } = req.body;
     const decoded = decodeToken(req);
-    if (!decoded || !isAgencyOwnerRole(decoded.role)) return res.status(403).json({ error: 'Only the agency owner can manage team members' });
-    const ownerUserId = decoded.userId;
+    if (!canManageTeam(decoded)) return res.status(403).json({ error: 'Only the agency owner can manage team members' });
+    const ownerUserId = await resolveActingUserId(decoded, agencyId);
     if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
     const limits = await checkTeamLimit('agency', agencyId);
     if (!limits.allowed) {
@@ -329,7 +350,8 @@ router.put('/:agencyId/team/:memberId', requireAgencyAccess('settings'), async (
     const { agencyId, memberId } = req.params;
     const { display_name, phone, permissions, notification_prefs, status } = req.body;
     const decoded = decodeToken(req);
-    if (!decoded || !isAgencyOwnerRole(decoded.role)) return res.status(403).json({ error: 'Only the agency owner can manage team members' });
+    if (!canManageTeam(decoded)) return res.status(403).json({ error: 'Only the agency owner can manage team members' });
+    const actingUserId = await resolveActingUserId(decoded, agencyId);
     const { data: existing } = await supabase.from('team_members').select('id, member_user_id, permissions').eq('id', memberId).eq('entity_type', 'agency').eq('entity_id', agencyId).single();
     if (!existing) return res.status(404).json({ error: 'Team member not found' });
     const updates = { updated_at: new Date().toISOString() };
@@ -348,7 +370,7 @@ router.put('/:agencyId/team/:memberId', requireAgencyAccess('settings'), async (
     const { data: updated, error } = await supabase.from('team_members').update(updates).eq('id', memberId).select().single();
     if (error) { console.error('❌ Update team member error:', error); return res.status(500).json({ error: 'Failed to update team member' }); }
     if (Object.keys(userUpdates).length > 0) await supabase.from('users').update(userUpdates).eq('id', existing.member_user_id);
-    if (permissions !== undefined) await logActivity(memberId, decoded.userId, 'agency', agencyId, 'permissions_changed', { old: existing.permissions, new: updates.permissions });
+    if (permissions !== undefined) await logActivity(memberId, actingUserId, 'agency', agencyId, 'permissions_changed', { old: existing.permissions, new: updates.permissions });
     res.json({ success: true, member: updated });
   } catch (err) { console.error('❌ Update team member error:', err); res.status(500).json({ error: 'Failed to update team member' }); }
 });
@@ -358,14 +380,15 @@ router.post('/:agencyId/team/:memberId/reset-password', requireAgencyAccess('set
     const { agencyId, memberId } = req.params;
     const { password } = req.body;
     const decoded = decodeToken(req);
-    if (!decoded || !isAgencyOwnerRole(decoded.role)) return res.status(403).json({ error: 'Only the agency owner can manage team members' });
+    if (!canManageTeam(decoded)) return res.status(403).json({ error: 'Only the agency owner can manage team members' });
+    const actingUserId = await resolveActingUserId(decoded, agencyId);
     const { data: member } = await supabase.from('team_members').select('id, member_user_id, phone, display_name').eq('id', memberId).eq('entity_type', 'agency').eq('entity_id', agencyId).single();
     if (!member) return res.status(404).json({ error: 'Team member not found' });
     const newPassword = password || generateTempPassword();
     const passwordHash = await bcrypt.hash(newPassword, 10);
     await supabase.from('users').update({ password_hash: passwordHash }).eq('id', member.member_user_id);
     await supabase.from('team_members').update({ visible_password: newPassword, updated_at: new Date().toISOString() }).eq('id', memberId);
-    await logActivity(memberId, decoded.userId, 'agency', agencyId, 'password_reset', { reset_by: 'owner' });
+    await logActivity(memberId, actingUserId, 'agency', agencyId, 'password_reset', { reset_by: 'owner' });
     if (member.phone) {
       try {
         const send = getSendSms();
@@ -389,10 +412,11 @@ router.delete('/:agencyId/team/:memberId', requireAgencyAccess('settings'), asyn
   try {
     const { agencyId, memberId } = req.params;
     const decoded = decodeToken(req);
-    if (!decoded || !isAgencyOwnerRole(decoded.role)) return res.status(403).json({ error: 'Only the agency owner can manage team members' });
+    if (!canManageTeam(decoded)) return res.status(403).json({ error: 'Only the agency owner can manage team members' });
+    const actingUserId = await resolveActingUserId(decoded, agencyId);
     const { data: member } = await supabase.from('team_members').select('id, member_user_id, display_name').eq('id', memberId).eq('entity_type', 'agency').eq('entity_id', agencyId).single();
     if (!member) return res.status(404).json({ error: 'Team member not found' });
-    await logActivity(memberId, decoded.userId, 'agency', agencyId, 'member_removed', { name: member.display_name });
+    await logActivity(memberId, actingUserId, 'agency', agencyId, 'member_removed', { name: member.display_name });
     await supabase.from('team_members').delete().eq('id', memberId);
     await supabase.from('users').delete().eq('id', member.member_user_id);
     res.json({ success: true });
