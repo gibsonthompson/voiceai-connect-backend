@@ -54,13 +54,13 @@ async function agentProfile(agencyId, memberUserId) {
   try {
     const { data } = await supabase
       .from('team_members')
-      .select('display_name, call_delivery, agent_phone')
+      .select('display_name, call_delivery, agent_phone, availability_hours')
       .eq('entity_type', 'agency').eq('entity_id', agencyId)
       .eq('member_user_id', memberUserId)
       .maybeSingle();
-    if (data) return { displayName: data.display_name || null, callDelivery: data.call_delivery || 'browser', agentPhone: data.agent_phone || null };
+    if (data) return { displayName: data.display_name || null, callDelivery: data.call_delivery || 'browser', agentPhone: data.agent_phone || null, availabilityHours: data.availability_hours || null };
   } catch { /* fall through */ }
-  return { displayName: null, callDelivery: 'browser', agentPhone: null };
+  return { displayName: null, callDelivery: 'browser', agentPhone: null, availabilityHours: null };
 }
 
 // ---- POST /api/cc/agent/heartbeat -----------------------------------------
@@ -81,11 +81,29 @@ router.post('/agent/heartbeat', async (req, res) => {
 
   // Catch a (re)connecting agent up on any offer still open for them.
   const open = await offers.listOpenForAgent({ agencyId: agent.agencyId, memberUserId: agent.memberUserId });
+
+  // Tell the agent whether they are within their working hours right now, so the
+  // console can explain the quiet. No schedule / override => always on; only
+  // pays the agency-timezone lookup when a schedule is actually set.
+  const ah = prof.availabilityHours;
+  const scheduleEnabled = !!(ah && ah.enabled);
+  const override = !!(ah && ah.override);
+  let onSchedule = true;
+  if (scheduleEnabled && !override) {
+    try {
+      const { data: ag } = await supabase.from('agencies').select('timezone').eq('id', agent.agencyId).single();
+      onSchedule = presence.isAgentOnSchedule(ah, (ag && ag.timezone) || 'America/New_York');
+    } catch (e) { onSchedule = true; }
+  }
+
   res.json({
     success: true,
     channel: channelForAgent(agent.memberUserId),
     status,
     offers: open.map(shapeOffer),
+    onSchedule,
+    scheduleEnabled,
+    override,
   });
 });
 
@@ -193,12 +211,38 @@ router.post('/offer/:offerId/decline', async (req, res) => {
 
 // ---- GET /api/cc/:agencyId/agents/presence (manager bar) ------------------
 router.get('/:agencyId/agents/presence', requireAgencyAccess('team'), async (req, res) => {
-  const list = await presence.listForAgency(req.params.agencyId);
+  const agencyId = req.params.agencyId;
+  const list = await presence.listForAgency(agencyId);
+
+  // Annotate each agent with their working-hours state (in the agency timezone)
+  // so the bar can show who is actually on: an off-hours agent is online but not
+  // offered calls. Best-effort; on any failure everyone reads as on-schedule.
+  let tz = 'America/New_York';
+  const hoursByUser = {};
+  try { const { data: ag } = await supabase.from('agencies').select('timezone').eq('id', agencyId).single(); if (ag && ag.timezone) tz = ag.timezone; } catch (e) {}
+  try {
+    const { data: members } = await supabase.from('team_members')
+      .select('member_user_id, availability_hours')
+      .eq('entity_type', 'agency').eq('entity_id', agencyId);
+    for (const m of (members || [])) hoursByUser[m.member_user_id] = m.availability_hours || null;
+  } catch (e) {}
+  const nowTz = presence.hoursNowInTz(tz);
+
+  const agents = list.map((a) => {
+    const ah = hoursByUser[a.memberUserId] || null;
+    return {
+      ...a,
+      scheduleEnabled: !!(ah && ah.enabled),
+      override: !!(ah && ah.override),
+      onSchedule: presence.isAgentOnSchedule(ah, tz, nowTz),
+    };
+  });
+
   res.json({
     success: true,
-    online: list.filter((a) => a.online).length,
-    available: list.filter((a) => a.online && a.status === 'available' && !a.busy).length,
-    agents: list,
+    online: agents.filter((a) => a.online).length,
+    available: agents.filter((a) => a.online && a.status === 'available' && !a.busy && a.onSchedule).length,
+    agents,
   });
 });
 
