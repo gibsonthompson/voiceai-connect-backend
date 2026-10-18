@@ -60,6 +60,24 @@ function decodeToken(req) {
 }
 
 function isAgencyOwnerRole(role) { return role === 'agency_owner' || role === 'super_admin'; }
+
+// Per-agent weekly working hours. Shape is normalized to
+//   { enabled, days: { mon:{on,start,end}, ... sun } } with HH:mm times.
+// null clears it (no restriction). Interpreted in the agency timezone by
+// agent-presence.isAgentOnSchedule at routing time.
+const _HM = (v, fb) => (typeof v === 'string' && /^\d{1,2}:\d{2}$/.test(v) ? v : fb);
+function sanitizeAvailabilityHours(h) {
+  if (h === null) return null;
+  if (!h || typeof h !== 'object') return null;
+  const names = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+  const src = (h.days && typeof h.days === 'object') ? h.days : {};
+  const days = {};
+  for (const n of names) {
+    const d = src[n] || {};
+    days[n] = { on: d.on === true, start: _HM(d.start, '09:00'), end: _HM(d.end, '17:00') };
+  }
+  return { enabled: h.enabled === true, days };
+}
 // Who may manage a team: a real agency owner / super_admin, OR an admin
 // impersonation token (type:'agency'), which requireAgencyAccess already treats
 // as an authorized agency actor. The inner guard used to accept only
@@ -152,20 +170,20 @@ async function checkTeamLimit(entityType, entityId) {
 
     if (isTrial) {
       maxAllowed = -1;
+    } else if (agency?.is_call_center === true && (maxAllowed === null || maxAllowed === undefined || maxAllowed <= 0)) {
+      // Call centers are agent-pool businesses: their agents ARE the product, so
+      // a blank OR zero cap must never lock them out. Zero is the stale signup
+      // default, not a real limit. Only a deliberate POSITIVE admin cap is
+      // honored for a call center (the branch below); everything else = unlimited.
+      maxAllowed = -1;
     } else if (maxAllowed === null || maxAllowed === undefined) {
       // Not on trial: derive from plan only when nothing was explicitly set in
       // the DB. Strict null/undefined check (NOT !maxAllowed) so that 0 (Free
       // tier explicit cap) and -1 (Scale tier unlimited sentinel set by
       // TEAM_MEMBER_LIMITS in stripe-platform.js) are both respected.
       const plan = (agency?.plan_type || 'free').toLowerCase();
-
-      // Call centers are agent-pool businesses: their agents ARE the product, so
-      // they get unlimited agent seats regardless of plan (an explicit
-      // max_team_members_agency still overrides, handled above).
-      if (agency?.is_call_center === true) {
-        maxAllowed = -1;
       // Seat caps follow the SELECTED plan: Scale unlimited, Pro 3, Free 0.
-      } else if (plan === 'scale' || plan === 'enterprise') {
+      if (plan === 'scale' || plan === 'enterprise') {
         maxAllowed = -1;
       } else if (plan === 'pro' || plan === 'professional') {
         maxAllowed = 3;
@@ -280,14 +298,14 @@ router.get('/:agencyId/team', requireAgencyAccess('settings'), async (req, res) 
     const { agencyId } = req.params;
     const { data: members, error } = await supabase
       .from('team_members')
-      .select(`id, display_name, phone, visible_password, permissions, notification_prefs, status, assigned_client_ids, call_delivery, agent_phone, created_at, updated_at, member_user_id, users:member_user_id (id, email, last_login, avatar_url)`)
+      .select(`id, display_name, phone, visible_password, permissions, notification_prefs, status, assigned_client_ids, call_delivery, agent_phone, availability_hours, created_at, updated_at, member_user_id, users:member_user_id (id, email, last_login, avatar_url)`)
       .eq('entity_type', 'agency').eq('entity_id', agencyId)
       .order('created_at', { ascending: true });
     if (error) { console.error('❌ Fetch team error:', error); return res.status(500).json({ error: 'Failed to fetch team members' }); }
     const limits = await checkTeamLimit('agency', agencyId);
     res.json({
       success: true,
-      members: (members || []).map(m => ({ id: m.id, user_id: m.member_user_id, display_name: m.display_name, phone: m.phone, email: m.users?.email || null, visible_password: m.visible_password, permissions: m.permissions, notification_prefs: m.notification_prefs, status: m.status, assigned_client_ids: m.assigned_client_ids || null, call_delivery: m.call_delivery || 'browser', agent_phone: m.agent_phone || null, last_login: m.users?.last_login || null, avatar_url: m.users?.avatar_url || null, created_at: m.created_at })),
+      members: (members || []).map(m => ({ id: m.id, user_id: m.member_user_id, display_name: m.display_name, phone: m.phone, email: m.users?.email || null, visible_password: m.visible_password, permissions: m.permissions, notification_prefs: m.notification_prefs, status: m.status, assigned_client_ids: m.assigned_client_ids || null, call_delivery: m.call_delivery || 'browser', agent_phone: m.agent_phone || null, availability_hours: m.availability_hours || null, last_login: m.users?.last_login || null, avatar_url: m.users?.avatar_url || null, created_at: m.created_at })),
       limits,
     });
   } catch (err) { console.error('❌ List team error:', err); res.status(500).json({ error: 'Failed to fetch team members' }); }
@@ -367,6 +385,7 @@ router.put('/:agencyId/team/:memberId', requireAgencyAccess('settings'), async (
     // Call-center agent call delivery, editable later.
     if (req.body.call_delivery !== undefined) updates.call_delivery = req.body.call_delivery === 'phone' ? 'phone' : 'browser';
     if (req.body.agent_phone !== undefined) updates.agent_phone = (typeof req.body.agent_phone === 'string' && req.body.agent_phone.trim()) ? req.body.agent_phone.trim() : null;
+    if (req.body.availability_hours !== undefined) updates.availability_hours = sanitizeAvailabilityHours(req.body.availability_hours);
     const { data: updated, error } = await supabase.from('team_members').update(updates).eq('id', memberId).select().single();
     if (error) { console.error('❌ Update team member error:', error); return res.status(500).json({ error: 'Failed to update team member' }); }
     if (Object.keys(userUpdates).length > 0) await supabase.from('users').update(userUpdates).eq('id', existing.member_user_id);

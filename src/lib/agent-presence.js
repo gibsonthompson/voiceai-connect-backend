@@ -31,6 +31,49 @@ function onlineCutoffIso() {
   return new Date(Date.now() - ONLINE_WINDOW_MS).toISOString();
 }
 
+// ---- Per-agent working hours ------------------------------------------------
+// availability_hours (team_members jsonb):
+//   { enabled: bool, days: { mon:{on,start,end}, ... sun:{...} } }  (HH:mm, 24h)
+// null / enabled=false => no restriction. Interpreted in the AGENCY timezone.
+const DOW = { Sun: 'sun', Mon: 'mon', Tue: 'tue', Wed: 'wed', Thu: 'thu', Fri: 'fri', Sat: 'sat' };
+
+// "Now" in a timezone, as { day:'mon'..'sun', minutes: 0..1439 }. Uses Intl so
+// no tz library is needed; falls back to America/New_York on a bad zone.
+function hoursNowInTz(timezone) {
+  let parts;
+  try {
+    parts = new Intl.DateTimeFormat('en-US', { timeZone: timezone || 'America/New_York', weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date());
+  } catch {
+    parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date());
+  }
+  const wd = parts.find((x) => x.type === 'weekday')?.value || 'Mon';
+  let H = parseInt(parts.find((x) => x.type === 'hour')?.value || '0', 10);
+  if (H === 24) H = 0; // some ICU builds emit 24 for midnight
+  const M = parseInt(parts.find((x) => x.type === 'minute')?.value || '0', 10);
+  return { day: DOW[wd] || 'mon', minutes: H * 60 + M };
+}
+
+function parseHM(v) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(v || ''));
+  if (!m) return null;
+  const mins = (+m[1]) * 60 + (+m[2]);
+  return mins >= 0 && mins <= 1439 ? mins : null;
+}
+
+// True if the agent may take calls right now. No schedule / disabled => always.
+// Handles overnight windows (end <= start, e.g. 22:00-06:00).
+function isAgentOnSchedule(availabilityHours, timezone, nowOverride) {
+  const ah = availabilityHours;
+  if (!ah || typeof ah !== 'object' || ah.enabled !== true || !ah.days || typeof ah.days !== 'object') return true;
+  const { day, minutes } = nowOverride || hoursNowInTz(timezone);
+  const d = ah.days[day];
+  if (!d || d.on !== true) return false;
+  const start = parseHM(d.start), end = parseHM(d.end);
+  if (start == null || end == null) return false;
+  if (end <= start) return minutes >= start || minutes < end; // overnight
+  return minutes >= start && minutes < end;
+}
+
 function normStatus(s) {
   return s === 'away' ? 'away' : 'available';
 }
@@ -140,7 +183,7 @@ async function listAvailableForClient({ agencyId, clientId }) {
     // 1) Which staff are assigned to this client (active, not seat-disabled).
     const { data: members, error: mErr } = await supabase
       .from('team_members')
-      .select('member_user_id, display_name, assigned_client_ids, call_delivery, agent_phone, status, seat_disabled_at')
+      .select('member_user_id, display_name, assigned_client_ids, call_delivery, agent_phone, status, seat_disabled_at, availability_hours')
       .eq('entity_type', 'agency')
       .eq('entity_id', agencyId);
     if (mErr || !Array.isArray(members)) return [];
@@ -169,7 +212,14 @@ async function listAvailableForClient({ agencyId, clientId }) {
       .gte('last_seen', onlineCutoffIso());
     if (pErr || !Array.isArray(pres)) return [];
 
-    const out = pres.map((p) => {
+    // Working-hours gate: drop agents who are online but outside their scheduled
+    // hours (in the agency's timezone). No schedule => always passes.
+    let tz = 'America/New_York';
+    try { const { data: ag } = await supabase.from('agencies').select('timezone').eq('id', agencyId).single(); if (ag && ag.timezone) tz = ag.timezone; } catch (e) {}
+    const nowTz = hoursNowInTz(tz);
+    const presOnSchedule = pres.filter((p) => isAgentOnSchedule((byUser.get(p.member_user_id) || {}).availability_hours, tz, nowTz));
+
+    const out = presOnSchedule.map((p) => {
       const m = byUser.get(p.member_user_id) || {};
       // Delivery + phone: trust team_members (the manager's saved setting) over
       // the presence snapshot, falling back to the snapshot then defaults.
@@ -207,4 +257,6 @@ module.exports = {
   setBusy,
   listForAgency,
   listAvailableForClient,
+  isAgentOnSchedule,
+  hoursNowInTz,
 };
