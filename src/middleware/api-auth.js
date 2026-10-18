@@ -14,6 +14,9 @@
 const crypto = require('crypto');
 const { supabase } = require('../lib/supabase');
 
+// Public base for durable links returned in API shapes (e.g. recording_api_url).
+const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
+
 const RATE_LIMIT = 120;            // requests per window, per key
 const RATE_WINDOW_MS = 60 * 1000;  // 1 minute
 const LAST_USED_THROTTLE_MS = 60 * 1000;
@@ -106,6 +109,9 @@ function toPublicCall(c) {
     summary: c.summary,
     transcript: c.transcript,
     recording_url: c.recording_url,      // resolved on single-call fetch
+    // Durable link that resolves a fresh signed URL on demand. recording_url
+    // above is only resolved on the single-call fetch and is short-lived.
+    recording_api_url: c.id && c.recording_url ? `${BACKEND_URL}/api/v1/calls/${c.id}/recording` : null,
     ended_reason: c.ended_reason,
     transfer_status: c.transfer_status,
     is_spam: c.is_spam,

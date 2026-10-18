@@ -1414,6 +1414,13 @@ async function handleVapiWebhook(req, res) {
     const transcript = message.transcript || '';
     const callerPhone = call.customer?.number || 'Unknown';
     const recordingUrl = message.recordingUrl || message.artifact?.recordingUrl || call.recordingUrl || null;
+    // The true caller ID (origin line). Kept distinct from customer_phone, which
+    // the AI may overwrite with a callback number the caller gives on the call.
+    const callerIdNumber = call.customer?.number || null;
+    // Call start/end timestamps from VAPI, so the API and webhooks carry them
+    // instead of leaving started_at / ended_at null on every call row.
+    const callStartedAt = call.startedAt || message.startedAt || null;
+    const callEndedAt = call.endedAt || message.endedAt || null;
     let durationSeconds = call.duration || message.duration || message.artifact?.duration || message.durationSeconds || null;
     // duration_seconds is an INTEGER column. VAPI sends fractional seconds
     // (e.g. 50.573), which Postgres rejects with 22P02. Round to a whole
@@ -1453,6 +1460,7 @@ async function handleVapiWebhook(req, res) {
     // the call record. AI data is backfilled in step 4.
     const initialRec = {
       client_id: client.id, customer_name: 'Unknown', customer_phone: callerPhone,
+      caller_phone: callerIdNumber, started_at: callStartedAt, ended_at: callEndedAt,
       customer_email: null, ai_summary: null, transcript: storedTranscript,
       recording_url: storedRecordingUrl, duration_seconds: durationSeconds,
       urgency_level: 'routine', call_status: wasTransferred ? 'transferred' : 'completed',

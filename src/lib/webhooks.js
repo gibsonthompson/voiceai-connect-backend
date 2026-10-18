@@ -13,6 +13,10 @@ const crypto = require('crypto');
 const dns = require('dns').promises;
 const { supabase } = require('./supabase');
 
+// Public base used to build durable links in stored payloads (the signed
+// recording URL expires, so consumers refetch via this stable endpoint).
+const BACKEND_URL = process.env.BACKEND_URL || 'https://urchin-app-bqb4i.ondigitalocean.app';
+
 const EVENT_TYPES = [
   'call.started',
   'call.completed',
@@ -206,6 +210,10 @@ async function dispatchWebhook(agencyId, eventType, data) {
             summary: call.summary,
             transcript: call.transcript,
             recording_url: recordingUrl,
+            // Durable link: `recording_url` above is a short-lived signed URL, so a
+            // stored webhook replayed later would have a dead link. This endpoint
+            // returns a fresh URL on demand (auth with the agency API key).
+            recording_api_url: call.recording_url ? `${BACKEND_URL}/api/v1/calls/${call.id}/recording` : null,
             ended_reason: call.ended_reason,
             transfer_status: call.transfer_status,
             is_spam: call.is_spam,
