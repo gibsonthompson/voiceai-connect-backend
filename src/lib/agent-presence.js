@@ -60,18 +60,33 @@ function parseHM(v) {
   return mins >= 0 && mins <= 1439 ? mins : null;
 }
 
-// True if the agent may take calls right now. No schedule / disabled => always.
-// Handles overnight windows (end <= start, e.g. 22:00-06:00).
+// Does `minutes` (0..1439) fall inside a [start,end) window? Handles an overnight
+// window (end <= start, e.g. 22:00-06:00).
+function inWindow(minutes, start, end) {
+  if (start == null || end == null) return false;
+  if (end <= start) return minutes >= start || minutes < end;
+  return minutes >= start && minutes < end;
+}
+
+// A day's windows, tolerating the legacy single {start,end} shape.
+function dayWindows(d) {
+  if (!d) return [];
+  if (Array.isArray(d.windows)) return d.windows;
+  if (d.start || d.end) return [{ start: d.start, end: d.end }];
+  return [];
+}
+
+// True if the agent may take calls right now. No schedule / disabled / manager
+// override => always. A day can have multiple windows (e.g. 9-12 and 1-5 with a
+// lunch break); the agent is on if NOW falls in any of them.
 function isAgentOnSchedule(availabilityHours, timezone, nowOverride) {
   const ah = availabilityHours;
   if (!ah || typeof ah !== 'object' || ah.enabled !== true || !ah.days || typeof ah.days !== 'object') return true;
+  if (ah.override === true) return true; // manager keeps them eligible
   const { day, minutes } = nowOverride || hoursNowInTz(timezone);
   const d = ah.days[day];
   if (!d || d.on !== true) return false;
-  const start = parseHM(d.start), end = parseHM(d.end);
-  if (start == null || end == null) return false;
-  if (end <= start) return minutes >= start || minutes < end; // overnight
-  return minutes >= start && minutes < end;
+  return dayWindows(d).some((w) => inWindow(minutes, parseHM(w && w.start), parseHM(w && w.end)));
 }
 
 function normStatus(s) {

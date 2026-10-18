@@ -74,9 +74,14 @@ function sanitizeAvailabilityHours(h) {
   const days = {};
   for (const n of names) {
     const d = src[n] || {};
-    days[n] = { on: d.on === true, start: _HM(d.start, '09:00'), end: _HM(d.end, '17:00') };
+    // Windows (multiple per day for breaks/lunch); tolerate the legacy single
+    // {start,end} shape. Cap at 6 windows/day; fall back to one 9-5 window.
+    let raw = Array.isArray(d.windows) ? d.windows : ((d.start || d.end) ? [{ start: d.start, end: d.end }] : []);
+    let windows = raw.slice(0, 6).map((w) => ({ start: _HM(w && w.start, '09:00'), end: _HM(w && w.end, '17:00') }));
+    if (windows.length === 0) windows = [{ start: '09:00', end: '17:00' }];
+    days[n] = { on: d.on === true, windows };
   }
-  return { enabled: h.enabled === true, days };
+  return { enabled: h.enabled === true, override: h.override === true, days };
 }
 // Who may manage a team: a real agency owner / super_admin, OR an admin
 // impersonation token (type:'agency'), which requireAgencyAccess already treats
