@@ -414,6 +414,24 @@ async function getAvailableSlots(clientId, date, options) {
 }
 
 // ====================================================================
+// Entitlement for the CUSTOMER booking-confirmation SMS (a paid capability).
+//   - A reseller agency can offer it only on the Scale plan (trial counts as
+//     Scale, matching hasScale()).
+//   - A call center is never unlocked by plan (they are invoiced directly); it
+//     needs the distinct `appointment_sms_addon` upgrade flag.
+//   - `appointment_sms_addon` also acts as a platform override for any agency.
+// The owner "new appointment booked" alert is NOT gated (it only texts the owner).
+// ====================================================================
+function canOfferApptCustomerSms(agency) {
+  if (!agency) return false;
+  if (agency.appointment_sms_addon === true) return true;
+  if (agency.is_call_center === true) return false;
+  const isTrialing = ['trialing', 'trial'].includes(agency.subscription_status);
+  const plan = isTrialing ? 'scale' : String(agency.plan_type || '').toLowerCase();
+  return plan === 'scale';
+}
+
+// ====================================================================
 // Book an appointment
 // staffName: optional — included in event title and description
 // The function looks up service config from client_services for
@@ -669,7 +687,21 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
       if (fromNum) {
         const { sendTelnyxSMS } = require('./notifications');
 
+        // Entitlement gate: only send the customer confirmation if the agency is
+        // allowed to offer it (Scale reseller, or call-center/agency with the
+        // add-on). Fetched only when the toggle is on, so normal calls skip it.
+        let custEntitled = false;
         if (tc.apptCustomerSmsEnabled === true && customerPhone) {
+          try {
+            const { data: ag } = await supabase.from('agencies')
+              .select('plan_type, subscription_status, is_call_center, appointment_sms_addon')
+              .eq('id', client.agency_id).maybeSingle();
+            custEntitled = canOfferApptCustomerSms(ag);
+            if (!custEntitled) console.log('📵 Customer booking SMS on but agency not entitled (needs Scale / upgrade) — skipping');
+          } catch (e) { console.warn('appt customer SMS entitlement check failed:', e.message); }
+        }
+
+        if (tc.apptCustomerSmsEnabled === true && customerPhone && custEntitled) {
           const vars = {
             name: customerName || 'there',
             business: client.business_name || 'us',
@@ -718,6 +750,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
 module.exports = {
   getAvailableSlots,
   bookAppointment,
+  canOfferApptCustomerSms,
   refreshAccessToken,
   lookupServiceConfig,
   // exported for tests / reuse

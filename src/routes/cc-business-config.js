@@ -23,6 +23,7 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { requireAgencyAccess } = require('./auth');
+const { canOfferApptCustomerSms } = require('../lib/calendar-booking');
 
 // Normalize a US/CA number to E.164, or null if it is not a plausible number.
 function toE164(input) {
@@ -81,15 +82,20 @@ router.get('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
     // platform default of 30 min notice / 60 days ahead. Surfaced so the editor
     // can show the business owner exactly what "blank = agency default" means.
     let agencyDefaults = { minNotice: 30, maxDays: 60 };
+    // Whether this account may offer the customer booking-confirmation SMS. For a
+    // call center that is the distinct `appointment_sms_addon` upgrade; the UI
+    // shows a locked "contact us to enable" row until it is on.
+    let apptCustomerSmsUnlocked = false;
     try {
       const { data: ag } = await supabase.from('agencies')
-        .select('default_min_booking_notice_minutes, default_max_booking_days_ahead')
+        .select('default_min_booking_notice_minutes, default_max_booking_days_ahead, plan_type, subscription_status, is_call_center, appointment_sms_addon')
         .eq('id', req.params.agencyId).maybeSingle();
       if (ag) {
         agencyDefaults = {
           minNotice: ag.default_min_booking_notice_minutes ?? 30,
           maxDays: ag.default_max_booking_days_ahead ?? 60,
         };
+        apptCustomerSmsUnlocked = canOfferApptCustomerSms(ag);
       }
     } catch (e) { /* keep platform fallback */ }
 
@@ -113,6 +119,7 @@ router.get('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
     res.json({
       success: true,
       agencyDefaults,
+      apptCustomerSmsUnlocked,
       config: {
         optOut,
         businessName: c.business_name || '',
