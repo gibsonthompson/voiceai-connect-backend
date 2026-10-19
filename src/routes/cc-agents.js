@@ -116,6 +116,88 @@ router.post('/agent/status', async (req, res) => {
   res.json({ success: true, status });
 });
 
+// ---- GET /api/cc/agent/me -------------------------------------------------
+// Read-only snapshot for the agent's own availability page: their saved working
+// hours, whether they are on schedule right now, their override flag, their
+// current presence status, and delivery. No writes (so it never fights the
+// heartbeat loop that owns presence status).
+router.get('/agent/me', async (req, res) => {
+  const agent = resolveAgent(decodeToken(req.query.token || req.headers.authorization));
+  if (!agent) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+  const prof = await agentProfile(agent.agencyId, agent.memberUserId);
+  const ah = prof.availabilityHours;
+  const scheduleEnabled = !!(ah && ah.enabled);
+  const override = !!(ah && ah.override);
+
+  let timezone = 'America/New_York';
+  try {
+    const { data: ag } = await supabase.from('agencies').select('timezone').eq('id', agent.agencyId).single();
+    if (ag && ag.timezone) timezone = ag.timezone;
+  } catch (e) {}
+
+  let onSchedule = true;
+  if (scheduleEnabled && !override) {
+    try { onSchedule = presence.isAgentOnSchedule(ah, timezone); } catch (e) { onSchedule = true; }
+  }
+
+  let status = 'available';
+  try {
+    const { data: pres } = await supabase.from('agent_presence')
+      .select('status')
+      .eq('agency_id', agent.agencyId).eq('member_user_id', agent.memberUserId)
+      .maybeSingle();
+    if (pres && pres.status === 'away') status = 'away';
+  } catch (e) {}
+
+  res.json({
+    success: true,
+    displayName: prof.displayName,
+    callDelivery: prof.callDelivery,
+    agentPhone: prof.agentPhone,
+    availabilityHours: ah || null,
+    scheduleEnabled,
+    override,
+    onSchedule,
+    status,
+    timezone,
+  });
+});
+
+// ---- POST /api/cc/agent/override ------------------------------------------
+// The agent flips their OWN availability override (make myself available now,
+// even outside my set hours). The override lives in team_members.availability_hours
+// (the same flag a manager can set from the Agents page), so routing and the
+// manager presence bar pick it up on the next lookup. We preserve the rest of the
+// schedule and only change the override boolean.
+router.post('/agent/override', async (req, res) => {
+  const agent = resolveAgent(decodeToken(req.headers.authorization));
+  if (!agent) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  const override = !!(req.body && req.body.override === true);
+
+  try {
+    const { data: tm } = await supabase.from('team_members')
+      .select('availability_hours')
+      .eq('entity_type', 'agency').eq('entity_id', agent.agencyId)
+      .eq('member_user_id', agent.memberUserId)
+      .maybeSingle();
+    if (!tm) return res.status(404).json({ success: false, error: 'No agent profile to update.' });
+
+    const cur = (tm.availability_hours && typeof tm.availability_hours === 'object') ? tm.availability_hours : {};
+    const next = { ...cur, override };
+    const { error } = await supabase.from('team_members')
+      .update({ availability_hours: next })
+      .eq('entity_type', 'agency').eq('entity_id', agent.agencyId)
+      .eq('member_user_id', agent.memberUserId);
+    if (error) throw error;
+
+    res.json({ success: true, override });
+  } catch (e) {
+    console.error('cc-agents: agent/override failed:', e.message);
+    res.status(500).json({ success: false, error: 'Could not update your availability.' });
+  }
+});
+
 // ---- GET /api/cc/agent/stream (SSE) ---------------------------------------
 router.get('/agent/stream', async (req, res) => {
   const agent = resolveAgent(decodeToken(req.query.token || req.headers.authorization));
