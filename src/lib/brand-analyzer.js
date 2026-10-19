@@ -110,7 +110,7 @@ Logo background looks: ${themeHint}
 Choose fonts ONLY from this catalog (use the family name exactly). Pick a DISPLAY font whose letterforms match the logo's own type, and a BODY font that pairs well and is highly readable:
 ${catalogForPrompt()}
 
-Icon style options (nav icon weight): "fine" (elegant/luxury/light), "regular" (modern/clean/professional), "bold" (strong/techy/energetic).
+Nav icon style options (pick the one that matches the brand): "outline" (clean, professional, default), "thin" (elegant, light, luxury), "bold" (strong, confident), "solid" (filled, modern, high-impact), "duotone" (two-tone, friendly, playful), "none" (no icons, minimal/editorial, text-only nav).
 
 Return ONLY valid JSON, no prose, in exactly this shape:
 {
@@ -125,7 +125,7 @@ Return ONLY valid JSON, no prose, in exactly this shape:
   },
   "roles": [ { "hex": "#hex", "role": "primary|accent|neutral|background|text" } ],
   "fonts": { "display": "Exact Family Name", "body": "Exact Family Name", "rationale": "one short sentence on why these match the logo" },
-  "icon_style": "fine | regular | bold"
+  "icon_style": "outline | thin | bold | solid | duotone | none"
 }`;
 }
 

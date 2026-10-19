@@ -54,8 +54,11 @@ const BRAND_FONTS = [
   { family: 'JetBrains Mono', category: 'mono', vibes: ['techy', 'precise', 'developer'], role: 'body' },
 ];
 
-const ICON_STYLES = ['fine', 'regular', 'bold']; // fine=elegant/luxury, bold=strong/techy
-const DEFAULT_ICON_STYLE = 'regular';
+// Nav icon styles. Each is a genuinely different look (rendered as a Phosphor
+// weight on the frontend), plus a text-only mode. outline=clean, thin=elegant,
+// bold=strong, solid=filled, duotone=two-tone/playful, none=no icons.
+const ICON_STYLES = ['outline', 'thin', 'bold', 'solid', 'duotone', 'none'];
+const DEFAULT_ICON_STYLE = 'outline';
 
 function byFamily(family) {
   if (!family || typeof family !== 'string') return null;
