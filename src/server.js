@@ -1827,6 +1827,8 @@ app.use('/api/agency', require('./routes/cc-analytics'));
 app.use('/api/agency', require('./routes/cc-calls'));
 // Call-center messages & callbacks inbox: the follow-up worklist agents clear.
 app.use('/api/agency', require('./routes/cc-messages'));
+// Call-center TEXTS inbox: two-way SMS across every business the center serves.
+app.use('/api/agency', require('./routes/cc-sms'));
 // Call-center business config: configure a business's AI from inside /cc.
 app.use('/api/agency', require('./routes/cc-business-config'));
 // Call-center agent real-time plane: presence, escalation offer stream + claim.
