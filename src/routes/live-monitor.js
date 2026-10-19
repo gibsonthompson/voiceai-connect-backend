@@ -222,6 +222,9 @@ router.get('/:id/live/info', async (req, res) => {
     client: {
       id: auth.client.id,
       business_name: auth.client.business_name,
+      // The business's own line, shown in the monitor header for context (so an
+      // agent always knows which number they are answering for).
+      phone_number: auth.client.vapi_phone_number || null,
       // The web demo places a browser call straight to this assistant.
       assistant_id: auth.client.vapi_assistant_id || null,
       industry: auth.client.industry || null,

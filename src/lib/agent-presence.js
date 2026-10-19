@@ -24,8 +24,10 @@
 const { supabase } = require('./supabase');
 
 // An agent counts as online if we have heard from them within this window. The
-// /cc console heartbeats every ~15s, so ~3 missed beats ages them out.
-const ONLINE_WINDOW_MS = parseInt(process.env.AGENT_PRESENCE_ONLINE_MS || '', 10) || 45000;
+// /cc console heartbeats every ~15s (from a Web Worker, so a backgrounded tab
+// keeps beating), so 90s is ~6 missed beats before they age out, which rides
+// out a brief network blip or a momentary sleep without dropping them mid-call.
+const ONLINE_WINDOW_MS = parseInt(process.env.AGENT_PRESENCE_ONLINE_MS || '', 10) || 90000;
 
 function onlineCutoffIso() {
   return new Date(Date.now() - ONLINE_WINDOW_MS).toISOString();

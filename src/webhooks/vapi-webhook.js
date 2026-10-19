@@ -1146,6 +1146,21 @@ async function handleAssistantRequest(req, res, message) {
       } catch (e) { console.warn('⚠️ Contact lookup failed:', e.message); }
     }
 
+    // Surface the incoming caller to the live monitor the instant the call
+    // starts, so an agent watching sees who is on the line (number, and any
+    // recognized name / prior-call count) before the first transcript line.
+    // Best-effort: the monitor must never break the call.
+    try {
+      const recName = (callerContext && callerContext.name && callerContext.name !== 'Unknown') ? callerContext.name : null;
+      broadcastLiveEvent(client.id, {
+        type: 'call_started',
+        caller_number: callerPhone || fromNumber || null,
+        caller_name: recName,
+        prior_calls: (callerContext && callerContext.total_calls) || 0,
+        recognized: !!recName,
+      });
+    } catch (e) { /* monitor must never break the call */ }
+
     const assistantConfig = await buildDynamicAssistantConfig(client, agency, callerContext);
     console.log(`✅ Assistant config built in ${Date.now() - startTime}ms`);
     return res.status(200).json({ assistant: assistantConfig });
