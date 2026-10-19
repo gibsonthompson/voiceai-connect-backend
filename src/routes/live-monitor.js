@@ -446,12 +446,32 @@ router.post('/:id/live/listen-start', async (req, res) => {
     return res.status(409).json({ success: false, error: 'Browser audio is not ready. Reconnect and try again.' });
   }
 
+  // Resolve the agent's real display name server-side from team_members (the same
+  // source the escalation claim label uses), so the live-feed labels and the
+  // stored supervisor_events[].name show the person's name, not whatever the
+  // browser had in localStorage (which can be just their email). Prefer the
+  // team_members name; fall back to the client-sent name, then null.
+  let resolvedName = (typeof agentName === 'string' && agentName.trim()) ? agentName.trim() : null;
+  try {
+    if (auth.decoded && auth.decoded.userId && auth.client.agency_id) {
+      const { data: tm } = await supabase
+        .from('team_members')
+        .select('display_name')
+        .eq('entity_type', 'agency')
+        .eq('entity_id', auth.client.agency_id)
+        .eq('member_user_id', auth.decoded.userId)
+        .maybeSingle();
+      if (tm && tm.display_name && String(tm.display_name).trim()) resolvedName = String(tm.display_name).trim();
+    }
+  } catch (e) { /* keep the client-sent name */ }
+
   console.log(`live-monitor: 🎧 listen-start requested client=${auth.client.id} call=${callId} session=${session.id}`);
   const result = await voiceRouter.barge.startSupervisorListen({
     sessionId: session.id,
     sipUsername: session.telnyx_agent_sip_username,
     credentialId: session.telnyx_agent_credential_id,
-    agentName: typeof agentName === 'string' ? agentName : null,
+    agentName: resolvedName,
+    autoJoin: req.body && req.body.autoJoin === true,
   });
   if (!result.ok) {
     console.warn(`live-monitor: 🎧 listen-start refused session=${session.id}: ${result.error}`);

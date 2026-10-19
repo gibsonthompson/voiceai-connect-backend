@@ -1079,6 +1079,12 @@ function nameFor(sessionId) {
   return (typeof n === 'string' && n.trim()) ? n.trim() : null;
 }
 
+// Seats that arrived from an escalation screen-pop (autoJoin). For these we skip
+// the intermediate "is listening in" feed line, so an escalation reads as a
+// single jump-in rather than connect -> listen -> take over. Best-effort, in
+// memory, cleared when the seat leaves. A voluntary monitor is never in this set.
+const autoJoinSeats = new Set();
+
 // Durable-for-the-call timeline of who listened / jumped in / handed back on
 // each call (sessionId -> [{ name, action, at }]). Accumulated in memory as the
 // events happen, then flushed onto the call record (calls.call_metadata) at save
@@ -1143,10 +1149,11 @@ async function ensureConference(session) {
 
 // Start a listen seat: promote to a conference and dial the supervisor's browser.
 // On answer, completeSupervisorSeat joins it as a muted monitor.
-async function startSupervisorListen({ sessionId, sipUsername, credentialId, agentName }) {
+async function startSupervisorListen({ sessionId, sipUsername, credentialId, agentName, autoJoin = false }) {
   if (!sessionId || !sipUsername) return { ok: false, code: 400, error: 'Missing session or endpoint.' };
   // Remember who is seating in, so every event on this call names the person.
   if (agentName && String(agentName).trim()) supervisorNames.set(sessionId, String(agentName).trim().slice(0, 80));
+  if (autoJoin) autoJoinSeats.add(sessionId); else autoJoinSeats.delete(sessionId);
   const session = await getSessionById(sessionId);
   if (!session) return { ok: false, code: 404, error: 'No live session.' };
   if (session.telnyx_agent_control_id && session.supervisor_role) {
@@ -1211,7 +1218,11 @@ async function completeSupervisorSeat(sessionId) {
   });
   await updateSession(sessionId, { supervisor_role: 'monitor' });
   try {
-    broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_dialing', label: `${nameFor(session.id) || 'A teammate'} is listening in` });
+    // For an escalation auto-join we skip this intermediate "listening" line so
+    // the feed reads as a single jump-in; a voluntary monitor still shows it.
+    if (!autoJoinSeats.has(sessionId)) {
+      broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_dialing', label: `${nameFor(session.id) || 'A teammate'} is listening in` });
+    }
   } catch (e) {}
   recordSupervisorEvent(sessionId, 'listening');
   console.log(`telnyx-voice: 🎧 supervisor seated as monitor in conference ${session.telnyx_conference_id} (session ${sessionId})`);
@@ -1324,6 +1335,7 @@ async function supervisorLeaveSeat(sessionId) {
     broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_ended', label: `${who} stopped monitoring` });
   } catch (e) {}
   supervisorNames.delete(sessionId);
+  autoJoinSeats.delete(sessionId);
   recordSupervisorEvent(sessionId, 'left');
   console.log(`telnyx-voice: 🎧 supervisor left the seat (session ${sessionId})`);
   return { ok: true };
