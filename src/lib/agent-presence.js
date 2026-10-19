@@ -122,6 +122,19 @@ async function heartbeat({ agencyId, memberUserId, displayName, callDelivery, ag
     if (status !== undefined) row.status = normStatus(status);
     if (callDelivery !== undefined) row.call_delivery = normDelivery(callDelivery);
     if (agentPhone !== undefined) row.agent_phone = agentPhone || null;
+
+    // A NEW session starts when the agent was offline (no row, or last_seen gone
+    // stale past the online window). Stamp online_since and reset the per-session
+    // call counter. On a continuing session we omit both so the upsert keeps them.
+    // Best-effort: if the read fails, the heartbeat still proceeds unchanged.
+    try {
+      const { data: prev } = await supabase
+        .from('agent_presence').select('last_seen')
+        .eq('agency_id', agencyId).eq('member_user_id', memberUserId).maybeSingle();
+      const wasOffline = !prev || !prev.last_seen || (Date.now() - Date.parse(prev.last_seen) >= ONLINE_WINDOW_MS);
+      if (wasOffline) { row.online_since = new Date().toISOString(); row.session_calls = 0; }
+    } catch (e) { /* non-fatal; skip the session stamp */ }
+
     const { error } = await supabase
       .from('agent_presence')
       .upsert(row, { onConflict: 'agency_id,member_user_id' });
@@ -164,6 +177,22 @@ async function setBusy({ agencyId, memberUserId, busy, busyClientId }) {
   } catch { return false; }
 }
 
+// Count one more call answered by this agent in their current online session.
+// Read-then-write (the volume is low and a rare race just miscounts by one).
+async function incrementSessionCalls({ agencyId, memberUserId }) {
+  if (!agencyId || !memberUserId) return false;
+  try {
+    const { data } = await supabase
+      .from('agent_presence').select('session_calls')
+      .eq('agency_id', agencyId).eq('member_user_id', memberUserId).maybeSingle();
+    const next = ((data && data.session_calls) || 0) + 1;
+    const { error } = await supabase
+      .from('agent_presence').update({ session_calls: next, updated_at: new Date().toISOString() })
+      .eq('agency_id', agencyId).eq('member_user_id', memberUserId);
+    return !error;
+  } catch { return false; }
+}
+
 // Every presence row for an agency, each stamped with a derived `online` flag.
 // Used by the manager presence bar. Never throws; returns [] on error.
 async function listForAgency(agencyId) {
@@ -171,7 +200,7 @@ async function listForAgency(agencyId) {
   try {
     const { data, error } = await supabase
       .from('agent_presence')
-      .select('member_user_id, display_name, status, busy, busy_client_id, call_delivery, agent_phone, last_seen')
+      .select('member_user_id, display_name, status, busy, busy_client_id, call_delivery, agent_phone, last_seen, online_since, session_calls')
       .eq('agency_id', agencyId);
     if (error || !Array.isArray(data)) return [];
     const cutoff = Date.now() - ONLINE_WINDOW_MS;
@@ -184,6 +213,8 @@ async function listForAgency(agencyId) {
       callDelivery: r.call_delivery || 'browser',
       agentPhone: r.agent_phone || null,
       lastSeen: r.last_seen,
+      onlineSince: r.online_since || null,
+      sessionCalls: r.session_calls || 0,
       online: !!r.last_seen && Date.parse(r.last_seen) >= cutoff,
     }));
   } catch { return []; }
@@ -272,6 +303,7 @@ module.exports = {
   heartbeat,
   setStatus,
   setBusy,
+  incrementSessionCalls,
   listForAgency,
   listAvailableForClient,
   isAgentOnSchedule,

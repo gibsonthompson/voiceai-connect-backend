@@ -187,6 +187,8 @@ router.post('/offer/:offerId/claim', async (req, res) => {
 
   // Mark the winner busy so they are not offered a second call mid-takeover.
   presence.setBusy({ agencyId: agent.agencyId, memberUserId: agent.memberUserId, busy: true, busyClientId: offer.client_id }).catch(() => {});
+  // Count this as a call answered this session (for the manager presence hover).
+  presence.incrementSessionCalls({ agencyId: agent.agencyId, memberUserId: agent.memberUserId }).catch(() => {});
 
   // Clear the pop for everyone else who was offered this call.
   const others = (Array.isArray(offer.offered_to) ? offer.offered_to : []).filter((id) => id !== agent.memberUserId);
