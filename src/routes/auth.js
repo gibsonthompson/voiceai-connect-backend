@@ -104,8 +104,9 @@ async function agencyLogin(req, res) {
 
     let teamPermissions = null;
     let assignedClientIds = null;
+    let isManagerMember = false;
     if (user.role === 'agency_staff') {
-      const { data: teamMember } = await supabase.from('team_members').select('permissions, notification_prefs, status, assigned_client_ids').eq('member_user_id', user.id).eq('entity_type', 'agency').eq('entity_id', user.agency_id).single();
+      const { data: teamMember } = await supabase.from('team_members').select('permissions, notification_prefs, status, assigned_client_ids, is_manager').eq('member_user_id', user.id).eq('entity_type', 'agency').eq('entity_id', user.agency_id).single();
       if (teamMember) {
         if (teamMember.status === 'disabled') return res.status(403).json({ error: 'Your account has been disabled by the agency owner.' });
         teamPermissions = teamMember.permissions;
@@ -113,6 +114,7 @@ async function agencyLogin(req, res) {
         // agent. null = unrestricted. The frontend uses it to scope the agent's
         // nav; the server re-reads it per request for the authoritative scope.
         assignedClientIds = Array.isArray(teamMember.assigned_client_ids) ? teamMember.assigned_client_ids : null;
+        isManagerMember = teamMember.is_manager === true;
       }
     }
 
@@ -124,7 +126,7 @@ async function agencyLogin(req, res) {
 
     const responsePayload = {
       success: true, token,
-      user: { id: user.id, email: user.email, first_name: user.first_name, last_name: user.last_name, role: user.role, agency_id: user.agency_id, permissions: teamPermissions, assigned_client_ids: assignedClientIds },
+      user: { id: user.id, email: user.email, first_name: user.first_name, last_name: user.last_name, role: user.role, agency_id: user.agency_id, permissions: teamPermissions, assigned_client_ids: assignedClientIds, is_manager: isManagerMember },
       agency
     };
     // Lapsed billing state: same success shape as an active login, plus the two

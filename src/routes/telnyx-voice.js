@@ -552,6 +552,41 @@ async function completeAccept(sessionId, recipientName) {
 // the confirmation finishes (or the backstop timer). The confirming->bridged
 // transition lets only the first caller through, so the event and the timer can
 // never double-bridge.
+// Is the CLIENT BUSINESS open right now? Used only to avoid ringing the
+// business's own line (the ring_business overflow) when the office is closed, so
+// a caller isn't put on a pointless ring to a dead line. Mirrors the config
+// builder's checkBusinessHours. Fails OPEN on any uncertainty, so we never
+// wrongly suppress a dial. business_hours shape: { monday:{open,close,closed}, ... }
+// with times like "9:00 AM" or "09:00", interpreted in the client's timezone.
+function parseClockToMinutes(v) {
+  const s = String(v || '').trim();
+  let m = /^(\d{1,2}):(\d{2})\s*([AaPp][Mm])?$/.exec(s);
+  if (!m) { const h = /^(\d{1,2})\s*([AaPp][Mm])$/.exec(s); if (h) m = [h[0], h[1], '00', h[2]]; }
+  if (!m) return null;
+  let hr = parseInt(m[1], 10); const min = parseInt(m[2], 10);
+  const ap = (m[3] || '').toLowerCase();
+  if (ap === 'pm' && hr < 12) hr += 12;
+  if (ap === 'am' && hr === 12) hr = 0;
+  if (hr < 0 || hr > 23 || min < 0 || min > 59) return null;
+  return hr * 60 + min;
+}
+function isBusinessOpenNow(businessHours, timezone) {
+  if (!businessHours || typeof businessHours !== 'object') return true; // no hours set => treat as open
+  let parts;
+  try {
+    parts = new Intl.DateTimeFormat('en-US', { timeZone: timezone || 'America/New_York', weekday: 'long', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date());
+  } catch { return true; }
+  const weekday = (parts.find((p) => p.type === 'weekday')?.value || '').toLowerCase();
+  let hr = parseInt(parts.find((p) => p.type === 'hour')?.value || '0', 10); if (hr === 24) hr = 0;
+  const min = parseInt(parts.find((p) => p.type === 'minute')?.value || '0', 10);
+  const day = businessHours[weekday];
+  if (!day || day.closed === true || !day.open || !day.close) return false;
+  const o = parseClockToMinutes(day.open), c = parseClockToMinutes(day.close);
+  if (o == null || c == null) return true; // unparseable => fail open
+  const cur = hr * 60 + min;
+  return c > o ? (cur >= o && cur < c) : (cur >= o || cur < c); // handles overnight ranges
+}
+
 // ── Human-handoff recording + real-time webhook ────────────────────────────
 // A telnyx_cc call hands the caller to a person two ways: a call-center AGENT
 // takes over (a browser jump-in, or their phone is rung), or we dial the
@@ -1875,7 +1910,7 @@ router.post('/api/voice/request-transfer', async (req, res) => {
 
     const { data: client } = await supabase
       .from('clients')
-      .select('vapi_phone_number, owner_phone, transfer_phone, tool_config, agency_id, owner_name, business_name')
+      .select('vapi_phone_number, owner_phone, transfer_phone, tool_config, agency_id, owner_name, business_name, business_hours, timezone')
       .eq('id', session.client_id)
       .single();
 
@@ -2049,7 +2084,18 @@ router.post('/api/voice/request-transfer', async (req, res) => {
     // business opted into ringing its own line, do NOT dial the business - that
     // is what keeps the call center in front of it. Hand the caller back to the
     // AI to take a message (or set a callback expectation and capture details).
-    if (ccIsCallCenter && ccAgentPathExhausted && overflowAction !== 'ring_business') {
+    // The ONE real "after hours" for a call center: do not ring the business's
+    // own line when the business is closed (no one would answer). When the
+    // overflow is ring_business but the office is closed right now, fall back to
+    // taking a message instead of ringing a dead line. Agents were already tried
+    // above and this only runs once they are exhausted. Other overflow actions
+    // (message/callback) don't ring the business, so hours never matter for them.
+    const businessClosedNow = overflowAction === 'ring_business'
+      && !isBusinessOpenNow(client?.business_hours, client?.timezone);
+    if (businessClosedNow) {
+      console.log(`telnyx-voice: ring_business overflow suppressed - business closed (session ${session.id})`);
+    }
+    if (ccIsCallCenter && ccAgentPathExhausted && (overflowAction !== 'ring_business' || businessClosedNow)) {
       await returnToAI(session.id, 'overflow_no_agent').catch(() => {});
       if (overflowAction === 'callback') {
         return reply('No team member is available right now. Apologize, tell the caller a team member will call them back shortly, and confirm the best callback number and a short reason for the call.');

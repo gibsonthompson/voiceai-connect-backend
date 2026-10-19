@@ -109,9 +109,39 @@ function generateTempPassword() {
 }
 
 const DEFAULT_PERMISSIONS = {
-  agency: { dashboard: true, clients: true, leads: true, outreach: false, analytics: true, marketing: false, settings: false, billing: false },
+  // manage_team: can create/edit/remove managers & agents (call-center managers).
+  // Off by default; the owner grants it. Owners bypass all of these entirely.
+  agency: { dashboard: true, clients: true, leads: true, outreach: false, analytics: true, marketing: false, settings: false, billing: false, manage_team: false },
   client: { dashboard: true, calls: true, contacts: true, messages: false, my_business: false, ai_agent: false, settings: false, billing: false },
 };
+
+// Can the CALLER manage the team (create/edit/remove managers & agents)?
+// Owners / super-admin / impersonation always can. For a CALL-CENTER agency,
+// an agency_staff caller must be a manager (is_manager) WITH the manage_team
+// permission (fail-closed). For a non-call-center agency, the legacy behavior is
+// preserved: the route's existing 'settings' Page Access guard already decided
+// access, so staff who reached here are allowed. req.user is set by
+// requireAgencyAccess. Best-effort DB reads; any miss denies (except the
+// owner/legacy paths above).
+async function callerCanManageTeam(decoded, agencyId) {
+  if (!decoded) return false;
+  if (decoded.role === 'super_admin' || decoded.role === 'agency_owner' || decoded.type === 'agency') return true;
+  if (decoded.role !== 'agency_staff') return false;
+  try {
+    const { data: agency } = await supabase.from('agencies').select('is_call_center').eq('id', agencyId).maybeSingle();
+    const isCallCenter = !!(agency && agency.is_call_center);
+    if (!isCallCenter) return true; // non-cc: the 'settings' guard already gated this
+    const { data: m } = await supabase.from('team_members')
+      .select('is_manager, permissions, status')
+      .eq('member_user_id', decoded.userId).eq('entity_type', 'agency').eq('entity_id', agencyId)
+      .maybeSingle();
+    if (!m || m.status === 'disabled') return false;
+    return m.is_manager === true && !!(m.permissions && m.permissions.manage_team === true);
+  } catch (e) {
+    console.warn('callerCanManageTeam check failed:', e.message);
+    return false;
+  }
+}
 
 function sanitizePermissions(perms, entityType) {
   const validKeys = Object.keys(DEFAULT_PERMISSIONS[entityType] || {});
@@ -303,15 +333,17 @@ router.get('/:agencyId/team', requireAgencyAccess('settings'), async (req, res) 
     const { agencyId } = req.params;
     const { data: members, error } = await supabase
       .from('team_members')
-      .select(`id, display_name, phone, visible_password, permissions, notification_prefs, status, assigned_client_ids, call_delivery, agent_phone, availability_hours, created_at, updated_at, member_user_id, users:member_user_id (id, email, last_login, avatar_url)`)
+      .select(`id, display_name, phone, visible_password, permissions, notification_prefs, status, assigned_client_ids, call_delivery, agent_phone, availability_hours, is_manager, created_at, updated_at, member_user_id, users:member_user_id (id, email, last_login, avatar_url)`)
       .eq('entity_type', 'agency').eq('entity_id', agencyId)
       .order('created_at', { ascending: true });
     if (error) { console.error('❌ Fetch team error:', error); return res.status(500).json({ error: 'Failed to fetch team members' }); }
     const limits = await checkTeamLimit('agency', agencyId);
     res.json({
       success: true,
-      members: (members || []).map(m => ({ id: m.id, user_id: m.member_user_id, display_name: m.display_name, phone: m.phone, email: m.users?.email || null, visible_password: m.visible_password, permissions: m.permissions, notification_prefs: m.notification_prefs, status: m.status, assigned_client_ids: m.assigned_client_ids || null, call_delivery: m.call_delivery || 'browser', agent_phone: m.agent_phone || null, availability_hours: m.availability_hours || null, last_login: m.users?.last_login || null, avatar_url: m.users?.avatar_url || null, created_at: m.created_at })),
+      members: (members || []).map(m => ({ id: m.id, user_id: m.member_user_id, display_name: m.display_name, phone: m.phone, email: m.users?.email || null, visible_password: m.visible_password, permissions: m.permissions, notification_prefs: m.notification_prefs, status: m.status, assigned_client_ids: m.assigned_client_ids || null, call_delivery: m.call_delivery || 'browser', agent_phone: m.agent_phone || null, availability_hours: m.availability_hours || null, is_manager: m.is_manager === true, last_login: m.users?.last_login || null, avatar_url: m.users?.avatar_url || null, created_at: m.created_at })),
       limits,
+      // So the team UI can gate controls to what THIS caller may do.
+      can_manage_team: await callerCanManageTeam(req.user, agencyId),
     });
   } catch (err) { console.error('❌ List team error:', err); res.status(500).json({ error: 'Failed to fetch team members' }); }
 });
@@ -321,7 +353,7 @@ router.post('/:agencyId/team', requireAgencyAccess('settings'), async (req, res)
     const { agencyId } = req.params;
     const { name, email, phone, permissions } = req.body;
     const decoded = decodeToken(req);
-    if (!canManageTeam(decoded)) return res.status(403).json({ error: 'Only the agency owner can manage team members' });
+    if (!(await callerCanManageTeam(decoded, agencyId))) return res.status(403).json({ error: 'You do not have permission to manage the team.' });
     const ownerUserId = await resolveActingUserId(decoded, agencyId);
     if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
     const limits = await checkTeamLimit('agency', agencyId);
@@ -345,7 +377,11 @@ router.post('/:agencyId/team', requireAgencyAccess('settings'), async (req, res)
     // Call-center agent call delivery (how an escalated call reaches them).
     const callDelivery = req.body.call_delivery === 'phone' ? 'phone' : 'browser';
     const agentPhone = (typeof req.body.agent_phone === 'string' && req.body.agent_phone.trim()) ? req.body.agent_phone.trim() : null;
-    const { data: member, error: memberError } = await supabase.from('team_members').insert({ owner_user_id: ownerUserId, member_user_id: newUser.id, entity_type: 'agency', entity_id: agencyId, display_name: name, phone: phone || null, visible_password: tempPassword, permissions: sanitizedPerms, assigned_client_ids: assignedClientIds, call_delivery: callDelivery, agent_phone: agentPhone, status: 'active' }).select().single();
+    // A MANAGER (call center) is a non-agent team member who runs the dashboard
+    // rather than taking calls. is_manager flips the whole role; the frontend
+    // decides nav/tab access from it + the permissions object (incl. manage_team).
+    const isManager = req.body.is_manager === true;
+    const { data: member, error: memberError } = await supabase.from('team_members').insert({ owner_user_id: ownerUserId, member_user_id: newUser.id, entity_type: 'agency', entity_id: agencyId, display_name: name, phone: phone || null, visible_password: tempPassword, permissions: sanitizedPerms, assigned_client_ids: assignedClientIds, call_delivery: callDelivery, agent_phone: agentPhone, is_manager: isManager, status: 'active' }).select().single();
     if (memberError) { console.error('❌ Create team member error:', memberError); await supabase.from('users').delete().eq('id', newUser.id); return res.status(500).json({ error: 'Failed to create team member' }); }
     await logActivity(member.id, ownerUserId, 'agency', agencyId, 'member_added', { name, email: email.toLowerCase(), phone });
     if (phone) {
@@ -364,7 +400,7 @@ router.post('/:agencyId/team', requireAgencyAccess('settings'), async (req, res)
       } catch (smsErr) { console.warn('⚠️ SMS send failed:', smsErr.message); }
     }
     console.log(`✅ Team member added: ${name} (${email}) → agency ${agencyId}`);
-    res.json({ success: true, member: { id: member.id, display_name: member.display_name, phone: member.phone, email: newUser.email, visible_password: tempPassword, permissions: member.permissions, notification_prefs: member.notification_prefs, status: member.status, assigned_client_ids: member.assigned_client_ids || null, call_delivery: member.call_delivery || 'browser', agent_phone: member.agent_phone || null, created_at: member.created_at } });
+    res.json({ success: true, member: { id: member.id, display_name: member.display_name, phone: member.phone, email: newUser.email, visible_password: tempPassword, permissions: member.permissions, notification_prefs: member.notification_prefs, status: member.status, assigned_client_ids: member.assigned_client_ids || null, call_delivery: member.call_delivery || 'browser', agent_phone: member.agent_phone || null, is_manager: member.is_manager === true, created_at: member.created_at } });
   } catch (err) { console.error('❌ Add team member error:', err); res.status(500).json({ error: 'Failed to add team member' }); }
 });
 
@@ -373,7 +409,7 @@ router.put('/:agencyId/team/:memberId', requireAgencyAccess('settings'), async (
     const { agencyId, memberId } = req.params;
     const { display_name, phone, permissions, notification_prefs, status } = req.body;
     const decoded = decodeToken(req);
-    if (!canManageTeam(decoded)) return res.status(403).json({ error: 'Only the agency owner can manage team members' });
+    if (!(await callerCanManageTeam(decoded, agencyId))) return res.status(403).json({ error: 'You do not have permission to manage the team.' });
     const actingUserId = await resolveActingUserId(decoded, agencyId);
     const { data: existing } = await supabase.from('team_members').select('id, member_user_id, permissions').eq('id', memberId).eq('entity_type', 'agency').eq('entity_id', agencyId).single();
     if (!existing) return res.status(404).json({ error: 'Team member not found' });
@@ -391,6 +427,9 @@ router.put('/:agencyId/team/:memberId', requireAgencyAccess('settings'), async (
     if (req.body.call_delivery !== undefined) updates.call_delivery = req.body.call_delivery === 'phone' ? 'phone' : 'browser';
     if (req.body.agent_phone !== undefined) updates.agent_phone = (typeof req.body.agent_phone === 'string' && req.body.agent_phone.trim()) ? req.body.agent_phone.trim() : null;
     if (req.body.availability_hours !== undefined) updates.availability_hours = sanitizeAvailabilityHours(req.body.availability_hours);
+    // Promote/demote between manager and agent. Only a caller who may manage the
+    // team (checked above) can change this.
+    if (req.body.is_manager !== undefined) updates.is_manager = req.body.is_manager === true;
     const { data: updated, error } = await supabase.from('team_members').update(updates).eq('id', memberId).select().single();
     if (error) { console.error('❌ Update team member error:', error); return res.status(500).json({ error: 'Failed to update team member' }); }
     if (Object.keys(userUpdates).length > 0) await supabase.from('users').update(userUpdates).eq('id', existing.member_user_id);
@@ -404,7 +443,7 @@ router.post('/:agencyId/team/:memberId/reset-password', requireAgencyAccess('set
     const { agencyId, memberId } = req.params;
     const { password } = req.body;
     const decoded = decodeToken(req);
-    if (!canManageTeam(decoded)) return res.status(403).json({ error: 'Only the agency owner can manage team members' });
+    if (!(await callerCanManageTeam(decoded, agencyId))) return res.status(403).json({ error: 'You do not have permission to manage the team.' });
     const actingUserId = await resolveActingUserId(decoded, agencyId);
     const { data: member } = await supabase.from('team_members').select('id, member_user_id, phone, display_name').eq('id', memberId).eq('entity_type', 'agency').eq('entity_id', agencyId).single();
     if (!member) return res.status(404).json({ error: 'Team member not found' });
@@ -436,7 +475,7 @@ router.delete('/:agencyId/team/:memberId', requireAgencyAccess('settings'), asyn
   try {
     const { agencyId, memberId } = req.params;
     const decoded = decodeToken(req);
-    if (!canManageTeam(decoded)) return res.status(403).json({ error: 'Only the agency owner can manage team members' });
+    if (!(await callerCanManageTeam(decoded, agencyId))) return res.status(403).json({ error: 'You do not have permission to manage the team.' });
     const actingUserId = await resolveActingUserId(decoded, agencyId);
     const { data: member } = await supabase.from('team_members').select('id, member_user_id, display_name').eq('id', memberId).eq('entity_type', 'agency').eq('entity_id', agencyId).single();
     if (!member) return res.status(404).json({ error: 'Team member not found' });
