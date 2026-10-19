@@ -143,7 +143,7 @@ async function generateAISummary(transcript, industry, callerPhone) {
     pest_control: 'Focus on: the pest, one-time vs recurring, location and severity, any stinging-insect allergy, urgency.',
     landscaping: 'Focus on: service needed (maintenance, cleanup, or design and install), property size, one-time vs recurring, timeline.'
   };
-  const prompt = `Analyze this phone call transcript for a ${industry} business.\n\nTranscript:\n${transcript}\n\nCaller Phone: ${callerPhone}\n\nExtract and return ONLY valid JSON:\n{"customerName":"string or Unknown","customerPhone":"formatted (XXX) XXX-XXXX","customerEmail":"string or null","urgency":"emergency|high|medium|routine","summary":"2-3 sentence summary IN ENGLISH focusing on: ${industryGuidance[industry] || 'what the customer needs'}","callLanguage":"two-letter language code of the language spoken during the call, e.g. en or es","isSpam":false,"spamReason":null}\n\nIMPORTANT: Always write the summary in English, even if the call was conducted in Spanish or another language. If the call was not in English, note the language in the callLanguage field and begin the summary with the language spoken (e.g. "Spanish-language call.").\n\nSPAM DETECTION: Set isSpam true ONLY if the caller is clearly a telemarketer, robocall, or solicitor. Indicators: plays a pre-recorded message or sales pitch, tries to sell a product or service TO the business (SEO, Google Ads, insurance leads, credit card processing, etc.), opens the call by asking for "the business owner" or "the person in charge of your Google listing" with no prior natural conversation, the line goes silent after connecting, or uses high-pressure sales tactics. Do NOT mark as spam if: the caller is a real customer asking a question, requesting service, or asking to speak with someone - even if the interaction is short. When in doubt, set isSpam to false.`;
+  const prompt = `Analyze this phone call transcript for a ${industry} business.\n\nTranscript:\n${transcript}\n\nCaller Phone: ${callerPhone}\n\nExtract and return ONLY valid JSON:\n{"customerName":"string or Unknown","customerPhone":"formatted (XXX) XXX-XXXX","customerEmail":"string or null","urgency":"emergency|high|medium|routine","summary":"2-3 sentence summary IN ENGLISH focusing on: ${industryGuidance[industry] || 'what the customer needs'}","callLanguage":"two-letter language code of the language spoken during the call, e.g. en or es","isSpam":false,"spamReason":null,"callerSpoke":true,"followupOutcome":"none"}\n\nCALLER SPOKE: set callerSpoke to false if the caller never actually spoke (silent line, immediate hang-up, robocall with no human, or only the assistant talked). Otherwise true.\n\nFOLLOWUP OUTCOME: decide whether a human needs to follow up, choosing EXACTLY ONE: "message" (the caller left a message or their details for someone to get back to them), "callback_requested" (the caller explicitly asked to be called back), "unanswered" (the caller had a real question or need the assistant could not fully resolve), "complaint" (the caller was upset or complaining and it was not resolved), "abandoned" (the caller was discussing a real need but hung up before it was resolved), or "none" (the assistant fully handled it, or there is nothing for a human to do, including spam, wrong numbers, and silent hang-ups). Default to "none" unless a human clearly needs to follow up. Begin the summary by noting it plainly, e.g. "Caller left a message..." or "Caller hung up before finishing...".\n\nIMPORTANT: Always write the summary in English, even if the call was conducted in Spanish or another language. If the call was not in English, note the language in the callLanguage field and begin the summary with the language spoken (e.g. "Spanish-language call.").\n\nSPAM DETECTION: Set isSpam true ONLY if the caller is clearly a telemarketer, robocall, or solicitor. Indicators: plays a pre-recorded message or sales pitch, tries to sell a product or service TO the business (SEO, Google Ads, insurance leads, credit card processing, etc.), opens the call by asking for "the business owner" or "the person in charge of your Google listing" with no prior natural conversation, the line goes silent after connecting, or uses high-pressure sales tactics. Do NOT mark as spam if: the caller is a real customer asking a question, requesting service, or asking to speak with someone - even if the interaction is short. When in doubt, set isSpam to false.`;
   try {
     const _ac1 = new AbortController();
     const _t1 = setTimeout(() => _ac1.abort(), 15000);
@@ -160,11 +160,15 @@ async function generateAISummary(transcript, industry, callerPhone) {
     const parsed = JSON.parse(text);
     parsed.isSpam = parsed.isSpam === true;
     if (!parsed.isSpam) parsed.spamReason = null;
+    parsed.callerSpoke = parsed.callerSpoke !== false;
+    const _OUTCOMES = ['message', 'callback_requested', 'unanswered', 'complaint', 'abandoned', 'none'];
+    parsed.followupOutcome = _OUTCOMES.includes(parsed.followupOutcome) ? parsed.followupOutcome : 'none';
     return parsed;
   } catch (error) {
     console.error('❌ AI summary failed:', error.message);
     return { customerName: 'Unknown', customerPhone: callerPhone, customerEmail: null, urgency: 'routine',
-      summary: `Customer called regarding ${industry.replace('_', ' ')} services.`, callLanguage: 'en', isSpam: false, spamReason: null };
+      summary: `Customer called regarding ${industry.replace('_', ' ')} services.`, callLanguage: 'en', isSpam: false, spamReason: null,
+      callerSpoke: !!(transcript && transcript.length > 40), followupOutcome: 'none' };
   }
 }
 
@@ -1605,6 +1609,22 @@ async function handleVapiWebhook(req, res) {
       const { error: updateErr } = await supabase.from('calls').update(aiUpdate).eq('id', savedCallId);
       if (updateErr) console.warn('⚠️ Call AI update failed (non-fatal):', updateErr.message);
       else console.log('✅ Call updated with AI data');
+
+      // Callbacks queue tag. The AI classifies the outcome; we HARD-override to
+      // 'none' when a human already handled the call (a transfer or an agent
+      // takeover), when it booked, or when it was spam, so none of those ever
+      // become a callback. Only a genuine need-a-human outcome lands in the
+      // Callbacks tab. Written separately + best-effort so it can never disturb
+      // the AI-data update above.
+      try {
+        const ACTIONABLE = ['message', 'callback_requested', 'unanswered', 'complaint', 'abandoned'];
+        let followupOutcome = aiData.followupOutcome || 'none';
+        const humanHandled = transferredAny || wasTransferred || agentHandoff;
+        if (isSpam || appointmentBooked || humanHandled) followupOutcome = 'none';
+        if (!ACTIONABLE.includes(followupOutcome)) followupOutcome = 'none';
+        const callerSpoke = aiData.callerSpoke === true && !isSpam;
+        await supabase.from('calls').update({ followup_outcome: followupOutcome, caller_spoke: callerSpoke }).eq('id', savedCallId);
+      } catch (e) { console.warn('followup_outcome tag failed (non-fatal):', e.message); }
 
       // Persist who listened / jumped in onto the call for the post-call review.
       // Covers listen-only calls (no takeover recording, so the telnyx-voice recap

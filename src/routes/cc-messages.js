@@ -66,7 +66,7 @@ function safeIso(s) {
 }
 
 const RANGE_DAYS = { '7d': 7, '30d': 30, '90d': 90 };
-const VIEW_COLS = 'id, created_at, client_id, agency_id, caller_phone, customer_name, customer_phone, duration_seconds, ai_summary, summary, service_requested, urgency_level, sentiment, followup_status, followup_note, followup_resolved_by, followup_resolved_at';
+const VIEW_COLS = 'id, created_at, client_id, agency_id, caller_phone, customer_name, customer_phone, duration_seconds, ai_summary, summary, service_requested, urgency_level, sentiment, followup_outcome, caller_spoke, followup_status, followup_note, followup_resolved_by, followup_resolved_at';
 
 // Resolve + scope-check a call for a write. Returns { call } or { error, code }.
 async function scopedCall(req, agencyId, callId) {
@@ -135,6 +135,8 @@ router.get('/:agencyId/cc/messages', requireAgencyAccess('dashboard'), async (re
       service: c.service_requested || null,
       urgency: c.urgency_level || null,
       sentiment: c.sentiment || null,
+      outcome: c.followup_outcome || null,
+      callerSpoke: c.caller_spoke === true,
       durationSeconds: c.duration_seconds || 0,
       at: c.created_at,
       status: c.followup_status || 'open',
