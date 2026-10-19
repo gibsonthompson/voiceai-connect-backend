@@ -1921,7 +1921,21 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   }
 
   const { isOpen } = checkBusinessHours(client);
-  const isAfterHours = toolConfig.businessHoursRouting && !isOpen;
+  // After-hours MODE (which suppresses the live human handoff and tells the AI to
+  // just take a message) applies ONLY to native (vapi_direct) clients, whose
+  // transfer dials the business's OWN line, which is closed outside its hours.
+  //
+  // Call-center (telnyx_cc) clients answer on their AGENTS' availability, not the
+  // client office's hours, so they NEVER enter after-hours mode: the AI always
+  // keeps the escalation tool and hands a caller to the agents (then the overflow
+  // action when none are available), around the clock. The "call center is
+  // closed / no humans" state is handled by agent schedules + overflow, not here.
+  //
+  // Business hours still matter for call-center clients, just not through this
+  // flag: they drive which appointment slots the AI can book (handled in the
+  // calendar layer, by the TARGET day, so a caller at night still books the next
+  // open day) and let the AI tell callers when the office is open.
+  const isAfterHours = toolConfig.businessHoursRouting && !isOpen && client.voice_routing !== 'telnyx_cc';
 
   if (isAfterHours) {
     console.log('🌙 After-hours mode active, transfer disabled, message-taking mode');
