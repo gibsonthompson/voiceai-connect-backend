@@ -112,6 +112,7 @@ const { repriceMinuteItemsForAgency } = require('./stripe-connect');
 const paystack = require('../lib/paystack');
 const flutterwave = require('../lib/flutterwave');
 const { encrypt } = require('../lib/encryption');
+const { analyzeLogo } = require('../lib/brand-analyzer');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -200,6 +201,13 @@ function publicAgencyShape(agency) {
 
     // Dashboard branding overrides (nav, bg, card, button colors)
     branding_overrides: agency.branding_overrides || null,
+
+    // AI brand kit: per-agency display/body fonts, nav icon weight, and the full
+    // analyzed kit (vibe, palette, roles, rationale).
+    display_font: agency.display_font || null,
+    body_font: agency.body_font || null,
+    icon_style: agency.icon_style || null,
+    brand_kit: agency.brand_kit || null,
 
     // Per-agency legal page overrides ({ terms, privacy } markdown). Exposed so
     // the hosted Terms/Privacy renderer (components/LegalPage) can pick up an
@@ -564,7 +572,14 @@ async function getAgencySettings(req, res) {
         
         // Dashboard branding overrides (nav, bg, card, button colors)
         branding_overrides: agency.branding_overrides || null,
-        
+
+        // AI brand kit: per-agency display/body fonts, nav icon weight, and the
+        // full analyzed kit (vibe, palette, roles, rationale).
+        display_font: agency.display_font || null,
+        body_font: agency.body_font || null,
+        icon_style: agency.icon_style || null,
+        brand_kit: agency.brand_kit || null,
+
         // Client dashboard settings
         client_header_mode: agency.client_header_mode || 'agency_name',
         allow_client_branding: agency.allow_client_branding || false,
@@ -807,6 +822,8 @@ async function updateAgencySettings(req, res) {
       'default_voice_routing',
       // Dashboard branding overrides (nav, bg, card, button colors)
       'branding_overrides',
+      // AI brand kit (fonts + nav icon weight + full analyzed kit jsonb)
+      'display_font', 'body_font', 'icon_style', 'brand_kit',
       // Client dashboard settings
       'client_header_mode',
       'allow_client_branding',
@@ -1892,11 +1909,34 @@ async function updateAgencyLegal(req, res) {
   }
 }
 
+// ----------------------------------------------------------------------------
+// POST /api/agency/:agencyId/branding/analyze-logo
+// Takes the uploaded logo (data URL) + the pixel palette the browser extracted,
+// runs the Claude vision analyzer, and returns a proposed brand kit (colors,
+// fonts, nav icon style, vibe). It does NOT save anything; the branding page
+// shows the proposal, lets the manager tweak it, then saves via the normal
+// settings PUT. Best-effort: always returns a usable kit (palette fallback).
+// ----------------------------------------------------------------------------
+async function analyzeLogoBranding(req, res) {
+  try {
+    const { logo, palette, name } = req.body || {};
+    if (!logo || typeof logo !== 'string') {
+      return res.status(400).json({ success: false, error: 'A logo image is required.' });
+    }
+    const kit = await analyzeLogo({ logo, palette: palette || {}, name: name || '' });
+    return res.json({ success: true, kit });
+  } catch (e) {
+    console.warn('analyzeLogoBranding failed:', e.message);
+    return res.status(500).json({ success: false, error: 'Could not analyze the logo.' });
+  }
+}
+
 module.exports = {
   getAgencyByHost,
   getAgencyByIdPublic,
   getAgencySettings,
   updateAgencySettings,
+  analyzeLogoBranding,
   verifyAgencyDomain,
   connectPaystack,
   disconnectPaystack,

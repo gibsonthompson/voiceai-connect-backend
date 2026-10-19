@@ -198,7 +198,7 @@ app.use((req, res, next) => {
 // ============================================================================
 
 const { handleAgencySignup, handleAgencyOnboarding } = require('./routes/agency-signup');
-const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySettings, verifyAgencyDomain, connectPaystack, disconnectPaystack, connectFlutterwave, disconnectFlutterwave, getAgencyLegal, updateAgencyLegal } = require('./routes/agency-settings');
+const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySettings, analyzeLogoBranding, verifyAgencyDomain, connectPaystack, disconnectPaystack, connectFlutterwave, disconnectFlutterwave, getAgencyLegal, updateAgencyLegal } = require('./routes/agency-settings');
 const demoPhoneRoutes = require('./routes/demo-phone');
 const customIndustriesRoutes = require('./routes/custom-industries');
 const referralRoutes = require('./routes/referrals');
@@ -553,6 +553,8 @@ app.get('/api/agency/:agencyId/settings', getAgencySettings);
 // breaks. requireAgencyAccess enforces a valid token + caller-owns-:agencyId +
 // the 'settings' Page Access toggle for agency_staff.
 app.put('/api/agency/:agencyId/settings', requireAgencyAccess('settings'), updateAgencySettings);
+// AI brand analyzer: logo -> proposed brand kit (colors, fonts, nav icons, vibe).
+app.post('/api/agency/:agencyId/branding/analyze-logo', requireAgencyAccess('settings'), analyzeLogoBranding);
 // Legal pages (Terms / Privacy) editing. Read effective content (override or
 // platform default) and save/clear a per-page override.
 app.get('/api/agency/:agencyId/legal', requireAgencyAccess('settings'), getAgencyLegal);
