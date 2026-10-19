@@ -278,7 +278,7 @@ async function notifyOwnerOfInboundSMS(client, callerPhone, messageContent) {
 // Returns { error, code, details } on failure, or
 // { conversation, savedMessage, providerMessageId } on success.
 // ============================================================================
-async function sendClientSms({ clientId, to, message }) {
+async function sendClientSms({ clientId, to, message, sentBy }) {
   if (!clientId || !to || !message) {
     return { error: 'client_id, to, and message are required', code: 400 };
   }
@@ -380,6 +380,8 @@ async function sendClientSms({ clientId, to, message }) {
       recipient_phone: toNumber,
       telnyx_message_id: providerMessageId,
       status: 'sent',
+      sent_by_user_id: (sentBy && sentBy.userId) || null,
+      sent_by_name: (sentBy && sentBy.name) || null,
     })
     .select()
     .single();

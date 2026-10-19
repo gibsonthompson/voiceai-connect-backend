@@ -51,6 +51,37 @@ function sanitizeSearch(q) {
   return String(q || '').replace(/[,()*:"%]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
 }
 
+// The viewer's user id, for per-user archive state.
+function viewerId(req) { return (req.user && (req.user.userId || req.user.id)) || null; }
+
+// Conversation ids THIS viewer has archived. Archive is account-specific for the
+// call-center inbox (an agent archiving a thread does NOT archive it for the
+// manager), so it lives in sms_conversation_user_state keyed by user, not on the
+// shared sms_conversations.is_archived flag.
+async function archivedSetForViewer(req) {
+  const uid = viewerId(req);
+  if (!uid) return new Set();
+  try {
+    const { data } = await supabase.from('sms_conversation_user_state')
+      .select('conversation_id').eq('user_id', uid).eq('archived', true);
+    return new Set((data || []).map((r) => r.conversation_id));
+  } catch { return new Set(); }
+}
+
+// This viewer's display name, stamped on an outbound text so a manager sees which
+// agent replied. Agency staff -> their team name; owner -> token name/email.
+async function senderName(req, agencyId) {
+  const d = req.user || {};
+  if (d.role === 'agency_staff' && (d.userId || d.id)) {
+    try {
+      const { data: m } = await supabase.from('team_members').select('display_name')
+        .eq('member_user_id', d.userId || d.id).eq('entity_type', 'agency').eq('entity_id', agencyId).maybeSingle();
+      if (m && m.display_name) return m.display_name;
+    } catch (e) { /* fall through */ }
+  }
+  return d.name || [d.first_name, d.last_name].filter(Boolean).join(' ') || d.email || 'Manager';
+}
+
 // Resolve + scope-check a conversation for a read/write. Returns { conv, client_id }
 // or { error, code }.
 async function scopedConversation(req, agencyId, conversationId) {
@@ -66,7 +97,7 @@ async function scopedConversation(req, agencyId, conversationId) {
   return { conv, businessName: nameById.get(conv.client_id) || 'Business' };
 }
 
-function mapRow(c, nameById) {
+function mapRow(c, nameById, archivedSet) {
   const name = (c.caller_name && c.caller_name.toLowerCase() !== 'unknown') ? c.caller_name : null;
   return {
     id: c.id,
@@ -78,7 +109,7 @@ function mapRow(c, nameById) {
     lastAt: c.last_message_at || c.created_at,
     lastDirection: c.last_direction || null,
     unread: c.unread_count || 0,
-    archived: c.is_archived === true,
+    archived: archivedSet ? archivedSet.has(c.id) : (c.is_archived === true),
   };
 }
 
@@ -101,9 +132,20 @@ router.get('/:agencyId/cc/sms/conversations', requireAgencyAccess('dashboard'), 
       return res.json({ success: true, page, limit, total: 0, totalPages: 0, unreadTotal: 0, businesses: toBizList(clients), rows: [] });
     }
 
+    // Per-user archive: the Archived tab shows only threads THIS viewer archived;
+    // the Inbox hides them. Archive state is not shared between accounts.
+    const archivedSet = await archivedSetForViewer(req);
+    const archivedIds = [...archivedSet];
+
+    if (archived && archivedIds.length === 0) {
+      return res.json({ success: true, page, limit, total: 0, totalPages: 0, unreadTotal: 0, businesses: toBizList(clients), rows: [] });
+    }
+
     let q = supabase.from('sms_conversations')
       .select('id, client_id, caller_phone, caller_name, last_message_at, last_message_preview, last_direction, unread_count, is_archived, created_at', { count: 'exact' })
-      .in('client_id', clientIds).eq('is_archived', archived);
+      .in('client_id', clientIds);
+    if (archived) q = q.in('id', archivedIds);
+    else if (archivedIds.length) q = q.not('id', 'in', `(${archivedIds.join(',')})`);
 
     const search = sanitizeSearch(req.query.q);
     if (search) q = q.or(`caller_name.ilike.*${search}*,caller_phone.ilike.*${search}*,last_message_preview.ilike.*${search}*`);
@@ -112,12 +154,12 @@ router.get('/:agencyId/cc/sms/conversations', requireAgencyAccess('dashboard'), 
     const { data, count, error } = await q;
     if (error) { console.error('cc/sms list error:', error.message); return res.status(500).json({ success: false, error: 'Server error' }); }
 
-    // Unread backlog across the full scope (for the nav badge), independent of
-    // the current filters/paging.
+    // Unread backlog across the full scope (for the nav badge), excluding threads
+    // this viewer archived, independent of the current filters/paging.
     const { data: unreadRows } = await supabase.from('sms_conversations')
-      .select('unread_count')
-      .in('client_id', clients.map((c) => c.id)).eq('is_archived', false).gt('unread_count', 0);
-    const unreadTotal = (unreadRows || []).reduce((s, r) => s + (r.unread_count || 0), 0);
+      .select('id, unread_count')
+      .in('client_id', clients.map((c) => c.id)).gt('unread_count', 0);
+    const unreadTotal = (unreadRows || []).filter((r) => !archivedSet.has(r.id)).reduce((s, r) => s + (r.unread_count || 0), 0);
 
     const total = count || 0;
     res.json({
@@ -125,7 +167,7 @@ router.get('/:agencyId/cc/sms/conversations', requireAgencyAccess('dashboard'), 
       totalPages: Math.max(1, Math.ceil(total / limit)),
       unreadTotal,
       businesses: toBizList(clients),
-      rows: (data || []).map((c) => mapRow(c, nameById)),
+      rows: (data || []).map((c) => mapRow(c, nameById, archivedSet)),
     });
   } catch (e) {
     console.error('cc/sms list error:', e.message);
@@ -140,11 +182,12 @@ router.get('/:agencyId/cc/sms/unread', requireAgencyAccess('dashboard'), async (
     const clients = await scopedClients(req, agencyId);
     const clientIds = clients.map((c) => c.id);
     if (clientIds.length === 0) return res.json({ success: true, unread: 0, latest: null });
+    const archivedSet = await archivedSetForViewer(req);
     const { data } = await supabase.from('sms_conversations')
       .select('id, client_id, caller_phone, caller_name, last_message_preview, last_message_at, last_direction, unread_count')
-      .in('client_id', clientIds).eq('is_archived', false).gt('unread_count', 0)
+      .in('client_id', clientIds).gt('unread_count', 0)
       .order('last_message_at', { ascending: false, nullsFirst: false });
-    const rows = data || [];
+    const rows = (data || []).filter((r) => !archivedSet.has(r.id));
     const unread = rows.reduce((s, r) => s + (r.unread_count || 0), 0);
     // Most recent unread thread whose last message came IN, for the new-text
     // toast. (An outbound-last thread can still be unread if a reply landed and
@@ -176,11 +219,20 @@ router.get('/:agencyId/cc/sms/conversations/:conversationId', requireAgencyAcces
     const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 100));
     const { data: messages, error } = await supabase
       .from('sms_messages')
-      .select('id, direction, content, sender_phone, recipient_phone, status, error_message, sent_at, created_at')
+      .select('id, direction, content, sender_phone, recipient_phone, status, error_message, sent_at, created_at, sent_by_name')
       .eq('conversation_id', conversationId)
       .order('sent_at', { ascending: false })
       .limit(limit);
     if (error) return res.status(400).json({ success: false, error: error.message });
+
+    // Per-user archive state for this thread (drives the Archive/Unarchive label).
+    let archivedForViewer = false;
+    const uid = viewerId(req);
+    if (uid) {
+      const { data: st } = await supabase.from('sms_conversation_user_state')
+        .select('archived').eq('conversation_id', conversationId).eq('user_id', uid).maybeSingle();
+      archivedForViewer = !!(st && st.archived);
+    }
 
     res.json({
       success: true,
@@ -190,7 +242,7 @@ router.get('/:agencyId/cc/sms/conversations/:conversationId', requireAgencyAcces
         businessName: chk.businessName,
         caller: (chk.conv.caller_name && chk.conv.caller_name.toLowerCase() !== 'unknown') ? chk.conv.caller_name : null,
         callerPhone: chk.conv.caller_phone || null,
-        archived: chk.conv.is_archived === true,
+        archived: archivedForViewer,
       },
       messages: (messages || []).reverse().map((m) => ({
         id: m.id,
@@ -199,6 +251,7 @@ router.get('/:agencyId/cc/sms/conversations/:conversationId', requireAgencyAcces
         status: m.status || (m.direction === 'inbound' ? 'received' : 'sent'),
         error: m.error_message || null,
         at: m.sent_at || m.created_at,
+        sentBy: m.sent_by_name || null,
       })),
     });
   } catch (e) {
@@ -220,7 +273,8 @@ router.post('/:agencyId/cc/sms/conversations/:conversationId/send', requireAgenc
     if (chk.error) return res.status(chk.code).json({ success: false, error: chk.error });
     if (!chk.conv.caller_phone) return res.status(400).json({ success: false, error: 'This thread has no caller number to reply to' });
 
-    const result = await sendClientSms({ clientId: chk.conv.client_id, to: chk.conv.caller_phone, message });
+    const who = await senderName(req, agencyId);
+    const result = await sendClientSms({ clientId: chk.conv.client_id, to: chk.conv.caller_phone, message, sentBy: { userId: viewerId(req), name: who } });
     if (result.error) return res.status(result.code || 500).json({ success: false, error: result.error, details: result.details });
 
     res.json({
@@ -232,6 +286,7 @@ router.post('/:agencyId/cc/sms/conversations/:conversationId/send', requireAgenc
         status: result.savedMessage.status || 'sent',
         error: null,
         at: result.savedMessage.sent_at || result.savedMessage.created_at || new Date().toISOString(),
+        sentBy: who,
       } : null,
     });
   } catch (e) {
@@ -262,7 +317,11 @@ router.post('/:agencyId/cc/sms/conversations/:conversationId/archive', requireAg
     const chk = await scopedConversation(req, agencyId, conversationId);
     if (chk.error) return res.status(chk.code).json({ success: false, error: chk.error });
     const archived = req.body?.archived === true;
-    const { error } = await supabase.from('sms_conversations').update({ is_archived: archived }).eq('id', conversationId);
+    const uid = viewerId(req);
+    if (!uid) return res.status(400).json({ success: false, error: 'Could not identify the account.' });
+    // Account-specific: archiving only affects THIS viewer's inbox, not everyone.
+    const { error } = await supabase.from('sms_conversation_user_state')
+      .upsert({ conversation_id: conversationId, user_id: uid, archived, updated_at: new Date().toISOString() }, { onConflict: 'conversation_id,user_id' });
     if (error) return res.status(400).json({ success: false, error: error.message });
     res.json({ success: true, archived });
   } catch (e) {
@@ -290,7 +349,8 @@ router.post('/:agencyId/cc/sms/start', requireAgencyAccess('dashboard'), async (
     const clients = await scopedClients(req, agencyId);
     if (!clients.some((c) => c.id === clientId)) return res.status(404).json({ success: false, error: 'Business not found' });
 
-    const result = await sendClientSms({ clientId, to, message });
+    const who = await senderName(req, agencyId);
+    const result = await sendClientSms({ clientId, to, message, sentBy: { userId: viewerId(req), name: who } });
     if (result.error) return res.status(result.code || 500).json({ success: false, error: result.error, details: result.details });
 
     res.json({
