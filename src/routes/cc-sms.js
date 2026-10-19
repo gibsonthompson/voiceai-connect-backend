@@ -271,4 +271,44 @@ router.post('/:agencyId/cc/sms/conversations/:conversationId/archive', requireAg
   }
 });
 
+// ---- POST /:agencyId/cc/sms/start -----------------------------------------
+// Start (or reopen) a conversation by texting a number for a business. Used by
+// the Texts "New text" composer, both to a saved contact and to a new number.
+// The shared send path finds-or-creates the thread, so sending to an existing
+// number just adds to that thread. Returns the conversationId to open.
+router.post('/:agencyId/cc/sms/start', requireAgencyAccess('dashboard'), async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const clientId = (req.body?.clientId || '').toString();
+    const to = (req.body?.to || '').toString();
+    const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+    if (!clientId) return res.status(400).json({ success: false, error: 'Pick a business to text from.' });
+    if (!to.trim()) return res.status(400).json({ success: false, error: 'A phone number is required.' });
+    if (!message) return res.status(400).json({ success: false, error: 'Write a message to send.' });
+
+    // Scope-check: the chosen business must be in the viewer's scope.
+    const clients = await scopedClients(req, agencyId);
+    if (!clients.some((c) => c.id === clientId)) return res.status(404).json({ success: false, error: 'Business not found' });
+
+    const result = await sendClientSms({ clientId, to, message });
+    if (result.error) return res.status(result.code || 500).json({ success: false, error: result.error, details: result.details });
+
+    res.json({
+      success: true,
+      conversationId: result.conversation ? result.conversation.id : null,
+      message: result.savedMessage ? {
+        id: result.savedMessage.id,
+        direction: 'outbound',
+        content: message,
+        status: result.savedMessage.status || 'sent',
+        error: null,
+        at: result.savedMessage.sent_at || result.savedMessage.created_at || new Date().toISOString(),
+      } : null,
+    });
+  } catch (e) {
+    console.error('cc/sms start error:', e.message);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
 module.exports = router;

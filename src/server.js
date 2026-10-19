@@ -1829,6 +1829,8 @@ app.use('/api/agency', require('./routes/cc-calls'));
 app.use('/api/agency', require('./routes/cc-messages'));
 // Call-center TEXTS inbox: two-way SMS across every business the center serves.
 app.use('/api/agency', require('./routes/cc-sms'));
+// Call-center CONTACTS: the mini-CRM across every business the center serves.
+app.use('/api/agency', require('./routes/cc-contacts'));
 // Call-center business config: configure a business's AI from inside /cc.
 app.use('/api/agency', require('./routes/cc-business-config'));
 // Call-center agent real-time plane: presence, escalation offer stream + claim.
