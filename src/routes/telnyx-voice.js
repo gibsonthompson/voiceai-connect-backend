@@ -1226,6 +1226,20 @@ async function completeSupervisorSeat(sessionId) {
   } catch (e) {}
   recordSupervisorEvent(sessionId, 'listening');
   console.log(`telnyx-voice: 🎧 supervisor seated as monitor in conference ${session.telnyx_conference_id} (session ${sessionId})`);
+
+  // Escalation auto-join: the agent took the call from the "needs a human" pop,
+  // so bridge them straight onto the caller instead of leaving them muted waiting
+  // for a manual jump-in. The seat is already in the exact state supervisorJumpIn
+  // needs (monitor role + conference + agent control id), and the jump is a
+  // server-side AI-hangup + unmute that does NOT renegotiate the browser media
+  // (see the note above), so this is safe to chain here. Best-effort: on any
+  // failure the agent can still jump in from the console.
+  if (autoJoinSeats.has(sessionId)) {
+    try {
+      const r = await supervisorJumpIn(sessionId);
+      if (!r || !r.ok) console.warn(`telnyx-voice: auto-bridge jump-in did not take (session ${sessionId}): ${r && r.error}`);
+    } catch (e) { console.warn(`telnyx-voice: auto-bridge failed (session ${sessionId}):`, e.message); }
+  }
 }
 
 // Jump in: drop the AI and flip the supervisor seat to barge so the human talks
