@@ -1793,9 +1793,18 @@ function enforceAgencyPlanFeatures(toolConfig, client, agency) {
     business_hours: 'businessHoursRouting',
   };
 
+  // Call-center (telnyx_cc) clients escalate to the AGENCY'S OWN agents, which is
+  // the core service, not a per-client plan upsell. The end client's plan must
+  // never strip their escalation tool, or the AI falls back to take-a-message and
+  // no agent screen-pop ever fires. Skip the call_transfer gate for them (mirrors
+  // the after-hours exemption at buildDynamicAssistantConfig, which also never
+  // applies to telnyx_cc). Other plan gates still apply.
+  const isCallCenterClient = client.voice_routing === 'telnyx_cc';
+
   const enforced = { ...toolConfig };
   for (const [planKey, toolKey] of Object.entries(PLAN_FEATURE_TO_TOOL_CONFIG)) {
     if (planFeatures[planKey] === false) {
+      if (isCallCenterClient && toolKey === 'transferCall') continue;
       enforced[toolKey] = false;
     }
   }
