@@ -126,6 +126,12 @@ const DEFAULT_TOOL_CONFIG = {
   // hears the caller). Set tool_config.backgroundDenoising=false per client to
   // disable. This is a fleet-wide default change as of 2026-10-07.
   backgroundDenoising: true,
+  // Auto-escalation (call-center / telnyx_cc only): when on, the AI connects the
+  // caller to a person on its own, not just when asked, if it cannot understand
+  // them, they are confused/frustrated, it genuinely cannot help, or they go
+  // silent. Opt-in so existing clients are unchanged. Also enables idle re-prompts
+  // that offer to connect on silence.
+  autoEscalate: false,
 };
 
 const LANGUAGE_DETECTION_BLOCK = `
@@ -155,6 +161,25 @@ Once you have decided a transfer is right AND you have the caller's name and rea
 2. Immediately call the request_human_transfer tool. For its summary, give one or two sentences covering who is calling and what they need (use the name and reason you just gathered), so the team member knows the situation before they pick up. Example summary: "Maria Lopez is calling about a burst pipe in her basement and needs someone out today."
 3. After you call the tool, do NOT keep talking. The system connects the call for you. Only speak again if the tool result tells you no one was available, in which case apologize briefly and take a detailed message (name, number, and reason for calling).
 Never read the summary out loud to the caller. It is only for the team member.`;
+
+// ============================================================================
+// AUTO-ESCALATION BLOCK (telnyx_cc clients with tool_config.autoEscalate on)
+// Injected right after the whisper-transfer block. Tells the AI to connect the
+// caller to a person ON ITS OWN, beyond an explicit request, when it cannot
+// understand/help or the caller is confused/silent, using the same
+// request_human_transfer tool. Paired with VAPI idle messages (set in the
+// assistant config) that re-prompt and offer to connect on silence.
+// ============================================================================
+const AUTO_ESCALATION_BLOCK = `
+
+# When to Connect to a Person on Your Own
+Beyond an explicit request, connect the caller to a team member on your own (call the request_human_transfer tool) in these situations, because a person can help faster than you can:
+- You could not understand the caller after two tries, or the line quality makes it impossible to help them.
+- The caller is clearly confused, frustrated, or upset, or keeps repeating themselves without getting anywhere.
+- The caller needs something you genuinely cannot do or answer, and taking a message would not actually solve their problem.
+- The caller goes quiet or does not respond after you have re-prompted once (for example after "Are you still there?"). Offer to connect them, and if they confirm or stay silent again, connect them.
+
+Before connecting, say one short, warm line, for example "Let me get one of our team members to help you with that." For the tool summary, briefly note who is calling and why you are escalating, for example "Caller is having trouble describing the issue and would be better helped by a person." Use judgment: do not escalate over a single misheard word or a brief pause. Only hand off when it genuinely helps the caller.`;
 
 // ============================================================================
 // APPOINTMENT BOOKING BLOCK
@@ -1319,6 +1344,11 @@ SALES, SOLICITATIONS, AND SPAM: if the reason is a sales pitch, a marketing or a
     if (!systemPrompt.includes('# Connecting a Caller to a Person')) {
       systemPrompt += WHISPER_TRANSFER_BLOCK;
     }
+    // Opt-in: let the AI escalate on its own when it can't understand/help or the
+    // caller is confused/silent, not only when explicitly asked.
+    if (toolConfig.autoEscalate && !systemPrompt.includes('# When to Connect to a Person on Your Own')) {
+      systemPrompt += AUTO_ESCALATION_BLOCK;
+    }
   } else if (handoff === 'transfer' && toolConfig.transferCall) {
     // Always injected for a native transfer: a warm transfer hands the caller
     // back to the AI on no-answer/voicemail (fallbackPlan.endCallEnabled:false),
@@ -2008,6 +2038,12 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     : true;
 
   const systemPrompt = await buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook, handoff, transferStaff);
+  // Auto-escalation is live only when the escalation tool is actually attached
+  // (telnyx_cc, transfer handoff, not after-hours) AND the client opted in. Drives
+  // the idle re-prompt messages below; the prompt block is added in buildSystemPrompt.
+  const autoEscalateOn = client.voice_routing === 'telnyx_cc'
+    && toolConfig.transferCall && handoff === 'transfer' && !isAfterHours
+    && toolConfig.autoEscalate === true;
   const firstMessage = buildFirstMessage(client.business_name, industryKey, callerContext, isAfterHours, toolConfig, hipaaMode, client.greeting_message);
   const tools = buildTools(client, toolConfig, isAfterHours, canAutoBook, handoff, transferTo, transferStaff);
   const hooks = buildHooks(client, toolConfig, isAfterHours, handoff, transferTo);
@@ -2059,6 +2095,11 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     // the caller can be handed back on a no-answer. Only telnyx_cc parks the
     // leg; vapi_direct keeps VAPI's default.
     ...(client.voice_routing === 'telnyx_cc' ? { silenceTimeoutSeconds: 60 } : {}),
+    // Auto-escalation on silence: re-prompt on no response and offer to connect
+    // to a person, instead of letting an unresponsive caller time out silently.
+    // The prompt block tells the model to call request_human_transfer when the
+    // caller then responds (or stays silent). Only when auto-escalation is on.
+    ...(autoEscalateOn ? { messagePlan: { idleMessages: ["Sorry, I didn't catch that. Are you still there?", "No problem. I can connect you with a member of our team if that's easier, just say the word."], idleTimeoutSeconds: 10, idleMessageMaxSpokenCount: 2 } } : {}),
     firstMessage,
     // Record unless HIPAA mode is on OR the business turned recording off in its
     // compliance settings (recording_enabled column). Default is on (the column

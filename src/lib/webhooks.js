@@ -21,6 +21,9 @@ const EVENT_TYPES = [
   'call.started',
   'call.completed',
   'call.transferred',
+  // A call-center agent took over a live call (browser jump-in or their phone was
+  // rung). Distinct from call.transferred, which is a dial to the business line.
+  'call.escalated',
   'appointment.booked',
   'client.provisioned',
   'client.provisioning_failed',

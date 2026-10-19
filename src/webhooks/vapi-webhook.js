@@ -1302,15 +1302,17 @@ async function handleVapiWebhook(req, res) {
     // returned to the AI (no answer) is NOT bridged, so it keeps the normal SMS.
     let transferredViaTelnyx = false;
     let bargeSessionId = null; // call_sessions.id, for flushing the supervisor timeline
+    let handoffMeta = null;    // call_sessions.handoff: how this call reached a human
     if (call?.id) {
       const { data: session } = await supabase
         .from('call_sessions')
-        .select('id, client_id, status, barged')
+        .select('id, client_id, status, barged, handoff')
         .eq('vapi_call_id', call.id)
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
       if (session?.id) bargeSessionId = session.id;
+      if (session?.handoff) handoffMeta = session.handoff;
       if (session?.client_id) {
         // Treat a connected warm transfer OR a browser human-barge as "handled
         // off the VAPI leg": the caller is still on with a person (or being
@@ -1457,6 +1459,15 @@ async function handleVapiWebhook(req, res) {
     const endedReason = call.endedReason || message.endedReason || null;
     const { transferStatus, wasTransferred } = detectTransferStatus(endedReason, transcript);
 
+    // telnyx_cc handoffs never produce a native VAPI 'assistant-forwarded-call',
+    // so detectTransferStatus misses them. Fold in the handoff the Telnyx engine
+    // recorded on the session so the saved call record (and the dashboards/API
+    // that read it) reflect a business transfer or an agent takeover.
+    const businessHandoff = !!(handoffMeta && handoffMeta.type === 'business');
+    const agentHandoff = !!(handoffMeta && handoffMeta.type === 'agent');
+    const finalTransferStatus = transferStatus || (businessHandoff ? 'transferred' : null);
+    const transferredAny = wasTransferred || businessHandoff;
+
     // Did the AI book an appointment during this call? Flagged by the /book tool
     // (keyed by VAPI call id). Powers the "Booked" badge in the dashboards.
     const callBooking = getCallBooking(call.id);
@@ -1478,8 +1489,8 @@ async function handleVapiWebhook(req, res) {
       caller_phone: callerIdNumber, started_at: callStartedAt, ended_at: callEndedAt,
       customer_email: null, ai_summary: null, transcript: storedTranscript,
       recording_url: storedRecordingUrl, duration_seconds: durationSeconds,
-      urgency_level: 'routine', call_status: wasTransferred ? 'transferred' : 'completed',
-      ended_reason: endedReason, transfer_status: transferStatus,
+      urgency_level: 'routine', call_status: transferredAny ? 'transferred' : 'completed',
+      ended_reason: endedReason, transfer_status: finalTransferStatus,
       appointment_booked: appointmentBooked, appointment_time: callBooking?.time || null,
       is_spam: false, spam_reason: null,
       // Stamp the VAPI call id so the warm-transfer recap (telnyx-voice.js) can
@@ -1586,7 +1597,7 @@ async function handleVapiWebhook(req, res) {
         customer_email: customerEmail,
         ai_summary: aiSummary,
         urgency_level: isSpam ? 'spam' : urgency,
-        call_status: isSpam ? 'spam' : (wasTransferred ? 'transferred' : 'completed'),
+        call_status: isSpam ? 'spam' : (transferredAny ? 'transferred' : 'completed'),
         is_spam: isSpam,
         spam_reason: spamReason || null,
         call_language: aiData.callLanguage || 'en',
@@ -1600,8 +1611,16 @@ async function handleVapiWebhook(req, res) {
       // path never runs). Idempotent with that path: both write the full array.
       try {
         if (bargeSessionId) {
-          const events = require('../routes/telnyx-voice').barge.getSupervisorEvents(bargeSessionId);
-          if (events && events.length) {
+          const events = (require('../routes/telnyx-voice').barge.getSupervisorEvents(bargeSessionId) || []).slice();
+          // An agent takeover must read as "Agent took over" even when the
+          // supervisor timeline is empty: a PHONE agent never records a
+          // jumped_in event, and a browser jump-in's in-memory events are lost
+          // if the end-of-call report lands on another instance. The persisted
+          // handoff is the reliable source, so synthesize the event from it.
+          if (agentHandoff && !events.some((e) => e && e.action === 'jumped_in')) {
+            events.push({ action: 'jumped_in', name: (handoffMeta && handoffMeta.agent_name) || null, delivery: (handoffMeta && handoffMeta.delivery) || null, at: (handoffMeta && handoffMeta.at) || new Date().toISOString() });
+          }
+          if (events.length) {
             const { data: row } = await supabase.from('calls').select('call_metadata').eq('id', savedCallId).single();
             const meta = Object.assign({}, row?.call_metadata || {}, { supervisor_events: events });
             await supabase.from('calls').update({ call_metadata: meta }).eq('id', savedCallId);

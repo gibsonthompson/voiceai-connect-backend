@@ -552,6 +552,81 @@ async function completeAccept(sessionId, recipientName) {
 // the confirmation finishes (or the backstop timer). The confirming->bridged
 // transition lets only the first caller through, so the event and the timer can
 // never double-bridge.
+// ── Human-handoff recording + real-time webhook ────────────────────────────
+// A telnyx_cc call hands the caller to a person two ways: a call-center AGENT
+// takes over (a browser jump-in, or their phone is rung), or we dial the
+// BUSINESS's own line. Both were invisible to the API and the dashboards (no
+// transfer_status was ever set for telnyx_cc, and only browser jump-ins recorded
+// a supervisor event). These helpers persist the handoff on the call_session (so
+// the end-of-call report can mark the saved call record even if it lands on a
+// different backend instance) and fire exactly ONE real-time webhook:
+//   agent takeover -> call.escalated     business line -> call.transferred
+// setHandoffIntent stamps what WILL happen (before the agent/office answers);
+// fireHandoff emits the webhook the moment the human is actually connected.
+async function setHandoffIntent(sessionId, intent) {
+  try {
+    const { data: s } = await supabase.from('call_sessions').select('handoff').eq('id', sessionId).maybeSingle();
+    if (s && s.handoff && s.handoff.fired) return; // already emitted; never downgrade
+    const handoff = {
+      type: intent.type === 'business' ? 'business' : 'agent',
+      agent_name: intent.agent_name || null,
+      agent_user_id: intent.agent_user_id || null,
+      delivery: intent.delivery || null,
+      reason: intent.reason || null,
+      at: null,
+      fired: false,
+    };
+    await supabase.from('call_sessions').update({ handoff }).eq('id', sessionId);
+  } catch (e) { console.warn('telnyx-voice: setHandoffIntent failed:', e.message); }
+}
+
+async function fireHandoff(sessionId, overrides) {
+  try {
+    const { data: session } = await supabase.from('call_sessions')
+      .select('id, client_id, caller_number, vapi_call_id, handoff').eq('id', sessionId).maybeSingle();
+    if (!session) return;
+    const prev = session.handoff || {};
+    if (prev.fired) return; // one webhook per call
+    const h = {
+      type: ((overrides && overrides.type) || prev.type) === 'business' ? 'business' : 'agent',
+      agent_name: (overrides && overrides.agent_name) || prev.agent_name || null,
+      agent_user_id: (overrides && overrides.agent_user_id) || prev.agent_user_id || null,
+      delivery: (overrides && overrides.delivery) || prev.delivery || null,
+      reason: (overrides && overrides.reason) || prev.reason || null,
+      at: new Date().toISOString(),
+      fired: true,
+    };
+    await supabase.from('call_sessions').update({ handoff: h }).eq('id', sessionId);
+    let agencyId = null, businessName = null;
+    try {
+      const { data: client } = await supabase.from('clients').select('agency_id, business_name').eq('id', session.client_id).maybeSingle();
+      agencyId = client && client.agency_id || null;
+      businessName = client && client.business_name || null;
+    } catch (e) {}
+    if (!agencyId) return;
+    const { dispatchWebhook } = require('../lib/webhooks');
+    const eventType = h.type === 'business' ? 'call.transferred' : 'call.escalated';
+    // Real-time: the calls row does not exist yet (it is written at end-of-call),
+    // so we send a self-contained payload keyed by the session + VAPI call id a
+    // consumer can correlate with the later call.completed. No `id` here, so the
+    // dispatcher's call-record enrichment is intentionally skipped.
+    dispatchWebhook(agencyId, eventType, {
+      call_session_id: session.id,
+      vapi_call_id: session.vapi_call_id || null,
+      client_id: session.client_id,
+      business_name: businessName,
+      caller_phone: session.caller_number || null,
+      handoff_type: h.type,       // 'agent' | 'business'
+      delivery: h.delivery,        // 'browser' | 'phone' | null
+      handled_by: h.agent_name,    // the agent's name on an agent takeover
+      reason: h.reason,
+      transfer_status: 'transferred',
+      occurred_at: h.at,
+    });
+    console.log(`telnyx-voice: handoff webhook ${eventType} fired (session ${sessionId}, type=${h.type}, delivery=${h.delivery || '-'})`);
+  } catch (e) { console.warn('telnyx-voice: fireHandoff failed:', e.message); }
+}
+
 async function finalizeBridge(sessionId, recipientName) {
   const won = await atomicTransition(sessionId, ['confirming'], 'bridged');
   if (!won) return;
@@ -594,6 +669,10 @@ async function finalizeBridge(sessionId, recipientName) {
   } catch (e) {}
 
   console.log(`telnyx-voice: caller bridged to office (session ${sessionId}) - transfer connected`);
+
+  // A person is now on the live call (a phone agent, or the business line). Emit
+  // the one-time handoff webhook from the intent stamped at dial time.
+  await fireHandoff(sessionId).catch(() => {});
 }
 
 // ============================================================================
@@ -1146,6 +1225,8 @@ async function supervisorJumpIn(sessionId) {
     broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_connected', label: `${nameFor(session.id) || 'A teammate'} took over the call` });
   } catch (e) {}
   recordSupervisorEvent(sessionId, 'jumped_in');
+  // A browser agent fully took over the live call -> fire call.escalated.
+  await fireHandoff(sessionId, { type: 'agent', delivery: 'browser', agent_name: nameFor(session.id) || null, reason: 'Agent jumped into the live call' }).catch(() => {});
   console.log(`telnyx-voice: 🎧 supervisor jumped in (session ${sessionId})`);
   return { ok: true };
 }
@@ -1841,6 +1922,10 @@ router.post('/api/voice/request-transfer', async (req, res) => {
     const overflowAction = ['message', 'callback', 'ring_business'].includes(_tc.overflowAction) ? _tc.overflowAction : 'message';
     let ccIsCallCenter = false;
     let ccAgentPathExhausted = false;
+    // What we will tell the handoff webhook once a human actually connects. Set
+    // at the decision point below (phone agent vs business line) and persisted
+    // right before the dial; finalizeBridge emits the webhook on connect.
+    let handoffIntent = null;
 
     // ---- Call-center escalation routing (opt-in; call-center agencies only) ----
     // Before dialing the business's own line, offer the caller to the assigned,
@@ -1863,6 +1948,7 @@ router.post('/api/voice/request-transfer', async (req, res) => {
         // department: skip the agent offer and let the transfer go straight to
         // them (officeNumber is already the chosen number).
         console.log(`telnyx-voice: AI-direct routing on + department matched ("${transferToLabel}") - bypassing agent offer`);
+        handoffIntent = { type: 'business', delivery: 'business', reason: `AI routed to ${transferToLabel || 'a department'}` };
       } else if (isCallCenter) {
         const avail = await agentPresence.listAvailableForClient({ agencyId: escAgencyId, clientId: session.client_id });
         if (!avail.length) ccAgentPathExhausted = true;
@@ -1924,6 +2010,7 @@ router.post('/api/voice/request-transfer', async (req, res) => {
                   if (phE164 && !(businessDid && phE164 === businessDid)) {
                     officeNumber = phE164;         // dial the agent, not the office
                     phoneRouted = true;
+                    handoffIntent = { type: 'agent', delivery: 'phone', agent_name: recipientName || o.claimed_name || null, agent_user_id: o.claimed_by || null, reason: 'Call-center agent took the call (phone)' };
                     break;                          // fall through to the gate/dial below
                   }
                   // Unusable number: release the claim back to the pool and keep waiting.
@@ -1971,6 +2058,14 @@ router.post('/api/voice/request-transfer', async (req, res) => {
     }
 
     await updateSession(session.id, { status: 'transferring', whisper_summary: summary });
+
+    // Stamp the handoff intent before we dial, so finalizeBridge can emit the
+    // right webhook on connect. Not a phone agent => we are dialing the business
+    // line (a configured overflow/routing), so it is a business transfer.
+    if (!handoffIntent) {
+      handoffIntent = { type: 'business', delivery: 'business', reason: overflowAction === 'ring_business' ? 'Overflow to the business line' : 'Transferred to the business line' };
+    }
+    await setHandoffIntent(session.id, handoffIntent).catch(() => {});
 
     // Let the AI finish its short "connecting you" line before we take the
     // caller off it, so the caller is not cut off mid sentence. The AI is still
