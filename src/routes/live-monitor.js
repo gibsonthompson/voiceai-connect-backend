@@ -210,7 +210,7 @@ router.get('/:id/live/info', async (req, res) => {
     if (auth.client.agency_id) {
       const { data: ag } = await supabase
         .from('agencies')
-        .select('name, logo_url, primary_color, accent_color')
+        .select('name, logo_url, primary_color, accent_color, app_icon_url')
         .eq('id', auth.client.agency_id)
         .single();
       if (ag) a = ag;
@@ -233,6 +233,9 @@ router.get('/:id/live/info', async (req, res) => {
     branding: {
       agency_name: a.name || null,
       logo_url: a.logo_url || null,
+      // Dedicated square app icon for the browser-tab favicon (a wide wordmark
+      // logo gets squished at tab size); the page falls back to logo_url.
+      app_icon_url: a.app_icon_url || null,
       primary_color: a.primary_color || null,
       accent_color: a.accent_color || null,
     },

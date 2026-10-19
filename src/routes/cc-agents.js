@@ -198,6 +198,47 @@ router.post('/agent/override', async (req, res) => {
   }
 });
 
+// ---- POST /api/cc/agent/delivery ------------------------------------------
+// The agent sets how calls reach them: a browser seat (take the call in the
+// console) or their own phone (we ring the number below). Writes the agent's own
+// team_members row. A phone seat requires a phone number.
+router.post('/agent/delivery', async (req, res) => {
+  const agent = resolveAgent(decodeToken(req.headers.authorization));
+  if (!agent) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+  const callDelivery = (req.body && req.body.callDelivery) === 'phone' ? 'phone' : 'browser';
+  const rawPhone = (req.body && typeof req.body.agentPhone === 'string') ? req.body.agentPhone.trim() : '';
+  // Keep digits (and a leading +) so a formatted input still stores cleanly.
+  const agentPhone = rawPhone ? rawPhone.replace(/[^\d+]/g, '') : '';
+  if (callDelivery === 'phone' && agentPhone.replace(/\D/g, '').length < 10) {
+    return res.status(400).json({ success: false, error: 'Enter a valid phone number to take calls on your phone.' });
+  }
+
+  try {
+    const { data: tm } = await supabase.from('team_members')
+      .select('member_user_id')
+      .eq('entity_type', 'agency').eq('entity_id', agent.agencyId)
+      .eq('member_user_id', agent.memberUserId)
+      .maybeSingle();
+    if (!tm) return res.status(404).json({ success: false, error: 'No agent profile to update.' });
+
+    const update = { call_delivery: callDelivery };
+    // Only overwrite the stored number when one was provided, so switching back
+    // to browser does not wipe a number they may want to keep.
+    if (agentPhone) update.agent_phone = agentPhone;
+    const { error } = await supabase.from('team_members')
+      .update(update)
+      .eq('entity_type', 'agency').eq('entity_id', agent.agencyId)
+      .eq('member_user_id', agent.memberUserId);
+    if (error) throw error;
+
+    res.json({ success: true, callDelivery, agentPhone: agentPhone || null });
+  } catch (e) {
+    console.error('cc-agents: agent/delivery failed:', e.message);
+    res.status(500).json({ success: false, error: 'Could not update your call delivery.' });
+  }
+});
+
 // ---- GET /api/cc/agent/stream (SSE) ---------------------------------------
 router.get('/agent/stream', async (req, res) => {
   const agent = resolveAgent(decodeToken(req.query.token || req.headers.authorization));
