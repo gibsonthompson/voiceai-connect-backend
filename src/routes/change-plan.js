@@ -99,6 +99,7 @@ async function syncPerClientItem(agencyId, planId, subscriptionId) {
           .from('clients')
           .select('id', { count: 'exact', head: true })
           .eq('agency_id', agencyId)
+          .eq('status', 'active')
           .eq('is_test_client', false);
         await stripe.subscriptionItems.create({
           subscription: subscriptionId,

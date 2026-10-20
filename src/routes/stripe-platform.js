@@ -211,6 +211,7 @@ async function syncPerClientSubscriptionItem(agencyId, planId, subscriptionId) {
           .from('clients')
           .select('id', { count: 'exact', head: true })
           .eq('agency_id', agencyId)
+          .eq('status', 'active')
           .eq('is_test_client', false);
 
         await stripe.subscriptionItems.create({
@@ -740,6 +741,10 @@ async function handleAgencyCardSetupCompleted(session) {
   const { error } = await supabase.from('agencies').update({ stripe_customer_id: customerId, has_payment_method: true }).eq('id', agencyId);
   if (error) { console.error('⚠️ Failed to save stripe_customer_id after card setup:', error.message); return; }
   console.log(`✅ Payment method added for agency ${agencyId} (customer ${customerId})`);
+  // A Free agency now has a card, so turn on usage billing ($0 platform +
+  // metered minutes; per-client attaches on first client). Non-blocking.
+  try { const { ensureFreeUsageBilling } = require('../lib/usage-tracker'); await ensureFreeUsageBilling(agencyId); }
+  catch (e) { console.warn('card setup: ensureFreeUsageBilling failed (continuing):', e.message); }
 }
 
 // POST /api/agency/add-payment-method  body { agency_id, successUrl?, cancelUrl? }
@@ -817,6 +822,9 @@ async function getAgencyCardStatus(req, res) {
     } catch (e) { console.warn('card-status Stripe check failed:', e.message); }
 
     if (has) { try { await supabase.from('agencies').update({ has_payment_method: true }).eq('id', agencyId); } catch {} }
+    // Self-heal Free usage billing for an existing agency that already has a
+    // card but was never wired (no-op for paid or if already wired). Non-blocking.
+    if (has) { try { const { ensureFreeUsageBilling } = require('../lib/usage-tracker'); await ensureFreeUsageBilling(agencyId); } catch (e) { console.warn('card-status: ensureFreeUsageBilling failed (continuing):', e.message); } }
     return res.json({ hasPaymentMethod: has });
   } catch (e) {
     console.error('❌ card-status error:', e.message);

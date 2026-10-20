@@ -276,8 +276,107 @@ async function sendClientMinuteMeterEvent(clientId, minutes, usageRecordId) {
 // ============================================================================
 // UPDATE CLIENT COUNT ON SUBSCRIPTION (per-client billing)
 // ============================================================================
+// ============================================================================
+// ENSURE FREE USAGE BILLING
+// ----------------------------------------------------------------------------
+// Free agencies are billed $0 platform + $29.99/client + $0.12/min, but unlike
+// paid plans there is no checkout to turn usage billing on. This wires it: once
+// a Free agency has a card on file, create a $0 platform + metered-minute
+// subscription and flip usage_billing_enabled, so per-client and per-minute
+// billing actually run (and the per-minute client toggle can be enabled).
+// Idempotent + non-blocking: safe to call on every client add, on card setup,
+// and on the card-status self-heal. Only acts on Free agencies with a card and
+// no usage subscription yet; paid plans and the pre-card state are no-ops.
+// ============================================================================
+async function ensureFreeUsageBilling(agencyId) {
+  if (!agencyId) return { created: false, reason: 'no_agency' };
+  try {
+    const { data: agency, error } = await supabase
+      .from('agencies')
+      .select('id, plan_type, stripe_customer_id, stripe_subscription_id, usage_billing_enabled')
+      .eq('id', agencyId)
+      .single();
+    if (error || !agency) return { created: false, reason: 'agency_not_found' };
+
+    const isFree = !agency.plan_type || agency.plan_type === 'free' || agency.plan_type === 'starter';
+    if (!isFree) return { created: false, reason: 'not_free' }; // paid plans wire at checkout
+
+    // Already has a subscription: just make sure the flag is on, then stop.
+    if (agency.stripe_subscription_id) {
+      if (!agency.usage_billing_enabled) {
+        await supabase.from('agencies').update({ usage_billing_enabled: true }).eq('id', agencyId);
+      }
+      return { created: false, reason: 'already_wired' };
+    }
+
+    if (!agency.stripe_customer_id) return { created: false, reason: 'no_customer' };
+
+    const platformPrice = process.env.STRIPE_PRICE_FREE_PLATFORM;
+    const minutePrice = process.env.STRIPE_PRICE_FREE_MINUTE;
+    if (!platformPrice || !minutePrice) {
+      console.error('ensureFreeUsageBilling: FREE platform/minute price env not configured');
+      return { created: false, reason: 'price_not_configured' };
+    }
+
+    // The customer needs a default payment method so Stripe can collect the
+    // per-client + per-minute charges. Promote the first card if one isn't set.
+    try {
+      const cust = await stripe.customers.retrieve(agency.stripe_customer_id);
+      let hasDefault = !!(cust && !cust.deleted && (cust.invoice_settings?.default_payment_method || cust.default_source));
+      if (!hasDefault) {
+        const pms = await stripe.paymentMethods.list({ customer: agency.stripe_customer_id, type: 'card', limit: 1 });
+        if (pms?.data?.[0]) {
+          await stripe.customers.update(agency.stripe_customer_id, { invoice_settings: { default_payment_method: pms.data[0].id } });
+          hasDefault = true;
+        }
+      }
+      if (!hasDefault) return { created: false, reason: 'no_payment_method' };
+    } catch (e) {
+      console.error('ensureFreeUsageBilling: customer check failed:', e.message);
+      return { created: false, reason: 'customer_error' };
+    }
+
+    // $0 platform + metered minutes, no trial (usage bills from day one). The
+    // per-client $29.99 item is attached by updateClientBillingQuantity once the
+    // subscription exists.
+    let sub;
+    try {
+      sub = await stripe.subscriptions.create({
+        customer: agency.stripe_customer_id,
+        items: [{ price: platformPrice, quantity: 1 }, { price: minutePrice }],
+        metadata: { agency_id: agencyId, plan: 'free', type: 'free_usage' },
+        proration_behavior: 'none',
+      });
+    } catch (e) {
+      console.error('ensureFreeUsageBilling: subscription create failed:', e.message);
+      alertError('free-usage-subscription', e, { agencyId });
+      return { created: false, reason: 'stripe_error', error: e.message };
+    }
+
+    let minuteItemId = null;
+    try { minuteItemId = (sub.items?.data || []).find(i => i.price && i.price.id === minutePrice)?.id || null; } catch (e) {}
+
+    await supabase.from('agencies').update({
+      stripe_subscription_id: sub.id,
+      usage_billing_enabled: true,
+      ...(minuteItemId ? { stripe_minute_meter_item_id: minuteItemId } : {}),
+      updated_at: new Date().toISOString(),
+    }).eq('id', agencyId);
+
+    console.log(`✅ Free usage billing wired for agency ${agencyId.slice(0, 8)} (sub ${sub.id})`);
+    return { created: true, subscriptionId: sub.id };
+  } catch (e) {
+    console.error('ensureFreeUsageBilling error:', e.message);
+    return { created: false, reason: 'error', error: e.message };
+  }
+}
+
 async function updateClientBillingQuantity(agencyId) {
   try {
+    // Wire Free usage billing first (no-op for paid or until a card is on file),
+    // so the per-client item below actually has a subscription to attach to.
+    try { await ensureFreeUsageBilling(agencyId); } catch (e) { console.warn('updateClientBillingQuantity: ensureFreeUsageBilling failed (continuing):', e.message); }
+
     const { data: agency } = await supabase
       .from('agencies')
       .select('stripe_subscription_id, stripe_client_meter_item_id, plan_type, usage_billing_enabled')
@@ -494,6 +593,7 @@ module.exports = {
   sendVoiceMinutesMeterEvent,
   sendClientMinuteMeterEvent,
   updateClientBillingQuantity,
+  ensureFreeUsageBilling,
   getAgencyUsageSummary,
   retryUnreportedMeterEvents,
 };
