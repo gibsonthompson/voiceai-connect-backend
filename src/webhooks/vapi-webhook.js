@@ -1133,12 +1133,20 @@ async function handleAssistantRequest(req, res, message) {
             try {
               const prior = contact.total_calls || 0;
               const named = contact.name && contact.name !== 'Unknown';
+              // A short context line so the monitor shows this was a real lookup:
+              // how many times they've called, when they last spoke, any tag.
+              const bits = [];
+              const tag0 = Array.isArray(contact.tags) && contact.tags.length ? String(contact.tags[0]).trim() : '';
+              if (tag0) bits.push(tag0);
+              if (prior >= 1) bits.push(`${prior} prior call${prior !== 1 ? 's' : ''}`);
+              if (contact.last_call_at) {
+                try { bits.push('last spoke ' + new Date(contact.last_call_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })); } catch (e) {}
+              }
               broadcastLiveEvent(client.id, {
                 type: 'activity',
                 tool: 'caller_recognized',
-                label: named
-                  ? `Recognized returning caller — ${contact.name}`
-                  : `Recognized a returning caller (${prior} prior call${prior !== 1 ? 's' : ''})`,
+                label: named ? `Recognized ${contact.name}` : 'Recognized a returning caller',
+                detail: bits.join(' · ') || null,
               });
             } catch (e) { /* monitor must never break the call */ }
           } else {
@@ -1162,6 +1170,13 @@ async function handleAssistantRequest(req, res, message) {
         caller_name: recName,
         prior_calls: (callerContext && callerContext.total_calls) || 0,
         recognized: !!recName,
+        // Richer caller context for the "About this caller" panel on the monitor
+        // (and reusable on the manager wall). All best-effort / may be null.
+        caller_email: (callerContext && callerContext.email) || null,
+        caller_summary: (callerContext && callerContext.ai_summary) || null,
+        caller_last_call_at: (callerContext && callerContext.last_call_at) || null,
+        caller_tags: (callerContext && Array.isArray(callerContext.tags)) ? callerContext.tags.slice(0, 6) : null,
+        caller_status: (callerContext && callerContext.status) || null,
       });
     } catch (e) { /* monitor must never break the call */ }
 

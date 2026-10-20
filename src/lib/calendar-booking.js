@@ -2,10 +2,10 @@
 // GOOGLE CALENDAR BOOKING - VAPI Tool Handler
 // Matched to CallBird working implementation
 // UPDATED: Added double-booking prevention guard
-// UPDATED: 2026-05-19 Phase 3B — Service-aware booking: looks up service
+// UPDATED: 2026-05-19 Phase 3B - Service-aware booking: looks up service
 //   duration from client_services table, includes staff name in event
 //   title, applies buffer minutes between appointments.
-// UPDATED: 2026-06-17 — TIMEZONE FIX + edge-case hardening.
+// UPDATED: 2026-06-17 - TIMEZONE FIX + edge-case hardening.
 //   Availability previously compared busy events using the SERVER's
 //   timezone (UTC on DigitalOcean) against business hours in the CLIENT's
 //   timezone, so conflict detection was wrong and the AI would offer (and
@@ -356,7 +356,7 @@ async function getAvailableSlots(clientId, date, options) {
     // fully unavailable rather than risk booking over it.
     const allDay = items.find(ev => ev.start && ev.start.date && !ev.start.dateTime);
     if (allDay) {
-      console.log(`📅 All-day event on ${date} ("${allDay.summary || 'untitled'}") — treating the day as unavailable`);
+      console.log(`📅 All-day event on ${date} ("${allDay.summary || 'untitled'}") - treating the day as unavailable`);
       return { success: true, slots: [], message: 'Unavailable this day' };
     }
 
@@ -379,6 +379,10 @@ async function getAvailableSlots(clientId, date, options) {
     const nowMs = Date.now();
     const leadMs = (leadMinutes != null ? leadMinutes : LEAD_TIME_MINUTES) * 60000;
     const slots = [];
+    // A few in-hours time slots the AI actually skipped because they were booked,
+    // captured so the live monitor can show the AI stepping past taken times
+    // (a few, not all). Only real conflicts within business hours land here.
+    const taken = [];
 
     for (let cur = openTotal; cur + duration <= closeTotal; cur += SLOT_STEP_MINUTES) {
       const hr = Math.floor(cur / 60);
@@ -402,11 +406,13 @@ async function getAvailableSlots(clientId, date, options) {
 
       if (!hasConflict) {
         slots.push(formatSlotLabel(hr, min));
+      } else if (taken.length < 4) {
+        taken.push(formatSlotLabel(hr, min));
       }
     }
 
     console.log(`📅 Available slots for ${date} (${timezone}): ${slots.length} slots (duration: ${duration}min, buffer: ${buffer}min)`);
-    return { success: true, slots, date };
+    return { success: true, slots, date, dayName, taken };
   } catch (err) {
     console.error('Get slots error:', err);
     return { success: false, error: 'Failed to get availability' };
@@ -433,7 +439,7 @@ function canOfferApptCustomerSms(agency) {
 
 // ====================================================================
 // Book an appointment
-// staffName: optional — included in event title and description
+// staffName: optional - included in event title and description
 // The function looks up service config from client_services for
 // duration override and buffer enforcement.
 // ====================================================================
@@ -488,7 +494,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
       }
       // Check service-level booking_mode override
       if (serviceConfig.booking_mode === 'collect_request' || serviceConfig.booking_mode === 'disabled') {
-        console.log(`⚠️ Service "${serviceConfig.name}" has booking_mode: ${serviceConfig.booking_mode} — should not be booked directly`);
+        console.log(`⚠️ Service "${serviceConfig.name}" has booking_mode: ${serviceConfig.booking_mode} - should not be booked directly`);
         return {
           success: false,
           error: `This service is not available for direct booking. Please collect the caller's preferred date and time, and let them know the office will call to confirm.`
@@ -553,7 +559,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     titleParts.push(serviceType || 'Appointment');
     if (staffName) titleParts.push(staffName);
     titleParts.push(customerName);
-    const eventTitle = titleParts.join(' — ');
+    const eventTitle = titleParts.join(' - ');
 
     // Build description
     const descParts = [`Customer: ${customerName}`, `Phone: ${customerPhone}`];
@@ -604,7 +610,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     const createdEvent = await response.json();
     console.log('✅ Appointment booked:', createdEvent.id);
 
-    // Save to our database (staff_name column may not exist yet — fallback gracefully)
+    // Save to our database (staff_name column may not exist yet - fallback gracefully)
     const appointmentRecord = {
       client_id: clientId,
       google_event_id: createdEvent.id,
@@ -697,7 +703,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
               .select('plan_type, subscription_status, is_call_center, appointment_sms_addon')
               .eq('id', client.agency_id).maybeSingle();
             custEntitled = canOfferApptCustomerSms(ag);
-            if (!custEntitled) console.log('📵 Customer booking SMS on but agency not entitled (needs Scale / upgrade) — skipping');
+            if (!custEntitled) console.log('📵 Customer booking SMS on but agency not entitled (needs Scale / upgrade) - skipping');
           } catch (e) { console.warn('appt customer SMS entitlement check failed:', e.message); }
         }
 

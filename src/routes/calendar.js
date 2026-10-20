@@ -8,6 +8,39 @@ var recordCallBooking = require('../lib/booking-call-cache').recordCallBooking;
 var liveMonitor = require('../lib/live-monitor-bus');
 var { broadcastLiveEvent } = require('../lib/live-broadcast');
 
+// Live monitor: a few staggered "what the AI is doing" cards that narrate a
+// calendar scan, revealed over ~1.5s. Fire-and-forget (setTimeout, never
+// awaited) so the tool response to VAPI is not delayed - call latency is
+// untouched; these are purely for the person watching the monitor.
+function emitSteps(clientId, steps) {
+  if (!clientId || !Array.isArray(steps)) return;
+  for (var si = 0; si < steps.length; si++) {
+    (function (s) {
+      setTimeout(function () {
+        try { broadcastLiveEvent(clientId, { type: 'activity', tool: s.tool, label: s.label, detail: s.detail || null }); } catch (e) {}
+      }, s.delay || 0);
+    })(steps[si]);
+  }
+}
+
+// Narrate one day's availability result: scanning -> a couple of booked times
+// (not all) -> the openings found. Curated so the feed shows the AI working
+// without listing every skipped slot.
+function emitAvailabilitySteps(clientId, dayLabel, slots, taken, suggested) {
+  var steps = [];
+  steps.push({ tool: 'calendar_scanning', label: 'Scanning ' + dayLabel, detail: 'Looking for open times', delay: 300 });
+  var booked = (taken || []).slice(0, 2);
+  if (booked.length === 1) {
+    steps.push({ tool: 'slot_taken', label: booked[0] + ' is booked', detail: 'skipping past it', delay: 800 });
+  } else if (booked.length >= 2) {
+    steps.push({ tool: 'slot_taken', label: booked[0] + ' and ' + booked[1] + ' are booked', detail: 'skipping past them', delay: 800 });
+  }
+  var n = (slots || []).length;
+  var few = ((suggested && suggested.length ? suggested : slots) || []).slice(0, 3);
+  steps.push({ tool: 'slot_found', label: 'Found ' + n + ' opening' + (n === 1 ? '' : 's') + ' on ' + dayLabel, detail: few.join(', ') || null, delay: 1200 });
+  emitSteps(clientId, steps);
+}
+
 // ============================================================================
 // SERVER-SIDE DATE RESOLVER
 // The AI model has no clock. It sends garbage dates.
@@ -215,6 +248,8 @@ router.post('/availability/:clientId', async function(req, res) {
           var suggested = slots.length <= 4 ? slots : [slots[0], slots[Math.floor(slots.length / 2)], slots[Math.floor(slots.length * 0.75)]];
           var dateLabel = friendlyDate(checkStr);
 
+          emitAvailabilitySteps(clientId, dateLabel, slots, checkResult.taken, suggested);
+
           return res.json({
             results: [{
               toolCallId: toolCallId,
@@ -228,8 +263,9 @@ router.post('/availability/:clientId', async function(req, res) {
         }
       }
       
-      return res.json({ 
-        results: [{ toolCallId: toolCallId, result: 'No availability in the next 7 days. Ask if the caller would like to check a specific date further out.' }] 
+      emitSteps(clientId, [{ tool: 'calendar_full', label: 'No openings in the next 7 days', detail: 'offering to check further out', delay: 400 }]);
+      return res.json({
+        results: [{ toolCallId: toolCallId, result: 'No availability in the next 7 days. Ask if the caller would like to check a specific date further out.' }]
       });
     }
 
@@ -245,8 +281,9 @@ router.post('/availability/:clientId', async function(req, res) {
     var dateLabel2 = friendlyDate(date);
 
     if (result.slots.length === 0) {
-      return res.json({ 
-        results: [{ toolCallId: toolCallId, result: 'CORRECT DATE: ' + dateLabel2 + '. No availability on ' + dateLabel2 + '. Ask if the caller would like to try another date.' }] 
+      emitSteps(clientId, [{ tool: 'calendar_full', label: dateLabel2 + ' is fully booked', detail: 'offering another day', delay: 400 }]);
+      return res.json({
+        results: [{ toolCallId: toolCallId, result: 'CORRECT DATE: ' + dateLabel2 + '. No availability on ' + dateLabel2 + '. Ask if the caller would like to try another date.' }]
       });
     }
 
@@ -263,6 +300,8 @@ router.post('/availability/:clientId', async function(req, res) {
         suggested2.push(slots2[slots2.length - 2]);
       }
     }
+
+    emitAvailabilitySteps(clientId, dateLabel2, slots2, result.taken, suggested2);
 
     return res.json({
       results: [{
@@ -345,6 +384,14 @@ router.post('/book/:clientId', async function(req, res) {
       // Flag that this call booked an appointment so the end-of-call handler can
       // mark the saved call record (powers the "Booked" badge in the dashboards).
       try { recordCallBooking(message?.call?.id, { time: result.appointment_time || (date + ' ' + time) }); } catch (e) { /* best-effort */ }
+      // Live monitor: the appointment is on the books.
+      try {
+        broadcastLiveEvent(clientId, {
+          type: 'activity', tool: 'appointment_booked',
+          label: 'Booked ' + (customerName || 'the caller') + ' for ' + friendlyDate(date) + ' at ' + time,
+          detail: serviceType || null,
+        });
+      } catch (e) {}
       return res.json({
         results: [{ toolCallId: toolCallId, result: 'Booked. ' + result.message + '. Confirm this to the caller in natural speech, using this exact date and time, not any other.' }]
       });
