@@ -207,20 +207,17 @@ async function syncPerClientSubscriptionItem(agencyId, planId, subscriptionId) {
     const alreadyAttached = perClientItems.some((item) => item.price.id === targetPriceId);
     if (!alreadyAttached) {
       try {
-        const { count } = await supabase
-          .from('clients')
-          .select('id', { count: 'exact', head: true })
-          .eq('agency_id', agencyId)
-          .eq('status', 'active')
-          .eq('is_test_client', false);
+        // Plan-aware: Pro counts only converted (non-trial) clients.
+        const { getBillableClientCount } = require('../lib/usage-tracker');
+        const count = await getBillableClientCount(agencyId, planId);
 
         await stripe.subscriptionItems.create({
           subscription: subscriptionId,
           price: targetPriceId,
-          quantity: count || 0,
+          quantity: count,
           proration_behavior: 'create_prorations',
         });
-        console.log(`✅ Added per-client item for plan=${planId} (qty=${count || 0})`);
+        console.log(`✅ Added per-client item for plan=${planId} (qty=${count})`);
       } catch (e) {
         console.error(`Failed to add per-client item for plan=${planId}:`, e.message);
       }
@@ -435,6 +432,86 @@ async function releaseAgencyDemoNumber(agencyId) {
 // resubscribe screen, both of which involve agencies that already used their
 // one trial. Absent/false (new signups) keeps the standard 14-day trial.
 // ============================================================================
+// convertFreeUsageToPaid: a Free agency that has added a client carries a
+// metered "free_usage" subscription ($0 base + per-minute + per-client). When
+// they upgrade to a paid plan from the dashboard, we must NOT mint a second
+// subscription (that would double-bill) and we must NOT just 409 them to the
+// portal (they'd get no trial). Instead we convert the SAME subscription up in
+// place: swap the $0 base to the paid platform price and the Free minute price
+// to the paid minute price, reconcile the per-client item to the target plan,
+// and start the standard 14-day trial (unless noTrial). The card is already on
+// file, so no checkout redirect is needed. Mirrors change-plan.js's item-swap,
+// plus the trial. Returns { ok, trialEndsAt } or { ok:false, error }.
+async function convertFreeUsageToPaid(agency, sub, plan, planConfig, noTrial) {
+  try {
+    const items = sub.items?.data || [];
+    const allPlatformPrices = Object.values(PLATFORM_PLANS).map((p) => p.platformPrice).filter(Boolean);
+    const allMinutePrices = Object.values(PLATFORM_PLANS).map((p) => p.minutePrice).filter(Boolean);
+    const platformItem = items.find((i) => i.price && allPlatformPrices.includes(i.price.id));
+    const minuteItem = items.find((i) => i.price && allMinutePrices.includes(i.price.id));
+
+    const updateItems = [];
+    if (platformItem) {
+      if (platformItem.price.id !== planConfig.platformPrice) {
+        updateItems.push({ id: platformItem.id, price: planConfig.platformPrice });
+      }
+    } else {
+      updateItems.push({ price: planConfig.platformPrice, quantity: 1 });
+    }
+    if (planConfig.minutePrice) {
+      if (minuteItem) {
+        if (minuteItem.price.id !== planConfig.minutePrice) {
+          updateItems.push({ id: minuteItem.id, price: planConfig.minutePrice });
+        }
+      } else {
+        updateItems.push({ price: planConfig.minutePrice });
+      }
+    }
+
+    const update = {
+      proration_behavior: 'none',
+      metadata: { ...(sub.metadata || {}), plan, type: 'agency_subscription' },
+    };
+    if (updateItems.length) update.items = updateItems;
+    let trialEndsAtIso = null;
+    if (!noTrial) {
+      const trialEndUnix = Math.floor(Date.now() / 1000) + 14 * 24 * 60 * 60;
+      update.trial_end = trialEndUnix;
+      trialEndsAtIso = new Date(trialEndUnix * 1000).toISOString();
+    }
+
+    await stripe.subscriptions.update(sub.id, update);
+
+    // Swap the per-client item to the target plan (Free $29.99 -> Pro $9.99, or
+    // remove entirely for Scale). Reuses the shared reconciler.
+    try { await syncPerClientSubscriptionItem(agency.id, plan, sub.id); }
+    catch (e) { console.error('convertFreeUsageToPaid: per-client reconcile failed:', e.message); }
+
+    // Expand team seat cap to the new plan.
+    try { await reconcileAgencyTeamSeats(agency.id, plan); }
+    catch (e) { console.error('convertFreeUsageToPaid: seat reconcile failed:', e.message); }
+
+    // Reflect in our DB immediately so the dashboard shows the new plan + trial
+    // without waiting on the webhook.
+    const dbUpdate = {
+      plan_type: plan,
+      subscription_status: noTrial ? 'active' : 'trial',
+      usage_billing_enabled: true,
+      trial_ends_at: noTrial ? null : trialEndsAtIso,
+      max_team_members_agency: null,
+      max_team_members_client: null,
+      updated_at: new Date().toISOString(),
+    };
+    await supabase.from('agencies').update(dbUpdate).eq('id', agency.id);
+
+    console.log(`📈 Converted free_usage sub ${sub.id} -> ${plan}${noTrial ? '' : ' (14-day trial)'} for agency ${agency.id.slice(0, 8)}`);
+    return { ok: true, trialEndsAt: trialEndsAtIso };
+  } catch (e) {
+    console.error('convertFreeUsageToPaid failed:', e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
 async function createAgencyCheckout(req, res) {
   try {
     const { agency_id, plan, skipTrial } = req.body;
@@ -486,6 +563,31 @@ async function createAgencyCheckout(req, res) {
         const existingSub = await stripe.subscriptions.retrieve(agency.stripe_subscription_id);
         const blockingStatuses = ['active', 'trialing', 'past_due'];
         if (blockingStatuses.includes(existingSub.status)) {
+          // A Free agency that has added a client carries a metered "free_usage"
+          // subscription. Upgrading to a paid plan is that SAME subscription
+          // converting up, not a duplicate, so convert it in place (card already
+          // on file) with the 14-day trial instead of blocking to the portal.
+          const isFreeUsageSub = existingSub.metadata?.type === 'free_usage'
+            || !agency.plan_type || agency.plan_type === 'free' || agency.plan_type === 'starter';
+          const toPaid = plan === 'pro' || plan === 'scale';
+          if (isFreeUsageSub && toPaid) {
+            const converted = await convertFreeUsageToPaid(agency, existingSub, plan, planConfig, noTrial);
+            if (converted.ok) {
+              return res.json({
+                success: true,
+                converted: true,
+                plan,
+                trial: !noTrial,
+                trialEndsAt: converted.trialEndsAt,
+                message: noTrial ? `You're now on ${planConfig.name}.` : `You're on ${planConfig.name} with a 14-day free trial.`,
+              });
+            }
+            // Conversion failed: do NOT fall through to a second checkout (that
+            // would double-subscribe). Surface the error so they can retry.
+            return res.status(502).json({ error: 'upgrade_failed', message: converted.error || 'Could not upgrade your plan. Please try again.' });
+          }
+          // A real paid subscription: keep the duplicate guard (Pro<->Scale go
+          // through change-plan / the portal, not a fresh checkout).
           return res.status(409).json({
             error: 'subscription_exists',
             message: 'You already have an active subscription. Use Manage Subscription to change plans.',
