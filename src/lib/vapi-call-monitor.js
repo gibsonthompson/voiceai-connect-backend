@@ -26,4 +26,30 @@ async function fetchMonitorUrls(callId) {
   }
 }
 
-module.exports = { fetchMonitorUrls };
+// Resolve a call's live controlUrl (cached first, then VAPI's API) and POST a
+// control message to it. Used for server-side takeover polish: parking the
+// assistant (mute-assistant) while a human is on the call, and a clean scripted
+// resume (say) on hand-back. Best-effort: returns false on any miss or failure
+// so it can never block or break the call path. Payload is a VAPI live-control
+// message, e.g. { type:'control', control:'mute-assistant' } or
+// { type:'say', content:'...', interruptAssistantEnabled:true }.
+async function sendVapiControl(callId, payload) {
+  try {
+    if (!callId || !payload) return false;
+    let controlUrl = null;
+    // Prefer the cached URL (lazy require avoids any load-time module cycle).
+    try { const info = require('./live-monitor-bus').getCallInfo(callId); controlUrl = info && info.controlUrl; } catch { /* ignore */ }
+    if (!controlUrl) { const urls = await fetchMonitorUrls(callId); controlUrl = urls.controlUrl || null; }
+    if (!controlUrl) return false;
+    const res = await fetch(controlUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return !!(res && res.ok);
+  } catch {
+    return false;
+  }
+}
+
+module.exports = { fetchMonitorUrls, sendVapiControl };

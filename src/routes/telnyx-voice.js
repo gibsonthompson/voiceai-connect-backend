@@ -57,6 +57,7 @@ const { sendCallNotificationSMS } = require('../lib/notifications');
 const spaces = require('../lib/spaces');
 const liveMonitor = require('../lib/live-monitor-bus');
 const { broadcastLiveEvent } = require('../lib/live-broadcast');
+const { sendVapiControl } = require('../lib/vapi-call-monitor');
 // Call-center escalation routing (opt-in, call-center agencies only).
 const agentPresence = require('../lib/agent-presence');
 const escalationOffers = require('../lib/escalation-offers');
@@ -1084,6 +1085,9 @@ function nameFor(sessionId) {
 // single jump-in rather than connect -> listen -> take over. Best-effort, in
 // memory, cleared when the seat leaves. A voluntary monitor is never in this set.
 const autoJoinSeats = new Set();
+// Sessions whose caller has already heard the one-time "connecting you" line, so
+// a repeat jump-in on the same call does not replay it. Cleared when the call ends.
+const connectAnnouncedSeats = new Set();
 
 // Durable-for-the-call timeline of who listened / jumped in / handed back on
 // each call (sessionId -> [{ name, action, at }]). Accumulated in memory as the
@@ -1259,9 +1263,37 @@ async function supervisorJumpIn(sessionId) {
   // step: if the caller gets dropped ("couldn't find number"), these lines show
   // whether it was the AI hangup collapsing the conference or a failed role flip.
   console.log(`telnyx-voice: 🎧 jump-in begin (session ${sessionId}) conf=${session.telnyx_conference_id} caller=${caller} vapi=${vapi} seat=${session.telnyx_agent_control_id}`);
+  // Park the AI instead of hanging it up: conference-MUTE the VAPI leg. The
+  // caller stops hearing the AI instantly, but the leg STAYS in the audio mix
+  // and keeps hearing the caller + agent, so VAPI's silence timer is held off by
+  // the live conversation (the original AI call never times out) and the AI
+  // keeps full context. Hand-back is then a clean unmute with no restart. If the
+  // mute call fails for any reason, fall back to the old hang-up so the caller
+  // never hears the AI over the agent; telnyx_vapi_control_id is cleared so
+  // hand-back knows to re-dial a fresh leg instead of unmuting a dead one.
   if (vapi) {
-    const hv = await hangupCall(vapi).catch((e) => { console.warn(`telnyx-voice: 🎧 jump-in hangup(vapi) threw: ${e.message}`); return null; });
-    console.log(`telnyx-voice: 🎧 jump-in hung up AI leg ${vapi} (session ${sessionId}) ok=${!!hv}`);
+    const parked = await conferenceMute(session.telnyx_conference_id, [vapi]).catch((e) => { console.warn(`telnyx-voice: 🎧 jump-in mute(vapi) threw: ${e.message}`); return null; });
+    if (parked) {
+      console.log(`telnyx-voice: 🎧 jump-in parked AI leg ${vapi} via mute (session ${sessionId})`);
+      // Also mute the ASSISTANT at VAPI so it stops generating speech while
+      // parked (it keeps hearing the call, so the silence timer still never
+      // fires). That means no stale/queued audio to blurt out when we bring it
+      // back. Fire-and-forget best-effort so it never slows the jump-in; if it
+      // does not land, the Telnyx mute still parks the AI and the interrupting
+      // say on hand-back clears any queue anyway.
+      if (session.vapi_call_id) sendVapiControl(session.vapi_call_id, { type: 'control', control: 'mute-assistant' }).catch(() => {});
+    } else {
+      const hv = await hangupCall(vapi).catch((e) => { console.warn(`telnyx-voice: 🎧 jump-in fallback hangup(vapi) threw: ${e.message}`); return null; });
+      await updateSession(sessionId, { telnyx_vapi_control_id: null });
+      console.log(`telnyx-voice: 🎧 jump-in mute failed, hung up AI leg ${vapi} instead (session ${sessionId}) ok=${!!hv}`);
+    }
+  }
+  // One-time "connecting you" line to the caller, played in the gap after the AI
+  // is parked and before the agent is unmuted, so it never overlaps the AI or
+  // the agent. Guarded so repeated jump-ins on one call do not replay it.
+  if (caller && !connectAnnouncedSeats.has(sessionId)) {
+    connectAnnouncedSeats.add(sessionId);
+    await speakToCall(caller, 'One moment please, connecting you with a member of our team.').catch(() => {});
   }
   // Unmute the seat so the human is heard. We do NOT flip the Telnyx supervisor
   // role (monitor->barge): that change renegotiated the browser's media and
@@ -1291,8 +1323,11 @@ async function supervisorJumpIn(sessionId) {
   return { ok: true };
 }
 
-// Hand the caller back to the AI: re-dial a fresh VAPI leg into the conference
-// and flip the supervisor back to a muted monitor.
+// Hand the caller back to the AI. Preferred path: the AI leg was PARKED (muted)
+// at jump-in and is still alive, so a plain unmute brings it back instantly with
+// full context and no "thanks for calling" restart. Fallback: the parked leg is
+// gone (mute failed at jump-in, or VAPI dropped during the takeover, which nulls
+// telnyx_vapi_control_id), so re-dial a fresh leg the way we used to.
 async function supervisorHandBack(session) {
   const sessionId = session.id;
   const caller = session.telnyx_caller_control_id;
@@ -1304,6 +1339,31 @@ async function supervisorHandBack(session) {
     await conferenceMute(session.telnyx_conference_id, [session.telnyx_agent_control_id]).catch(() => {});
     await updateSession(sessionId, { supervisor_role: 'monitor' });
   }
+
+  // Preferred: unmute the still-alive parked AI leg. No re-dial, no restart, and
+  // it already heard the whole takeover, so it resumes with full context.
+  const parkedVapi = session.telnyx_vapi_control_id;
+  if (parkedVapi && session.telnyx_conference_id) {
+    const un = await conferenceUnmute(session.telnyx_conference_id, [parkedVapi]).catch(() => null);
+    if (un) {
+      // Clean resume: unmute the assistant at VAPI, then inject a fixed line with
+      // interruptAssistantEnabled so it cuts off anything in progress or queued
+      // and speaks exactly this, every time, instead of resuming mid-thought.
+      // Both best-effort; if they do not land, the caller is still back with the
+      // (unmuted) AI, just without the scripted line.
+      if (session.vapi_call_id) {
+        await sendVapiControl(session.vapi_call_id, { type: 'control', control: 'unmute-assistant' }).catch(() => {});
+        await sendVapiControl(session.vapi_call_id, { type: 'say', content: "Thanks for holding. I'm back with you, what else can I help with?", interruptAssistantEnabled: true }).catch(() => {});
+      }
+      recordSupervisorEvent(sessionId, 'handed_back');
+      console.log(`telnyx-voice: 🎧 handed caller back to parked AI leg ${parkedVapi} via unmute (session ${sessionId})`);
+      return;
+    }
+    console.warn(`telnyx-voice: 🎧 unmute of parked AI leg ${parkedVapi} failed, re-dialing (session ${sessionId})`);
+    await updateSession(sessionId, { telnyx_vapi_control_id: null }).catch(() => {});
+  }
+
+  // Fallback: re-dial a fresh VAPI leg into the conference.
   const { connectionId, sipUri } = await getWhisperConfig();
   if (!sipUri) { await updateSession(sessionId, { status: 'active' }); return; }
   const vapiLeg = await dialCall({
@@ -1350,6 +1410,7 @@ async function supervisorLeaveSeat(sessionId) {
   } catch (e) {}
   supervisorNames.delete(sessionId);
   autoJoinSeats.delete(sessionId);
+  connectAnnouncedSeats.delete(sessionId);
   recordSupervisorEvent(sessionId, 'left');
   console.log(`telnyx-voice: 🎧 supervisor left the seat (session ${sessionId})`);
   return { ok: true };
@@ -1818,6 +1879,12 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
           // the old AI leg drops again on a return-to-AI), so it must not end the
           // monitor or the session. Ignore it.
           if (role === 'vapi' && bargeState) {
+            // The parked AI leg dropped mid-takeover (e.g. a VAPI silence timeout
+            // while muted). Do NOT end the caller; just forget the dead leg so
+            // hand-back re-dials a fresh AI instead of unmuting a leg that is gone.
+            if (payload.call_control_id && s.telnyx_vapi_control_id === payload.call_control_id) {
+              await updateSession(sessionId, { telnyx_vapi_control_id: null }).catch(() => {});
+            }
             break;
           }
 
