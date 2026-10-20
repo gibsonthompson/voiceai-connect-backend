@@ -890,8 +890,15 @@ async function completeBarge(sessionId) {
 
   if (!hipaa) {
     await recordStart(caller, { channels: 'dual', clientState: { role: 'caller', sessionId } });
-    await startTranscription(caller, { tracks: 'both', interim: true, clientState: { role: 'caller', sessionId } });
-    console.log(`telnyx-voice: 🎧 barge recording + live transcription started on caller leg (session ${sessionId})`);
+    // Transcribe each party on its OWN leg (inbound only) so the speaker is
+    // deterministic from the leg's client_state role, not a Telnyx track label
+    // (which was mis-tagging the agent's audio as the caller). Caller leg = the
+    // caller; the supervisor seat leg = the human agent.
+    await startTranscription(caller, { tracks: 'inbound', interim: true, clientState: { role: 'caller', sessionId } });
+    if (session.telnyx_agent_control_id) {
+      await startTranscription(session.telnyx_agent_control_id, { tracks: 'inbound', interim: true, clientState: { role: 'supervisor', sessionId } }).catch(() => {});
+    }
+    console.log(`telnyx-voice: 🎧 barge recording + live transcription started on caller + agent legs (session ${sessionId})`);
   } else {
     console.log(`telnyx-voice: 🎧 barge HIPAA client - not recorded/transcribed (session ${sessionId})`);
   }
@@ -933,7 +940,7 @@ async function handleAgentLeave(sessionId, reason) {
   if (mode === 'end_call') {
     const won = await atomicTransition(sessionId, ['agent_bridged'], 'ending_after_barge');
     if (!won) return;
-    await stopTranscription(caller).catch(() => {});
+    await stopTranscription(caller).catch(() => {}); await stopTranscription(session.telnyx_agent_control_id).catch(() => {});
     await cleanupBargeCredential(session);
     try { broadcastLiveEvent(session.client_id, { type: 'activity', tool: 'barge_ended', label: 'Teammate ended the call' }); } catch (e) {}
     // Hang the caller up: this fires call.hangup (role caller) which finalizes
@@ -947,7 +954,7 @@ async function handleAgentLeave(sessionId, reason) {
   // unexpected browser drop, so a caller is never left in silence).
   const won = await atomicTransition(sessionId, ['agent_bridged'], 'returning_to_ai');
   if (!won) return;
-  await stopTranscription(caller).catch(() => {});
+  await stopTranscription(caller).catch(() => {}); await stopTranscription(session.telnyx_agent_control_id).catch(() => {});
   await cleanupBargeCredential(session);
   await reBridgeToAI(await getSessionById(sessionId), reason);
 }
@@ -1017,22 +1024,27 @@ async function reBridgeToAI(session, reason) {
 
 // A real-time transcription fragment arrived during a barge. Push it to the live
 // monitor and accumulate finals onto the session as a recap fallback.
-async function handleBargeTranscription(sessionId, payload) {
+async function handleBargeTranscription(sessionId, payload, role) {
   try {
     const t = payload.transcription_data || payload.transcription || payload || {};
     const text = (t.transcript || t.text || '').toString().trim();
     if (!text) return;
     const isFinal = (t.is_final === true) || (payload.is_final === true) || ((t.type || '').toString() === 'final');
-    // Telnyx labels the track: inbound = caller, outbound = the agent.
-    const track = (t.track || payload.track || '').toString();
-    const who = track === 'outbound' ? 'agent' : (track === 'inbound' ? 'caller' : 'unknown');
+    // Speaker comes from the LEG that produced this fragment (its client_state
+    // role), not a Telnyx track label: the supervisor seat leg is the human
+    // agent, the caller leg is the caller. The AI is parked (muted) during a
+    // takeover, so it never produces transcription here.
+    const who = (role === 'supervisor' || role === 'agent') ? 'agent' : 'caller';
 
     const session = await getSessionById(sessionId);
     if (!session) return;
 
     try {
       broadcastLiveEvent(session.client_id, {
-        type: 'transcript', role: who === 'agent' ? 'assistant' : 'user', speaker: who,
+        // role 'caller' (left) vs 'assistant' (right, grouped with the AI) - the
+        // same keys the monitor checks, so the caller and the human land on the
+        // correct sides.
+        type: 'transcript', role: who === 'agent' ? 'assistant' : 'caller', speaker: who,
         text, final: !!isFinal, source: 'barge',
       });
     } catch (e) {}
@@ -1309,8 +1321,14 @@ async function supervisorJumpIn(sessionId) {
   } catch (e) {}
   if (!hipaa && caller) {
     await recordStart(caller, { channels: 'dual', clientState: { role: 'caller', sessionId } });
-    await startTranscription(caller, { tracks: 'both', interim: true, clientState: { role: 'caller', sessionId } });
-    console.log(`telnyx-voice: 🎧 jump-in recording + transcription started (session ${sessionId})`);
+    // Transcribe each party on its OWN leg (inbound only) so the speaker is
+    // deterministic from the leg's client_state role, not a Telnyx track label.
+    // Caller leg = the caller; the supervisor seat leg = the human agent.
+    await startTranscription(caller, { tracks: 'inbound', interim: true, clientState: { role: 'caller', sessionId } });
+    if (session.telnyx_agent_control_id) {
+      await startTranscription(session.telnyx_agent_control_id, { tracks: 'inbound', interim: true, clientState: { role: 'supervisor', sessionId } }).catch(() => {});
+    }
+    console.log(`telnyx-voice: 🎧 jump-in recording + transcription started on caller + agent legs (session ${sessionId})`);
   }
   try {
     broadcastLiveEvent(session.client_id, { type: 'status', status: 'agent_connected', label: `${nameFor(session.id) || 'A teammate'} is on the call` });
@@ -1331,7 +1349,7 @@ async function supervisorJumpIn(sessionId) {
 async function supervisorHandBack(session) {
   const sessionId = session.id;
   const caller = session.telnyx_caller_control_id;
-  await stopTranscription(caller).catch(() => {});
+  await stopTranscription(caller).catch(() => {}); await stopTranscription(session.telnyx_agent_control_id).catch(() => {});
   // Re-mute the seat (server side) instead of flipping its supervisor role back
   // to monitor. Same reason as jump-in: a role change renegotiates the browser
   // media and crashes the SDK. Muting leaves the browser leg untouched.
@@ -1810,7 +1828,7 @@ router.post('/webhook/telnyx-voice', async (req, res) => {
         // supplies its own transcript the rest of the time), so route it to the
         // live monitor + recap accumulator. Harmless if it arrives otherwise.
         if (sessionId) {
-          await handleBargeTranscription(sessionId, payload);
+          await handleBargeTranscription(sessionId, payload, role);
         }
         break;
 
