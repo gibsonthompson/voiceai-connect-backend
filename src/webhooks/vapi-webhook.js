@@ -931,6 +931,40 @@ async function handleAssistantRequest(req, res, message) {
       }
     }
 
+    // telnyx_cc hand-back net: when a supervisor hands the caller back to the
+    // AI, supervisorHandBack re-dials a FRESH VAPI leg into the conference. That
+    // leg fires this assistant-request, but the session is already LINKED (so the
+    // unlinked net above misses it), and VAPI does not reliably surface our
+    // X-Client-Id SIP header on the shared door. Resolve from the caller's
+    // currently-live conference session instead. This is strictly a fallback:
+    // it only runs when neither a SIP header nor a VAPI number identified the
+    // client, so custom SIP headers remain the primary path and this goes
+    // dormant automatically once the header (or a dedicated number) comes
+    // through under better infrastructure. Scoped to a live telnyx_cc conference
+    // session for this caller, newest first, within a short window.
+    if (!sipClientId && !vapiPhoneNumber && (fromNumber || callerPhone)) {
+      try {
+        const since = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+        const { data: live } = await supabase
+          .from('call_sessions')
+          .select('id, client_id')
+          .eq('caller_number', fromNumber || callerPhone)
+          .not('telnyx_conference_id', 'is', null)
+          .in('status', ['agent_bridged', 'active'])
+          .gte('updated_at', since)
+          .order('updated_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (live && live.client_id) {
+          sipClientId = live.client_id;
+          sipSessionId = live.id;
+          console.log(`🔁 telnyx_cc hand-back - resolved client via live conference session ${live.id} (caller ${fromNumber || callerPhone}); SIP header was absent`);
+        }
+      } catch (e) {
+        console.warn('telnyx_cc hand-back session lookup failed:', e.message);
+      }
+    }
+
     if (!vapiPhoneNumber && !sipClientId) {
       const phoneNumberId = message.call?.phoneNumberId || message.phoneNumber?.id;
       if (phoneNumberId) {
