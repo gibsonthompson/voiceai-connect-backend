@@ -997,6 +997,36 @@ async function handleAssistantRequest(req, res, message) {
       console.log('⚠️ No client found for:', vapiPhoneNumber);
       const { agency: demoAgency, industryKey } = await resolveAgencyForDemo(vapiPhoneNumber);
 
+      // Free-tier demo call cap. A free agency's demo line is a no-card, live
+      // number that bills minutes we eat, so cap its calls the same as a test
+      // client (30). Over the cap, answer with a short "demo limit reached"
+      // message and end the call, exactly like the client call-limit gate.
+      // Paid demos are uncapped. Fail-open: a counting error never blocks a call.
+      if (demoAgency && String(demoAgency.plan_type || '').toLowerCase() === 'free') {
+        try {
+          const DEMO_FREE_CALL_LIMIT = 30; // mirrors TEST_CLIENT_CALL_LIMIT
+          const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+          const { count: demoCallCount } = await supabase
+            .from('demo_calls')
+            .select('id', { count: 'exact', head: true })
+            .eq('agency_id', demoAgency.id)
+            .gte('created_at', since);
+          if ((demoCallCount || 0) >= DEMO_FREE_CALL_LIMIT) {
+            console.log(`🚫 Free demo call-limit reached for ${demoAgency.name}: ${demoCallCount}/${DEMO_FREE_CALL_LIMIT}`);
+            return res.status(200).json({ assistant: {
+              model: { provider: 'openai', model: 'gpt-4o-mini', temperature: 0.1,
+                messages: [{ role: 'system', content: 'Say: "Thanks for calling. This demo line has reached its limit. Goodbye." Then end the call.' }],
+                tools: [{ type: 'endCall' }] },
+              voice: { provider: 'openai', voiceId: 'alloy' },
+              firstMessage: 'Thanks for calling. This demo line has reached its limit. Goodbye.',
+              maxDurationSeconds: 15, recordingEnabled: false
+            }});
+          }
+        } catch (capErr) {
+          console.warn('⚠️ Free demo cap check failed (allowing call):', capErr.message);
+        }
+      }
+
       if (demoAgency && industryKey) {
         console.log(`🎯 Industry demo call (${industryKey}) - building config for: ${demoAgency.name}`);
         try {

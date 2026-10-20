@@ -353,6 +353,20 @@ async function runDemoProvisioning({ agency, country, finalAreaCode }) {
     }
     _demoJobs.set(agencyId, { status: 'done', error: null, startedAt: Date.now() });
     await setDemoProvisioning(agencyId, null); // success is carried by demo_phone_number
+
+    // Free-tier demo lines auto-expire after 30 days: stamp the deadline (the
+    // expire-demo-phones cron reclaims the number on Telnyx + VAPI) and mark the
+    // free demo as used, so a later one requires a card or a paid upgrade. Paid
+    // demos never expire, so this only runs for Free.
+    if (isFreePlan(agency)) {
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      try {
+        await supabase.from('agencies').update({ demo_free_used: true, demo_expires_at: expiresAt }).eq('id', agencyId);
+      } catch (e) {
+        console.warn('⚠️ Failed to stamp free demo expiry (continuing):', e.message);
+      }
+    }
+
     console.log(`🎉 [demo async] Demo phone created for ${agency.name}: ${result.phoneNumber}`);
   } catch (err) {
     const message = country === 'US'
@@ -386,27 +400,34 @@ router.post('/:agencyId/demo-phone', async (req, res) => {
       return res.status(404).json({ error: 'Agency not found' });
     }
 
-    // 2. Check access - paid or trial
-    if (!hasAccess(agency)) {
+    // 2. Access + plan gate.
+    //    Free plan: the FIRST demo line is free (no card) and lives 30 days
+    //    before auto-expiring (the expire-demo-phones cron reclaims the number
+    //    on Telnyx + VAPI). Once that free demo has been used, a new one needs
+    //    a card on file (so we can bill the minutes it uses) or an upgrade to a
+    //    paid plan. Paid plans: require an active/trial subscription, as before.
+    if (isFreePlan(agency)) {
+      const hasCard = agency.has_payment_method === true;
+      const usedFree = agency.demo_free_used === true;
+      if (usedFree && !hasCard) {
+        return res.status(403).json({
+          error: 'demo_reactivation_required',
+          reactivation: true,
+          feature: 'demo_phone',
+          current_plan: 'free',
+          title: 'Your free demo line has been used',
+          message: 'Your first demo line was free for 30 days. To start a new one, add a card so we can bill the minutes it uses, or upgrade to Pro for a demo line that does not expire plus lower rates.',
+          cta_card: 'Add a card',
+          cta_upgrade: 'Upgrade to Pro',
+        });
+      }
+      // Allowed: their first free demo, or a card-backed one after that. Falls
+      // through to provisioning; runDemoProvisioning stamps the 30-day expiry
+      // and marks the free demo used.
+    } else if (!hasAccess(agency)) {
       return res.status(403).json({
         error: 'Subscription required',
         message: 'Demo phone numbers require an active subscription or trial. Please subscribe to create your demo line.'
-      });
-    }
-
-    // 2b. Paid-plan gate. Demos are a paid feature. This is the server-side
-    //     enforcement behind the UI's "paid plans only" state, so a free
-    //     agency cannot bypass the greyed button and buy a number we would
-    //     only have to sweep later.
-    if (isFreePlan(agency)) {
-      return res.status(403).json({
-        error: 'upgrade_required',
-        upgrade_required: true,
-        feature: 'demo_phone',
-        current_plan: 'free',
-        title: 'Demo lines are a paid feature',
-        message: 'Give prospects a live number to call and hear your AI in action. Upgrade to Pro or Scale to create a branded demo line.',
-        cta: 'Upgrade to unlock demos',
       });
     }
 
@@ -491,14 +512,14 @@ router.get('/:agencyId/demo-phone/status', async (req, res) => {
 
     const { data: agency } = await supabase
       .from('agencies')
-      .select('demo_phone_number, demo_provisioning')
+      .select('demo_phone_number, demo_provisioning, demo_expires_at')
       .eq('id', agencyId)
       .single();
 
     if (agency && agency.demo_phone_number) {
       _demoJobs.delete(agencyId);
       if (agency.demo_provisioning) setDemoProvisioning(agencyId, null); // best-effort cleanup
-      return res.json({ status: 'done', demo_phone_number: agency.demo_phone_number });
+      return res.json({ status: 'done', demo_phone_number: agency.demo_phone_number, demo_expires_at: agency.demo_expires_at || null });
     }
 
     // Durable state first: it survives restarts, multi-instance, and slow jobs.
@@ -602,6 +623,7 @@ router.delete('/:agencyId/demo-phone', async (req, res) => {
         demo_phone_number: null,
         demo_assistant_id: null,
         demo_vapi_phone_id: null,
+        demo_expires_at: null, // no live demo, so no expiry deadline (demo_free_used stays set)
         updated_at: new Date().toISOString()
       })
       .eq('id', agencyId);

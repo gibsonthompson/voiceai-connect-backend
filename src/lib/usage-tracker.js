@@ -371,6 +371,40 @@ async function ensureFreeUsageBilling(agencyId) {
   }
 }
 
+// ============================================================================
+// BILLABLE CLIENT COUNT (plan-aware)
+// ----------------------------------------------------------------------------
+//   free  -> every active, non-test client counts, trial included (the
+//            $29.99/client is a per-seat charge owed whether or not the client
+//            ever converts).
+//   pro   -> only active, non-test clients whose trial has CONVERTED. Clients
+//            still in trial (subscription_status trial/trialing) do NOT count,
+//            so the $9.99/client is charged only once the client is live and
+//            paying. NULL subscription_status is treated as converted.
+//   scale -> no per-client fee (callers skip scale).
+// Trial clients carry status='active' with subscription_status trial/trialing;
+// on conversion that flips and the client webhooks re-run this, bumping Pro.
+// ============================================================================
+const CLIENT_TRIAL_STATUSES = ['trial', 'trialing'];
+
+async function getBillableClientCount(agencyId, planType) {
+  let query = supabase
+    .from('clients')
+    .select('id', { count: 'exact', head: true })
+    .eq('agency_id', agencyId)
+    .eq('status', 'active')
+    .eq('is_test_client', false);
+
+  if (planType === 'pro') {
+    query = query.or(
+      `subscription_status.is.null,subscription_status.not.in.(${CLIENT_TRIAL_STATUSES.join(',')})`
+    );
+  }
+
+  const { count } = await query;
+  return count || 0;
+}
+
 async function updateClientBillingQuantity(agencyId) {
   try {
     // Wire Free usage billing first (no-op for paid or until a card is on file),
@@ -395,14 +429,7 @@ async function updateClientBillingQuantity(agencyId) {
       return { updated: false, reason: 'Scale tier, no per-client fee' };
     }
 
-    const { count } = await supabase
-      .from('clients')
-      .select('id', { count: 'exact', head: true })
-      .eq('agency_id', agencyId)
-      .eq('status', 'active')
-      .eq('is_test_client', false);
-
-    const billableCount = count || 0;
+    const billableCount = await getBillableClientCount(agencyId, agency.plan_type);
 
     // ── CASE 1: Client price item exists → update quantity ──────────
     if (agency.stripe_client_meter_item_id) {
@@ -491,12 +518,9 @@ async function getAgencyUsageSummary(agencyId) {
 
     const rates = getPlanRates(agency.plan_type);
 
-    const { count: billableClients } = await supabase
-      .from('clients')
-      .select('id', { count: 'exact', head: true })
-      .eq('agency_id', agencyId)
-      .eq('status', 'active')
-      .eq('is_test_client', false);
+    // Matches the count that actually bills (Pro excludes unconverted trials),
+    // so the usage summary the agency sees lines up with its invoice.
+    const billableClients = await getBillableClientCount(agencyId, agency.plan_type);
 
     const { data: usageData } = await supabase
       .from('usage_records')
@@ -593,6 +617,7 @@ module.exports = {
   sendVoiceMinutesMeterEvent,
   sendClientMinuteMeterEvent,
   updateClientBillingQuantity,
+  getBillableClientCount,
   ensureFreeUsageBilling,
   getAgencyUsageSummary,
   retryUnreportedMeterEvents,

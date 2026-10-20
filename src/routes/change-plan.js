@@ -95,19 +95,16 @@ async function syncPerClientItem(agencyId, planId, subscriptionId) {
     const already = perClientItems.some((i) => i.price.id === targetPriceId);
     if (!already) {
       try {
-        const { count } = await supabase
-          .from('clients')
-          .select('id', { count: 'exact', head: true })
-          .eq('agency_id', agencyId)
-          .eq('status', 'active')
-          .eq('is_test_client', false);
+        // Plan-aware: Pro counts only converted (non-trial) clients.
+        const { getBillableClientCount } = require('../lib/usage-tracker');
+        const count = await getBillableClientCount(agencyId, planId);
         await stripe.subscriptionItems.create({
           subscription: subscriptionId,
           price: targetPriceId,
-          quantity: count || 0,
+          quantity: count,
           proration_behavior: 'create_prorations',
         });
-        console.log(`✅ change-plan: added per-client item for ${planId} (qty=${count || 0})`);
+        console.log(`✅ change-plan: added per-client item for ${planId} (qty=${count})`);
       } catch (e) {
         console.error(`change-plan: failed to add per-client item for ${planId}:`, e.message);
       }
