@@ -74,7 +74,7 @@ function outcomeLabel(c) {
 const CALL_COLS = 'id, created_at, client_id, caller_phone, customer_name, customer_phone, duration_seconds, appointment_booked, call_status, transfer_status, is_spam, call_metadata';
 
 // ---------------------------------------------------------------------------
-// GET /:agencyId/cc/overview  — today's live-ops snapshot for the home screen.
+// GET /:agencyId/cc/overview  - today's live-ops snapshot for the home screen.
 // ---------------------------------------------------------------------------
 router.get('/:agencyId/cc/overview', requireAgencyAccess('dashboard'), async (req, res) => {
   try {
@@ -86,10 +86,17 @@ router.get('/:agencyId/cc/overview', requireAgencyAccess('dashboard'), async (re
       return res.json({ success: true, businessesServed: 0, live: 0, agentsActive: 0, today: emptyToday(), recent: [], busiest: [] });
     }
 
-    // Live right now.
+    // Live right now - from the active-call registry (active_calls), which records
+    // EVERY in-flight call, not just own-the-call (telnyx_cc) sessions. The old
+    // source (call_sessions) only existed for telnyx_cc clients, so a normal
+    // AI-answered call never bumped this count. A live call heartbeats on every
+    // transcript/status event, so a 3-minute freshness window counts exactly the
+    // calls happening now (and ignores any straggler whose end event was missed).
+    const liveSince = new Date(Date.now() - 3 * 60 * 1000).toISOString();
     const { data: live } = await supabase
-      .from('call_sessions').select('client_id').in('client_id', clientIds).in('status', LIVE_STATUSES)
-      .gte('created_at', new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString());
+      .from('active_calls').select('client_id')
+      .in('client_id', clientIds)
+      .gt('last_seen', liveSince);
 
     // Agents on the roster (active).
     const { count: agentsActive } = await supabase
@@ -152,7 +159,7 @@ function emptyToday() {
 }
 
 // ---------------------------------------------------------------------------
-// GET /:agencyId/cc/analytics?range=7d|30d|90d  — deep call analytics.
+// GET /:agencyId/cc/analytics?range=7d|30d|90d  - deep call analytics.
 // ---------------------------------------------------------------------------
 router.get('/:agencyId/cc/analytics', requireAgencyAccess('analytics'), async (req, res) => {
   try {
