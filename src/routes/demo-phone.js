@@ -889,20 +889,37 @@ router.post('/:agencyId/demo-sms/send', async (req, res) => {
     const { data: agency, error: aErr } = await supabase
       .from('agencies').select('id, name, demo_phone_number').eq('id', agencyId).single();
     if (aErr || !agency) return res.status(404).json({ error: 'Agency not found' });
-    if (!agency.demo_phone_number) {
-      return res.status(400).json({ error: 'No demo number on this agency yet' });
-    }
 
-    // Send FROM the demo number and log it as an outbound demo-thread row so the
+    // Reply FROM the demo line this prospect actually texted, so a reply to
+    // someone who reached an extra demo number goes back from that number, not
+    // the primary. Find the thread's most recent demo row (same prospect) and
+    // use its demo_number; fall back to the agency's primary demo number.
+    let fromNumber = agency.demo_phone_number || null;
+    try {
+      const { data: recent } = await supabase
+        .from('sms_log')
+        .select('recipient_phone, metadata, created_at')
+        .eq('agency_id', agencyId)
+        .in('message_type', DEMO_SMS_TYPES)
+        .order('created_at', { ascending: false })
+        .limit(200);
+      const key = demoThreadKey(to);
+      const match = (recent || []).find((r) => demoThreadKey(r.recipient_phone) === key && r.metadata && r.metadata.demo_number);
+      if (match) fromNumber = match.metadata.demo_number;
+    } catch (_) { /* fall back to primary */ }
+
+    if (!fromNumber) return res.status(400).json({ error: 'No demo number on this agency yet' });
+
+    // Send FROM that demo number and log it as an outbound demo-thread row so the
     // GET above shows the agency's reply in the conversation.
     const sent = await sendAndLogSMS({
       phone: to,
       message,
-      from: agency.demo_phone_number,
+      from: fromNumber,
       agencyId: agency.id,
       recipientType: 'prospect',
       messageType: 'demo_reply_outbound',
-      metadata: { direction: 'outbound', demo_number: agency.demo_phone_number },
+      metadata: { direction: 'outbound', demo_number: fromNumber },
     });
 
     if (!sent) return res.status(502).json({ error: 'Message could not be sent' });
@@ -977,7 +994,22 @@ router.get('/:agencyId/demo-numbers', async (req, res) => {
       .eq('agency_id', agencyId)
       .order('created_at', { ascending: true });
     if (error) return res.status(500).json({ error: error.message });
-    res.json({ demos: data || [], max: MAX_EXTRA_DEMO_NUMBERS });
+
+    // Attach per-number activity counts so each line's calls + texts are visible
+    // independently (the main reason agencies want a second number: tracking
+    // which traffic source drives demos). Small N, so a couple counts per row.
+    const demos = data || [];
+    await Promise.all(demos.map(async (d) => {
+      if (!d.phone_number) { d.call_count = 0; d.text_count = 0; return; }
+      try {
+        const { count: calls } = await supabase.from('demo_calls').select('id', { count: 'exact', head: true }).eq('agency_id', agencyId).eq('demo_number', d.phone_number);
+        const { count: texts } = await supabase.from('sms_log').select('id', { count: 'exact', head: true }).eq('agency_id', agencyId).in('message_type', DEMO_SMS_TYPES).eq('metadata->>demo_number', d.phone_number);
+        d.call_count = calls || 0;
+        d.text_count = texts || 0;
+      } catch (_) { d.call_count = 0; d.text_count = 0; }
+    }));
+
+    res.json({ demos, max: MAX_EXTRA_DEMO_NUMBERS });
   } catch (e) {
     res.status(500).json({ error: 'Failed to list demo numbers' });
   }

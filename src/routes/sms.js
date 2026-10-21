@@ -652,13 +652,25 @@ async function handleAgencyReplyToPlatform(fromPhone, text) {
 async function findAgencyByDemoNumber(phone) {
   const normalized = normalizePhone(phone);
   if (!normalized) return null;
+  // Primary demo (on the agency row).
   const { data } = await supabase
     .from('agencies').select('id, name, phone, demo_phone_number').eq('demo_phone_number', normalized).limit(1).maybeSingle();
-  if (data) return data;
+  if (data) return { ...data, _matchedDemoNumber: data.demo_phone_number };
+  // Extra demo numbers (Pro/Scale) live in agency_demo_numbers. Without this, a
+  // text TO a second demo line would never match and would be dropped.
+  try {
+    const { data: ex } = await supabase
+      .from('agency_demo_numbers').select('agency_id, phone_number').eq('phone_number', normalized).eq('status', 'active').limit(1).maybeSingle();
+    if (ex) {
+      const { data: ag } = await supabase.from('agencies').select('id, name, phone, demo_phone_number').eq('id', ex.agency_id).limit(1).maybeSingle();
+      if (ag) return { ...ag, _matchedDemoNumber: ex.phone_number };
+    }
+  } catch (e) { /* table may not exist yet; fall through */ }
+  // Fuzzy fallback on the primary number (existing behavior).
   const without1 = normalized.startsWith('+1') ? normalized.slice(2) : normalized;
   const { data: d2 } = await supabase
     .from('agencies').select('id, name, phone, demo_phone_number').like('demo_phone_number', `%${without1}`).limit(1).maybeSingle();
-  return d2 || null;
+  return d2 ? { ...d2, _matchedDemoNumber: d2.demo_phone_number } : null;
 }
 
 async function handleDemoInbound(agency, callerPhone, text, payload) {
@@ -675,7 +687,7 @@ async function handleDemoInbound(agency, callerPhone, text, payload) {
       message_body: text,
       telnyx_message_id: payload?.id || null,
       delivery_status: 'received',
-      metadata: { direction: 'inbound', from, demo_number: agency.demo_phone_number || null },
+      metadata: { direction: 'inbound', from, demo_number: agency._matchedDemoNumber || agency.demo_phone_number || null },
     });
   } catch (err) {
     console.warn('Failed to log inbound demo reply:', err.message);

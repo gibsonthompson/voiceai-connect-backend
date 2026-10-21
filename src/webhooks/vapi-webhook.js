@@ -78,11 +78,15 @@ const { sendAndLogSMS } = require('../lib/sms-logger');
 // back to the platform sender if the demo number is not SMS-ready, so the
 // prospect always gets the text.
 async function sendDemoProspectSMS(agency, params) {
+  // agency.demo_phone_number is the number that was actually called (for an
+  // extra demo line, getAgencyByDemoPhone already pointed it at that line), so
+  // the text goes out FROM it and is tagged with it for per-number history.
   const fromDemo = agency?.demo_phone_number || null;
-  const sent = await sendAndLogSMS({ ...params, from: fromDemo });
+  const metadata = { ...(params.metadata || {}), demo_number: fromDemo };
+  const sent = await sendAndLogSMS({ ...params, from: fromDemo, metadata });
   if (!sent && fromDemo) {
     console.warn(`\u26a0\ufe0f Demo SMS from demo number ${fromDemo} failed; retrying from the platform number.`);
-    return sendAndLogSMS({ ...params, from: null, metadata: { ...(params.metadata || {}), fallback: 'platform' } });
+    return sendAndLogSMS({ ...params, from: null, metadata: { ...metadata, fallback: 'platform' } });
   }
   return sent;
 }
@@ -682,6 +686,7 @@ async function handleDemoCall(agency, message, industryKey = null) {
 
     const { error: dbError } = await supabase.from('demo_calls').insert({
       agency_id: agency.id,
+      demo_number: agency.demo_phone_number || null, // which demo line was called (per-source tracking)
       caller_phone: callerPhone,
       caller_name: callerName || null,
       business_name: businessName || null,
