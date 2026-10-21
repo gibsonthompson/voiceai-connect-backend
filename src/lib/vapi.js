@@ -1651,7 +1651,7 @@ async function createDemoAssistant(agencyName) {
 // PROVISION DEMO PHONE FOR AGENCY
 // FIXED: Error logging in catch blocks + early bail on account-level errors
 // ============================================================================
-async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
+async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404', opts = {}) {
   try {
     console.log(`📞 Provisioning demo phone for agency: ${agencyName} (area code: ${areaCode})`);
 
@@ -1747,6 +1747,16 @@ async function provisionAgencyDemo(agencyId, agencyName, areaCode = '404') {
 
     if (!supabase) {
       console.warn('⚠️ Supabase not available — cannot save demo phone to agency');
+      return { phoneNumber: phoneData.number, assistantId: assistant.id, phoneId: phoneData.id };
+    }
+
+    // opts.writeAgency === false: this is an EXTRA demo number (stored in
+    // agency_demo_numbers by the caller), so do NOT write the single-demo
+    // columns on the agency row, which belong to the agency's primary demo.
+    // Everything above (assistant, number purchase, dynamic-mode PATCH) is the
+    // same; only persistence differs.
+    if (opts.writeAgency === false) {
+      console.log(`🎉 Extra demo provisioning complete for ${agencyName}: ${phoneData.number} (not written to agency row)`);
       return { phoneNumber: phoneData.number, assistantId: assistant.id, phoneId: phoneData.id };
     }
 

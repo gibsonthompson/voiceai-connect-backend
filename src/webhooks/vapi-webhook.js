@@ -180,7 +180,47 @@ function isTrialExpired(trialEndsAt) {
   return new Date(trialEndsAt) < new Date();
 }
 
+// Merge an extra demo number's own experience (greeting / voice / prompt /
+// follow-up) over the agency, and point the demo number fields at THIS line, so
+// every downstream path, the answered config, the follow-up SMS, and the
+// from-number it is sent from, is correct for the specific number that was
+// called. Returns the agency unchanged when there is no row (the primary demo).
+function effectiveDemoAgency(agency, demoRow) {
+  if (!agency || !demoRow) return agency;
+  const pick = (rowVal, agencyVal) => (rowVal !== null && rowVal !== undefined ? rowVal : agencyVal);
+  return {
+    ...agency,
+    demo_phone_number: demoRow.phone_number || agency.demo_phone_number,
+    demo_vapi_phone_id: demoRow.vapi_phone_id || agency.demo_vapi_phone_id,
+    demo_assistant_id: demoRow.assistant_id || agency.demo_assistant_id,
+    demo_voice_id: pick(demoRow.voice_id, agency.demo_voice_id),
+    demo_greeting: pick(demoRow.greeting, agency.demo_greeting),
+    demo_prompt_additions: pick(demoRow.prompt_additions, agency.demo_prompt_additions),
+    demo_followup_sms_override: pick(demoRow.followup_sms_override, agency.demo_followup_sms_override),
+  };
+}
+
 async function getAgencyByDemoPhone(phoneNumber) {
+  if (!phoneNumber) return null;
+  // Extra demo numbers (Pro/Scale) live in agency_demo_numbers, each with its
+  // own experience. Check there first; on a match, return the agency with that
+  // number's experience merged in. Wrapped so a missing table (pre-migration)
+  // or any error silently falls back to the primary-demo path below.
+  try {
+    const { data: rows } = await supabase
+      .from('agency_demo_numbers')
+      .select('*')
+      .eq('phone_number', phoneNumber)
+      .eq('status', 'active')
+      .limit(1);
+    const row = rows && rows[0];
+    if (row) {
+      const { data: ag } = await supabase.from('agencies').select('*').eq('id', row.agency_id).single();
+      if (ag) return effectiveDemoAgency(ag, row);
+    }
+  } catch (e) { /* fall through to primary-demo lookup */ }
+
+  // Primary demo on the agency row (unchanged behavior).
   try {
     const { data, error } = await supabase.from('agencies').select('*').eq('demo_phone_number', phoneNumber).single();
     if (error || !data) return null;

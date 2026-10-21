@@ -67,6 +67,7 @@ const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 router.use('/:agencyId/demo-phone', requireAgencyAccess());
 router.use('/:agencyId/demo-calls', requireAgencyAccess());
 router.use('/:agencyId/demo-sms', requireAgencyAccess());
+router.use('/:agencyId/demo-numbers', requireAgencyAccess('clients'));
 
 // ============================================================================
 // IN-MEMORY DEMO PROVISIONING JOBS
@@ -257,7 +258,7 @@ function friendlyDemoProvisioningError(err, country) {
 // the number is bought and imported but the DB write fails, the number is
 // released from BOTH VAPI and the agency's Twilio so it does not leak.
 // ============================================================================
-async function provisionAgencyDemoBYOT(agency) {
+async function provisionAgencyDemoBYOT(agency, opts = {}) {
   const country = (agency.country || '').toUpperCase();
   console.log(`📞 [BYOT demo] Provisioning demo for ${agency.name} in ${country} via agency Twilio`);
 
@@ -302,24 +303,28 @@ async function provisionAgencyDemoBYOT(agency) {
     console.warn('⚠️ [BYOT demo] dynamic-mode PATCH error (non-blocking):', whErr.message);
   }
 
-  // 4. Persist on the agency row (same three columns the US path uses).
-  const { error: updateError } = await supabase
-    .from('agencies')
-    .update({
-      demo_phone_number: byot.number,
-      demo_assistant_id: assistant.id,
-      demo_vapi_phone_id: byot.vapiPhoneId,
-    })
-    .eq('id', agency.id);
+  // 4. Persist. opts.writeAgency === false means this is an EXTRA demo number
+  //    (stored in agency_demo_numbers by the caller), so skip the agency-row
+  //    columns, which belong to the primary demo. Everything above is identical.
+  if (opts.writeAgency !== false) {
+    const { error: updateError } = await supabase
+      .from('agencies')
+      .update({
+        demo_phone_number: byot.number,
+        demo_assistant_id: assistant.id,
+        demo_vapi_phone_id: byot.vapiPhoneId,
+      })
+      .eq('id', agency.id);
 
-  if (updateError) {
-    // Could not record the number. Release it from BOTH VAPI and the agency's
-    // Twilio so we do not leak a billable line, delete the assistant, and fail.
-    console.error('❌ [BYOT demo] Failed to save demo number, releasing it:', updateError.message);
-    try { await fullyReleaseNumber(byot.vapiPhoneId, byot.number); } catch (e) { console.warn('⚠️ VAPI/Telnyx release failed:', e.message); }
-    try { await releaseBYOTNumber(agency, byot.number); } catch (e) { console.warn('⚠️ Twilio release failed:', e.message); }
-    await deleteVapiAssistant(assistant.id);
-    throw updateError;
+    if (updateError) {
+      // Could not record the number. Release it from BOTH VAPI and the agency's
+      // Twilio so we do not leak a billable line, delete the assistant, and fail.
+      console.error('❌ [BYOT demo] Failed to save demo number, releasing it:', updateError.message);
+      try { await fullyReleaseNumber(byot.vapiPhoneId, byot.number); } catch (e) { console.warn('⚠️ VAPI/Telnyx release failed:', e.message); }
+      try { await releaseBYOTNumber(agency, byot.number); } catch (e) { console.warn('⚠️ Twilio release failed:', e.message); }
+      await deleteVapiAssistant(assistant.id);
+      throw updateError;
+    }
   }
 
   console.log(`🎉 [BYOT demo] Demo provisioning complete for ${agency.name}: ${byot.number}`);
@@ -905,6 +910,199 @@ router.post('/:agencyId/demo-sms/send', async (req, res) => {
   } catch (e) {
     console.error('❌ demo-sms send error:', e.message);
     res.status(500).json({ error: 'Failed to send reply' });
+  }
+});
+
+// ============================================================================
+// ADDITIONAL DEMO NUMBERS (Pro / Scale) — multiple demo lines per agency
+// ----------------------------------------------------------------------------
+// The agency's PRIMARY demo stays on the agency row (demo_phone_number etc.)
+// and every existing path keeps using it. EXTRA demo numbers live here, one row
+// per number in agency_demo_numbers, each with its OWN greeting / voice /
+// prompt / follow-up (so an agency can give two traffic sources two different
+// experiences). The webhook resolves an incoming call to the right row and
+// merges that row's experience over the agency (see getAgencyByDemoPhone).
+//
+// Free plan: not allowed here (they get the single free primary demo). Pro and
+// Scale can add up to MAX_EXTRA_DEMO_NUMBERS extra lines; each is one more
+// Telnyx rental, absorbed like the primary demo (no new Stripe metering). The
+// cap exists only so a mistake can't run up numbers.
+// ============================================================================
+const MAX_EXTRA_DEMO_NUMBERS = 4; // plus the primary = 5 demo lines total
+
+function isPaidForExtraDemos(agency) {
+  const p = String(agency.plan_type || '').toLowerCase();
+  return p === 'pro' || p === 'scale';
+}
+
+// Background provisioning for an extra demo number. Mirrors runDemoProvisioning
+// but persists to the agency_demo_numbers ROW (status column is the durable
+// marker the status poll reads). Never throws.
+async function runExtraDemoProvisioning({ agency, rowId, country, finalAreaCode }) {
+  try {
+    let result;
+    if (country === 'US') {
+      result = await provisionAgencyDemo(agency.id, agency.name, finalAreaCode, { writeAgency: false });
+      if (!result || !result.phoneNumber) throw new Error('Failed to create demo phone. Please try again or contact support.');
+    } else {
+      result = await provisionAgencyDemoBYOT(agency, { writeAgency: false });
+    }
+    await supabase.from('agency_demo_numbers').update({
+      phone_number: result.phoneNumber,
+      vapi_phone_id: result.phoneId,
+      assistant_id: result.assistantId,
+      status: 'active',
+      provisioning_error: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', rowId);
+    console.log(`🎉 [extra demo] ${agency.name}: ${result.phoneNumber} (row ${rowId})`);
+  } catch (err) {
+    const message = country === 'US'
+      ? (err.message || 'Failed to create demo phone. Please try again.')
+      : friendlyDemoProvisioningError(err, country);
+    await supabase.from('agency_demo_numbers').update({
+      status: 'error', provisioning_error: message, updated_at: new Date().toISOString(),
+    }).eq('id', rowId);
+    console.error(`❌ [extra demo] Provisioning failed for ${agency.name} (row ${rowId}):`, err.message);
+  }
+}
+
+// GET /:agencyId/demo-numbers — list the agency's extra demo numbers.
+router.get('/:agencyId/demo-numbers', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const { data, error } = await supabase
+      .from('agency_demo_numbers')
+      .select('*')
+      .eq('agency_id', agencyId)
+      .order('created_at', { ascending: true });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ demos: data || [], max: MAX_EXTRA_DEMO_NUMBERS });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to list demo numbers' });
+  }
+});
+
+// POST /:agencyId/demo-numbers — provision a new extra demo number (async).
+// Returns 202 with the row id; the UI polls GET /:agencyId/demo-numbers/:id.
+router.post('/:agencyId/demo-numbers', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const { area_code, label } = req.body || {};
+
+    const { data: agency, error: agencyError } = await supabase.from('agencies').select('*').eq('id', agencyId).single();
+    if (agencyError || !agency) return res.status(404).json({ error: 'Agency not found' });
+
+    // Gate: paid plans only, and demos require an active/trial subscription.
+    if (!isPaidForExtraDemos(agency)) {
+      return res.status(403).json({
+        error: 'upgrade_required', upgrade_required: true, feature: 'extra_demo_numbers', current_plan: agency.plan_type || 'free',
+        title: 'Multiple demo numbers are a Pro feature',
+        message: 'Add a second demo line to give a different traffic source its own greeting and experience. Upgrade to Pro or Scale to add more demo numbers.',
+        cta: 'Upgrade to add demo numbers',
+      });
+    }
+    if (!hasAccess(agency)) {
+      return res.status(403).json({ error: 'Subscription required', message: 'Demo numbers require an active subscription.' });
+    }
+
+    // Cap check.
+    const { count } = await supabase.from('agency_demo_numbers').select('id', { count: 'exact', head: true }).eq('agency_id', agencyId);
+    if ((count || 0) >= MAX_EXTRA_DEMO_NUMBERS) {
+      return res.status(409).json({ error: 'limit_reached', message: `You can have up to ${MAX_EXTRA_DEMO_NUMBERS} additional demo numbers.` });
+    }
+
+    const country = (agency.country || 'US').toUpperCase();
+    if (country !== 'US' && !hasByotCredentials(agency)) {
+      return res.status(400).json({ error: 'twilio_required', message: `To add a demo line outside the US, connect your own Twilio account in Settings, Twilio (and complete the regulatory bundle for ${country}). Then try again.`, country });
+    }
+
+    // Resolve a US area code the same way the primary demo does.
+    let finalAreaCode = '404';
+    if (country === 'US') {
+      if (area_code && /^\d{3}$/.test(area_code)) finalAreaCode = area_code;
+      else if (agency.phone) {
+        const digits = agency.phone.replace(/\D/g, '');
+        const ten = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+        if (ten.length === 10) finalAreaCode = ten.slice(0, 3);
+      }
+    }
+
+    // Create the pending row FIRST so the poll has something to read, then
+    // provision in the background (number purchase + VAPI import are slow).
+    const { data: row, error: insErr } = await supabase
+      .from('agency_demo_numbers')
+      .insert({ agency_id: agencyId, country, label: (label || '').toString().slice(0, 60) || null, status: 'provisioning' })
+      .select('id')
+      .single();
+    if (insErr || !row) return res.status(500).json({ error: 'Could not start demo provisioning' });
+
+    res.status(202).json({ success: true, status: 'provisioning', id: row.id, country });
+    runExtraDemoProvisioning({ agency, rowId: row.id, country, finalAreaCode });
+  } catch (error) {
+    console.error('❌ Create extra demo number error:', error);
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to create demo number' });
+  }
+});
+
+// GET /:agencyId/demo-numbers/:id — one row (status poll + experience read).
+router.get('/:agencyId/demo-numbers/:id', async (req, res) => {
+  try {
+    const { agencyId, id } = req.params;
+    const { data, error } = await supabase.from('agency_demo_numbers').select('*').eq('id', id).eq('agency_id', agencyId).single();
+    if (error || !data) return res.status(404).json({ error: 'Demo number not found' });
+    res.json({ demo: data });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to load demo number' });
+  }
+});
+
+// PATCH /:agencyId/demo-numbers/:id — update this number's experience/label.
+router.patch('/:agencyId/demo-numbers/:id', async (req, res) => {
+  try {
+    const { agencyId, id } = req.params;
+    const b = req.body || {};
+    const update = { updated_at: new Date().toISOString() };
+    if (b.label !== undefined) update.label = (b.label || '').toString().slice(0, 60) || null;
+    if (b.greeting !== undefined) update.greeting = (b.greeting || '').toString().slice(0, 300) || null;
+    if (b.voice_id !== undefined) update.voice_id = b.voice_id || null;
+    if (b.prompt_additions !== undefined) update.prompt_additions = (b.prompt_additions || '').toString().slice(0, 1500) || null;
+    if (b.followup_sms_override !== undefined) update.followup_sms_override = (b.followup_sms_override || '').toString().slice(0, 600) || null;
+    const { data, error } = await supabase.from('agency_demo_numbers').update(update).eq('id', id).eq('agency_id', agencyId).select('*').single();
+    if (error || !data) return res.status(404).json({ error: 'Demo number not found' });
+    res.json({ demo: data });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to update demo number' });
+  }
+});
+
+// DELETE /:agencyId/demo-numbers/:id — tear down (Telnyx + VAPI) and remove.
+router.delete('/:agencyId/demo-numbers/:id', async (req, res) => {
+  try {
+    const { agencyId, id } = req.params;
+    const { data: row } = await supabase
+      .from('agency_demo_numbers')
+      .select('*')
+      .eq('id', id).eq('agency_id', agencyId).single();
+    if (!row) return res.status(404).json({ error: 'Demo number not found' });
+
+    // Release the number on VAPI + platform Telnyx (and the agency's Twilio for
+    // a BYOT number), then delete the assistant. Mirrors the primary DELETE.
+    if (row.vapi_phone_id || row.phone_number) {
+      try { await fullyReleaseNumber(row.vapi_phone_id, row.phone_number); } catch (e) { console.warn('⚠️ extra demo release error (continuing):', e.message); }
+      const { data: ag } = await supabase.from('agencies').select('id, byot_enabled, twilio_account_sid, twilio_api_key_encrypted, twilio_api_secret_encrypted, country').eq('id', agencyId).single();
+      if (ag && ag.byot_enabled && ag.twilio_account_sid && ag.twilio_api_key_encrypted) {
+        try { await releaseBYOTNumber(ag, row.phone_number); } catch (e) { console.warn('⚠️ extra demo Twilio release error (continuing):', e.message); }
+      }
+    }
+    if (row.assistant_id) { try { await deleteVapiAssistant(row.assistant_id); } catch (e) { console.warn('⚠️ extra demo assistant delete error (continuing):', e.message); } }
+
+    const { error: delErr } = await supabase.from('agency_demo_numbers').delete().eq('id', id).eq('agency_id', agencyId);
+    if (delErr) return res.status(500).json({ error: 'Failed to remove demo number' });
+    res.json({ success: true });
+  } catch (e) {
+    console.error('❌ Delete extra demo number error:', e);
+    res.status(500).json({ error: 'Failed to remove demo number' });
   }
 });
 
