@@ -73,6 +73,7 @@ async function computeOverageCents(client, agency, dueDateISO) {
       .from('usage_records')
       .select('duration_seconds')
       .eq('client_id', client.id)
+      .eq('billable', true) // spam calls are non-billable; exclude from the overage tally
       .gte('created_at', new Date(startMs).toISOString())
       .lt('created_at', new Date(now).toISOString());
     if (error) { console.warn('⚠️ overage tally query failed:', error.message); return 0; }

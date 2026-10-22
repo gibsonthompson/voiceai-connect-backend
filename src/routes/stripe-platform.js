@@ -1005,6 +1005,15 @@ async function handleAgencyCheckoutCompleted(session) {
       .update({
         status: 'trial',
         subscription_status: 'trial', // normalized (Stripe will say 'trialing')
+        // Turn usage billing ON at paid-trial start, not just at activation.
+        // This is the capability flag that lets a paid agency enable per-minute
+        // client billing (setMinutePassThrough) and onboard paying clients
+        // DURING their 14-day trial. It is safe to flip on now: the agency's own
+        // platform subscription is itself in a Stripe trial, and Stripe discards
+        // metered usage reported during a trial, so the platform does not invoice
+        // the agency for trial-period minutes. Both sides bill normally once the
+        // trial converts (handleAgencyPaymentSucceeded re-affirms this flag).
+        usage_billing_enabled: true,
         plan_type: plan,
         stripe_subscription_id: session.subscription,
         trial_ends_at: trialEndsAt,
