@@ -520,11 +520,14 @@ router.post('/message', async (req, res) => {
     if (SUPPORT_PHONE) {
       try {
         const whoLabel = isProspect ? 'Prospect' : (userType === 'client' ? 'Client' : 'Agency');
-        // No preview; just a heads-up to go handle it in the admin dashboard.
+        // Include the actual message so it can be read and triaged straight from
+        // the text, not just a "go look in the dashboard" heads-up.
+        const _preview = (cleanMessage || composed || '').trim().slice(0, 500);
         const smsBody = [
           isProspect ? '📞 New callback request' : '🆘 New support request',
           `${whoLabel}: ${displayName}`,
-          'Check your admin dashboard to view and reply.',
+          _preview ? `"${_preview}"` : '(No message typed.)',
+          'Reply in your admin inbox.',
         ].join('\n');
 
         await sendAndLogSMS({

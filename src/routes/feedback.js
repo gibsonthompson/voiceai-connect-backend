@@ -72,10 +72,10 @@ router.post('/:agencyId/feedback', async (req, res) => {
       return res.status(500).json({ error: 'Failed to save feedback' });
     }
 
-    // SMS notification to platform owner. No preview; just a heads-up to go
-    // read it in the admin dashboard.
+    // SMS notification to platform owner, with the actual message so it can be
+    // read and triaged straight from the text, not just a "go look" heads-up.
     try {
-      await sendPlatformNotificationSMS(`New feedback from ${agency.name}. Check your admin dashboard.`);
+      await sendPlatformNotificationSMS(`💬 New feedback from ${agency.name}:\n"${String(message).trim().slice(0, 500)}"`);
     } catch (smsErr) {
       console.error('Failed to send feedback SMS:', smsErr);
     }

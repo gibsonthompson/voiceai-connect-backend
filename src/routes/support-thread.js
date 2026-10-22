@@ -133,6 +133,7 @@ async function buildAgencyThread(agencyId) {
       stream.push({
         id: `seed-${r.id}`, request_id: r.id, sender: 'agency', body: r.message,
         created_at: r.created_at, seed: true, kind: r.kind || 'support',
+        source: r.source || null, // feedback | widget | support_chat | inbox — for admin labeling
         client_name: r.client_id ? (clientNames[r.client_id] || null) : null,
       });
     }
@@ -417,7 +418,7 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
         const items = [];
         try {
           const t = await buildAgencyThread(aid);
-          for (const m of t.thread) items.push({ id: `inapp-${m.id}`, sender: m.sender === 'admin' ? 'out' : 'in', body: m.body, at: m.created_at, kind: 'inapp' });
+          for (const m of t.thread) items.push({ id: `inapp-${m.id}`, sender: m.sender === 'admin' ? 'out' : 'in', body: m.body, at: m.created_at, kind: 'inapp', source: m.seed ? (m.source || null) : null });
         } catch (e) { /* no in-app thread */ }
         const { data: srows } = await supabase.from('sms_log')
           .select('id, message_body, message_type, metadata, created_at')
