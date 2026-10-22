@@ -28,6 +28,7 @@
 const Stripe = require('stripe');
 const { supabase } = require('./supabase');
 const { alertError } = require('./error-monitor');
+const { billedMinutesFromSeconds } = require('./billing-math');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -83,7 +84,7 @@ function minutePassThroughActive(agency) {
 // older callers are unaffected. vapiCost is coerced to a finite number or null
 // before storage, so a malformed value never breaks the insert.
 // ============================================================================
-async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds, vapiCost = null, costBreakdown = null }) {
+async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds, vapiCost = null, costBreakdown = null, isSpam = false }) {
   if (!agencyId || !clientId) {
     console.warn('⚠️ Usage record skipped, missing agencyId or clientId');
     return null;
@@ -92,7 +93,12 @@ async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds, 
   const seconds = Math.max(0, Math.round(durationSeconds || 0));
   if (seconds === 0) return null;
 
-  const billedMinutes = Math.ceil(seconds / 60);
+  const billedMinutes = billedMinutesFromSeconds(seconds);
+  // Nothing to meter when the call is spam (a sold feature, never billed) or
+  // when it rounds to zero billed minutes (under 30 seconds). Record the row for
+  // cost/analytics but pre-settle both report flags so the retry cron leaves it
+  // alone and never bills it.
+  const nothingToBill = isSpam || billedMinutes <= 0;
 
   // Coerce the VAPI-reported cost to a finite number, else null. Never throws.
   const cost = (vapiCost !== null && vapiCost !== undefined && Number.isFinite(Number(vapiCost)))
@@ -114,7 +120,12 @@ async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds, 
         vapi_cost: cost,
         cost_breakdown: costBreakdown || null,
         billing_month: billingMonth.toISOString().split('T')[0],
-        reported_to_stripe: false,
+        // Spam rows are non-billable; a zero-minute (sub-30s) call is billable
+        // in principle but bills nothing this time. Either way, settle the report
+        // flags so the retry cron does not churn on or re-bill them.
+        billable: !isSpam,
+        reported_to_stripe: nothingToBill ? true : false,
+        client_reported_to_stripe: nothingToBill ? true : false,
       })
       .select('id')
       .single();
@@ -125,7 +136,11 @@ async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds, 
       return null;
     }
 
-    console.log(`📊 Usage recorded: ${seconds}s (${billedMinutes} billed min)${cost !== null ? ` | cost $${cost}` : ''} | agency=${agencyId.slice(0, 8)} client=${clientId.slice(0, 8)}`);
+    console.log(`📊 Usage recorded: ${seconds}s (${billedMinutes} billed min)${cost !== null ? ` | cost $${cost}` : ''}${isSpam ? ' | SPAM (non-billable)' : ''}${(!isSpam && billedMinutes <= 0) ? ' | <30s (0 min)' : ''} | agency=${agencyId.slice(0, 8)} client=${clientId.slice(0, 8)}`);
+
+    // Nothing to meter: spam, or a sub-30s call that rounded to 0 minutes. The
+    // row was recorded with both report flags already settled above.
+    if (nothingToBill) return data;
 
     // Two independent meter events off the SAME billed-minute value and the same
     // usage_records row. Platform side (agency pays the platform) on the platform
@@ -526,10 +541,13 @@ async function getAgencyUsageSummary(agencyId) {
       .from('usage_records')
       .select('duration_seconds')
       .eq('agency_id', agencyId)
-      .eq('billing_month', billingMonthStr);
+      .eq('billing_month', billingMonthStr)
+      .eq('billable', true); // exclude non-billable spam so the estimate matches the real bill
 
     const totalSeconds = (usageData || []).reduce((sum, r) => sum + (r.duration_seconds || 0), 0);
-    const totalMinutes = Math.ceil(totalSeconds / 60);
+    // Sum per-call billed minutes (the value that actually meters) rather than
+    // rounding the aggregate, so this estimate lines up with what is invoiced.
+    const totalMinutes = (usageData || []).reduce((sum, r) => sum + billedMinutesFromSeconds(r.duration_seconds), 0);
     const totalCalls = (usageData || []).length;
 
     const clientCharge = (billableClients || 0) * rates.perClient;
@@ -572,6 +590,7 @@ async function retryUnreportedMeterEvents() {
     const { data: unreported } = await supabase
       .from('usage_records')
       .select('id, agency_id, client_id, duration_seconds, reported_to_stripe, client_reported_to_stripe')
+      .eq('billable', true) // never retry (and so never bill) a non-billable spam row
       .or('reported_to_stripe.eq.false,client_reported_to_stripe.eq.false')
       .order('created_at', { ascending: true })
       .limit(100);
@@ -584,7 +603,7 @@ async function retryUnreportedMeterEvents() {
     let platformOk = 0, clientOk = 0;
 
     for (const record of unreported) {
-      const minutes = Math.ceil((record.duration_seconds || 0) / 60);
+      const minutes = billedMinutesFromSeconds(record.duration_seconds);
       if (minutes <= 0) continue;
 
       if (record.reported_to_stripe === false) {
