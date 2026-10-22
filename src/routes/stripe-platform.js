@@ -986,6 +986,8 @@ async function handleAgencyCheckoutCompleted(session) {
         stripe_subscription_id: session.subscription,
         trial_ends_at: null,
         numbers_release_at: null,     // came back in time: keep the client numbers
+        data_retention_until: null,   // reactivated: cancel the 90-day data purge
+        data_purged_at: null,
         max_team_members_agency: null,
         max_team_members_client: null,
         updated_at: new Date().toISOString(),
@@ -1005,19 +1007,12 @@ async function handleAgencyCheckoutCompleted(session) {
       .update({
         status: 'trial',
         subscription_status: 'trial', // normalized (Stripe will say 'trialing')
-        // Turn usage billing ON at paid-trial start, not just at activation.
-        // This is the capability flag that lets a paid agency enable per-minute
-        // client billing (setMinutePassThrough) and onboard paying clients
-        // DURING their 14-day trial. It is safe to flip on now: the agency's own
-        // platform subscription is itself in a Stripe trial, and Stripe discards
-        // metered usage reported during a trial, so the platform does not invoice
-        // the agency for trial-period minutes. Both sides bill normally once the
-        // trial converts (handleAgencyPaymentSucceeded re-affirms this flag).
-        usage_billing_enabled: true,
         plan_type: plan,
         stripe_subscription_id: session.subscription,
         trial_ends_at: trialEndsAt,
         numbers_release_at: null,     // clear any stale grace deadline on (re)activation
+        data_retention_until: null,   // reactivated: cancel the 90-day data purge
+        data_purged_at: null,
         // Clear per-row team caps so plan-based defaults in routes/team.js
         // (checkTeamLimit) take effect. The column is treated as a hard
         // override when non-null, including the value 0 which would block
@@ -1173,7 +1168,8 @@ async function handleAgencySubscriptionUpdated(subscription) {
     console.log(`🧹 Agency ${agency.id} suspended via subscription.updated (${status}); starting 3-day client-number grace`);
     try {
       const graceReleaseAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
-      await supabase.from('agencies').update({ numbers_release_at: graceReleaseAt }).eq('id', agency.id);
+      const dataRetentionAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
+      await supabase.from('agencies').update({ numbers_release_at: graceReleaseAt, data_retention_until: dataRetentionAt, data_purged_at: null }).eq('id', agency.id);
       await releaseAgencyDemoNumber(agency.id);
     } catch (cascadeErr) { console.error(`   ❌ Grace setup failed for ${agency.id}:`, cascadeErr.message); }
   }
@@ -1215,6 +1211,10 @@ async function handleAgencySubscriptionDeleted(subscription) {
   // "no longer in service" gate during the grace window; only the physical
   // number teardown is deferred.
   const graceReleaseAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+  // Data-retention deadline: keep all call data for 90 days after cancellation so
+  // a returning agency gets everything back; purgeExpiredRetention() permanently
+  // deletes it once this passes. Reactivation clears it.
+  const dataRetentionAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
   await supabase
     .from('agencies')
     .update({
@@ -1224,6 +1224,8 @@ async function handleAgencySubscriptionDeleted(subscription) {
       stripe_subscription_id: null,
       trial_ends_at: null,
       numbers_release_at: graceReleaseAt,
+      data_retention_until: dataRetentionAt,
+      data_purged_at: null,
       max_team_members_agency: null,
       max_team_members_client: null,
     })
@@ -1354,6 +1356,8 @@ async function handleAgencyPaymentSucceeded(invoice) {
       subscription_status: 'active',
       usage_billing_enabled: true,  // turn on per-minute + per-client usage billing at activation
       status: 'active',
+      data_retention_until: null,   // a paying agency is never on the data-purge clock
+      data_purged_at: null,
     })
     .eq('id', agency.id);
 
@@ -1548,6 +1552,63 @@ async function releaseExpiredGraceNumbers() {
 }
 
 // ============================================================================
+// CRON: PURGE DATA AFTER THE 90-DAY RETENTION WINDOW
+// ----------------------------------------------------------------------------
+// Call data (recordings, transcripts, summaries, call history) and client
+// accounts are kept for 90 days after an agency cancels, so a returning agency
+// gets everything back. Once agencies.data_retention_until passes and the agency
+// has NOT reactivated (reactivation nulls it), this permanently deletes that
+// data, mirroring the manual client delete. Billing/usage records are
+// deliberately left intact: both privacy policies keep them for 7 years.
+// Idempotent: data_purged_at is stamped so each row is processed once, and an
+// agency that came back to life is skipped (its clock is just cleared).
+// ============================================================================
+async function purgeExpiredRetention() {
+  const nowIso = new Date().toISOString();
+  const { data: agencies, error } = await supabase
+    .from('agencies')
+    .select('id, name, status, subscription_status, data_retention_until, data_purged_at')
+    .not('data_retention_until', 'is', null)
+    .is('data_purged_at', null)
+    .lte('data_retention_until', nowIso);
+
+  if (error) {
+    console.error('purgeExpiredRetention: query failed:', error.message);
+    return { purgedAgencies: 0, purgeError: error.message };
+  }
+
+  let purgedAgencies = 0, callsDeleted = 0, clientsDeleted = 0;
+  for (const a of agencies || []) {
+    // Safety: if the agency is alive again, never purge; just clear the clock.
+    const alive = ['active', 'trial', 'trialing'].includes(a.subscription_status) || a.status === 'active' || a.status === 'trial';
+    if (alive) {
+      await supabase.from('agencies').update({ data_retention_until: null, data_purged_at: null }).eq('id', a.id);
+      continue;
+    }
+    try {
+      const { data: clients } = await supabase.from('clients').select('id').eq('agency_id', a.id);
+      const clientIds = (clients || []).map((c) => c.id);
+      for (const cid of clientIds) {
+        const { count } = await supabase.from('calls').delete({ count: 'exact' }).eq('client_id', cid);
+        if (typeof count === 'number') callsDeleted += count;
+        await supabase.from('users').delete().eq('client_id', cid);   // client-side logins
+        await supabase.from('clients').delete().eq('id', cid);
+        clientsDeleted++;
+      }
+      await supabase.from('agencies').update({ data_purged_at: new Date().toISOString(), data_retention_until: null }).eq('id', a.id);
+      purgedAgencies++;
+      console.log(`🗑️ Retention purge: deleted call data + ${clientIds.length} client account(s) for ${a.name} (${a.id}); 90-day window elapsed.`);
+    } catch (e) {
+      // Leave data_retention_until set so the next daily run retries.
+      console.error(`Retention purge failed for ${a.id} (next run retries):`, e.message);
+    }
+  }
+
+  if (purgedAgencies) console.log(`🗑️ Retention sweep purged ${purgedAgencies} agency(ies): ${callsDeleted} calls, ${clientsDeleted} clients.`);
+  return { purgedAgencies, callsDeleted, clientsDeleted, purgeChecked: (agencies || []).length };
+}
+
+// ============================================================================
 // CRON: WARN AGENCIES WITH TRIALS ENDING IN 3 DAYS
 // ----------------------------------------------------------------------------
 // server.js imports this for /api/cron/warn-agency-trials. The original file
@@ -1616,8 +1677,10 @@ async function warnExpiringAgencyTrials() {
     // schedule is needed: release client numbers for any agency whose 3-day
     // grace has passed without re-subscribing.
     const graceResult = await releaseExpiredGraceNumbers();
+    // Also run the 90-day data-retention purge on this same daily cron.
+    const purgeResult = await purgeExpiredRetention();
 
-    return { warned, ...graceResult };
+    return { warned, ...graceResult, ...purgeResult };
   } catch (e) {
     console.error('Trial warning cron error:', e.message);
     return { warned: 0, error: e.message };
@@ -1723,6 +1786,7 @@ module.exports = {
   handlePlatformStripeWebhook,
   warnExpiringAgencyTrials,
   releaseExpiredGraceNumbers,
+  purgeExpiredRetention,
   canAgencyAddClient,
   reconcileAgencyTeamSeats,
   releaseAgencyClientNumbers,
