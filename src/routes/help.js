@@ -39,7 +39,7 @@ const { supabase } = require('../lib/supabase');
 
 // Best-effort logging of marketing FAQ-bot conversations (see widget_chat_log).
 // Never blocks or fails the chat/escalation response.
-async function logWidgetChat(sessionId, role, content, origin = {}) {
+async function logWidgetChat(sessionId, role, content, origin = {}, at = null) {
   try {
     if (!sessionId || typeof sessionId !== 'string') return;
     if (!content || typeof content !== 'string' || !content.trim()) return;
@@ -47,6 +47,11 @@ async function logWidgetChat(sessionId, role, content, origin = {}) {
       session_id: sessionId.slice(0, 100),
       role,
       content: content.trim().slice(0, 8000),
+      // Explicit timestamp so the user question and the bot answer never collide
+      // on created_at. Every thread view sorts by created_at ascending, and
+      // without a distinct stamp a racing insert could sort the answer above the
+      // question. Caller passes the question's time and the answer's time + a gap.
+      ...(at ? { created_at: at } : {}),
     };
     // Record WHERE the chat came from so the admin inbox can tell a marketing
     // prospect from a logged-in agency/client, and so questions can be triaged
@@ -371,9 +376,12 @@ router.post('/chat', async (req, res) => {
     // check runs before the log inserts below, never seeing its own rows.
     await notifyHelpChat({ sessionId, aud, agencyId: origin.agencyId, message: message.trim() });
 
-    // Log the exchange with its origin (fire-and-forget, non-blocking).
-    logWidgetChat(sessionId, 'user', message.trim(), origin);
-    logWidgetChat(sessionId, 'assistant', assistantResponse, origin);
+    // Log the exchange with its origin. Awaited IN ORDER and stamped with a
+    // 1-second gap so the question always sorts before the answer (standard
+    // iMessage order), never inverted by a timestamp collision.
+    const askedAt = Date.now();
+    await logWidgetChat(sessionId, 'user', message.trim(), origin, new Date(askedAt).toISOString());
+    await logWidgetChat(sessionId, 'assistant', assistantResponse, origin, new Date(askedAt + 1000).toISOString());
   } catch (err) {
     console.error('Support chat error:', err);
     res.status(500).json({ error: 'Failed to process message' });

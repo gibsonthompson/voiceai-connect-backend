@@ -229,7 +229,7 @@ adminRouter.post('/support-requests/:id/reply', requireAdmin, async (req, res) =
             agencyId: request.agency_id,
             recipientType: 'agency',
             messageType: 'platform_support_reply',
-            message: 'New reply from VoiceAI Connect support. Respond from your dashboard inbox.',
+            message: 'New message from VoiceAI Connect support. Respond from your dashboard inbox.',
           });
         }
       } catch (e) { console.error('agency reply SMS failed (non-blocking):', e.message); }
@@ -408,8 +408,18 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
     ])];
 
     if (agencyIds.length) {
-      const { data: agencies } = await supabase.from('agencies').select('id, name, email, phone, platform_replies_read_at, plan_type, access_plan').in('id', agencyIds);
+      const { data: agencies } = await supabase.from('agencies')
+        .select('id, name, email, phone, platform_replies_read_at, plan_type, access_plan, app_name, slug, country, status, subscription_status, trial_ends_at, current_period_end, created_at, minute_pass_through, client_minute_rate_cents, usage_billing_enabled, bill_minutes_during_trial')
+        .in('id', agencyIds);
       const agMap = new Map((agencies || []).map(a => [a.id, a]));
+
+      // Client count per agency (non-test), for the admin inbox agency panel, so
+      // Gibson can see how established an agency is before replying.
+      const clientCountByAgency = {};
+      try {
+        const { data: crows } = await supabase.from('clients').select('agency_id, is_test_client').in('agency_id', agencyIds);
+        for (const c of (crows || [])) { if (c.is_test_client) continue; clientCountByAgency[c.agency_id] = (clientCountByAgency[c.agency_id] || 0) + 1; }
+      } catch (e) { /* non-fatal; panel just shows 0 */ }
       const unreadByAgency = {};
       for (const r of reqRows) unreadByAgency[r.agency_id] = (unreadByAgency[r.agency_id] || 0) + (r.admin_unread || 0);
 
@@ -468,6 +478,27 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
           lastInboundKind: inbound.length ? inbound[inbound.length - 1].kind : 'inapp',
           needsReply: last.sender === 'in',
           supportStatus: supportStatusFor(`agency-${aid}`, inbound.length ? inbound[inbound.length - 1].at : null),
+          // Agency context panel for the admin inbox: everything worth knowing
+          // before replying (plan, trial clock, account status, size, billing).
+          facts: {
+            plan: ag.access_plan || ag.plan_type || null,
+            subscriptionStatus: ag.subscription_status || null,
+            status: ag.status || null,
+            trialEndsAt: ag.trial_ends_at || null,
+            currentPeriodEnd: ag.current_period_end || null,
+            createdAt: ag.created_at || null,
+            clientCount: clientCountByAgency[aid] || 0,
+            country: ag.country || null,
+            email: ag.email || null,
+            phone: fmtPhone(ag.phone),
+            // The names this agency goes by: their agency name, their white-label
+            // app/brand name, and their slug, shown when they differ from the name.
+            names: [...new Set([ag.name, ag.app_name, ag.slug].filter(Boolean))],
+            minutePassThrough: ag.minute_pass_through === true,
+            minuteRateCents: ag.client_minute_rate_cents != null ? Number(ag.client_minute_rate_cents) : null,
+            usageBillingEnabled: ag.usage_billing_enabled === true,
+            billMinutesDuringTrial: ag.bill_minutes_during_trial === true,
+          },
         });
       }
     }
@@ -583,7 +614,7 @@ adminRouter.post('/inbox/send', requireAdmin, async (req, res) => {
     const upd = { agency_unread: (latest ? (latest.agency_unread || 0) : 0) + 1, last_reply_at: new Date().toISOString(), last_sender: 'admin' };
     if (latest && latest.status === 'resolved') upd.status = 'open';
     await supabase.from('support_requests').update(upd).eq('id', reqId);
-    try { if (agency.phone) await sendAndLogSMS({ phone: agency.phone, agencyId, recipientType: 'agency', messageType: 'platform_support_reply', message: 'New reply from VoiceAI Connect support. Respond from your dashboard inbox.' }); } catch (e) { /* non-blocking */ }
+    try { if (agency.phone) await sendAndLogSMS({ phone: agency.phone, agencyId, recipientType: 'agency', messageType: 'platform_support_reply', message: 'New message from VoiceAI Connect support. Respond from your dashboard inbox.' }); } catch (e) { /* non-blocking */ }
     return res.json({ success: true, channel: 'inapp', message_id: msg.id });
   } catch (error) {
     console.error('Admin inbox send error:', error.message);
@@ -761,7 +792,7 @@ agencyRouter.post('/:agencyId/platform-threads/:id/reply', requireAgencyAccess('
     try {
       const { data: agency } = await supabase.from('agencies').select('name').eq('id', agencyId).single();
       const who = (agency && agency.name) || 'An agency';
-      await sendPlatformNotificationSMS(`New reply from ${who} in admin messaging. Check your admin dashboard.`);
+      await sendPlatformNotificationSMS(`New message from ${who} in admin messaging. Check your admin dashboard.`);
     } catch (e) { console.error('platform reply SMS failed (non-blocking):', e.message); }
 
     res.json({ success: true, message });

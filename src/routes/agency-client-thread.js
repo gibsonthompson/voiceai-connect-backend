@@ -228,7 +228,7 @@ clientRouter.post('/:clientId/agency-threads/:id/reply', async (req, res) => {
             agencyId: client.agency_id,
             recipientType: 'agency',
             messageType: 'client_reply',
-            message: `New reply from ${client.business_name || 'a client'}. Respond from your dashboard inbox.`,
+            message: `New message from ${client.business_name || 'a client'}. Respond from your dashboard inbox.`,
           });
         }
       }
@@ -397,7 +397,7 @@ clientRouter.post('/:clientId/provider-inbox/reply', async (req, res) => {
           agencyId: client.agency_id,
           recipientType: 'agency',
           messageType: 'client_reply',
-          message: `New reply from ${client.business_name || 'a client'}. Respond from your dashboard inbox.`,
+          message: `New message from ${client.business_name || 'a client'}. Respond from your dashboard inbox.`,
         });
       }
     } catch (e) { console.error('agency notify SMS failed (non-blocking):', e.message); }
