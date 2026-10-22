@@ -83,7 +83,7 @@ function minutePassThroughActive(agency) {
 // older callers are unaffected. vapiCost is coerced to a finite number or null
 // before storage, so a malformed value never breaks the insert.
 // ============================================================================
-async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds, vapiCost = null, costBreakdown = null, isSpam = false }) {
+async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds, vapiCost = null, costBreakdown = null }) {
   if (!agencyId || !clientId) {
     console.warn('⚠️ Usage record skipped, missing agencyId or clientId');
     return null;
@@ -114,14 +114,7 @@ async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds, 
         vapi_cost: cost,
         cost_breakdown: costBreakdown || null,
         billing_month: billingMonth.toISOString().split('T')[0],
-        // Spam calls are a sold feature: never billed to the client, never
-        // metered to the platform. Record the row for cost/margin analytics but
-        // flag it non-billable and pre-settle both report flags so the retry
-        // cron never picks it up and bills it later. Non-spam rows behave
-        // exactly as before (billable, reported flags false until a meter send).
-        billable: !isSpam,
-        reported_to_stripe: isSpam ? true : false,
-        client_reported_to_stripe: isSpam ? true : false,
+        reported_to_stripe: false,
       })
       .select('id')
       .single();
@@ -132,11 +125,7 @@ async function insertUsageRecord({ agencyId, clientId, callId, durationSeconds, 
       return null;
     }
 
-    console.log(`📊 Usage recorded: ${seconds}s (${billedMinutes} billed min)${cost !== null ? ` | cost $${cost}` : ''}${isSpam ? ' | SPAM (non-billable)' : ''} | agency=${agencyId.slice(0, 8)} client=${clientId.slice(0, 8)}`);
-
-    // Spam: row is logged for analytics but NOT metered to either side. Both
-    // report flags were pre-settled above, so the retry cron leaves it alone.
-    if (isSpam) return data;
+    console.log(`📊 Usage recorded: ${seconds}s (${billedMinutes} billed min)${cost !== null ? ` | cost $${cost}` : ''} | agency=${agencyId.slice(0, 8)} client=${clientId.slice(0, 8)}`);
 
     // Two independent meter events off the SAME billed-minute value and the same
     // usage_records row. Platform side (agency pays the platform) on the platform
@@ -583,7 +572,6 @@ async function retryUnreportedMeterEvents() {
     const { data: unreported } = await supabase
       .from('usage_records')
       .select('id, agency_id, client_id, duration_seconds, reported_to_stripe, client_reported_to_stripe')
-      .eq('billable', true) // never retry (and so never bill) a non-billable spam row
       .or('reported_to_stripe.eq.false,client_reported_to_stripe.eq.false')
       .order('created_at', { ascending: true })
       .limit(100);

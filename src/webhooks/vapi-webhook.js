@@ -1664,12 +1664,21 @@ async function handleVapiWebhook(req, res) {
     const isFirst = newCount === 1;
     const upd = { calls_this_month: newCount };
     if (isFirst) { upd.first_call_received = true; upd.first_call_received_at = new Date().toISOString(); }
-    await supabase.from('clients').update(upd).eq('id', client.id);
-    // Per-call billed minutes (ceil of duration / 60). The period counter and
-    // the usage ledger are both applied AFTER the spam determination (STEP 4),
-    // so a spam call is billed to no one and does not consume the client's
-    // displayed/capped minutes. Computed here so it is in scope below.
     const billedMinutes = (durationSeconds && durationSeconds > 0) ? Math.ceil(durationSeconds / 60) : 0;
+    if (billedMinutes > 0) {
+      upd.minutes_this_period = (client.minutes_this_period || 0) + billedMinutes;
+    }
+    await supabase.from('clients').update(upd).eq('id', client.id);
+
+    // ── STEP 3: RECORD VOICE USAGE ────────────────────────────────────
+    try {
+      const agencyId = agency?.id || client.agency_id;
+      if (agencyId && durationSeconds && durationSeconds > 0) {
+        await insertUsageRecord({ agencyId, clientId: client.id, callId: savedCallId, durationSeconds, vapiCost, costBreakdown });
+      }
+    } catch (usageErr) {
+      console.warn('⚠️ Usage record failed (non-fatal):', usageErr.message);
+    }
 
     // ── STEP 4: GENERATE AI SUMMARY (with hard timeout) ───────────────
     // Promise.race guarantees we never hang even if AbortController fails.
@@ -1706,30 +1715,6 @@ async function handleVapiWebhook(req, res) {
           label: 'Flagged as spam', detail: spamReason || null,
         });
       } catch (e) { /* best effort */ }
-    }
-
-    // ── RECORD VOICE USAGE + PERIOD MINUTES (after spam is known) ──────
-    // Runs post-spam so a spam call bills no one. Spam is recorded as a
-    // non-billable usage row (for cost/margin analytics) with no meter events,
-    // and it is left out of minutes_this_period so the client's displayed and
-    // capped minutes match what is actually billed. A successful transfer
-    // already cleared isSpam above, so transferred calls bill normally.
-    try {
-      const agencyId = agency?.id || client.agency_id;
-      if (agencyId && durationSeconds && durationSeconds > 0) {
-        await insertUsageRecord({ agencyId, clientId: client.id, callId: savedCallId, durationSeconds, vapiCost, costBreakdown, isSpam });
-      }
-    } catch (usageErr) {
-      console.warn('⚠️ Usage record failed (non-fatal):', usageErr.message);
-    }
-    if (!isSpam && billedMinutes > 0) {
-      try {
-        await supabase.from('clients')
-          .update({ minutes_this_period: (client.minutes_this_period || 0) + billedMinutes })
-          .eq('id', client.id);
-      } catch (minErr) {
-        console.warn('⚠️ minutes_this_period update failed (non-fatal):', minErr.message);
-      }
     }
 
     // ── STEP 5: UPDATE CALL RECORD WITH AI DATA ───────────────────────
