@@ -356,7 +356,7 @@ router.delete('/:agencyId/custom-industries/:key', async (req, res) => {
   try {
     const { agencyId, key } = req.params;
     const { data: agency, error } = await supabase
-      .from('agencies').select('custom_industries').eq('id', agencyId).single();
+      .from('agencies').select('custom_industries, allowed_industries').eq('id', agencyId).single();
     if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
     const existing = Array.isArray(agency.custom_industries) ? agency.custom_industries : [];
 
@@ -372,8 +372,15 @@ router.delete('/:agencyId/custom-industries/:key', async (req, res) => {
     }
 
     const next = existing.filter((c) => c && c.key !== key);
+    // Also drop this key from the signup gate so it never references a vertical
+    // that no longer exists.
+    const update = { custom_industries: next };
+    if (Array.isArray(agency.allowed_industries)) {
+      const prunedGate = agency.allowed_industries.filter((k) => k !== key);
+      update.allowed_industries = prunedGate.length ? prunedGate : null;
+    }
     const { error: upErr } = await supabase
-      .from('agencies').update({ custom_industries: next }).eq('id', agencyId);
+      .from('agencies').update(update).eq('id', agencyId);
     if (upErr) return res.status(500).json({ error: 'Could not remove the custom industry' });
     res.json({ ok: true, removed: existing.length - next.length });
   } catch (e) {

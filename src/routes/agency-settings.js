@@ -244,6 +244,16 @@ function publicAgencyShape(agency) {
     custom_features: Array.isArray(agency.custom_features) ? agency.custom_features : [],
     feature_overrides: (agency.feature_overrides && typeof agency.feature_overrides === 'object') ? agency.feature_overrides : {},
 
+    // Industry gating for client signup. allowed_industries: which industry
+    // values a client may pick at signup (empty/absent = all; exactly one =
+    // fully vertical, the picker is hidden and that industry is auto-assigned).
+    // custom_industries: the agency's own verticals (key + label only, never the
+    // generated KB) so the signup picker can offer them alongside the built-ins.
+    allowed_industries: Array.isArray(agency.allowed_industries) ? agency.allowed_industries : [],
+    custom_industries: Array.isArray(agency.custom_industries)
+      ? agency.custom_industries.map((c) => ({ key: c && c.key, label: c && c.label })).filter((c) => c.key)
+      : [],
+
     // Pricing (for client signup + marketing website)
     price_starter: agency.price_starter,
     price_pro: agency.price_pro,
@@ -869,7 +879,9 @@ async function updateAgencySettings(req, res) {
       // Default booking-window rules new/existing clients inherit unless they set
       // their own override. Range-clamped below. NULL = fall back to platform
       // default (30 min notice, 60 days ahead).
-      'default_min_booking_notice_minutes', 'default_max_booking_days_ahead'
+      'default_min_booking_notice_minutes', 'default_max_booking_days_ahead',
+      // Industry gating for client signup (Pro+; validated + plan-gated below).
+      'allowed_industries'
     ];
 
     const sanitizedUpdates = {};
@@ -904,6 +916,29 @@ async function updateAgencySettings(req, res) {
     }
     if (updates.setup_fee_timing !== undefined && !['upfront', 'after_trial'].includes(updates.setup_fee_timing)) {
       updates.setup_fee_timing = 'upfront';
+    }
+
+    // ── Industry gating (allowed_industries) ─────────────────────────────
+    // Pro+ only (white-label is Pro+, and a vertical funnel is a white-label
+    // move). The UI gate is bypassable, so enforce the plan here. Normalize to a
+    // deduped array of non-empty strings; an empty result means "all industries"
+    // and is stored as null.
+    if (updates.allowed_industries !== undefined) {
+      try {
+        const { getEffectivePlan } = require('../lib/plan-access');
+        const { data: planRow } = await supabase
+          .from('agencies').select('plan_type, access_plan, subscription_status').eq('id', agencyId).single();
+        const eff = getEffectivePlan(planRow || {});
+        if (eff === 'free') {
+          delete updates.allowed_industries;
+        } else {
+          const raw = Array.isArray(updates.allowed_industries) ? updates.allowed_industries : [];
+          const cleaned = [...new Set(raw.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim()))].slice(0, 100);
+          updates.allowed_industries = cleaned.length ? cleaned : null;
+        }
+      } catch (e) {
+        delete updates.allowed_industries;
+      }
     }
 
     for (const key of allowedFields) {

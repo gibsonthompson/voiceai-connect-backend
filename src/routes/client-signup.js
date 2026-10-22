@@ -1024,6 +1024,18 @@ async function handleClientSignup(req, res) {
       return res.status(404).json({ error: 'Agency not found' });
     }
 
+    // Industry gating: if the agency limited which industries clients can sign
+    // up for, reject anything outside that set. Empty/absent = all allowed. The
+    // signup UI already hides disallowed industries; this enforces it against a
+    // direct API call.
+    {
+      const allowedInds = Array.isArray(agency.allowed_industries) ? agency.allowed_industries : [];
+      const chosenInd = String(req.body.industry || '').trim();
+      if (allowedInds.length && !allowedInds.includes(chosenInd)) {
+        return res.status(400).json({ error: 'That receptionist type is not available for signup here.' });
+      }
+    }
+
     // Resolve the plan against THIS agency's plans (Path B). Honor a valid
     // requested key; otherwise default to the first VISIBLE plan (then the first
     // plan of any kind). Never hardcode 'starter', which an agency may have
