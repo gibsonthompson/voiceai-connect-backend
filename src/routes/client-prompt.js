@@ -38,7 +38,7 @@ const VAPI_API_KEY = process.env.VAPI_API_KEY;
 
 // Allowed pipeline values (mirror the AI Lab dropdowns). llm_model is kept
 // permissive so a newly enabled model id is not rejected before the dropdown ships.
-const ALLOWED_TTS_MODELS = ['eleven_flash_v2_5', 'eleven_multilingual_v2', 'eleven_v3'];
+const ALLOWED_TTS_MODELS = ['eleven_flash_v2_5', 'eleven_v4_turbo', 'eleven_multilingual_v2', 'eleven_v3'];
 const ALLOWED_TRANSCRIBER_MODELS = ['nova-3', 'nova-2', 'flux-general-multi', 'flux-general-en'];
 
 // ----------------------------------------------------------------------------

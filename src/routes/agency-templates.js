@@ -1421,7 +1421,7 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
   // Dialogue WebSocket, which Vapi hasn't adopted). When Vapi adds it, append
   // 'eleven_v4_turbo' below (one line) and drop `comingSoon` on the matching
   // option in the AI Lab template editor.
-  const validTtsModels = ['eleven_flash_v2_5', 'eleven_multilingual_v2', 'eleven_v3'];
+  const validTtsModels = ['eleven_flash_v2_5', 'eleven_v4_turbo', 'eleven_multilingual_v2', 'eleven_v3'];
   const finalTtsModel = validTtsModels.includes(tts_model) ? tts_model : 'eleven_flash_v2_5';
   // 'flux-general-en' (English-only Flux) added 2026-10-07 alongside the EN+ES multi.
   const validTranscribers = ['nova-3', 'nova-2', 'flux-general-multi', 'flux-general-en'];
