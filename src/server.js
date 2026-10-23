@@ -202,6 +202,7 @@ const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySet
 const demoPhoneRoutes = require('./routes/demo-phone');
 const customIndustriesRoutes = require('./routes/custom-industries');
 const workflowRoutes = require('./routes/workflows');
+const clientWorkflowRoutes = require('./routes/client-workflows');
 const referralRoutes = require('./routes/referrals');
 
 let domainRoutes;
@@ -1927,6 +1928,7 @@ app.use('/api/client', toolConfigRoutes);
 app.use('/api/client', require('./routes/live-monitor')); // live call demo + monitor (SSE stream, takeover)
 app.use('/api/client', pwaTrackingRoutes);
 app.use('/api/client', require('./routes/agency-client-thread').clientRouter); // agency<->client threads (behind requireClientAccess above)
+app.use('/api/client', clientWorkflowRoutes); // business owner's view + toggle of their automations
 app.use('/api/sms', smsRoutes);
 
 // ============================================================================
