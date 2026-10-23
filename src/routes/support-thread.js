@@ -1,4 +1,4 @@
-// ============================================================================
+//gibsonthompson/voiceai-connect-backend/sha/1e60c31dca6848eb42b1e6fb7bb171bc88cafd61/contents/src/routes/support-thread.js] // ============================================================================
 // SUPPORT THREADS - two-way platform <-> agency messaging on support_requests
 // ----------------------------------------------------------------------------
 // support_requests is the agency -> platform channel (admin Support queue). Its
@@ -330,11 +330,22 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
     const supportStatusFor = (key, lastInboundAt) => {
       const st = threadStateMap.get(key);
       if (!st || !st.status) return 'none';
+      if (st.status === 'archived') return 'none';
       if (st.status === 'resolved') {
         if (lastInboundAt && st.resolved_at && new Date(lastInboundAt).getTime() > new Date(st.resolved_at).getTime()) return 'support';
         return 'resolved';
       }
       return 'support';
+    };
+    // Archived threads drop out of the inbox entirely, but the full history is kept.
+    // The moment the agency/visitor sends a message newer than the archive time, the
+    // thread auto-unarchives (archived -> false) and reappears with everything intact.
+    // resolved_at doubles as the archive timestamp (same reopen-on-new-message rule).
+    const archivedFor = (key, lastInboundAt) => {
+      const st = threadStateMap.get(key);
+      if (!st || st.status !== 'archived') return false;
+      if (lastInboundAt && st.resolved_at && new Date(lastInboundAt).getTime() > new Date(st.resolved_at).getTime()) return false;
+      return true;
     };
 
     // ---- Agencies: in-app support thread + SMS, merged per agency ----
@@ -478,6 +489,7 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
           lastInboundKind: inbound.length ? inbound[inbound.length - 1].kind : 'inapp',
           needsReply: last.sender === 'in',
           supportStatus: supportStatusFor(`agency-${aid}`, inbound.length ? inbound[inbound.length - 1].at : null),
+          archived: archivedFor(`agency-${aid}`, inbound.length ? inbound[inbound.length - 1].at : null),
           // Agency context panel for the admin inbox: everything worth knowing
           // before replying (plan, trial clock, account status, size, billing).
           facts: {
@@ -563,6 +575,7 @@ adminRouter.get('/inbox', requireAdmin, async (req, res) => {
           messages: msgs, unread: 0, lastAt: last.at, lastDirection: last.sender,
           lastPreview: String(last.body || '').slice(0, 120), readOnly: true, needsReply: false, escalated: s.escalated,
           supportStatus: supportStatusFor(`faq-${sid}`, faqInbound.length ? faqInbound[faqInbound.length - 1].at : null),
+          archived: archivedFor(`faq-${sid}`, faqInbound.length ? faqInbound[faqInbound.length - 1].at : null),
         });
       }
     } catch (e) { console.warn('admin inbox FAQ build failed:', e.message); }
@@ -669,6 +682,27 @@ adminRouter.post('/inbox/reopen', requireAdmin, async (req, res) => {
     await upsertThreadState(threadKey, { status: 'support', resolved_at: null });
     res.json({ success: true, supportStatus: 'support' });
   } catch (e) { console.error('reopen error:', e.message); res.status(500).json({ error: 'Failed to update' }); }
+});
+
+// Archive a conversation: it drops out of the inbox but keeps its full history.
+// resolved_at stores the archive time; a message newer than it auto-unarchives the
+// thread (computed in the inbox GET), so it comes back in full the moment they reply.
+adminRouter.post('/inbox/archive', requireAdmin, async (req, res) => {
+  try {
+    const threadKey = clean(req.body && req.body.threadKey, 128);
+    if (!threadKey) return res.status(400).json({ error: 'threadKey required' });
+    await upsertThreadState(threadKey, { status: 'archived', resolved_at: new Date().toISOString(), marked_at: null });
+    res.json({ success: true, archived: true });
+  } catch (e) { console.error('archive error:', e.message); res.status(500).json({ error: 'Failed to update' }); }
+});
+// Unarchive: clear the thread state back to an active conversation.
+adminRouter.post('/inbox/unarchive', requireAdmin, async (req, res) => {
+  try {
+    const threadKey = clean(req.body && req.body.threadKey, 128);
+    if (!threadKey) return res.status(400).json({ error: 'threadKey required' });
+    await upsertThreadState(threadKey, { status: null, resolved_at: null, marked_at: null });
+    res.json({ success: true, archived: false });
+  } catch (e) { console.error('unarchive error:', e.message); res.status(500).json({ error: 'Failed to update' }); }
 });
 
 // ---------------------------------------------------------------------------
