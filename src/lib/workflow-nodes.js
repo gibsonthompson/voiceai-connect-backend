@@ -1,0 +1,160 @@
+// ============================================================================
+// WORKFLOW NODES - catalog, token rendering, and plan entitlements
+//
+// One place that defines:
+//   - every node type the engine understands, and its plan TIER
+//     ('basic' = available on Pro and up, 'advanced' = Scale only),
+//   - the merge tokens a message/condition may reference (whitelist),
+//   - the per-plan entitlement map (how many workflows a plan may run, and
+//     which node tiers it may use).
+//
+// Gating decision (locked): Pro gets a capped number of active workflows and
+// basic node types only; Scale gets unlimited workflows and every node type.
+//
+// NOTE ON PLAN NAMES: the normalized tier is 'pro' or 'scale'. mapPlanToTier()
+// below maps the stored agency plan onto that. The exact source plan strings
+// must line up with getEffectivePlan() before the Phase 1 UI enforces gating;
+// Phase 0 (headless, seeded test workflow) does not enforce, so this is the
+// forward-prep surface, intentionally in one spot.
+// ============================================================================
+
+// Every node type, with the plan tier that may use it.
+const NODE_TYPES = {
+  // Entry. Every workflow graph starts here; its single outgoing edge points
+  // at the first real node.
+  trigger:      { tier: 'basic',    label: 'Trigger',            terminal: false },
+
+  // Actions
+  send_sms:     { tier: 'basic',    label: 'Send SMS',           terminal: false },
+  ai_sms:       { tier: 'advanced', label: 'AI SMS',             terminal: false }, // grounded in client KB + call context
+  notify_owner: { tier: 'basic',    label: 'Notify business',    terminal: false },
+  add_tag:      { tier: 'basic',    label: 'Add tag',            terminal: false },
+  remove_tag:   { tier: 'basic',    label: 'Remove tag',         terminal: false },
+  set_status:   { tier: 'basic',    label: 'Set contact status', terminal: false },
+  webhook:      { tier: 'advanced', label: 'Webhook',            terminal: false },
+
+  // Flow control
+  wait:         { tier: 'basic',    label: 'Wait',               terminal: false },
+  condition:    { tier: 'basic',    label: 'If / Else',          terminal: false },
+  branch_outcome:{ tier: 'advanced',label: 'Branch on outcome',  terminal: false },
+
+  // Terminal
+  goal:         { tier: 'basic',    label: 'Goal reached',       terminal: true },
+  end:          { tier: 'basic',    label: 'End',                terminal: true },
+};
+
+function isKnownNodeType(type) {
+  return Object.prototype.hasOwnProperty.call(NODE_TYPES, type);
+}
+
+function nodeTier(type) {
+  const n = NODE_TYPES[type];
+  return n ? n.tier : 'advanced'; // unknown types treated as gated, never free
+}
+
+// ---------------------------------------------------------------------------
+// Plan entitlements
+// ---------------------------------------------------------------------------
+// maxWorkflows: how many ACTIVE workflows the agency may run at once.
+// allowedTiers: which node tiers the agency may build with.
+// Tunable without a deploy via env (WORKFLOW_MAX_PRO).
+const PRO_MAX_WORKFLOWS = parseInt(process.env.WORKFLOW_MAX_PRO || '5', 10);
+
+const ENTITLEMENTS = {
+  pro:   { maxWorkflows: PRO_MAX_WORKFLOWS, allowedTiers: ['basic'] },
+  scale: { maxWorkflows: Infinity,          allowedTiers: ['basic', 'advanced'] },
+  none:  { maxWorkflows: 0,                 allowedTiers: [] },
+};
+
+// Map a stored agency plan onto the workflow tier. Keep every known plan label
+// here so the mapping is explicit and auditable. Anything unrecognized falls to
+// 'none' (no access) rather than silently granting a tier.
+function mapPlanToTier(plan) {
+  const p = String(plan || '').toLowerCase();
+  // Top tier(s) -> scale (unlimited + advanced nodes)
+  if (['scale', 'growth', 'enterprise', 'agency_pro', 'unlimited'].includes(p)) return 'scale';
+  // Mid tier(s) -> pro (capped + basic only)
+  if (['pro', 'professional', 'starter', 'growth_lite'].includes(p)) return 'pro';
+  return 'none';
+}
+
+function getEntitlements(plan) {
+  return ENTITLEMENTS[mapPlanToTier(plan)] || ENTITLEMENTS.none;
+}
+
+// Does this plan permit every node type used in the graph? Returns
+// { ok, blockedTypes } so the caller can tell the agency exactly what to
+// upgrade for.
+function graphWithinPlan(graph, plan) {
+  const ent = getEntitlements(plan);
+  const nodes = (graph && graph.nodes) || [];
+  const blocked = [];
+  for (const n of nodes) {
+    if (!ent.allowedTiers.includes(nodeTier(n.type))) blocked.push(n.type);
+  }
+  return { ok: blocked.length === 0, blockedTypes: [...new Set(blocked)] };
+}
+
+// ---------------------------------------------------------------------------
+// Token rendering
+// ---------------------------------------------------------------------------
+// Messages and condition values may reference {{token}} fields. Only these are
+// resolvable; an unknown token renders empty (never leaks a raw {{...}} to a
+// customer). Values are pulled from the merged run record the engine builds
+// (context + contact + client).
+const TOKEN_FIELDS = [
+  'customer_name',   // the caller's name
+  'first_name',      // first word of customer_name
+  'business_name',   // the client business
+  'service',         // service_requested
+  'agent_name',      // owner_name of the business
+  'appointment_time',
+  'city',            // business_city
+  'caller_phone',
+];
+
+function firstName(name) {
+  if (!name) return '';
+  return String(name).trim().split(/\s+/)[0] || '';
+}
+
+// Build the flat field map the tokens resolve against, from the pieces the
+// engine already has in hand. Missing pieces just yield empty tokens.
+function buildTokenMap({ context = {}, contact = {}, client = {} } = {}) {
+  const customerName = context.customer_name || contact.name || '';
+  return {
+    customer_name: customerName,
+    first_name: firstName(customerName),
+    business_name: client.business_name || '',
+    service: context.service_requested || context.service || '',
+    agent_name: client.owner_name || '',
+    appointment_time: context.appointment_time || '',
+    city: client.business_city || '',
+    caller_phone: context.caller_phone || contact.phone || '',
+  };
+}
+
+// Replace {{token}} with its value. Whitelisted only; unknown -> ''. Tolerates
+// surrounding whitespace inside the braces.
+function renderTemplate(str, tokenMap) {
+  if (!str) return '';
+  return String(str).replace(/\{\{\s*([a-z_]+)\s*\}\}/gi, (_, key) => {
+    const k = String(key).toLowerCase();
+    if (!TOKEN_FIELDS.includes(k)) return '';
+    const v = tokenMap[k];
+    return v == null ? '' : String(v);
+  });
+}
+
+module.exports = {
+  NODE_TYPES,
+  TOKEN_FIELDS,
+  isKnownNodeType,
+  nodeTier,
+  getEntitlements,
+  mapPlanToTier,
+  graphWithinPlan,
+  buildTokenMap,
+  renderTemplate,
+  firstName,
+};

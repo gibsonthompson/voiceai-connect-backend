@@ -175,6 +175,15 @@ async function attemptDelivery(delivery, hook) {
 async function dispatchWebhook(agencyId, eventType, data) {
   try {
     if (!agencyId || !EVENT_TYPES.includes(eventType)) return;
+
+    // Internal fan-out to the workflow engine. Runs regardless of whether the
+    // agency has any external webhooks registered. Non-blocking and fully
+    // isolated: a workflow error must never affect webhook delivery or the
+    // event source. Lazy require avoids any load-order coupling.
+    try {
+      require('./workflow-triggers').onEvent(agencyId, eventType, data).catch(() => {});
+    } catch (e) { /* workflow engine not available: ignore */ }
+
     const { data: hooks } = await supabase
       .from('agency_webhooks').select('*')
       .eq('agency_id', agencyId).eq('status', 'active');

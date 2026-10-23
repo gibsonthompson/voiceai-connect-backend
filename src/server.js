@@ -241,6 +241,7 @@ const abandonedCheckoutCleanupRoutes = require('./routes/abandoned-checkout-clea
 const manualUsageResetRoutes = require('./routes/manual-usage-reset');
 const activationSmsRoutes = require('./routes/activation-sms');
 const onboardingEmailRoutes = require('./routes/onboarding-emails');
+const workflowsCronRoutes = require('./routes/workflows-cron');
 const feedbackRoutes = require('./routes/feedback');
 const supportRoutes = require('./routes/support');
 const helpRoutes = require('./routes/help');
@@ -2207,6 +2208,7 @@ app.use('/api/cron', abandonedCartRoutes);
 // /api/cron/agency-onboarding-sms, delete that job, the route no longer exists.
 app.use('/api/cron', activationSmsRoutes);
 app.use('/api/cron', onboardingEmailRoutes);
+app.use('/api/cron', workflowsCronRoutes);
 
 app.use('/api/cron', cleanupOrphanedTestClients);
 app.use('/api/cron', expireTestClients);
