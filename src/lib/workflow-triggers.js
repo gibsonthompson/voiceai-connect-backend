@@ -165,13 +165,24 @@ async function onEvent(agencyId, eventType, data) {
   try {
     if (!agencyId || !HANDLED_EVENTS.includes(eventType)) return;
 
-    const { data: workflows } = await supabase
-      .from('workflows').select('*')
-      .eq('agency_id', agencyId).eq('status', 'active').eq('trigger_type', eventType);
-    if (!workflows || workflows.length === 0) return;
-
+    // Resolve the event first so we know which client (business) it belongs to.
     const resolved = await resolveEvent(eventType, data);
     if (!resolved || !resolved.clientId || !resolved.contactPhone) return;
+
+    // Active workflows for this agency + trigger that are either agency-wide
+    // (client_id null) OR scoped to THIS client.
+    const { data: matched } = await supabase
+      .from('workflows').select('*')
+      .eq('agency_id', agencyId).eq('status', 'active').eq('trigger_type', eventType)
+      .or(`client_id.is.null,client_id.eq.${resolved.clientId}`);
+    if (!matched || matched.length === 0) return;
+
+    // Override rule: if this business has its own workflow(s) for this trigger,
+    // run only those; the agency-wide defaults are skipped for this business so
+    // nobody gets double-texted.
+    const clientScoped = matched.filter((w) => w.client_id === resolved.clientId);
+    const workflows = clientScoped.length ? clientScoped : matched.filter((w) => !w.client_id);
+    if (workflows.length === 0) return;
 
     const contact = await resolveContact(
       agencyId, resolved.clientId, resolved.contactId, resolved.contactPhone, resolved.contactName,
