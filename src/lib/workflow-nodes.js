@@ -109,7 +109,7 @@ function graphWithinPlan(graph, plan) {
 // customer). Values are pulled from the merged run record the engine builds
 // (context + contact + client).
 const TOKEN_FIELDS = [
-  'customer_name',   // the caller's name
+  'customer_name',   // the caller's name (or the business owner, for account events)
   'first_name',      // first word of customer_name
   'business_name',   // the client business
   'service',         // service_requested
@@ -117,6 +117,9 @@ const TOKEN_FIELDS = [
   'appointment_time',
   'city',            // business_city
   'caller_phone',
+  'plan',            // account events: the client's plan
+  'amount',          // account events: amount due / charged
+  'reason',          // account events: failure/cancel reason
 ];
 
 function firstName(name) {
@@ -137,6 +140,9 @@ function buildTokenMap({ context = {}, contact = {}, client = {} } = {}) {
     appointment_time: context.appointment_time || '',
     city: client.business_city || '',
     caller_phone: context.caller_phone || contact.phone || '',
+    plan: context.plan || '',
+    amount: context.amount != null ? String(context.amount) : '',
+    reason: context.reason || '',
   };
 }
 

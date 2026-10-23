@@ -128,6 +128,7 @@ const { releaseBYOTNumber } = require('./byot');
 const { getSmsTemplate } = require('../lib/sms-templates');
 const { updateClientBillingQuantity } = require('../lib/usage-tracker');
 const { getPlan, getAgencyPlans } = require('../lib/plans');
+const { dispatchWebhook } = require('../lib/webhooks');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
@@ -2559,6 +2560,7 @@ async function releaseClientResources(client) {
 // agency billing quantity. Idempotent: a second call finds the fields already
 // nulled and simply no-ops the release. reason is for logging only.
 async function cancelClientAndRelease(client, reason) {
+  try { if (client && client.agency_id) { const r = dispatchWebhook(client.agency_id, 'client.canceled', { client_id: client.id, reason }); if (r && r.catch) r.catch(() => {}); } } catch (e) {}
   const release = await releaseClientResources(client);
 
   const { error } = await supabase.from('clients').update({

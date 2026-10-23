@@ -20,6 +20,14 @@ function _logSMS(params) {
   catch { return sendTelnyxSMS(params.phone, params.message); }
 }
 
+// Fire a workflow-engine lifecycle event (non-blocking) so agencies can build
+// automations on account/billing events (payment failed, canceled, etc.).
+function _emitLifecycle(agencyId, eventType, data) {
+  if (!agencyId) return;
+  try { const r = require('./webhooks').dispatchWebhook(agencyId, eventType, data); if (r && r.catch) r.catch(() => {}); }
+  catch (e) { /* engine not available */ }
+}
+
 const REFERRAL_SOURCE_LABELS = {
   'google_search': 'Google Search', 'ai_recommendation': 'AI (ChatGPT/Claude)',
   'linkedin': 'LinkedIn', 'twitter': 'Twitter/X', 'facebook_instagram': 'Facebook/IG',
@@ -316,6 +324,7 @@ async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency) {
 }
 
 async function sendClientTrialExpiredSMS(client, agency) {
+  _emitLifecycle(agency?.id || client.agency_id, 'client.trial_expired', { client_id: client.id });
   const brandName = agency?.name || 'AI Receptionist';
   let upgradeUrl = agency?.marketing_domain && agency?.domain_verified ? `${agency.marketing_domain}/client/upgrade` : agency?.slug ? `${agency.slug}.myvoiceaiconnect.com/client/upgrade` : `myvoiceaiconnect.com/client/upgrade`;
   const message = `⚠️ ${brandName} Trial Ended\n\nHi ${client.owner_name || client.business_name}, your 7-day trial has ended.\n\nYour AI receptionist is no longer answering calls.\n\nReactivate now: ${upgradeUrl}`;
@@ -324,6 +333,7 @@ async function sendClientTrialExpiredSMS(client, agency) {
 }
 
 async function sendClientPaymentFailedSMS(client, agency) {
+  _emitLifecycle(agency?.id || client.agency_id, 'client.payment_failed', { client_id: client.id });
   const brandName = agency?.name || 'AI Receptionist';
   const message = `🚨 ${brandName} Payment Failed\n\nHi ${client.owner_name || client.business_name}, your payment failed.\n\nUpdate your payment method to keep your AI receptionist active.`;
   // From the agency's warm demo number (see sendWelcomeSMS), platform fallback.
@@ -331,6 +341,7 @@ async function sendClientPaymentFailedSMS(client, agency) {
 }
 
 async function sendClientSubscriptionActivatedSMS(client, agency, plan) {
+  _emitLifecycle(agency?.id || client.agency_id, 'client.subscription_activated', { client_id: client.id, plan });
   const brandName = agency?.name || 'AI Receptionist';
   const who = client.owner_name || client.business_name;
   const planName = plan || 'Starter';

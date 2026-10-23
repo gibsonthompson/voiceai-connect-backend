@@ -163,6 +163,69 @@ const TEMPLATES = {
       ],
     },
   },
+
+  // -------------------------------------------------------------------------
+  // ACCOUNT / BILLING automations. The subject is the BUSINESS, so a Send SMS
+  // here texts the business OWNER, not a customer. These run on your own
+  // billing/lifecycle events, not on calls.
+  // -------------------------------------------------------------------------
+  payment_failed_dunning: {
+    key: 'payment_failed_dunning',
+    name: 'Payment failed follow-up',
+    description: "Texts the business owner when their payment fails, then reminds them a few days later if it's still unpaid.",
+    tier: 'basic',
+    subject: 'account',
+    trigger_type: 'client.payment_failed',
+    trigger_config: {},
+    stop_on: {},
+    entry_rules: { reenroll: true, cooldown_hours: 24 },
+    graph: {
+      nodes: [
+        { id: 'trigger', type: 'trigger', data: {} },
+        { id: 's1', type: 'send_sms', data: {
+          respect_quiet_hours: false,
+          message: "Hi {{first_name}}, your payment for {{business_name}} didn't go through. Please update your payment method to keep your AI receptionist active.",
+        } },
+        { id: 'w1', type: 'wait', data: { minutes: 4320 } },
+        { id: 's2', type: 'send_sms', data: {
+          message: "Hi {{first_name}}, just a reminder that your {{business_name}} payment is still failing. Update your card to avoid any interruption to your receptionist.",
+        } },
+        { id: 'done', type: 'end', data: {} },
+      ],
+      edges: [
+        { source: 'trigger', target: 's1' },
+        { source: 's1', target: 'w1' },
+        { source: 'w1', target: 's2' },
+        { source: 's2', target: 'done' },
+      ],
+    },
+  },
+
+  client_winback: {
+    key: 'client_winback',
+    name: 'Win back a canceled client',
+    description: 'Texts the business owner when they cancel, inviting them to come back.',
+    tier: 'basic',
+    subject: 'account',
+    trigger_type: 'client.canceled',
+    trigger_config: {},
+    stop_on: {},
+    entry_rules: { reenroll: true, cooldown_hours: 0 },
+    graph: {
+      nodes: [
+        { id: 'trigger', type: 'trigger', data: {} },
+        { id: 's1', type: 'send_sms', data: {
+          respect_quiet_hours: false,
+          message: "Sorry to see {{business_name}} go, {{first_name}}. If you change your mind, just reply here and we'll get your AI receptionist back up and running.",
+        } },
+        { id: 'done', type: 'end', data: {} },
+      ],
+      edges: [
+        { source: 'trigger', target: 's1' },
+        { source: 's1', target: 'done' },
+      ],
+    },
+  },
 };
 
 function getTemplate(key) {
@@ -171,7 +234,7 @@ function getTemplate(key) {
 
 function listTemplates() {
   return Object.values(TEMPLATES).map((t) => ({
-    key: t.key, name: t.name, description: t.description, tier: t.tier, trigger_type: t.trigger_type,
+    key: t.key, name: t.name, description: t.description, tier: t.tier, trigger_type: t.trigger_type, subject: t.subject || 'customer',
   }));
 }
 

@@ -27,6 +27,12 @@ const EVENT_TYPES = [
   'appointment.booked',
   'client.provisioned',
   'client.provisioning_failed',
+  // Account / billing lifecycle events (the automation subject is the business
+  // itself, not a caller). Fired from notifications.js and stripe-connect.js.
+  'client.payment_failed',
+  'client.subscription_activated',
+  'client.trial_expired',
+  'client.canceled',
 ];
 
 // Retry backoff by attempt number, in minutes. max_attempts defaults to 6.

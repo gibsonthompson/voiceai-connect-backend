@@ -20,7 +20,11 @@ const { supabase } = require('./supabase');
 const { enroll } = require('./workflow-engine');
 const { samePhone } = require('./workflow-engine');
 
-const HANDLED_EVENTS = ['call.completed', 'appointment.booked'];
+// Account / billing lifecycle events: the automation subject is the business
+// itself (sends go to the owner), not a caller. These make the engine a general
+// "when X happens to a client, do anything" platform, not just call follow-ups.
+const ACCOUNT_EVENTS = ['client.payment_failed', 'client.subscription_activated', 'client.trial_expired', 'client.canceled'];
+const HANDLED_EVENTS = ['call.completed', 'appointment.booked', ...ACCOUNT_EVENTS];
 
 function phoneKey(p) {
   const d = String(p || '').replace(/\D/g, '');
@@ -78,6 +82,36 @@ async function resolveEvent(eventType, data) {
         appointment_time: data.appointment_time || data.time || data.start || null,
         service_requested: data.service || data.service_requested || null,
         caller_phone: contactPhone,
+      },
+    };
+  }
+
+  // Account / billing lifecycle events. Subject = the business; the "contact
+  // phone" is the business owner's number, so a Send SMS here texts the owner.
+  if (ACCOUNT_EVENTS.includes(eventType)) {
+    const clientId = data.client_id || data.clientId || null;
+    if (!clientId) return null;
+    const { data: client } = await supabase.from('clients')
+      .select('id, business_name, owner_name, owner_phone, notification_phone, plan_type, agency_id')
+      .eq('id', clientId).single();
+    if (!client) return null;
+    const ownerPhone = client.notification_phone || client.owner_phone || null;
+    return {
+      accountLevel: true,
+      clientId,
+      contactId: null,
+      contactName: client.owner_name || null,
+      contactPhone: ownerPhone,
+      idemExtra: data.invoice_id || data.reason || '',
+      context: {
+        event: eventType,
+        business_name: client.business_name || null,
+        owner_name: client.owner_name || null,
+        customer_name: client.owner_name || null, // so {{first_name}} resolves to the owner
+        plan: client.plan_type || null,
+        reason: data.reason || null,
+        amount: data.amount_due || data.amount || null,
+        invoice_id: data.invoice_id || null,
       },
     };
   }
@@ -184,28 +218,30 @@ async function onEvent(agencyId, eventType, data) {
     const workflows = clientScoped.length ? clientScoped : matched.filter((w) => !w.client_id);
     if (workflows.length === 0) return;
 
-    const contact = await resolveContact(
-      agencyId, resolved.clientId, resolved.contactId, resolved.contactPhone, resolved.contactName,
-    );
-    if (!contact) return;
+    // Call/appointment events resolve a caller contact; account events have no
+    // contact (the subject is the business, sends go to the owner).
+    const contact = resolved.accountLevel
+      ? null
+      : await resolveContact(agencyId, resolved.clientId, resolved.contactId, resolved.contactPhone, resolved.contactName);
+    if (!resolved.accountLevel && !contact) return;
 
     for (const wf of workflows) {
       try {
         if (!passesConfig(wf.trigger_config, resolved.context)) continue;
-        if (await blockedByReentry(wf, contact.id)) continue;
+        if (await blockedByReentry(wf, contact ? contact.id : null)) continue;
 
         const { versionId, graph } = await resolveLiveGraph(wf);
         if (!graph || !(graph.nodes || []).length) continue;
 
-        const idemBasis = resolved.callId || resolved.context.appointment_time || '';
-        const idempotencyKey = `${wf.id}:${eventType}:${idemBasis}:${phoneKey(resolved.contactPhone)}`;
+        const idemBasis = resolved.callId || resolved.context.appointment_time || resolved.idemExtra || '';
+        const idempotencyKey = `${wf.id}:${eventType}:${resolved.clientId || ''}:${idemBasis}:${phoneKey(resolved.contactPhone)}`;
 
         await enroll({
           workflowId: wf.id,
           versionId,
           agencyId,
           clientId: resolved.clientId,
-          contactId: contact.id,
+          contactId: contact ? contact.id : null,
           contactPhone: resolved.contactPhone,
           triggerEvent: eventType,
           triggerCallId: resolved.callId || null,
