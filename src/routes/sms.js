@@ -819,6 +819,28 @@ module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(re
       return res.status(200).json({ received: true, help: true });
     }
 
+    // ── Personal finance: bank-alert SMS -> HQ transactions ──────────────────
+    // A dedicated number (HQ_FINANCE_SMS_NUMBER) receives Gibson's bank/card text
+    // alerts. These are not client conversations, so handle and return BEFORE any
+    // receptionist routing. Fully isolated and best-effort: the branch only fires
+    // for that exact number, any failure is swallowed, and it always 200s so
+    // Telnyx does not retry-storm. The receptionist path is never reached here.
+    const FINANCE_SMS_NUMBER = normalizePhone(process.env.HQ_FINANCE_SMS_NUMBER || '');
+    if (FINANCE_SMS_NUMBER && clientPhone === FINANCE_SMS_NUMBER) {
+      try {
+        const finance = require('../lib/finance-ingest');
+        await finance.ingestBankSms({
+          text: messageText,
+          from: callerPhone,
+          to: clientPhone,
+          telnyxMessageId: payload.id || null,
+        });
+      } catch (err) {
+        console.error('❌ finance SMS ingest failed (non-blocking):', err.message);
+      }
+      return res.status(200).json({ received: true, finance: true });
+    }
+
     // Reply to the PLATFORM number (activation/engagement SMS to agency owners).
     // Not a client conversation: capture for the admin inbox and ping the owner.
     if (isPlatformSmsNumber(clientPhone)) {

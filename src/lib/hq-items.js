@@ -342,6 +342,38 @@ function fuzzyScore(query, text) {
   return (hits / Math.max(a.size, 1)) * 0.8;
 }
 
+// transaction (txn). Finance-tracker rows, written from a parsed bank-alert SMS
+// (source 'sms') or added by hand in the app (source 'manual'). amount is always
+// positive; `direction` ('out' spent | 'in' received) carries the sign. `business`
+// is a venture name or '' (personal/none). `id` can be supplied so a retried
+// webhook upserts the same row instead of creating a duplicate charge.
+function buildTxn({
+  amount, direction = 'out', merchant = '', category = 'Other', account = '',
+  business = '', type = 'personal', postedDate = null, note = '', raw = '',
+  source = 'sms', confidence = null, id = null,
+} = {}) {
+  const ts = Date.now();
+  const data = {
+    id: id || mid(),
+    amount: Math.round((Number(amount) || 0) * 100) / 100,
+    direction: direction === 'in' ? 'in' : 'out',
+    merchant: String(merchant || '').trim(),
+    category: String(category || 'Other').trim(),
+    account: String(account || '').trim(),
+    business: String(business || ''),
+    type: /bus/i.test(String(type)) ? 'business' : 'personal',
+    postedDate: postedDate || null,
+    note: String(note || ''),
+    raw: String(raw || ''),
+    source: source === 'manual' ? 'manual' : 'sms',
+    confidence: confidence == null ? null : Number(confidence),
+    del: false,
+    ts,
+    mtime: ts,
+  };
+  return toRow('txn', data, null);
+}
+
 module.exports = {
   SHS,
   SHE,
@@ -350,6 +382,7 @@ module.exports = {
   SEEDED_VENTURES,
   mid,
   toRow,
+  buildTxn,
   buildMover,
   buildEvent,
   buildReminder,
