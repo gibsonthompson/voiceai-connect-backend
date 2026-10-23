@@ -226,6 +226,58 @@ const TEMPLATES = {
       ],
     },
   },
+
+  new_client_welcome: {
+    key: 'new_client_welcome',
+    name: 'New client welcome',
+    description: 'Texts the business owner the moment their subscription activates, so they feel taken care of from day one.',
+    tier: 'basic',
+    subject: 'account',
+    trigger_type: 'client.subscription_activated',
+    trigger_config: {},
+    stop_on: {},
+    entry_rules: { reenroll: false, cooldown_hours: 0 },
+    graph: {
+      nodes: [
+        { id: 'trigger', type: 'trigger', data: {} },
+        { id: 's1', type: 'send_sms', data: {
+          respect_quiet_hours: false,
+          message: "Welcome aboard, {{first_name}}! Your AI receptionist for {{business_name}} is live and answering calls. Reply here anytime you need a hand.",
+        } },
+        { id: 'done', type: 'end', data: {} },
+      ],
+      edges: [
+        { source: 'trigger', target: 's1' },
+        { source: 's1', target: 'done' },
+      ],
+    },
+  },
+
+  trial_ending_upsell: {
+    key: 'trial_ending_upsell',
+    name: 'Trial ended upsell',
+    description: 'Texts the business owner when their trial ends, nudging them to upgrade before they lose the receptionist.',
+    tier: 'basic',
+    subject: 'account',
+    trigger_type: 'client.trial_expired',
+    trigger_config: {},
+    stop_on: {},
+    entry_rules: { reenroll: false, cooldown_hours: 0 },
+    graph: {
+      nodes: [
+        { id: 'trigger', type: 'trigger', data: {} },
+        { id: 's1', type: 'send_sms', data: {
+          respect_quiet_hours: false,
+          message: "Hi {{first_name}}, your {{business_name}} trial just ended, so your AI receptionist has paused. Upgrade to switch it back on. Reply here and I'll help you get set up.",
+        } },
+        { id: 'done', type: 'end', data: {} },
+      ],
+      edges: [
+        { source: 'trigger', target: 's1' },
+        { source: 's1', target: 'done' },
+      ],
+    },
+  },
 };
 
 function getTemplate(key) {
