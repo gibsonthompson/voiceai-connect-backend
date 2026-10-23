@@ -201,6 +201,7 @@ const { handleAgencySignup, handleAgencyOnboarding } = require('./routes/agency-
 const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySettings, analyzeLogoBranding, verifyAgencyDomain, connectPaystack, disconnectPaystack, connectFlutterwave, disconnectFlutterwave, getAgencyLegal, updateAgencyLegal } = require('./routes/agency-settings');
 const demoPhoneRoutes = require('./routes/demo-phone');
 const customIndustriesRoutes = require('./routes/custom-industries');
+const workflowRoutes = require('./routes/workflows');
 const referralRoutes = require('./routes/referrals');
 
 let domainRoutes;
@@ -1819,6 +1820,7 @@ app.get('/api/domain-test', (req, res) => {
 setupProcessErrorHandlers();
 app.use('/api/agency', demoPhoneRoutes);
 app.use('/api/agency', customIndustriesRoutes);
+app.use('/api/agency', workflowRoutes);
 // Discount codes (Pro/Scale): agencies create codes their clients redeem at checkout.
 app.use('/api/agency', require('./routes/discount-codes'));
 // Call-center wallboard: live calls across all of a call-center agency's businesses.

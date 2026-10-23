@@ -11,12 +11,14 @@
 // Gating decision (locked): Pro gets a capped number of active workflows and
 // basic node types only; Scale gets unlimited workflows and every node type.
 //
-// NOTE ON PLAN NAMES: the normalized tier is 'pro' or 'scale'. mapPlanToTier()
-// below maps the stored agency plan onto that. The exact source plan strings
-// must line up with getEffectivePlan() before the Phase 1 UI enforces gating;
-// Phase 0 (headless, seeded test workflow) does not enforce, so this is the
-// forward-prep surface, intentionally in one spot.
+// PLAN NAMES (confirmed against the live data): the agency tier resolved by
+// getEffectivePlan() is one of 'free' | 'pro' | 'scale' (trials and a comped
+// access_plan already resolve to 'scale' there). So 'scale' -> full, 'pro' ->
+// capped + basic, everything else -> no access. entitlementsForAgency(agency)
+// runs an agency through getEffectivePlan and returns its entitlement.
 // ============================================================================
+
+const { getEffectivePlan } = require('./plan-access');
 
 // Every node type, with the plan tier that may use it.
 const NODE_TYPES = {
@@ -66,20 +68,24 @@ const ENTITLEMENTS = {
   none:  { maxWorkflows: 0,                 allowedTiers: [] },
 };
 
-// Map a stored agency plan onto the workflow tier. Keep every known plan label
-// here so the mapping is explicit and auditable. Anything unrecognized falls to
-// 'none' (no access) rather than silently granting a tier.
+// Map the effective agency plan (from getEffectivePlan) onto the workflow tier.
+// The live agency tiers are exactly free / pro / scale; anything unrecognized
+// falls to 'none' (no access) rather than silently granting a tier.
 function mapPlanToTier(plan) {
   const p = String(plan || '').toLowerCase();
-  // Top tier(s) -> scale (unlimited + advanced nodes)
-  if (['scale', 'growth', 'enterprise', 'agency_pro', 'unlimited'].includes(p)) return 'scale';
-  // Mid tier(s) -> pro (capped + basic only)
-  if (['pro', 'professional', 'starter', 'growth_lite'].includes(p)) return 'pro';
-  return 'none';
+  if (p === 'scale') return 'scale'; // unlimited + advanced nodes
+  if (p === 'pro') return 'pro';     // capped count + basic nodes only
+  return 'none';                     // free / anything else: no workflow access
 }
 
 function getEntitlements(plan) {
   return ENTITLEMENTS[mapPlanToTier(plan)] || ENTITLEMENTS.none;
+}
+
+// Resolve an agency row straight to its entitlement, honoring trials and a
+// comped access_plan (both surface through getEffectivePlan as 'scale').
+function entitlementsForAgency(agency) {
+  return getEntitlements(getEffectivePlan(agency));
 }
 
 // Does this plan permit every node type used in the graph? Returns
@@ -152,6 +158,7 @@ module.exports = {
   isKnownNodeType,
   nodeTier,
   getEntitlements,
+  entitlementsForAgency,
   mapPlanToTier,
   graphWithinPlan,
   buildTokenMap,
