@@ -558,6 +558,15 @@ async function enableSMSForNumber(phoneNumber) {
 
     if (!campaignRes.ok) {
       const err = await campaignRes.text();
+      // The number is usually ALREADY on the campaign here because provisioning
+      // (assignNumberForSMS in lib/vapi.js) assigns it first. Telnyx then returns
+      // a duplicate error, which is expected and harmless, not a failure. Treat
+      // the already-assigned case as success so it stops logging a misleading
+      // warning on every signup (matches the graceful handling in assignNumberForSMS).
+      if (campaignRes.status === 409 || /already/i.test(err)) {
+        console.log(`ℹ️ SMS 10DLC campaign already assigned: ${normalized}`);
+        return { success: true };
+      }
       console.warn(`⚠️ SMS 10DLC campaign assignment failed for ${normalized}:`, err);
       // Profile was assigned, number can still receive inbound, just might get filtered on outbound
       return { success: true, reason: 'campaign_failed', error: err };

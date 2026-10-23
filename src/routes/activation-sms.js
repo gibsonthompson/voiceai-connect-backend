@@ -24,7 +24,7 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
-const { formatPhoneE164 } = require('../lib/notifications');
+const { formatPhoneE164, agencyHasByotCreds } = require('../lib/notifications');
 const { sendAndLogSMS } = require('../lib/sms-logger');
 const { getSmsTemplate } = require('../lib/sms-templates');
 
@@ -318,7 +318,7 @@ router.post('/activation-sms', async (req, res) => {
     }
 
     console.log(`📋 Found ${agencies.length} agencies to check for activation SMS`);
-    let sent = 0, skipped = 0, quietHeld = 0, callCenters = 0;
+    let sent = 0, skipped = 0, quietHeld = 0, callCenters = 0, intlNoTransport = 0;
     const results = [];
 
     for (const agency of agencies) {
@@ -333,6 +333,18 @@ router.post('/activation-sms', async (req, res) => {
       // (do NOT advance) so it goes out on the next daytime run instead of at
       // night. This is the fix for texts landing at 11pm / 1:30am.
       if (!withinQuietWindow(agency)) { quietHeld++; skipped++; continue; }
+
+      // International reachability. The platform SMS sender is a US Telnyx 10DLC
+      // number that cannot deliver to non-NANP destinations (e.g. +44 UK, which
+      // hard-fails with "Alpha sender not configured"). Those agencies are only
+      // reachable over their own Twilio (BYOT). Without BYOT, skip and HOLD the
+      // step (do NOT advance) so the drip resumes automatically if they connect
+      // Twilio later, instead of silently burning steps on sends that cannot land.
+      // US and Canada (+1 / NANP) are unaffected and keep sending over Telnyx.
+      const intlPhone = formatPhoneE164(agency.phone, agency.country || 'US');
+      if (intlPhone && !intlPhone.startsWith('+1') && !agencyHasByotCreds(agency)) {
+        intlNoTransport++; skipped++; continue;
+      }
 
       const result = await getNextEligibleStep(agency);
       if (!result) { skipped++; continue; }
@@ -388,8 +400,8 @@ router.post('/activation-sms', async (req, res) => {
       }
     }
 
-    console.log(`🚀 Activation SMS complete: ${sent} sent, ${skipped} skipped (${quietHeld} held for quiet hours, ${callCenters} call centers) out of ${agencies.length}`);
-    res.json({ success: true, processed: agencies.length, sent, skipped, quietHeld, callCenters, results });
+    console.log(`🚀 Activation SMS complete: ${sent} sent, ${skipped} skipped (${quietHeld} held for quiet hours, ${callCenters} call centers, ${intlNoTransport} international without Twilio) out of ${agencies.length}`);
+    res.json({ success: true, processed: agencies.length, sent, skipped, quietHeld, callCenters, intlNoTransport, results });
   } catch (error) {
     console.error('❌ Activation SMS cron error:', error);
     res.status(500).json({ error: 'Cron job failed', message: error.message });
