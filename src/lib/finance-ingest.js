@@ -39,12 +39,31 @@ function idFromMessage(telnyxMessageId, text) {
   return 'txn_' + Date.now().toString(36) + h.toString(36);
 }
 
+// Optional map of alert sender -> friendly bank/account name, so a bare short
+// code ("24273") shows as "Chase" and terse alerts get the right account.
+// Set env HQ_BANK_SENDERS as JSON, e.g. {"24273":"Chase","434340":"Wells Fargo"}.
+// Keys are matched against the raw sender with and without a leading '+'.
+function bankSenderMap() {
+  try { return JSON.parse(process.env.HQ_BANK_SENDERS || '{}') || {}; } catch (e) { return {}; }
+}
+function lookupSenderBank(from) {
+  if (!from) return '';
+  const map = bankSenderMap();
+  const raw = String(from);
+  return map[raw] || map[raw.replace(/^\+/, '')] || map[raw.replace(/\D/g, '')] || '';
+}
+
 async function ingestBankSms({ text, from, to, telnyxMessageId } = {}) {
-  const parsed = await parseBankSms(text, { today: etToday(), businesses: SEEDED_VENTURES });
+  const sender = from ? String(from).trim() : '';
+  const senderBank = lookupSenderBank(sender);
+  const parsed = await parseBankSms(text, { today: etToday(), businesses: SEEDED_VENTURES, sender, senderBank });
   if (!parsed || !parsed.isTransaction) {
-    console.log('💸 finance: not a transaction alert, ignored', parsed && parsed.error ? `(${parsed.error})` : '');
+    console.log('💸 finance: not a transaction alert, ignored', parsed && parsed.error ? `(${parsed.error})` : '', sender ? `[from ${sender}]` : '');
     return { ok: true, skipped: true, reason: 'not-a-transaction' };
   }
+
+  // Account label: what the parser read from the text, else the mapped bank name.
+  const account = parsed.account || senderBank || '';
 
   const row = buildTxn({
     id: idFromMessage(telnyxMessageId, text),
@@ -52,7 +71,8 @@ async function ingestBankSms({ text, from, to, telnyxMessageId } = {}) {
     direction: parsed.direction,
     merchant: parsed.merchant,
     category: parsed.category,
-    account: parsed.account,
+    account: account,
+    sender: sender,
     business: parsed.business,
     type: parsed.type,
     postedDate: parsed.postedDate,

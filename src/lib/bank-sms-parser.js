@@ -43,7 +43,10 @@ function buildSystemPrompt(ctx) {
   const businesses = (ctx.businesses && ctx.businesses.length)
     ? ctx.businesses.join(', ')
     : 'VoiceAI Connect, ScopeBook, Southern Peach, Splash Restoration, GTC, Blog Farm, JB Lawn';
-  return `You read a single bank or credit-card text alert and return ONE transaction as strict JSON. Today is ${today}.
+  const senderLine = ctx.senderBank
+    ? `\nThis alert came from ${ctx.senderBank}. If the text itself does not name the bank or card, use "${ctx.senderBank}" as the account.`
+    : (ctx.sender ? `\nThis alert came from the sender code "${ctx.sender}" (a bank short code). If the text names the bank or card, prefer that for the account; otherwise leave account "".` : '');
+  return `You read a single bank or credit-card text alert and return ONE transaction as strict JSON. Today is ${today}.${senderLine}
 
 Return ONLY a JSON object, no prose, no code fences.
 

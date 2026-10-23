@@ -350,7 +350,7 @@ function fuzzyScore(query, text) {
 function buildTxn({
   amount, direction = 'out', merchant = '', category = 'Other', account = '',
   business = '', type = 'personal', postedDate = null, note = '', raw = '',
-  source = 'sms', confidence = null, id = null,
+  source = 'sms', confidence = null, id = null, sender = '',
 } = {}) {
   const ts = Date.now();
   const data = {
@@ -360,6 +360,7 @@ function buildTxn({
     merchant: String(merchant || '').trim(),
     category: String(category || 'Other').trim(),
     account: String(account || '').trim(),
+    sender: String(sender || '').trim(),   // raw alert sender (short code / number), for display + bank mapping
     business: String(business || ''),
     type: /bus/i.test(String(type)) ? 'business' : 'personal',
     postedDate: postedDate || null,

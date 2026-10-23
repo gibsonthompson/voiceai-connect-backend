@@ -831,7 +831,9 @@ module.exports.handleTelnyxSMSWebhook = async function handleTelnyxSMSWebhook(re
         const finance = require('../lib/finance-ingest');
         await finance.ingestBankSms({
           text: messageText,
-          from: callerPhone,
+          // raw sender preserves a bank short code / alphanumeric id (e.g. "24273",
+          // "WELLSFARGO"); normalizePhone would mangle a short code.
+          from: (payload.from && payload.from.phone_number) || callerPhone,
           to: clientPhone,
           telnyxMessageId: payload.id || null,
         });
