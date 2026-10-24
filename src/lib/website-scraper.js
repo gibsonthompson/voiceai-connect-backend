@@ -222,6 +222,18 @@ function classifyUrl(url, baseUrl) {
 // never crashes the whole scrape (which previously made it return zero
 // suggestions, e.g. "0 services, 0 faqs").
 // ============================================================================
+// Strip characters that can make the Anthropic request invalid (C0/C1 control
+// chars, unpaired surrogates) out of scraped page text before extraction. Real
+// sites routinely include these, and they can make the API reject the whole
+// request with a 400 before any content is even read.
+function sanitizeForLLM(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, ' ')
+    .replace(/[\uD800-\uDFFF]/g, '')
+    .replace(/\uFFFD/g, '');
+}
+
 function parseJsonLoose(raw) {
   if (raw == null) return null;
   let t = String(raw).trim().replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
@@ -247,7 +259,7 @@ async function extractStructuredData(allContent, businessName, industry) {
 Extract the following structured information. Return ONLY valid JSON, no markdown, no backticks.
 
 Content to analyze (may be from multiple pages):
-${allContent.substring(0, 40000)}
+${sanitizeForLLM(allContent).substring(0, 40000)}
 
 Return this JSON structure. Use null for any field you cannot find:
 {
@@ -298,7 +310,8 @@ For "faqs": pull real question-and-answer pairs the site actually states (FAQ/he
     });
 
     if (!response.ok) {
-      console.warn(`⚠️ Claude extraction failed: ${response.status}`);
+      const body = await response.text().catch(() => '');
+      console.warn(`⚠️ Claude extraction failed: ${response.status} ${body.slice(0, 400)}`);
       return null;
     }
 
@@ -329,7 +342,7 @@ Pull EVERY distinct question-and-answer pair the content actually states, across
 { "faqs": [{ "question": "the question as a caller would ask it", "answer": "concise answer" }] }
 
 Content to analyze (may be several FAQ pages):
-${faqContent.substring(0, 50000)}`;
+${sanitizeForLLM(faqContent).substring(0, 50000)}`;
 
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -346,7 +359,11 @@ ${faqContent.substring(0, 50000)}`;
         messages: [{ role: "user", content: prompt }, { role: "assistant", content: "{" }]
       })
     });
-    if (!response.ok) { console.warn(`⚠️ Focused FAQ extraction failed: ${response.status}`); return []; }
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      console.warn(`⚠️ Focused FAQ extraction failed: ${response.status} ${body.slice(0, 400)}`);
+      return [];
+    }
     const data = await response.json();
     const parsed = parseJsonLoose('{' + (data.content?.[0]?.text ?? ''));
     return (parsed && Array.isArray(parsed.faqs)) ? parsed.faqs.filter(f => f && f.question && f.answer) : [];
