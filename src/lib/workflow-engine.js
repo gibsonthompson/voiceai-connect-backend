@@ -330,7 +330,7 @@ async function advanceEnrollment(enrOrId) {
   let client = null; let contact = null;
   if (enr.client_id) {
     const { data } = await supabase.from('clients')
-      .select('id, business_name, owner_name, business_city, timezone, knowledge_base_content, knowledge_base_data')
+      .select('id, business_name, owner_name, owner_phone, notification_phone, business_city, timezone, knowledge_base_content, knowledge_base_data')
       .eq('id', enr.client_id).single();
     client = data || null;
   }
@@ -463,7 +463,7 @@ async function executeNode(node, env) {
     case 'notify_owner': {
       // Text the business owner (not the customer). Best effort.
       const message = renderTemplate(data.message || 'A workflow was triggered.', tokenMap);
-      const ownerPhone = (contact && null) || (client && client.owner_phone) || null;
+      const ownerPhone = (client && (client.notification_phone || client.owner_phone)) || null;
       let detail = { sent: false, reason: 'no_owner_path' };
       if (ownerPhone) {
         try {
