@@ -39,7 +39,7 @@ const { supabase } = require('../lib/supabase');
 
 // Best-effort logging of marketing FAQ-bot conversations (see widget_chat_log).
 // Never blocks or fails the chat/escalation response.
-async function logWidgetChat(sessionId, role, content, origin = {}, at = null) {
+async function logWidgetChat(sessionId, role, content, origin = {}) {
   try {
     if (!sessionId || typeof sessionId !== 'string') return;
     if (!content || typeof content !== 'string' || !content.trim()) return;
@@ -47,11 +47,6 @@ async function logWidgetChat(sessionId, role, content, origin = {}, at = null) {
       session_id: sessionId.slice(0, 100),
       role,
       content: content.trim().slice(0, 8000),
-      // Explicit timestamp so the user question and the bot answer never collide
-      // on created_at. Every thread view sorts by created_at ascending, and
-      // without a distinct stamp a racing insert could sort the answer above the
-      // question. Caller passes the question's time and the answer's time + a gap.
-      ...(at ? { created_at: at } : {}),
     };
     // Record WHERE the chat came from so the admin inbox can tell a marketing
     // prospect from a logged-in agency/client, and so questions can be triaged
@@ -116,7 +111,7 @@ You are on the PUBLIC VoiceAI Connect marketing website, talking to a PROSPECT w
 For "how do I edit my website" and similar: explain that every VoiceAI Connect agency gets its own white-label marketing website that is auto-generated and fully hosted for them, and that after signing up they control it entirely from their dashboard (logo, colors, content, pricing, demo phone line, and a custom domain). There is nothing to hand-code or host themselves. Keep it benefit-oriented and inviting, and offer to point them to start a free trial or talk to the team for specifics.`,
   agency: `
 === WHO YOU ARE TALKING TO ===
-You are inside the dashboard of a logged-in AGENCY owner. Give concrete, accurate in-dashboard directions (which page or tab to open) from the knowledge base. Assume they have the full agency toolset: clients, their white-label marketing website editor, branding, billing, leads, and outreach.`,
+You are inside the dashboard of a logged-in AGENCY owner. Give concrete, accurate in-dashboard directions (which page or tab to open). Assume they have the full agency toolset: clients, their white-label marketing website editor, branding, billing, leads, and outreach.`,
   client: `
 === WHO YOU ARE TALKING TO ===
 You are inside the dashboard of an END CLIENT: a local business using an agency's AI receptionist. They do NOT have agency features, a marketing website, pricing controls, or billing. Only help with their own dashboard: their calls, recordings, messages, greeting and knowledge, and their own settings. If they ask about anything agency-level (a marketing website, pricing, adding clients, white-label), explain that their provider manages that and they should reach out to them.`,
@@ -132,7 +127,9 @@ const PLATFORM_NUMBER = process.env.TELNYX_SMS_FROM_NUMBER || process.env.TELNYX
 
 // -- Knowledge Base Context (embedded for AI) ------------------------
 const KB_CONTEXT = `
-You are the VoiceAI Connect support assistant. Answer questions about the platform accurately and helpfully using ONLY the information below. If a question isn't covered, say you don't have that information and suggest the user contact support.
+You are the VoiceAI Connect support assistant. Answer questions about the platform accurately and helpfully, using only what you actually know about VoiceAI Connect from the details below. Never invent features, steps, or pricing.
+
+Never mention a "knowledge base", "documentation", or "the information provided", and never say something "isn't documented" - that sounds robotic. If you are not sure about something, or it is not covered here, just say plainly that you are not totally sure, then point them to the team: they can tap "Contact Support" in this help widget to send a message straight to the team (it lands in their inbox and someone replies there), or email support@myvoiceaiconnect.com. Keep it warm and human, like a helpful teammate.
 
 Be concise - keep answers under 3-4 sentences unless the question requires more detail. Use a friendly, professional tone. Never make up features or pricing that aren't listed below.
 
@@ -233,6 +230,7 @@ LEAD FINDER (Pro/Scale):
 - Indeed: search by job title to find businesses hiring receptionists.
 - Fit scores (0-100): 70+ Hot, 50-69 Warm, 30-49 Cool.
 - Save leads to CRM pipeline, CSV import/export.
+- Delete leads: on the Leads page, tap "Manage" in the top right. In there you can search and filter by industry, status, source, or when a lead was added, tick the ones you want (or Select all), and delete them in bulk. Each row also has its own trash icon for a single delete. You can export the selected or filtered leads to CSV from that same Manage panel.
 
 OUTREACH (Pro/Scale):
 - 13 templates: 6 email, 3 SMS, 4 cold call scripts.
@@ -376,12 +374,9 @@ router.post('/chat', async (req, res) => {
     // check runs before the log inserts below, never seeing its own rows.
     await notifyHelpChat({ sessionId, aud, agencyId: origin.agencyId, message: message.trim() });
 
-    // Log the exchange with its origin. Awaited IN ORDER and stamped with a
-    // 1-second gap so the question always sorts before the answer (standard
-    // iMessage order), never inverted by a timestamp collision.
-    const askedAt = Date.now();
-    await logWidgetChat(sessionId, 'user', message.trim(), origin, new Date(askedAt).toISOString());
-    await logWidgetChat(sessionId, 'assistant', assistantResponse, origin, new Date(askedAt + 1000).toISOString());
+    // Log the exchange with its origin (fire-and-forget, non-blocking).
+    logWidgetChat(sessionId, 'user', message.trim(), origin);
+    logWidgetChat(sessionId, 'assistant', assistantResponse, origin);
   } catch (err) {
     console.error('Support chat error:', err);
     res.status(500).json({ error: 'Failed to process message' });
@@ -528,14 +523,11 @@ router.post('/message', async (req, res) => {
     if (SUPPORT_PHONE) {
       try {
         const whoLabel = isProspect ? 'Prospect' : (userType === 'client' ? 'Client' : 'Agency');
-        // Include the actual message so it can be read and triaged straight from
-        // the text, not just a "go look in the dashboard" heads-up.
-        const _preview = (cleanMessage || composed || '').trim().slice(0, 500);
+        // No preview; just a heads-up to go handle it in the admin dashboard.
         const smsBody = [
           isProspect ? '📞 New callback request' : '🆘 New support request',
           `${whoLabel}: ${displayName}`,
-          _preview ? `"${_preview}"` : '(No message typed.)',
-          'Reply in your admin inbox.',
+          'Check your admin dashboard to view and reply.',
         ].join('\n');
 
         await sendAndLogSMS({

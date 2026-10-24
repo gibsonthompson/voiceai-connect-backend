@@ -24,6 +24,21 @@ function norm(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// Safety net against the scrape mislabeling a marketing claim, offer, guarantee,
+// discount, or financing line as a "service" (the model is told not to, but this
+// also cleans older data on a re-scrape). A real service is a short name for a
+// job the business would show up and perform, not a policy or a sentence.
+const NON_SERVICE_RE = /\b(free (?:estimates?|consultations?|quotes?)|price[\s-]?match|flat[\s-]?rate|upfront pricing|transparent pricing|\bpricing\b|no overtime|no hidden|hidden fees?|satisfaction|money[\s-]?back|guarantee[ds]?|warrant(?:y|ies)|discounts?|financ(?:e|ing)|wisetack|affirm|synchrony|coupons?|promo(?:tion)?s?|special offers?|%\s?off|licensed (?:and|&) insured|fully insured|family[\s-]?owned|locally[\s-]?owned|veteran[\s-]?owned|\bbbb\b)\b/i;
+
+function looksLikeService(name) {
+  const s = String(name || '').trim();
+  if (!s) return false;
+  if (s.split(/\s+/).length > 8) return false;             // a sentence/claim, not a service name
+  if (/\b(?:if|when)\b.*\b(?:you|your)\b/i.test(s)) return false; // "...if you find a lower quote"
+  if (NON_SERVICE_RE.test(s)) return false;                // marketing / policy / offer / financing
+  return true;
+}
+
 // True when two names are the same or clearly overlapping, so we do not suggest
 // something the client already has.
 function isSimilar(a, b) {
@@ -48,6 +63,7 @@ function buildServiceSuggestions(structuredData, existingNames) {
   const add = (name, price) => {
     const clean = String(name || '').trim();
     if (!clean || clean.length > 80) return;
+    if (!looksLikeService(clean)) return; // drop marketing claims, offers, policies, financing
     const key = norm(clean);
     if (!key) return;
     const prev = byKey.get(key);

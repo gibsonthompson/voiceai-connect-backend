@@ -213,53 +213,13 @@ function classifyUrl(url, baseUrl) {
 // ============================================================================
 // STRUCTURED DATA EXTRACTION — Use Claude to pull business details
 // ============================================================================
-// ============================================================================
-// ROBUST JSON PARSE for LLM extraction responses
-// The extraction calls force JSON with an assistant prefill of "{", but a model
-// can still wrap output in prose or markdown, or stop mid-object on the token
-// budget. This strips fences, then falls back to slicing from the first opening
-// brace/bracket to the last matching close, so a stray "The content..." preface
-// never crashes the whole scrape (which previously made it return zero
-// suggestions, e.g. "0 services, 0 faqs").
-// ============================================================================
-// Strip characters that can make the Anthropic request invalid (C0/C1 control
-// chars, unpaired surrogates) out of scraped page text before extraction. Real
-// sites routinely include these, and they can make the API reject the whole
-// request with a 400 before any content is even read.
-function sanitizeForLLM(str) {
-  if (!str) return '';
-  return String(str)
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, ' ')
-    .replace(/[\uD800-\uDFFF]/g, '')
-    .replace(/\uFFFD/g, '');
-}
-
-function parseJsonLoose(raw) {
-  if (raw == null) return null;
-  let t = String(raw).trim().replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
-  try { return JSON.parse(t); } catch {}
-  const firstObj = t.indexOf('{');
-  const firstArr = t.indexOf('[');
-  let start = -1;
-  if (firstObj === -1) start = firstArr;
-  else if (firstArr === -1) start = firstObj;
-  else start = Math.min(firstObj, firstArr);
-  if (start === -1) return null;
-  const close = t[start] === '{' ? '}' : ']';
-  const end = t.lastIndexOf(close);
-  if (end > start) {
-    try { return JSON.parse(t.slice(start, end + 1)); } catch {}
-  }
-  return null;
-}
-
 async function extractStructuredData(allContent, businessName, industry) {
   const prompt = `You are analyzing scraped website content for a ${industry} business called "${businessName}".
 
 Extract the following structured information. Return ONLY valid JSON, no markdown, no backticks.
 
 Content to analyze (may be from multiple pages):
-${sanitizeForLLM(allContent).substring(0, 40000)}
+${allContent.substring(0, 40000)}
 
 Return this JSON structure. Use null for any field you cannot find:
 {
@@ -277,8 +237,8 @@ Return this JSON structure. Use null for any field you cannot find:
     "saturday": "9:00 AM - 2:00 PM or null",
     "sunday": "Closed or null"
   },
-  "services": ["array of services offered — be specific, include all found"],
-  "pricing": ["array of pricing info found, e.g. 'Oil Change: $39.99', 'Consultation: Free'"],
+  "services": ["array of actual services the business performs that a caller could request or book, as short service names (e.g. 'Drain Cleaning', 'Emergency Plumbing'). Follow the services rules below — do NOT include offers, guarantees, discounts, financing, or pricing claims."],
+  "pricing": ["array of ONLY concrete priced items as 'Name: $Amount' (e.g. 'Oil Change: $39.99', 'Service Call: $89'). Never list a pricing policy or claim here. Follow the services rules below."],
   "team_members": ["array of staff names and titles, e.g. 'Dr. Smith - General Dentist'"],
   "service_areas": ["array of cities/areas served"],
   "insurance_accepted": ["array of insurance providers if mentioned"],
@@ -290,6 +250,8 @@ Return this JSON structure. Use null for any field you cannot find:
 }
 
 For the address: find the business's real FULL STREET address. It is usually in the page footer, a contact or locations page, or embedded map / structured data (schema.org LocalBusiness JSON-LD), not the body copy. It MUST include a street number plus street name, and ideally city, state and ZIP, exactly as written (e.g. "123 Main St, Burlington, VT 05401"). "primary_address" is the single main location you would text a caller asking "where are you?"; "addresses" lists every full street address found. CRITICAL: a neighborhood, district, "downtown Burlington", "Greater Boston area", a city on its own, or a service-area phrase is NOT an address. If the site shows only a general area and no actual street address, set primary_address to null and leave addresses empty. Never invent or approximate an address.
+
+For "services" and "pricing": list ONLY actual services the business performs — the jobs or treatments a caller would phone in to request or book (e.g. "Drain Cleaning", "Hydro Jetting", "Leak Detection", "Teeth Whitening", "Brake Repair"). Each is a short service name, not a sentence. Do NOT list marketing claims, offers, guarantees, policies, or financing as services. Specifically EXCLUDE: free estimates or free consultations, "flat-rate"/"upfront"/"transparent" pricing claims, "no overtime charges", price-match guarantees, satisfaction or workmanship guarantees and warranties, senior/military/first-responder discounts, coupons, promotions or special offers, financing options (e.g. "financing available", "Wisetack", "Affirm"), "licensed and insured", "family owned", "locally owned", a stand-alone "24/7 availability" claim, awards, review or BBB mentions, and years in business. Those belong in key_differentiators, not services. For "pricing", include an item only when a real price is attached to a specific service ("Name: $Amount"); never list a pricing policy or a general claim. Test each candidate: "is this a job the business would show up and perform?" If not, leave it out of services.
 
 For "faqs": pull real question-and-answer pairs the site actually states (FAQ/help pages, or clear Q&A inline). Phrase each question the way a caller would ask it and keep answers short and factual. Include at most 8, the most useful for a phone receptionist. Return an empty array if the site has none. Do not invent FAQs.`;
 
@@ -310,16 +272,17 @@ For "faqs": pull real question-and-answer pairs the site actually states (FAQ/he
     });
 
     if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      console.warn(`⚠️ Claude extraction failed: ${response.status} ${body.slice(0, 400)}`);
+      console.warn(`⚠️ Claude extraction failed: ${response.status}`);
       return null;
     }
 
     const data = await response.json();
-    // Prepend the "{" assistant prefill so the continuation is complete JSON.
-    const parsed = parseJsonLoose(data.content?.[0]?.text ?? '');
-    if (!parsed) console.warn('⚠️ Structured extraction returned no parseable JSON');
-    return parsed;
+    let text = data.content[0].text.trim()
+      .replace(/```json\n?/g, "")
+      .replace(/```\n?/g, "")
+      .trim();
+
+    return JSON.parse(text);
   } catch (error) {
     console.error('❌ Structured extraction failed:', error.message);
     return null;
@@ -342,7 +305,7 @@ Pull EVERY distinct question-and-answer pair the content actually states, across
 { "faqs": [{ "question": "the question as a caller would ask it", "answer": "concise answer" }] }
 
 Content to analyze (may be several FAQ pages):
-${sanitizeForLLM(faqContent).substring(0, 50000)}`;
+${faqContent.substring(0, 50000)}`;
 
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -359,14 +322,11 @@ ${sanitizeForLLM(faqContent).substring(0, 50000)}`;
         messages: [{ role: "user", content: prompt }]
       })
     });
-    if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      console.warn(`⚠️ Focused FAQ extraction failed: ${response.status} ${body.slice(0, 400)}`);
-      return [];
-    }
+    if (!response.ok) { console.warn(`⚠️ Focused FAQ extraction failed: ${response.status}`); return []; }
     const data = await response.json();
-    const parsed = parseJsonLoose(data.content?.[0]?.text ?? '');
-    return (parsed && Array.isArray(parsed.faqs)) ? parsed.faqs.filter(f => f && f.question && f.answer) : [];
+    const text = data.content[0].text.trim().replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed.faqs) ? parsed.faqs.filter(f => f && f.question && f.answer) : [];
   } catch (e) {
     console.warn('⚠️ Focused FAQ extraction error:', e.message);
     return [];
