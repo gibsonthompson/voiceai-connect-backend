@@ -236,6 +236,9 @@ function publicAgencyShape(agency) {
     client_trial_days: agency.client_trial_days,
     subscription_status: agency.subscription_status,
     marketing_site_enabled: agency.marketing_site_enabled !== false,
+    // Whether the client signup/plan page shows the discount-code input.
+    // Default true (shown) so existing agencies are unchanged.
+    show_client_discount_code: agency.show_client_discount_code !== false,
 
     // Plans as data (resolved: array if present, else synthesized from columns)
     plans: getAgencyPlans(agency),
@@ -797,6 +800,8 @@ async function updateAgencySettings(req, res) {
       // needs no dedicated endpoint. Validated below against
       // VALID_CLIENT_BILLING_MODES.
       'client_billing_mode',
+      // Show/hide the discount-code input on the client signup page.
+      'show_client_discount_code',
       // Phase 3 - white-label plan customization
       'plan_starter_name', 'plan_pro_name', 'plan_growth_name',
       'plan_starter_description', 'plan_pro_description', 'plan_growth_description',
@@ -895,6 +900,7 @@ async function updateAgencySettings(req, res) {
     if (updates.hide_client_billing !== undefined) updates.hide_client_billing = updates.hide_client_billing === true;
     if (updates.show_client_call_usage !== undefined) updates.show_client_call_usage = updates.show_client_call_usage === true;
     if (updates.show_client_subscription !== undefined) updates.show_client_subscription = updates.show_client_subscription === true;
+    if (updates.show_client_discount_code !== undefined) updates.show_client_discount_code = updates.show_client_discount_code === true;
     if (updates.signup_logo_align !== undefined && !['left', 'center', 'right'].includes(updates.signup_logo_align)) {
       updates.signup_logo_align = 'left';
     }
