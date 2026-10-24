@@ -1136,7 +1136,7 @@ async function handleAssistantRequest(req, res, message) {
     if (!LIVE_CLIENT_STATUSES.includes(client.subscription_status))
       return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
     if (client.subscription_status === 'trial' && isTrialExpired(client.trial_ends_at)) {
-      await supabase.from('clients').update({ subscription_status: 'trial_expired', status: 'suspended' }).eq('id', client.id);
+      await supabase.from('clients').update({ subscription_status: 'trial_expired', status: 'expired' }).eq('id', client.id);
       return res.status(200).json(buildDisconnectedAssistantConfig(client.business_name));
     }
     // Manual access window expired: a manual client given a free window
@@ -1148,7 +1148,7 @@ async function handleAssistantRequest(req, res, message) {
     // permanent manual client has trial_ends_at=null, so isTrialExpired(null)
     // is false and it is never suspended here.
     if (client.subscription_status === 'manual' && isTrialExpired(client.trial_ends_at)) {
-      await supabase.from('clients').update({ subscription_status: 'manual_suspended', status: 'suspended' }).eq('id', client.id);
+      await supabase.from('clients').update({ subscription_status: 'manual_suspended', status: 'expired' }).eq('id', client.id);
       // Drop the just-suspended client out of the agency's per-client platform
       // charge now (fire-and-forget). The cron sweep handles windows that expire
       // without a call; this covers the lazy path where a call lands first, so
@@ -1525,7 +1525,7 @@ async function handleVapiWebhook(req, res) {
     }
     if (client.subscription_status === 'trial' && isTrialExpired(client.trial_ends_at)) {
       console.log(`🚫 BLOCKED at client-trial-expired gate: trial_ends_at=${client.trial_ends_at}`);
-      await supabase.from('clients').update({ subscription_status: 'trial_expired', status: 'suspended' }).eq('id', client.id);
+      await supabase.from('clients').update({ subscription_status: 'trial_expired', status: 'expired' }).eq('id', client.id);
       return res.status(200).json({ received: true, blocked: true, reason: 'Trial expired' });
     }
     // Manual access window expired (see handleAssistantRequest). Suspend WITHOUT
@@ -1535,7 +1535,7 @@ async function handleVapiWebhook(req, res) {
     // caught here.
     if (client.subscription_status === 'manual' && isTrialExpired(client.trial_ends_at)) {
       console.log(`🚫 BLOCKED at manual-window-expired gate: trial_ends_at=${client.trial_ends_at}`);
-      await supabase.from('clients').update({ subscription_status: 'manual_suspended', status: 'suspended' }).eq('id', client.id);
+      await supabase.from('clients').update({ subscription_status: 'manual_suspended', status: 'expired' }).eq('id', client.id);
       // Fire-and-forget: drop this client from the agency's per-client platform
       // charge now, so a call-triggered suspension doesn't lag billing (see the
       // assistant-request gate for the full note).

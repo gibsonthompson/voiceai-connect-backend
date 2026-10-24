@@ -376,7 +376,7 @@ async function releaseAgencyClientNumbers(agencyId) {
       .from('clients')
       .update({
         subscription_status: 'agency_canceled',
-        status: 'suspended',
+        status: 'cancelled',
         vapi_phone_id: null,
         vapi_phone_number: null,
         phone_number: null,

@@ -122,7 +122,7 @@ router.post('/cancel', async (req, res) => {
       await supabase
         .from('clients')
         .update({ 
-          status: 'suspended',
+          status: 'cancelled',
           subscription_status: 'agency_canceled'
         })
         .eq('agency_id', agency_id);

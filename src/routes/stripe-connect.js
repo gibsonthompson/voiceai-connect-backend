@@ -3436,7 +3436,7 @@ async function suspendExpiredManualTrials({ dryRun = false, limit = 100 } = {}) 
       .from('clients')
       .update({
         subscription_status: 'manual_suspended',
-        status: 'suspended',
+        status: 'expired',
         updated_at: new Date().toISOString(),
       })
       .eq('id', c.id)
@@ -3564,7 +3564,7 @@ async function suspendManualClient(req, res) {
       .from('clients')
       .update({
         subscription_status: 'manual_suspended',
-        status: 'suspended',
+        status: 'expired',
         updated_at: new Date().toISOString(),
       })
       .eq('id', client.id);
@@ -3578,7 +3578,7 @@ async function suspendManualClient(req, res) {
     // Drop the suspended client out of the agency's per-client platform charge.
     // Non-blocking.
     try { await updateClientBillingQuantity(client.agency_id); } catch (e) { console.warn('⚠️ Billing quantity update failed:', e.message); }
-    return res.json({ success: true, suspended: true, subscription_status: 'manual_suspended', status: 'suspended' });
+    return res.json({ success: true, suspended: true, subscription_status: 'manual_suspended', status: 'expired' });
   } catch (error) {
     console.error('❌ Suspend manual client error:', error);
     return res.status(500).json({ error: 'Failed to suspend client' });
