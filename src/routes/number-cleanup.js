@@ -506,6 +506,10 @@ async function buildLiveAllowlist() {
   const platform = [
     process.env.TELNYX_SMS_FROM_NUMBER,
     process.env.PLATFORM_OWNER_PHONE,
+    // HQ finance line: receives Gibson's bank text alerts. It is a platform
+    // number with NO client row, so without allowlisting it the carrier-truth
+    // sweep would treat it as an orphan and release it. Never sweep it.
+    process.env.HQ_FINANCE_SMS_NUMBER,
     ...(process.env.NUMBER_CLEANUP_ALLOWLIST || '').split(','),
   ];
   for (const p of platform) {
