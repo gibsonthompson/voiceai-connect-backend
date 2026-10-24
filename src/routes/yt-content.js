@@ -374,7 +374,7 @@ router.put('/ideas/:id', async (req, res) => {
     const updates = req.body;
 
     // Only allow updating specific fields
-    const allowed = ['title', 'hook', 'talking_points', 'script', 'target_length', 'recording_mode', 'status', 'notes', 'pillar'];
+    const allowed = ['title', 'hook', 'talking_points', 'script', 'target_length', 'recording_mode', 'status', 'notes', 'pillar', 'posted_at', 'caption'];
     const filtered = {};
     for (const key of allowed) {
       if (updates[key] !== undefined) filtered[key] = updates[key];
