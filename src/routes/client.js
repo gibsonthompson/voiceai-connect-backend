@@ -72,7 +72,7 @@ const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
-const { requirePermissionIfAuthed } = require('./auth');
+const { requirePermissionIfAuthed, requireClientAccess } = require('./auth');
 const { isSimilar, norm, existingFaqQuestions } = require('../lib/scrape-suggestions');
 
 function decodeToken(req) {
@@ -142,7 +142,7 @@ router.get('/:id', async (req, res) => {
     // 404 (which the client/preview reads as "Failed to load client data"). So try
     // the full select, and if it errors, log the real reason and retry without the
     // billing columns so the dashboard still loads.
-    const AGENCY_CORE = 'id, name, slug, primary_color, secondary_color, accent_color, logo_url, support_email, support_phone, website_theme, client_header_mode, display_font, body_font, is_call_center, price_starter, price_pro, price_growth, limit_starter, limit_pro, limit_growth, plan_starter_name, plan_pro_name, plan_growth_name, plan_features, plans, allow_client_branding, hide_client_billing, show_client_call_usage, show_client_subscription, marketing_domain, domain_verified';
+    const AGENCY_CORE = 'id, name, slug, primary_color, secondary_color, accent_color, logo_url, support_email, support_phone, website_theme, client_header_mode, display_font, body_font, is_call_center, price_starter, price_pro, price_growth, limit_starter, limit_pro, limit_growth, plan_starter_name, plan_pro_name, plan_growth_name, plan_features, plans, allow_client_branding, hide_client_billing, show_client_call_usage, show_client_subscription, marketing_domain, domain_verified, show_lower_plans_on_upgrade, allow_client_cancel, plan_badge_1, plan_badge_2, plan_badge_3';
     const AGENCY_FULL = `${AGENCY_CORE}, allow_client_plan_changes, paystack_currency, paystack_connected, flutterwave_currency, flutterwave_connected, stripe_charges_enabled`;
     let { data: client, error } = await supabase
       .from('clients')
@@ -993,6 +993,36 @@ router.get('/:id/kb-document', async (req, res) => {
   } catch (error) {
     console.error('Error fetching KB document:', error);
     res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+// ---- POST /:clientId/activate-number -------------------------------------
+// Global manual activation. A self-signup client is created with no number
+// (activation_pending=true); the owner clicks "Activate AI Number" in their
+// dashboard, which lands here and provisions KB + assistant + phone on demand.
+// requireClientAccess('settings') requires the authenticated owner (or the
+// managing agency); provisionClient's atomic claim makes a double-click safe.
+router.post('/:clientId/activate-number', requireClientAccess('settings'), async (req, res) => {
+  const { clientId } = req.params;
+  try {
+    const { activateClientNumber } = require('./client-signup');
+    const client = await activateClientNumber(clientId);
+    return res.json({
+      success: true,
+      client: {
+        id: client.id,
+        vapi_phone_number: client.vapi_phone_number || null,
+        status: client.status || 'active',
+        activation_pending: false,
+      },
+    });
+  } catch (err) {
+    console.error('❌ activate-number failed:', err?.message || err);
+    const code = (err?.code === 'PENDING_PAYMENT' || err?.code === 'NOT_ELIGIBLE') ? 400 : 503;
+    return res.status(code).json({
+      error: 'Activation failed',
+      message: err?.message || 'We could not activate your AI number right now. Please try again in a moment.',
+    });
   }
 });
 

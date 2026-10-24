@@ -198,6 +198,11 @@ function publicAgencyShape(agency) {
     signup_logo_align: agency.signup_logo_align || 'left',
     // Setup-fee timing: 'upfront' (charged at signup) | 'after_trial' (billed with first invoice).
     setup_fee_timing: agency.setup_fee_timing || 'upfront',
+    // Agency-configurable reassurance badges shown under the plan tiles on the
+    // client signup/plan page. null => the page falls back to its own default.
+    plan_badge_1: agency.plan_badge_1 ?? null,
+    plan_badge_2: agency.plan_badge_2 ?? null,
+    plan_badge_3: agency.plan_badge_3 ?? null,
 
     // Dashboard branding overrides (nav, bg, card, button colors)
     branding_overrides: agency.branding_overrides || null,
@@ -239,6 +244,16 @@ function publicAgencyShape(agency) {
     // Whether the client signup/plan page shows the discount-code input.
     // Default true (shown) so existing agencies are unchanged.
     show_client_discount_code: agency.show_client_discount_code !== false,
+    // Client upgrade page: show plans priced below the client's current plan.
+    // Default false (upgrade-only; lower plans hidden) so clients don't casually downgrade.
+    show_lower_plans_on_upgrade: agency.show_lower_plans_on_upgrade === true,
+    // Whether the client dashboard shows the cancel-subscription option.
+    // Default true (shown) so existing agencies are unchanged.
+    allow_client_cancel: agency.allow_client_cancel !== false,
+    // Agency-configurable reassurance badges under the plan tiles. null => app default.
+    plan_badge_1: agency.plan_badge_1 ?? null,
+    plan_badge_2: agency.plan_badge_2 ?? null,
+    plan_badge_3: agency.plan_badge_3 ?? null,
 
     // Plans as data (resolved: array if present, else synthesized from columns)
     plans: getAgencyPlans(agency),
@@ -802,6 +817,11 @@ async function updateAgencySettings(req, res) {
       'client_billing_mode',
       // Show/hide the discount-code input on the client signup page.
       'show_client_discount_code',
+      // Client upgrade page: show lower plans + agency-configurable plan badges,
+      // and whether clients can cancel from their dashboard.
+      'show_lower_plans_on_upgrade',
+      'allow_client_cancel',
+      'plan_badge_1', 'plan_badge_2', 'plan_badge_3',
       // Phase 3 - white-label plan customization
       'plan_starter_name', 'plan_pro_name', 'plan_growth_name',
       'plan_starter_description', 'plan_pro_description', 'plan_growth_description',
@@ -901,6 +921,11 @@ async function updateAgencySettings(req, res) {
     if (updates.show_client_call_usage !== undefined) updates.show_client_call_usage = updates.show_client_call_usage === true;
     if (updates.show_client_subscription !== undefined) updates.show_client_subscription = updates.show_client_subscription === true;
     if (updates.show_client_discount_code !== undefined) updates.show_client_discount_code = updates.show_client_discount_code === true;
+    if (updates.show_lower_plans_on_upgrade !== undefined) updates.show_lower_plans_on_upgrade = updates.show_lower_plans_on_upgrade === true;
+    if (updates.allow_client_cancel !== undefined) updates.allow_client_cancel = updates.allow_client_cancel === true;
+    for (const _bk of ['plan_badge_1', 'plan_badge_2', 'plan_badge_3']) {
+      if (updates[_bk] !== undefined) updates[_bk] = (updates[_bk] == null) ? null : String(updates[_bk]).slice(0, 40);
+    }
     if (updates.signup_logo_align !== undefined && !['left', 'center', 'right'].includes(updates.signup_logo_align)) {
       updates.signup_logo_align = 'left';
     }

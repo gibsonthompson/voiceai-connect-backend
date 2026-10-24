@@ -736,6 +736,14 @@ function checkBusinessHours(client) {
     return { isOpen: false, daySchedule: daySchedule || null, currentTime: null };
   }
 
+  // Open 24 hours: always open, never after-hours. Honors the explicit flag and
+  // the full-day sentinel (00:00-23:59 / 12:00 AM-11:59 PM) the editors store.
+  if (daySchedule.open24 ||
+      ((daySchedule.open === '00:00' || daySchedule.open === '12:00 AM') &&
+       (daySchedule.close === '23:59' || daySchedule.close === '11:59 PM'))) {
+    return { isOpen: true, daySchedule, currentTime: null };
+  }
+
   // Hours are saved in 12-hour form ("9:00 AM"); parse robustly (also 24-hour).
   const openMinutes = parseTimeToMinutes(daySchedule.open);
   const closeMinutes = parseTimeToMinutes(daySchedule.close);
@@ -846,7 +854,7 @@ function buildAfterHoursBlock(client, toolConfig) {
       const sched = client.business_hours[dayNames[checkIdx]];
       if (sched?.open && !sched.closed) {
         const dayLabel = offset === 1 ? 'tomorrow' : dayNames[checkIdx].charAt(0).toUpperCase() + dayNames[checkIdx].slice(1);
-        nextOpenInfo = `We open again ${dayLabel} at ${sched.open}.`;
+        nextOpenInfo = sched.open24 ? `We are open 24 hours ${dayLabel}.` : `We open again ${dayLabel} at ${sched.open}.`;
         break;
       }
     }
@@ -946,8 +954,6 @@ A transfer may not connect (no answer, voicemail, or a busy line). When that hap
 // spoken line.
 // ============================================================================
 function buildFirstMessage(businessName, industryKey, contact, isAfterHours, toolConfig, hipaaMode, customGreeting) {
-  const config = INDUSTRY_CONFIGS[industryKey] || INDUSTRY_CONFIGS['professional_services'];
-
   // Caller Recognition toggle (tool_config.callerRecognition, defaults on).
   // This is the single gate for greeting a returning caller by name. When the
   // toggle is off, knownName is null and no personalization happens anywhere
@@ -962,8 +968,6 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
     }
     return `Hello, you've reached ${businessName}. How can I help you today?`;
   }
-
-  const defaultMessage = config.firstMessage(businessName);
 
   if (isAfterHours && toolConfig.businessHoursRouting) {
     if (knownName) {
@@ -983,10 +987,15 @@ function buildFirstMessage(businessName, industryKey, contact, isAfterHours, too
   // No custom greeting set: a recognized returning caller still gets the
   // personalized welcome-back; a new caller gets the industry default.
   if (knownName) {
-    return `Hi ${knownName}, welcome back to ${businessName}! This call may be recorded. How can I help you today?`;
+    return `Hi ${knownName}, welcome back to ${businessName}! This call may be recorded. How can we help you today?`;
   }
 
-  return defaultMessage;
+  // Default greeting for a new caller with no custom greeting set. This is the
+  // single canonical default for ALL clients regardless of industry; the client
+  // overrides it in the greeting editor. Vertical personality and knowledge
+  // still come from the system prompt (INDUSTRY_CONFIGS), only the opening line
+  // is standardized here.
+  return `Hey, thanks for calling ${businessName}. This call may be recorded. How can we help you today?`;
 }
 
 // ============================================================================
@@ -1054,6 +1063,10 @@ function formatColumnHours(client) {
     const label = day.charAt(0).toUpperCase() + day.slice(1);
     if (!v || typeof v !== 'object' || v.closed === true || !v.open || !v.close) {
       lines.push(`${label}: Closed`);
+    } else if (v.open24 ||
+      ((v.open === '00:00' || v.open === '12:00 AM') && (v.close === '23:59' || v.close === '11:59 PM'))) {
+      anyOpen = true;
+      lines.push(`${label}: Open 24 hours`);
     } else {
       anyOpen = true;
       lines.push(`${label}: ${to12Hour(v.open)} - ${to12Hour(v.close)}`);

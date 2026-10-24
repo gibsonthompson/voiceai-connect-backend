@@ -2069,6 +2069,14 @@ async function cancelClientSubscription(req, res) {
     const agency = client.agencies;
     if (!agency) return res.status(404).json({ error: 'Agency not found' });
 
+    // Agency can disable client-initiated cancellation from the dashboard. This
+    // enforces the hidden UI button server-side: a client self-cancel is refused
+    // when the agency has allow_client_cancel = false. Agency/admin cancels and
+    // a client resuming a pending cancel are unaffected.
+    if (isOwnClient && resume !== true && agency.allow_client_cancel === false) {
+      return res.status(403).json({ error: 'client_cancel_disabled', message: `To cancel your subscription, please reach out to ${agency.name || 'your provider'}.` });
+    }
+
     // Record the cancellation and whatever reason the person typed, in one
     // place for every billing branch (Stripe, Paystack, Flutterwave, manual)
     // and for both client self-cancels and agency/admin cancels. Non-blocking:
