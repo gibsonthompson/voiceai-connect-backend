@@ -213,6 +213,34 @@ function classifyUrl(url, baseUrl) {
 // ============================================================================
 // STRUCTURED DATA EXTRACTION — Use Claude to pull business details
 // ============================================================================
+// ============================================================================
+// ROBUST JSON PARSE for LLM extraction responses
+// The extraction calls force JSON with an assistant prefill of "{", but a model
+// can still wrap output in prose or markdown, or stop mid-object on the token
+// budget. This strips fences, then falls back to slicing from the first opening
+// brace/bracket to the last matching close, so a stray "The content..." preface
+// never crashes the whole scrape (which previously made it return zero
+// suggestions, e.g. "0 services, 0 faqs").
+// ============================================================================
+function parseJsonLoose(raw) {
+  if (raw == null) return null;
+  let t = String(raw).trim().replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+  try { return JSON.parse(t); } catch {}
+  const firstObj = t.indexOf('{');
+  const firstArr = t.indexOf('[');
+  let start = -1;
+  if (firstObj === -1) start = firstArr;
+  else if (firstArr === -1) start = firstObj;
+  else start = Math.min(firstObj, firstArr);
+  if (start === -1) return null;
+  const close = t[start] === '{' ? '}' : ']';
+  const end = t.lastIndexOf(close);
+  if (end > start) {
+    try { return JSON.parse(t.slice(start, end + 1)); } catch {}
+  }
+  return null;
+}
+
 async function extractStructuredData(allContent, businessName, industry) {
   const prompt = `You are analyzing scraped website content for a ${industry} business called "${businessName}".
 
@@ -265,7 +293,7 @@ For "faqs": pull real question-and-answer pairs the site actually states (FAQ/he
         model: "claude-sonnet-4-6",
         max_tokens: 3000,
         temperature: 0.1,
-        messages: [{ role: "user", content: prompt }]
+        messages: [{ role: "user", content: prompt }, { role: "assistant", content: "{" }]
       })
     });
 
@@ -275,12 +303,10 @@ For "faqs": pull real question-and-answer pairs the site actually states (FAQ/he
     }
 
     const data = await response.json();
-    let text = data.content[0].text.trim()
-      .replace(/```json\n?/g, "")
-      .replace(/```\n?/g, "")
-      .trim();
-
-    return JSON.parse(text);
+    // Prepend the "{" assistant prefill so the continuation is complete JSON.
+    const parsed = parseJsonLoose('{' + (data.content?.[0]?.text ?? ''));
+    if (!parsed) console.warn('⚠️ Structured extraction returned no parseable JSON');
+    return parsed;
   } catch (error) {
     console.error('❌ Structured extraction failed:', error.message);
     return null;
@@ -317,14 +343,13 @@ ${faqContent.substring(0, 50000)}`;
         model: "claude-sonnet-4-6",
         max_tokens: 4000,
         temperature: 0.1,
-        messages: [{ role: "user", content: prompt }]
+        messages: [{ role: "user", content: prompt }, { role: "assistant", content: "{" }]
       })
     });
     if (!response.ok) { console.warn(`⚠️ Focused FAQ extraction failed: ${response.status}`); return []; }
     const data = await response.json();
-    const text = data.content[0].text.trim().replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-    const parsed = JSON.parse(text);
-    return Array.isArray(parsed.faqs) ? parsed.faqs.filter(f => f && f.question && f.answer) : [];
+    const parsed = parseJsonLoose('{' + (data.content?.[0]?.text ?? ''));
+    return (parsed && Array.isArray(parsed.faqs)) ? parsed.faqs.filter(f => f && f.question && f.answer) : [];
   } catch (e) {
     console.warn('⚠️ Focused FAQ extraction error:', e.message);
     return [];
