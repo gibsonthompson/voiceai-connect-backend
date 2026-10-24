@@ -183,7 +183,10 @@ router.post('/:agencyId/workflows', async (req, res) => {
       stopOn = t.stop_on || {}; entryRules = t.entry_rules || {}; templateKey = t.key;
       name = name || t.name; description = description || t.description;
     } else {
-      graph = body.graph || { nodes: [{ id: 'trigger', type: 'trigger', data: {} }], edges: [] };
+      graph = body.graph || {
+        nodes: [{ id: 'trigger', type: 'trigger', data: {} }, { id: 'end_0', type: 'end', data: {} }],
+        edges: [{ source: 'trigger', target: 'end_0' }],
+      };
       triggerType = body.trigger_type || 'call.completed';
       triggerConfig = body.trigger_config || {};
       stopOn = body.stop_on || {}; entryRules = body.entry_rules || { reenroll: false };
