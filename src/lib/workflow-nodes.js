@@ -37,6 +37,7 @@ const NODE_TYPES = {
 
   // Flow control
   wait:         { tier: 'basic',    label: 'Wait',               terminal: false },
+  reminder:     { tier: 'basic',    label: 'Appointment reminder', terminal: false }, // wait until relative to the appointment time
   condition:    { tier: 'basic',    label: 'If / Else',          terminal: false },
   branch_outcome:{ tier: 'advanced',label: 'Branch on outcome',  terminal: false },
 
@@ -127,6 +128,20 @@ function firstName(name) {
   return String(name).trim().split(/\s+/)[0] || '';
 }
 
+// Render an appointment time nicely in the business's timezone. An ISO datetime
+// (from the real booking) becomes "Tue, Oct 28 at 2:00 PM"; free text (an AI
+// transcript mention) is shown as-is.
+function formatApptTime(val, tz) {
+  if (!val) return '';
+  const ms = Date.parse(val);
+  if (!Number.isFinite(ms)) return String(val);
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: tz || 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    }).format(new Date(ms));
+  } catch (e) { return String(val); }
+}
+
 // Build the flat field map the tokens resolve against, from the pieces the
 // engine already has in hand. Missing pieces just yield empty tokens.
 function buildTokenMap({ context = {}, contact = {}, client = {} } = {}) {
@@ -137,7 +152,7 @@ function buildTokenMap({ context = {}, contact = {}, client = {} } = {}) {
     business_name: client.business_name || '',
     service: context.service_requested || context.service || '',
     agent_name: client.owner_name || '',
-    appointment_time: context.appointment_time || '',
+    appointment_time: formatApptTime(context.appointment_time, client.timezone),
     city: client.business_city || '',
     caller_phone: context.caller_phone || contact.phone || '',
     plan: context.plan || '',

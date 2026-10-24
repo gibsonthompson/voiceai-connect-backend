@@ -164,6 +164,41 @@ const TEMPLATES = {
     },
   },
 
+  appointment_reminder: {
+    key: 'appointment_reminder',
+    name: 'Appointment reminders',
+    description: 'Texts the customer a reminder the day before, then again a couple of hours before their appointment.',
+    tier: 'basic',
+    subject: 'customer',
+    trigger_type: 'appointment.booked',
+    trigger_config: {},
+    stop_on: {},
+    entry_rules: { reenroll: true, cooldown_hours: 0 },
+    graph: {
+      nodes: [
+        { id: 'trigger', type: 'trigger', data: {} },
+        { id: 'r1', type: 'reminder', data: { anchor: 'appointment_time', direction: 'before', amount: 1, unit: 'days' } },
+        { id: 's1', type: 'send_sms', data: {
+          respect_quiet_hours: false,
+          message: 'Reminder: your appointment with {{business_name}} is {{appointment_time}}. Reply here if you need to reschedule.',
+        } },
+        { id: 'r2', type: 'reminder', data: { anchor: 'appointment_time', direction: 'before', amount: 2, unit: 'hours' } },
+        { id: 's2', type: 'send_sms', data: {
+          respect_quiet_hours: false,
+          message: 'See you soon, {{first_name}}! Your {{business_name}} appointment is {{appointment_time}}.',
+        } },
+        { id: 'done', type: 'end', data: {} },
+      ],
+      edges: [
+        { source: 'trigger', target: 'r1' },
+        { source: 'r1', target: 's1' },
+        { source: 's1', target: 'r2' },
+        { source: 'r2', target: 's2' },
+        { source: 's2', target: 'done' },
+      ],
+    },
+  },
+
   // -------------------------------------------------------------------------
   // ACCOUNT / BILLING automations. The subject is the BUSINESS, so a Send SMS
   // here texts the business OWNER, not a customer. These run on your own

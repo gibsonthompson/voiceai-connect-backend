@@ -433,6 +433,23 @@ async function executeNode(node, env) {
       const minutes = Math.max(1, parseInt(data.minutes, 10) || 0);
       return { wait: true, runAt: new Date(Date.now() + minutes * 60000).toISOString(), nextNodeId: linearNext(graph, node.id) };
     }
+    case 'reminder': {
+      // Wait until a set time relative to a date in the run context (the real
+      // ISO appointment_time from the booking). "1 day before", "2 hours after".
+      const anchorVal = ctx[data.anchor || 'appointment_time'];
+      const anchorMs = anchorVal ? Date.parse(anchorVal) : NaN;
+      if (!Number.isFinite(anchorMs)) {
+        return { nextNodeId: linearNext(graph, node.id), detail: { skipped: 'no_anchor_time' } };
+      }
+      const unitMult = data.unit === 'days' ? 1440 : data.unit === 'hours' ? 60 : 1;
+      const offsetMin = (data.direction === 'after' ? 1 : -1) * Math.abs(parseInt(data.amount, 10) || 0) * unitMult;
+      const targetMs = anchorMs + offsetMin * 60000;
+      if (targetMs <= Date.now()) {
+        // Reminder time already passed (booked too close) -> continue now.
+        return { nextNodeId: linearNext(graph, node.id), detail: { fired_immediately: true } };
+      }
+      return { wait: true, runAt: new Date(targetMs).toISOString(), nextNodeId: linearNext(graph, node.id) };
+    }
     case 'send_sms': {
       const message = renderTemplate(data.message || '', tokenMap);
       const r = await doSendSms(enr, message);
