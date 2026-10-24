@@ -825,6 +825,43 @@ router.delete('/:agencyId/leads/:leadId', async (req, res) => {
 });
 
 // ============================================================================
+// POST /api/agency/:agencyId/leads/bulk-delete - delete many leads at once.
+// Body: { ids: string[] }. Protected by the router-prefix ownership guard
+// (requireAgencyAccess('leads')) AND scoped here with .eq('agency_id', ...),
+// so ids from another agency are silently ignored, never deleted. Capped to a
+// sane batch size. Returns how many actually belonged to this agency.
+// ============================================================================
+router.post('/:agencyId/leads/bulk-delete', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const ids = Array.isArray(req.body && req.body.ids)
+      ? req.body.ids.filter((x) => typeof x === 'string' && x)
+      : [];
+    if (!ids.length) return res.status(400).json({ error: 'No lead ids provided' });
+    if (ids.length > 2000) return res.status(400).json({ error: 'Too many leads in one request (max 2000)' });
+
+    const { data, error } = await supabase
+      .from('leads')
+      .delete()
+      .eq('agency_id', agencyId)
+      .in('id', ids)
+      .select('id');
+
+    if (error) {
+      console.error('Error bulk-deleting leads:', error);
+      return res.status(400).json({ error: error.message });
+    }
+
+    const deleted = (data || []).length;
+    console.log(`✅ Bulk-deleted ${deleted} lead(s) for agency ${agencyId}`);
+    res.json({ success: true, deleted });
+  } catch (error) {
+    console.error('Error bulk-deleting leads:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
 // PATCH /api/agency/:agencyId/leads/:leadId/status - Quick status update
 // ============================================================================
 router.patch('/:agencyId/leads/:leadId/status', async (req, res) => {
