@@ -265,7 +265,7 @@ router.post('/ideas/generate', async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════
 router.post('/ideas', async (req, res) => {
   try {
-    const { title, script, pillar, hook, target_length, recording_mode, talking_points } = req.body || {};
+    const { title, script, pillar, hook, target_length, recording_mode, talking_points, caption } = req.body || {};
     const cleanScript = typeof script === 'string' ? script.trim() : '';
     let cleanTitle = typeof title === 'string' ? title.trim().slice(0, 200) : '';
 
@@ -288,6 +288,7 @@ router.post('/ideas', async (req, res) => {
       target_length: (typeof target_length === 'string' && target_length) ? target_length : '20-30s',
       recording_mode: validModes.includes(recording_mode) ? recording_mode : 'telling_friend',
       script: cleanScript || null,
+      caption: (typeof caption === 'string' && caption.trim()) ? caption.trim() : null,
       status: cleanScript ? 'scripted' : 'idea',
     };
 
