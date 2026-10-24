@@ -305,7 +305,7 @@ For "faqs": pull real question-and-answer pairs the site actually states (FAQ/he
         model: "claude-sonnet-4-6",
         max_tokens: 3000,
         temperature: 0.1,
-        messages: [{ role: "user", content: prompt }, { role: "assistant", content: "{" }]
+        messages: [{ role: "user", content: prompt }]
       })
     });
 
@@ -317,7 +317,7 @@ For "faqs": pull real question-and-answer pairs the site actually states (FAQ/he
 
     const data = await response.json();
     // Prepend the "{" assistant prefill so the continuation is complete JSON.
-    const parsed = parseJsonLoose('{' + (data.content?.[0]?.text ?? ''));
+    const parsed = parseJsonLoose(data.content?.[0]?.text ?? '');
     if (!parsed) console.warn('⚠️ Structured extraction returned no parseable JSON');
     return parsed;
   } catch (error) {
@@ -356,7 +356,7 @@ ${sanitizeForLLM(faqContent).substring(0, 50000)}`;
         model: "claude-sonnet-4-6",
         max_tokens: 4000,
         temperature: 0.1,
-        messages: [{ role: "user", content: prompt }, { role: "assistant", content: "{" }]
+        messages: [{ role: "user", content: prompt }]
       })
     });
     if (!response.ok) {
@@ -365,7 +365,7 @@ ${sanitizeForLLM(faqContent).substring(0, 50000)}`;
       return [];
     }
     const data = await response.json();
-    const parsed = parseJsonLoose('{' + (data.content?.[0]?.text ?? ''));
+    const parsed = parseJsonLoose(data.content?.[0]?.text ?? '');
     return (parsed && Array.isArray(parsed.faqs)) ? parsed.faqs.filter(f => f && f.question && f.answer) : [];
   } catch (e) {
     console.warn('⚠️ Focused FAQ extraction error:', e.message);
