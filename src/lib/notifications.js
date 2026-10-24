@@ -312,7 +312,18 @@ async function sendCallNotificationSMS(client, agency, callData) {
 
 async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency) {
   const brandName = agency?.name || 'VoiceAI Connect';
-  const message = `Welcome to ${brandName}!\nYour AI receptionist for ${businessName} is ready.\nYour AI phone number: ${formatPhoneDisplay(aiPhoneNumber)}`;
+  const numberDisplay = formatPhoneDisplay(aiPhoneNumber);
+  // Never send the welcome before a real number has been bought. Without one
+  // there is nothing to announce and the body would otherwise print "null", so
+  // we skip it here and let the activation flow send this once the number is
+  // actually live. (Callers already defer to activation; this is a hard guard.)
+  if (!numberDisplay) {
+    console.warn(`⚠️ sendWelcomeSMS skipped for ${businessName}: no AI phone number provisioned yet`);
+    return { skipped: true, reason: 'no_number' };
+  }
+  // The AI number sits on its own line at the very bottom so it is easy to spot
+  // and tap from the text.
+  const message = `Welcome to ${brandName}!\nYour AI receptionist for ${businessName} is ready.\n\nYour AI phone number:\n${numberDisplay}`;
   // Send FROM the agency's demo number, not the client's brand-new AI number.
   // The demo number was SMS-provisioned (messaging profile + approved 10DLC
   // campaign) when the agency onboarded, so it is already carrier-propagated and
