@@ -582,6 +582,7 @@ function isBusinessOpenNow(businessHours, timezone) {
   const min = parseInt(parts.find((p) => p.type === 'minute')?.value || '0', 10);
   const day = businessHours[weekday];
   if (!day || day.closed === true || !day.open || !day.close) return false;
+  if (day.open24 === true) return true; // open all day (emergency/24h) => never suppress a dial
   const o = parseClockToMinutes(day.open), c = parseClockToMinutes(day.close);
   if (o == null || c == null) return true; // unparseable => fail open
   const cur = hr * 60 + min;
