@@ -333,4 +333,45 @@ router.post('/agencies/:agencyId/log-email', requireAdmin, async (req, res) => {
   }
 });
 
+// ============================================================================
+// PATCH /agencies/:agencyId/tags
+// Set the admin-only categorization tags on an agency (free-form string array).
+// Powers the admin agencies CRM workflow: segment free agencies, mark who has
+// been contacted, etc. Tags are normalized (trim, lowercase, de-dupe) and
+// capped. Body: { tags: string[] }. Returns the saved tags.
+// ============================================================================
+router.patch('/agencies/:agencyId/tags', requireAdmin, async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const raw = Array.isArray(req.body?.tags) ? req.body.tags : [];
+    const seen = new Set();
+    const tags = [];
+    for (const t of raw) {
+      if (typeof t !== 'string') continue;
+      const v = t.trim().toLowerCase().slice(0, 40);
+      if (!v || seen.has(v)) continue;
+      seen.add(v);
+      tags.push(v);
+      if (tags.length >= 20) break;
+    }
+
+    const { data, error } = await supabase
+      .from('agencies')
+      .update({ admin_tags: tags })
+      .eq('id', agencyId)
+      .select('id, admin_tags')
+      .single();
+
+    if (error) {
+      console.error('Set agency tags error:', error);
+      return res.status(500).json({ error: 'Failed to update tags' });
+    }
+
+    res.json({ success: true, agency: data });
+  } catch (error) {
+    console.error('Set agency tags error:', error);
+    res.status(500).json({ error: 'Failed to update tags' });
+  }
+});
+
 module.exports = router;
