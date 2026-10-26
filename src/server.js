@@ -2094,6 +2094,7 @@ app.use('/api/admin', require('./routes/orphan-cleanup'));
 app.use('/api/admin', require('./routes/sms-number-assignment'));
 app.use('/api/admin', require('./routes/admin-impersonate'));
 app.use('/api/admin', require('./routes/admin-widget-chats'));
+app.use('/api/admin', require('./routes/finance-provision')); // one-off: buy + attach the HQ finance SMS number
 app.use('/api/admin', smsLogRoutes);
 app.use('/api/admin', smsTemplatesAdminRoutes);
 app.use('/api/admin', require('./routes/platform-inbox')); // agency SMS reply inbox
@@ -2213,6 +2214,7 @@ app.use('/api/cron', abandonedCartRoutes);
 app.use('/api/cron', activationSmsRoutes);
 app.use('/api/cron', onboardingEmailRoutes);
 app.use('/api/cron', workflowsCronRoutes);
+app.use('/api/cron', require('./routes/finance-email-cron')); // poll bank-alert emails -> HQ transactions
 
 app.use('/api/cron', cleanupOrphanedTestClients);
 app.use('/api/cron', expireTestClients);

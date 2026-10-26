@@ -53,12 +53,15 @@ function lookupSenderBank(from) {
   return map[raw] || map[raw.replace(/^\+/, '')] || map[raw.replace(/\D/g, '')] || '';
 }
 
-async function ingestBankSms({ text, from, to, telnyxMessageId } = {}) {
-  const sender = from ? String(from).trim() : '';
-  const senderBank = lookupSenderBank(sender);
-  const parsed = await parseBankSms(text, { today: etToday(), businesses: SEEDED_VENTURES, sender, senderBank });
+// Core ingest: parse any bank-alert TEXT (an SMS body or an email subject+body),
+// categorize it, and write it to HQ. Used by both the SMS webhook and the email
+// poller. `id` makes the write idempotent (Telnyx message id, or email Message-ID).
+async function ingestBankText({ text, sender, id, source = 'sms' } = {}) {
+  const s = sender ? String(sender).trim() : '';
+  const senderBank = lookupSenderBank(s);
+  const parsed = await parseBankSms(text, { today: etToday(), businesses: SEEDED_VENTURES, sender: s, senderBank });
   if (!parsed || !parsed.isTransaction) {
-    console.log('💸 finance: not a transaction alert, ignored', parsed && parsed.error ? `(${parsed.error})` : '', sender ? `[from ${sender}]` : '');
+    console.log('💸 finance: not a transaction alert, ignored', parsed && parsed.error ? `(${parsed.error})` : '', s ? `[from ${s}]` : '');
     return { ok: true, skipped: true, reason: 'not-a-transaction' };
   }
 
@@ -66,19 +69,19 @@ async function ingestBankSms({ text, from, to, telnyxMessageId } = {}) {
   const account = parsed.account || senderBank || '';
 
   const row = buildTxn({
-    id: idFromMessage(telnyxMessageId, text),
+    id: id || idFromMessage(null, text),
     amount: parsed.amount,
     direction: parsed.direction,
     merchant: parsed.merchant,
     category: parsed.category,
     account: account,
-    sender: sender,
+    sender: s,
     business: parsed.business,
     type: parsed.type,
     postedDate: parsed.postedDate,
     note: parsed.note,
     raw: String(text || '').slice(0, 320),
-    source: 'sms',
+    source: source,
     confidence: parsed.confidence,
   });
 
@@ -88,8 +91,13 @@ async function ingestBankSms({ text, from, to, telnyxMessageId } = {}) {
     return { ok: false, reason: result.error };
   }
   const d = row.data;
-  console.log(`💸 finance: ${d.direction === 'in' ? '+' : '-'}$${d.amount} ${d.merchant} [${d.type}/${d.category}${d.business ? '/' + d.business : ''}]`);
+  console.log(`💸 finance[${source}]: ${d.direction === 'in' ? '+' : '-'}$${d.amount} ${d.merchant} [${d.type}/${d.category}${d.business ? '/' + d.business : ''}]`);
   return { ok: true, txn: d };
 }
 
-module.exports = { ingestBankSms, etToday };
+// Bank-alert SMS (from the Telnyx webhook).
+async function ingestBankSms({ text, from, to, telnyxMessageId } = {}) {
+  return ingestBankText({ text, sender: from, id: idFromMessage(telnyxMessageId, text), source: 'sms' });
+}
+
+module.exports = { ingestBankSms, ingestBankText, etToday };

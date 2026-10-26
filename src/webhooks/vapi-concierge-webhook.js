@@ -45,15 +45,18 @@ const DEMO_AGENCY_NUMBER = process.env.DEMO_AGENCY_NUMBER || null;
 // unbounded voice cost on the public number.
 const MAX_CALL_SECONDS = Number(process.env.CONCIERGE_MAX_CALL_SECONDS || 600);
 
-// Speaking speed for the 11labs voice. 1.0 is normal; lower is slower. ElevenLabs
-// accepts 0.7 to 1.2. 0.92 is a touch slower than default without dragging.
-// Tune with CONCIERGE_SPEED without a redeploy.
-const CONCIERGE_SPEED = Number(process.env.CONCIERGE_SPEED || 0.92);
+// Speaking speed for the 11labs voice. 1.0 is normal; lower is slower, higher is
+// faster. ElevenLabs accepts 0.7 to 1.2. 1.05 is a touch quicker than default so
+// the receptionist feels snappy instead of draggy. Tune with CONCIERGE_SPEED
+// (e.g. 1.1 for faster) without a redeploy.
+const CONCIERGE_SPEED = Number(process.env.CONCIERGE_SPEED || 1.05);
 
-// 11labs voice model. turbo_v2_5 sounds noticeably more natural / less robotic
-// than flash. If a call ever fails with "couldn't get assistant", this model may
-// not be enabled on your 11labs plan, set CONCIERGE_TTS_MODEL=eleven_flash_v2_5.
-const CONCIERGE_TTS_MODEL = process.env.CONCIERGE_TTS_MODEL || 'eleven_turbo_v2_5';
+// 11labs voice model. eleven_v4_turbo is ElevenLabs' newest real-time model
+// (~100ms, built for live agents) and replaces the now-deprecated turbo_v2_5.
+// If a call ever fails with "couldn't get assistant", this model may not be
+// enabled on your 11labs plan or not yet accepted by Vapi, fall back with
+// CONCIERGE_TTS_MODEL=eleven_flash_v2_5 (lowest latency, ~75ms).
+const CONCIERGE_TTS_MODEL = process.env.CONCIERGE_TTS_MODEL || 'eleven_v4_turbo';
 
 // ============================================================================
 // SYSTEM PROMPT, the SDR persona + accurate platform knowledge + routing
@@ -185,7 +188,10 @@ function buildConciergeAssistant() {
       useSpeakerBoost: true,
       speed: CONCIERGE_SPEED,
     },
-    transcriber: { provider: 'deepgram', model: 'nova-2', language: 'en' },
+    transcriber: { provider: 'deepgram', model: 'nova-3', language: 'en' },
+    // Cut the dead-air gap before the assistant starts replying (Vapi default is
+    // 0.4s). 0.3s keeps it snappy without clipping the caller.
+    startSpeakingPlan: { waitSeconds: 0.3 },
     silenceTimeoutSeconds: 30,
     maxDurationSeconds: MAX_CALL_SECONDS,
     endCallMessage: "Thanks for calling VoiceAI Connect! Check your texts for that trial link, and reach out at support at voiceaiconnect dot com anytime. Talk soon.",

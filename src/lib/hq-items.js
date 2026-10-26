@@ -366,7 +366,7 @@ function buildTxn({
     postedDate: postedDate || null,
     note: String(note || ''),
     raw: String(raw || ''),
-    source: source === 'manual' ? 'manual' : 'sms',
+    source: ['manual', 'email'].includes(source) ? source : 'sms',
     confidence: confidence == null ? null : Number(confidence),
     del: false,
     ts,
