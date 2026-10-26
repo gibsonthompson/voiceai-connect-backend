@@ -19,7 +19,7 @@ router.get('/', async (req, res) => {
     // Group voices by gender
     const femaleVoices = VOICE_OPTIONS.filter(v => v.gender === 'female');
     const maleVoices = VOICE_OPTIONS.filter(v => v.gender === 'male');
-    
+
     // Sort: recommended first, then alphabetically
     const sortVoices = (voices) => {
       return voices.sort((a, b) => {
@@ -53,7 +53,7 @@ router.get('/', async (req, res) => {
 // to the stock sample, so nothing breaks before the key is added.
 // ============================================================================
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const TTS_MODEL_ID = process.env.ELEVENLABS_TTS_MODEL || 'eleven_flash_v2_5';
+const TTS_MODEL_ID = process.env.ELEVENLABS_TTS_MODEL || 'eleven_v4_turbo';
 const MAX_PREVIEW_CHARS = 500;
 
 // In-memory cache (voiceId + text hash -> mp3 Buffer). Avoids re-billing the

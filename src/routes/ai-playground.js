@@ -110,7 +110,7 @@ router.get('/:agencyId/ai-playground/clients/:clientId/ai-details', async (req, 
             systemPromptLength: systemPrompt.length,
             temperature: client.temperature ?? raw.model?.temperature ?? 0.7,
             // ── voice pipeline (added 2026-10-07) ──
-            ttsModel: client.tts_model || raw.voice?.model || 'eleven_flash_v2_5',
+            ttsModel: client.tts_model || raw.voice?.model || 'eleven_v4_turbo',
             transcriberModel: client.transcriber_model || 'nova-2',
             backgroundDenoising: !(client.tool_config && client.tool_config.backgroundDenoising === false),
             tools: (raw.model?.tools || []).map(t => {

@@ -361,7 +361,7 @@ function getJarvisTools() {
 const JARVIS_VOICE = {
   provider: '11labs',
   voiceId: JARVIS_VOICE_ID,
-  model: 'eleven_flash_v2_5', // VAPI-supported v2.5 model, lowest latency (turbo_v2_5 is NOT on VAPI's list and gets the whole assistant rejected)
+  model: 'eleven_v4_turbo', // eleven_v4_turbo is now VAPI-supported and is the fleet default
   stability: 0.4,
   similarityBoost: 0.85,
   style: 0.35,
@@ -424,7 +424,7 @@ function buildRefusalConfig(line) {
       messages: [{ role: 'system', content: `Say exactly: "${line}" Then end the call.` }],
       tools: [{ type: 'endCall' }],
     },
-    voice: { provider: '11labs', voiceId: JARVIS_VOICE_ID, model: 'eleven_flash_v2_5' },
+    voice: { provider: '11labs', voiceId: JARVIS_VOICE_ID, model: 'eleven_v4_turbo' },
     firstMessage: line,
     maxDurationSeconds: 15,
     recordingEnabled: false,

@@ -107,7 +107,7 @@ const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 // ============================================================================
 const DEFAULT_LLM_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
 const DEFAULT_TRANSCRIBER_MODEL = process.env.DEEPGRAM_MODEL || 'nova-2';  // Deepgram STT default
-const ELEVENLABS_TTS_MODEL = 'eleven_flash_v2_5';
+const ELEVENLABS_TTS_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_v4_turbo';
 const FLUX_EOT_THRESHOLD_DEFAULT = 0.6;   // Flux end-of-turn sensitivity (sane default, not user-facing)
 const FLUX_EOT_TIMEOUT_MS_DEFAULT = 3000; // Flux hard cap before it ends the turn
 

@@ -138,7 +138,7 @@ Never mention internal tools or vendors (no VAPI, Supabase, Telnyx, and so on). 
     const { data } = await supabase.from('platform_settings').select('value').eq('key', 'support_query_tool_id').maybeSingle();
     toolId = data?.value || null;
   } catch (e) {
-    console.warn('\u26a0\ufe0f Could not load support_query_tool_id (KB tool):', e.message);
+    console.warn('⚠️ Could not load support_query_tool_id (KB tool):', e.message);
   }
 
   return {
@@ -155,7 +155,7 @@ Never mention internal tools or vendors (no VAPI, Supabase, Telnyx, and so on). 
     },
     voice: {
       provider: '11labs',
-      model: 'eleven_flash_v2_5',
+      model: 'eleven_v4_turbo',
       voiceId: SUPPORT_VOICE_ID,
     },
     startSpeakingPlan: {

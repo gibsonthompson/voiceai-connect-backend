@@ -33,11 +33,11 @@ const DEMO_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL';
 // Applied to ALL demo calls. Previously bare { provider, voiceId } only.
 // See: https://docs.vapi.ai/voice-fallback-plan for VAPI ElevenLabs schema
 // Model is env-overridable so the voice can be tuned without a deploy. Default
-// eleven_turbo_v2_5 sounds far more natural/human than eleven_flash_v2_5 (which
+// eleven_v4_turbo sounds far more natural/human than eleven_flash_v2_5 (which
 // sounds robotic) at a small latency cost. Set ELEVENLABS_TTS_MODEL to
 // eleven_multilingual_v2 for the highest quality, or eleven_flash_v2_5 for the
 // lowest latency.
-const ELEVEN_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_turbo_v2_5';
+const ELEVEN_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_v4_turbo';
 // Appended to the demo prompt so the sales demo sounds as human as the real
 // receptionist (same guidance as the client prompts in lib/vapi.js).
 const DEMO_NATURALNESS = `

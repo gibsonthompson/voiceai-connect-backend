@@ -1354,7 +1354,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         voice_id: voiceId,
         voice: voice || null,
         model: customTemplate?.model || 'gpt-4.1',
-        tts_model: customTemplate?.tts_model || 'eleven_flash_v2_5',
+        tts_model: customTemplate?.tts_model || 'eleven_v4_turbo',
         transcriber_model: customTemplate?.transcriber_model || 'nova-3',
         temperature: customTemplate?.temperature || 0.7,
         voice_speed: customTemplate?.voice_speed ?? 1,
@@ -1367,7 +1367,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         first_message: defaults.first_message,
         voice_id: defaults.voice_id,
         model: 'gpt-4.1',
-        tts_model: 'eleven_flash_v2_5',
+        tts_model: 'eleven_v4_turbo',
         transcriber_model: 'nova-3',
         temperature: 0.7,
         voice_speed: 1,
@@ -1416,13 +1416,10 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
 
   // TTS + transcriber model, both restricted to Vapi-verified values so an
   // agency can never save a string that would break their own calls.
-  // ElevenLabs models Vapi actually accepts. Eleven v4 / v4 Turbo are NOT here:
-  // Vapi doesn't support them yet (v4 streams only over ElevenLabs' Text-to-
-  // Dialogue WebSocket, which Vapi hasn't adopted). When Vapi adds it, append
-  // 'eleven_v4_turbo' below (one line) and drop `comingSoon` on the matching
-  // option in the AI Lab template editor.
-  const validTtsModels = ['eleven_flash_v2_5', 'eleven_v4_turbo', 'eleven_multilingual_v2', 'eleven_v3'];
-  const finalTtsModel = validTtsModels.includes(tts_model) ? tts_model : 'eleven_flash_v2_5';
+  // Vapi now accepts eleven_v4_turbo (ElevenLabs v4 Turbo, low-latency real-time
+  // model) as a voice.model value, so it is the platform default below.
+  const validTtsModels = ['eleven_v4_turbo', 'eleven_flash_v2_5', 'eleven_multilingual_v2', 'eleven_v3'];
+  const finalTtsModel = validTtsModels.includes(tts_model) ? tts_model : 'eleven_v4_turbo';
   // 'flux-general-en' (English-only Flux) added 2026-10-07 alongside the EN+ES multi.
   const validTranscribers = ['nova-3', 'nova-2', 'flux-general-multi', 'flux-general-en'];
   const finalTranscriber = validTranscribers.includes(transcriber_model) ? transcriber_model : 'nova-3';

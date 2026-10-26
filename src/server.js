@@ -2019,7 +2019,7 @@ app.get('/api/voices', (req, res) => {
 const _ttsFetch = require('node-fetch');
 const _ttsCrypto = require('crypto');
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const TTS_MODEL_ID = process.env.ELEVENLABS_TTS_MODEL || 'eleven_turbo_v2_5';
+const TTS_MODEL_ID = process.env.ELEVENLABS_TTS_MODEL || 'eleven_v4_turbo';
 const _ttsCache = new Map();   // voiceId+hash -> mp3 Buffer
 const _ttsRate = new Map();    // ip -> [timestamps]
 const _TTS_CACHE_MAX = 200, _TTS_RATE_MAX = 40, _TTS_RATE_WINDOW = 60 * 1000;

@@ -190,10 +190,10 @@ const VOICES = {
 };
 
 // ============================================================================
-// Env-overridable ElevenLabs model. Default eleven_flash_v2_5 (fleet default,
+// Env-overridable ElevenLabs model. Default eleven_v4_turbo (fleet default,
 // matches the dynamic live-call builder so test calls and live calls sound the
 // same). Set ELEVENLABS_TTS_MODEL to override.
-const ELEVEN_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_flash_v2_5';
+const ELEVEN_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_v4_turbo';
 
 // Env-overridable transcriber + LLM so the stack can be tuned without a deploy.
 // nova-3 (vs nova-2) improves accuracy on phone audio, accents, and multilingual.
