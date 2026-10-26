@@ -205,6 +205,17 @@ const workflowRoutes = require('./routes/workflows');
 const clientWorkflowRoutes = require('./routes/client-workflows');
 const referralRoutes = require('./routes/referrals');
 
+let emailDomainRoutes;
+try {
+  emailDomainRoutes = require('./routes/email-domain');
+  console.log('✅ Email-domain routes module loaded');
+} catch (err) {
+  console.error('❌ Failed to require email-domain routes:', err.message);
+  const express = require('express');
+  emailDomainRoutes = express.Router();
+  emailDomainRoutes.all('*', (req, res) => res.status(503).json({ error: 'Email domain routes unavailable' }));
+}
+
 let domainRoutes;
 try {
   domainRoutes = require('./routes/domains');
@@ -1801,6 +1812,7 @@ let domainRoutesLoaded = false;
 try {
   app.use('/api/agency', domainRoutes);
   app.use('/api/domain', domainRoutes);
+  app.use('/api/agency', emailDomainRoutes);
   domainRoutesLoaded = true;
   console.log('✅ Domain routes loaded successfully');
 } catch (err) {

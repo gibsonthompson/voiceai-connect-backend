@@ -411,6 +411,45 @@ async function sendEmail(emailData) {
 }
 
 // ============================================================================
+// WHITE-LABEL CLIENT EMAIL
+// ----------------------------------------------------------------------------
+// Sends an AGENCY -> CLIENT transactional email FROM the agency's own
+// authenticated sending domain, so the client never sees VoiceAI Connect.
+// GATED: only sends when the agency has the paid feature
+// (white_label_email_enabled) AND a verified sending domain
+// (email_domain_status === 'authenticated'). No domain => no send, by design
+// (clients otherwise stay on agency-branded SMS). Reply-To is set to the
+// agency's support email so client replies land in a real inbox.
+// Returns { success, skipped? } so callers can tell "disabled" from "failed".
+// ============================================================================
+async function sendClientEmail(agency, emailData) {
+  if (!process.env.BREVO_API_KEY) { console.log('⚠️ BREVO_API_KEY not configured'); return { success: false, skipped: 'no_api_key' }; }
+  if (!agency) return { success: false, skipped: 'no_agency' };
+  const enabled = agency.white_label_email_enabled === true;
+  const authed = agency.email_domain_status === 'authenticated' && !!agency.email_sending_domain;
+  if (!enabled || !authed) {
+    console.log(`✉️ sendClientEmail skipped for agency ${agency.id || '?'}: ${!enabled ? 'feature disabled' : 'domain not authenticated'}`);
+    return { success: false, skipped: !enabled ? 'feature_disabled' : 'domain_not_authenticated' };
+  }
+  const localPart = (agency.email_from_local && String(agency.email_from_local).trim()) || 'notifications';
+  const sender = { name: agency.name || agency.email_sending_domain, email: `${localPart}@${agency.email_sending_domain}` };
+  const recipients = (Array.isArray(emailData.to) ? emailData.to : [emailData.to]).map(email => ({ email }));
+  try {
+    const body = { sender, to: recipients, subject: emailData.subject, htmlContent: emailData.html };
+    if (agency.support_email) body.replyTo = { email: agency.support_email };
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'api-key': process.env.BREVO_API_KEY },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) { const error = await response.text(); console.error('❌ Client email error:', error); return { success: false, error }; }
+    const result = await response.json();
+    console.log(`✅ Client email sent from ${sender.email}:`, result.messageId);
+    return { success: true, data: result };
+  } catch (error) { console.error('❌ Client email error:', error); return { success: false, error: error.message }; }
+}
+
+// ============================================================================
 // WELCOME EMAILS, Plan-aware messaging
 // ============================================================================
 // Getting-started email. NO password link: agencies set their password
@@ -605,6 +644,6 @@ module.exports = {
   sendDemoCallFollowUpSMS, sendCallNotificationSMS, sendWelcomeSMS,
   sendClientTrialExpiredSMS, sendClientPaymentFailedSMS,
   sendClientSubscriptionActivatedSMS, sendSpamBlockedSMS,
-  sendEmail, sendAgencyWelcomeEmail,
+  sendEmail, sendClientEmail, sendAgencyWelcomeEmail,
   getReferralSourceLabel
 };
