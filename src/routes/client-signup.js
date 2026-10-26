@@ -139,6 +139,17 @@ async function reportClientSignupFailure(req, statusCode, body) {
     const businessName = b.businessName || b.business_name || null;
     const reason = (body && (body.message || body.error)) || `HTTP ${statusCode}`;
     const errCode = (body && body.error) || `http_${statusCode}`;
+    // More context for the admin error view: the request path/method and a
+    // sanitized copy of the submitted body (secrets dropped, values capped).
+    const reqPath = (req && (req.originalUrl || req.url)) || null;
+    const reqMethod = (req && req.method) || null;
+    const safeBody = {};
+    try {
+      for (const [k, v] of Object.entries(b)) {
+        if (/pass|token|secret|card|cvv|authorization/i.test(k)) continue;
+        safeBody[k] = typeof v === 'string' ? v.slice(0, 200) : v;
+      }
+    } catch (_) { /* best effort */ }
 
     let agencyName = 'Unknown agency';
     if (agencyId) {
@@ -152,7 +163,7 @@ async function reportClientSignupFailure(req, statusCode, body) {
     const logged = await alertError(
       'client_signup_failed',
       new Error(`${agencyName}: ${reason}`),
-      { agency_id: agencyId, agency_name: agencyName, client_email: email, business_name: businessName, status_code: statusCode, error_code: errCode }
+      { agency_id: agencyId, agency_name: agencyName, client_email: email, business_name: businessName, status_code: statusCode, error_code: errCode, request_path: reqPath, request_method: reqMethod, submitted: safeBody }
     );
 
     if (logged) {
