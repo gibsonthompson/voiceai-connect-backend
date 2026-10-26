@@ -39,7 +39,7 @@ const { supabase } = require('../lib/supabase');
 
 // Best-effort logging of marketing FAQ-bot conversations (see widget_chat_log).
 // Never blocks or fails the chat/escalation response.
-async function logWidgetChat(sessionId, role, content, origin = {}) {
+async function logWidgetChat(sessionId, role, content, origin = {}, createdAt = null) {
   try {
     if (!sessionId || typeof sessionId !== 'string') return;
     if (!content || typeof content !== 'string' || !content.trim()) return;
@@ -47,6 +47,10 @@ async function logWidgetChat(sessionId, role, content, origin = {}) {
       session_id: sessionId.slice(0, 100),
       role,
       content: content.trim().slice(0, 8000),
+      // Explicit timestamp when given, so the user turn is stamped strictly
+      // before the assistant turn (two fire-and-forget inserts with the default
+      // now() can tie/race and flip the order in the admin inbox).
+      ...(createdAt ? { created_at: createdAt } : {}),
     };
     // Record WHERE the chat came from so the admin inbox can tell a marketing
     // prospect from a logged-in agency/client, and so questions can be triaged
@@ -146,6 +150,11 @@ HARD RULES (never break these):
 WHAT IS VOICEAI CONNECT:
 VoiceAI Connect is a white-label AI receptionist platform for agencies. Agencies brand it as their own, onboard local businesses as clients, and collect monthly recurring revenue. The platform handles voice AI, phone numbers, billing, and dashboards.
 
+TRY THE AI / DEMO LINE:
+- Anyone can hear the AI live right now by calling the VoiceAI Connect demo line: (404) 201-7505. It is the fastest way to experience how the receptionist sounds and handles a real call, encourage prospects to call it.
+- When someone asks how to test the demo, how to try the AI, or for the demo number, GIVE THEM THIS NUMBER directly: (404) 201-7505. You have it, so never tell them to email the team to get the number.
+- This is VoiceAI Connect's own demo of the product. Separately, Pro and Scale agencies get their OWN branded demo line (a different, auto-provisioned number) that they set up in their dashboard and share with their own prospects.
+
 PLANS & PRICING:
 - Free: $0/mo platform, $29.99/client/mo, $0.12/min. Core features, VoiceAI Connect branding (not white-labeled). No trial.
 - Pro: $99/mo platform, $9.99/client/mo, $0.10/min. 14-day free trial (credit card required to start - not charged until the trial ends, cancel anytime before then). Includes white-label, AI Lab, lead finder, marketing site, demo line, outreach templates, referrals, 5 agency + 2 client team members.
@@ -187,7 +196,11 @@ PHONE NUMBERS:
 - Auto-provisioned US numbers via Telnyx. No A2P registration needed.
 - Each client gets their OWN dedicated number. SMS to and from a client's customers always sends from that client's own dedicated number (the same number their callers see), never a shared pool or a shared sender.
 - During a call, the AI receptionist can text the caller directly (a booking link, confirmation, address, or reminder) when this is turned on for the client in the AI settings. It sends to the number the caller is calling from.
-- Clients forward their existing number to the AI number.
+- CALL FORWARDING (how an existing number reaches the AI): the client keeps their current business number and forwards it to their dedicated AI number. This is GUIDED inside the client's dashboard, there is a call-forwarding card that shows the EXACT code to dial for their carrier, so no one has to search their carrier's support site or call the carrier.
+  - They pick their carrier (Verizon / US Cellular, AT&T / T-Mobile, or Other) and a mode: forward ALL calls to the AI, or only MISSED calls (they answer first and the AI catches the ones they miss).
+  - The card shows the exact code to dial from the business phone. Verizon / US Cellular: *72 then the AI number to forward all calls, *71 for missed-only, turn it off with *73. AT&T / T-Mobile: **21* then the AI number then # for all calls, **61* then the number then # for missed-only, turn it off with ##21# or ##61#. "Other" carriers see those codes to try with a note to confirm with the carrier if one does not take.
+  - It takes about 30 seconds. Either the agency or the business owner can do it, right from the business phone. To answer calls themselves again, they just dial the off-code.
+  - Do NOT tell people the steps "vary by carrier" and to look it up themselves or call their carrier, the dashboard card already gives them the exact code. Do NOT invent other codes.
 - International numbers via BYOT/Twilio (Scale plan). When an agency connects its own Twilio account, Twilio bills the agency directly for the number, call minutes, and SMS at Twilio's own rates. VoiceAI Connect does NOT add a markup or a separate international surcharge; the agency's VoiceAI Connect charges stay exactly as their plan describes (platform fee, per-client, per-minute), the same as for US numbers.
 
 DEMO PHONE (agency's own line for showing prospects):
@@ -374,9 +387,12 @@ router.post('/chat', async (req, res) => {
     // check runs before the log inserts below, never seeing its own rows.
     await notifyHelpChat({ sessionId, aud, agencyId: origin.agencyId, message: message.trim() });
 
-    // Log the exchange with its origin (fire-and-forget, non-blocking).
-    logWidgetChat(sessionId, 'user', message.trim(), origin);
-    logWidgetChat(sessionId, 'assistant', assistantResponse, origin);
+    // Log the exchange with its origin (fire-and-forget, non-blocking). Stamp the
+    // user turn strictly before the assistant turn so the admin inbox always
+    // renders the question above its answer.
+    const turnMs = Date.now();
+    logWidgetChat(sessionId, 'user', message.trim(), origin, new Date(turnMs).toISOString());
+    logWidgetChat(sessionId, 'assistant', assistantResponse, origin, new Date(turnMs + 1000).toISOString());
   } catch (err) {
     console.error('Support chat error:', err);
     res.status(500).json({ error: 'Failed to process message' });
