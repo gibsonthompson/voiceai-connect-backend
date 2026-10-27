@@ -33,7 +33,7 @@ const { sendAndLogSMS } = require('../lib/sms-logger');
 const { markConciergeTransfer } = require('../lib/concierge-demo-sms');
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
-const CONCIERGE_VOICE_ID = process.env.CONCIERGE_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL'; // Sarah (11labs)
+const CONCIERGE_VOICE_ID = process.env.CONCIERGE_VOICE_ID || 'uYXf8XasLslADfZ2MB4u'; // Hope (11labs, conversational)
 const SIGNUP_URL = process.env.PLATFORM_SIGNUP_URL || 'https://www.myvoiceaiconnect.com/signup';
 
 // Transfer targets (E.164). If a target is unset, the AI is told that demo is
@@ -46,10 +46,10 @@ const DEMO_AGENCY_NUMBER = process.env.DEMO_AGENCY_NUMBER || null;
 const MAX_CALL_SECONDS = Number(process.env.CONCIERGE_MAX_CALL_SECONDS || 600);
 
 // Speaking speed for the 11labs voice. 1.0 is normal; lower is slower, higher is
-// faster. ElevenLabs accepts 0.7 to 1.2. 1.05 is a touch quicker than default so
+// faster. ElevenLabs accepts 0.7 to 1.2. 1.1 is a bit quicker than default so
 // the receptionist feels snappy instead of draggy. Tune with CONCIERGE_SPEED
 // (e.g. 1.1 for faster) without a redeploy.
-const CONCIERGE_SPEED = Number(process.env.CONCIERGE_SPEED || 1.05);
+const CONCIERGE_SPEED = Number(process.env.CONCIERGE_SPEED || 1.1);
 
 // 11labs voice model. eleven_v4_turbo is ElevenLabs' newest real-time model
 // (~100ms, built for live agents) and replaces the now-deprecated turbo_v2_5.
