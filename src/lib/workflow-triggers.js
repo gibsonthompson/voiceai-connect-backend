@@ -160,16 +160,21 @@ function passesConfig(cfg, context) {
 async function blockedByReentry(wf, contactId) {
   const rules = wf.entry_rules || {};
   if (!contactId) return false;
-  // reenroll:false -> one lifetime enrollment per contact per workflow.
-  if (!rules.reenroll) {
-    const { data } = await supabase
-      .from('workflow_enrollments').select('id')
-      .eq('workflow_id', wf.id).eq('contact_id', contactId)
-      .neq('status', 'canceled').limit(1);
-    return !!(data && data.length);
-  }
-  // reenroll:true with a cooldown -> block if a recent enrollment is inside it.
+
   const cooldownH = parseInt(rules.cooldown_hours, 10) || 0;
+
+  // A positive cooldown means "re-enrollment is allowed, just not within this
+  // window." It takes precedence over the reenroll flag, because setting a
+  // cooldown only makes sense if re-enrollment can happen at all. Block only
+  // when a recent enrollment sits inside the window; otherwise allow.
+  //
+  // This is the fix for the silent-no-follow-up bug: the post-call follow-up
+  // template ships as { reenroll:false, cooldown_hours:24 }, but the old code
+  // checked !reenroll FIRST and treated it as a lifetime block, so it never
+  // reached the cooldown branch. Any caller who had ever called once was
+  // blocked forever and never got another follow-up (no run, no text, no
+  // error). Now the 24h cooldown actually governs: one follow-up per caller
+  // per 24h, re-enrolling normally after that.
   if (cooldownH > 0) {
     const sinceIso = new Date(Date.now() - cooldownH * 3600000).toISOString();
     const { data } = await supabase
@@ -178,6 +183,17 @@ async function blockedByReentry(wf, contactId) {
       .gt('enrolled_at', sinceIso).limit(1);
     return !!(data && data.length);
   }
+
+  // No cooldown set. reenroll:false -> one lifetime enrollment per contact per
+  // workflow (a true "only ever once"). reenroll:true -> always allow.
+  if (!rules.reenroll) {
+    const { data } = await supabase
+      .from('workflow_enrollments').select('id')
+      .eq('workflow_id', wf.id).eq('contact_id', contactId)
+      .neq('status', 'canceled').limit(1);
+    return !!(data && data.length);
+  }
+
   return false;
 }
 

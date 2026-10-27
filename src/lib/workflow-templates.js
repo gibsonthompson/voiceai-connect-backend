@@ -81,7 +81,10 @@ const TEMPLATES = {
       exclude_spam: true,
     },
     stop_on: { reply: true },
-    entry_rules: { reenroll: false, cooldown_hours: 24 },
+    // Fire after every real call, with no re-entry limit. (Previously
+    // { reenroll:false, cooldown_hours:24 }, which combined with a re-entry bug
+    // silently blocked a caller forever after their first call.)
+    entry_rules: { reenroll: true, cooldown_hours: 0 },
     graph: {
       nodes: [
         { id: 'trigger', type: 'trigger', data: {} },

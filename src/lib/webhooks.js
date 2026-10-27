@@ -25,6 +25,10 @@ const EVENT_TYPES = [
   // rung). Distinct from call.transferred, which is a dial to the business line.
   'call.escalated',
   'appointment.booked',
+  // Appointment moved to a new time, or canceled. Fired by the API appointment
+  // writes (create/reschedule/cancel) in calendar-booking.js.
+  'appointment.rescheduled',
+  'appointment.canceled',
   'client.provisioned',
   'client.provisioning_failed',
   // Account / billing lifecycle events (the automation subject is the business

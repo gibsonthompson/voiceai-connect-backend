@@ -19,6 +19,10 @@ const {
   parsePagination, sendList, toPublicClient, toPublicCall,
 } = require('../../middleware/api-auth');
 const { EVENT_TYPES, sendPing, isSafeWebhookUrl } = require('../../lib/webhooks');
+const {
+  getAvailableSlots,
+  createAppointmentApi, rescheduleAppointmentApi, cancelAppointmentApi,
+} = require('../../lib/calendar-booking');
 
 router.use(apiKeyAuth);
 
@@ -552,6 +556,135 @@ router.get('/appointments/:id', async (req, res) => {
   } catch (err) {
     console.error('v1 GET /appointments/:id:', err);
     return fail(res, 500, 'api_error', 'Failed to fetch appointment.');
+  }
+});
+
+// Fetch an appointment and confirm its client belongs to this agency.
+async function fetchOwnedAppointment(agencyId, apptId) {
+  const { data: appt } = await supabase.from('appointments').select('*').eq('id', apptId).single();
+  if (!appt) return null;
+  const owned = await ownedClient(agencyId, appt.client_id, 'id');
+  if (!owned) return null;
+  return appt;
+}
+
+// Map a calendar-booking result `code` to an HTTP status + error type.
+function apptFail(res, result) {
+  const code = (result && result.code) || 'api_error';
+  const map = {
+    invalid_request: [400, 'invalid_request'],
+    not_found: [404, 'not_found'],
+    slot_unavailable: [409, 'slot_unavailable'],
+    calendar_error: [502, 'calendar_error'],
+    api_error: [500, 'api_error'],
+  };
+  const [status, type] = map[code] || [500, 'api_error'];
+  const body = { error: { type, message: (result && result.error) || 'Request failed.' } };
+  if (result && result.available_slots) body.available_slots = result.available_slots;
+  return res.status(status).json(body);
+}
+
+// Open availability for a client on a date (wraps the booking engine's slot
+// finder). Google-connected clients only, since availability needs a calendar to
+// read; a record-only (no calendar) client has no busy times to check against.
+// GET /clients/:id/availability?date=YYYY-MM-DD[&duration=30]
+router.get('/clients/:id/availability', async (req, res) => {
+  try {
+    const owned = await ownedClient(req.agency.id, req.params.id, 'id');
+    if (!owned) return fail(res, 404, 'not_found', 'Client not found.');
+    const date = req.query.date;
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return fail(res, 400, 'invalid_request', 'Pass ?date=YYYY-MM-DD.');
+    }
+    const opts = {};
+    const dur = parseInt(req.query.duration, 10);
+    if (Number.isFinite(dur) && dur > 0) opts.durationOverride = dur;
+    const result = await getAvailableSlots(req.params.id, date, opts);
+    if (!result.success) {
+      // "Calendar not connected" is the expected case for a non-Google client:
+      // report it as a clean 409 rather than a server error.
+      if (result.error === 'Calendar not connected') {
+        return res.status(409).json({ error: { type: 'calendar_not_connected', message: 'This client has no connected calendar, so live availability is not available. You can still create a record-only appointment.' } });
+      }
+      return fail(res, 502, 'calendar_error', result.error || 'Could not read availability.');
+    }
+    return res.json({ client_id: req.params.id, date, slots: result.slots || [], message: result.message || null });
+  } catch (err) {
+    console.error('v1 GET availability:', err);
+    return fail(res, 500, 'api_error', 'Failed to fetch availability.');
+  }
+});
+
+// Create an appointment. Google-connected client -> real calendar event (availability
+// checked). Client with no supported calendar -> record-only appointment (a real row,
+// no calendar write) so the API still works for everyone; a connected aggregator or
+// native provider slots in here later with no API change. Fires appointment.booked.
+// Body: client_id, customer_name, (customer_phone, customer_email, service_type,
+// staff_name, notes, duration_minutes), and date "YYYY-MM-DD" + time "2:30 PM"/"14:30".
+// Set check_availability:false to skip the pre-write availability check.
+router.post('/appointments', requireScope('read_write'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const clientId = b.client_id || b.clientId;
+    if (!clientId) return fail(res, 400, 'invalid_request', 'client_id is required.');
+    const owned = await ownedClient(req.agency.id, clientId, 'id');
+    if (!owned) return fail(res, 404, 'not_found', 'Client not found.');
+
+    const result = await createAppointmentApi({
+      clientId,
+      customerName: b.customer_name || b.customerName,
+      customerPhone: b.customer_phone || b.customerPhone || null,
+      customerEmail: b.customer_email || b.customerEmail || null,
+      date: b.date,
+      time: b.time,
+      serviceType: b.service_type || b.serviceType || null,
+      staffName: b.staff_name || b.staffName || null,
+      notes: b.notes || null,
+      durationMinutes: b.duration_minutes || b.durationMinutes || null,
+      checkAvailability: b.check_availability !== false,
+    });
+    if (!result.ok) return apptFail(res, result);
+    return res.status(201).json(toPublicAppointment(result.appointment));
+  } catch (err) {
+    console.error('v1 POST /appointments:', err);
+    return fail(res, 500, 'api_error', 'Failed to create appointment.');
+  }
+});
+
+// Reschedule an appointment to a new date/time. Patches the Google event when the
+// appointment has one; otherwise just moves the record. Fires appointment.rescheduled.
+// Body: date "YYYY-MM-DD", time, (duration_minutes, check_availability).
+router.patch('/appointments/:id', requireScope('read_write'), async (req, res) => {
+  try {
+    const appt = await fetchOwnedAppointment(req.agency.id, req.params.id);
+    if (!appt) return fail(res, 404, 'not_found', 'Appointment not found.');
+    const b = req.body || {};
+    const result = await rescheduleAppointmentApi(appt, {
+      date: b.date,
+      time: b.time,
+      durationMinutes: b.duration_minutes || b.durationMinutes || null,
+      checkAvailability: b.check_availability !== false,
+    });
+    if (!result.ok) return apptFail(res, result);
+    return res.json(toPublicAppointment(result.appointment));
+  } catch (err) {
+    console.error('v1 PATCH /appointments/:id:', err);
+    return fail(res, 500, 'api_error', 'Failed to reschedule appointment.');
+  }
+});
+
+// Cancel an appointment. Deletes the Google event when present, marks the row
+// canceled (kept for history). Fires appointment.canceled. Body: optional reason.
+router.post('/appointments/:id/cancel', requireScope('read_write'), async (req, res) => {
+  try {
+    const appt = await fetchOwnedAppointment(req.agency.id, req.params.id);
+    if (!appt) return fail(res, 404, 'not_found', 'Appointment not found.');
+    const result = await cancelAppointmentApi(appt, { reason: (req.body || {}).reason || null });
+    if (!result.ok) return apptFail(res, result);
+    return res.json(toPublicAppointment(result.appointment));
+  } catch (err) {
+    console.error('v1 POST /appointments/:id/cancel:', err);
+    return fail(res, 500, 'api_error', 'Failed to cancel appointment.');
   }
 });
 

@@ -753,12 +753,285 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
   }
 }
 
+// ====================================================================
+// API-FACING APPOINTMENT WRITES (create / reschedule / cancel)
+//
+// These are for the public REST API (/api/v1/appointments), NOT the AI voice
+// flow. They differ from bookAppointment() on purpose:
+//   - They return structured { ok, ... } objects with a machine `code`, never
+//     the conversational strings the AI speaks back.
+//   - They are NOT Google-only. A client with Google Calendar connected gets a
+//     real calendar write (availability-checked, same engine the AI uses). A
+//     client WITHOUT Google gets a "record-only" appointment: a real row in the
+//     appointments table, no calendar event, so an integrator that runs its own
+//     calendar can still log, move, and cancel bookings through VoiceAI and
+//     receive the same events.
+// Every path fires the matching webhook (appointment.booked / .rescheduled /
+// .canceled) so a consumer sees the change in real time.
+// ====================================================================
+
+// Build the webhook `data` payload for an appointment, shaped like the
+// appointment.booked payload bookAppointment() emits (so all three appointment
+// events share one shape). googleEventId / calendarLink are null for
+// record-only appointments.
+function buildApptEventData(client, appt, extra) {
+  const startIso = appt.appointment_time;
+  const dur = appt.duration || null;
+  let endIso = null;
+  try { if (startIso && dur) endIso = new Date(new Date(startIso).getTime() + Number(dur) * 60000).toISOString(); } catch (e) { endIso = null; }
+  return Object.assign({
+    id: appt.id,
+    client_id: appt.client_id,
+    business_name: (client && client.business_name) || null,
+    customer_name: appt.customer_name || null,
+    customer_phone: appt.customer_phone || null,
+    customer_email: appt.customer_email || null,
+    appointment_time: startIso,
+    end_time: endIso,
+    duration_minutes: dur,
+    timezone: (client && client.timezone) || null,
+    service_type: appt.service_type || null,
+    staff_name: appt.staff_name || null,
+    notes: appt.notes || null,
+    status: appt.status || null,
+    booking_source: appt.booking_source || null,
+    google_event_id: appt.google_event_id || null,
+    google_calendar_id: appt.google_event_id ? ((client && client.google_calendar_id) || 'primary') : null,
+    calendar_link: null,
+    created_at: appt.created_at || new Date().toISOString(),
+  }, extra || {});
+}
+
+function emitApptEvent(client, eventType, appt, extra) {
+  try {
+    if (!client || !client.agency_id) return;
+    const { dispatchWebhook } = require('./webhooks');
+    dispatchWebhook(client.agency_id, eventType, buildApptEventData(client, appt, extra));
+  } catch (e) { console.error(`webhook emit (${eventType}):`, e.message); }
+}
+
+// Insert an appointments row, degrading gracefully if optional columns
+// (staff_name, customer_email) are not present in this database yet.
+async function insertAppointmentRow(record) {
+  const attempt = async (rec) => supabase.from('appointments').insert(rec).select('*').single();
+  let { data, error } = await attempt(record);
+  if (error && error.message && /staff_name/.test(error.message)) {
+    const r2 = Object.assign({}, record); delete r2.staff_name;
+    ({ data, error } = await attempt(r2));
+  }
+  if (error && error.message && /customer_email/.test(error.message)) {
+    const r3 = Object.assign({}, record); delete r3.customer_email;
+    ({ data, error } = await attempt(r3));
+  }
+  return { data, error };
+}
+
+async function fetchOwnedClientFull(clientId) {
+  const { data } = await supabase.from('clients').select('*').eq('id', clientId).single();
+  return data || null;
+}
+
+// Create an appointment via the API.
+// params: { clientId, customerName, customerPhone, customerEmail, date 'YYYY-MM-DD',
+//           time, serviceType, notes, staffName, durationMinutes, checkAvailability }
+// Returns { ok:true, appointment } or { ok:false, code, error }.
+async function createAppointmentApi(params) {
+  const p = params || {};
+  try {
+    if (!p.clientId) return { ok: false, code: 'invalid_request', error: 'clientId is required.' };
+    if (!p.date || !/^\d{4}-\d{2}-\d{2}$/.test(p.date)) return { ok: false, code: 'invalid_request', error: 'date is required in YYYY-MM-DD format.' };
+    const time24 = parseTimeTo24Hr(p.time);
+    if (!time24) return { ok: false, code: 'invalid_request', error: 'time is required (e.g. "2:30 PM" or "14:30").' };
+    if (!p.customerName) return { ok: false, code: 'invalid_request', error: 'customer_name is required.' };
+
+    const client = await fetchOwnedClientFull(p.clientId);
+    if (!client) return { ok: false, code: 'not_found', error: 'Client not found.' };
+
+    const timezone = client.timezone || 'America/New_York';
+    const serviceConfig = p.serviceType ? await lookupServiceConfig(p.clientId, p.serviceType) : null;
+    let duration = Number(p.durationMinutes) || (serviceConfig && serviceConfig.duration_minutes) || client.appointment_duration || 30;
+    const bufferMinutes = (serviceConfig && serviceConfig.buffer_minutes) || 0;
+
+    const googleConnected = client.google_calendar_connected === true;
+    let googleEventId = null;
+
+    if (googleConnected) {
+      // Google path: availability-check (unless explicitly disabled), then write
+      // the real calendar event, reusing the same engine the AI uses.
+      const [reqHr, reqMin] = time24.split(':').map(Number);
+      if (p.checkAvailability !== false) {
+        const avail = await getAvailableSlots(p.clientId, p.date, { durationOverride: duration, bufferMinutes });
+        if (!avail.success) return { ok: false, code: 'calendar_error', error: 'Could not read the calendar to confirm availability.' };
+        const want = formatSlotLabel(reqHr, reqMin).replace(/\s+/g, ' ').trim().toLowerCase();
+        const free = (avail.slots || []).some((s) => s.replace(/\s+/g, ' ').trim().toLowerCase() === want);
+        if (!free) return { ok: false, code: 'slot_unavailable', error: 'That time is not available.', available_slots: avail.slots || [] };
+      }
+      const accessToken = await refreshAccessToken(client);
+      if (!accessToken) return { ok: false, code: 'calendar_error', error: 'Calendar authentication failed.' };
+
+      const startDateTime = `${p.date}T${time24}:00`;
+      const totalMinutes = reqHr * 60 + reqMin + duration;
+      const endDateTime = `${p.date}T${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}:00`;
+      const titleParts = [p.serviceType || 'Appointment'];
+      if (p.staffName) titleParts.push(p.staffName);
+      titleParts.push(p.customerName);
+      const descParts = [`Customer: ${p.customerName}`, `Phone: ${p.customerPhone || ''}`];
+      if (p.staffName) descParts.push(`Provider: ${p.staffName}`);
+      if (p.serviceType) descParts.push(`Service: ${p.serviceType}`);
+      if (p.notes) descParts.push(`Notes: ${p.notes}`);
+      descParts.push('', 'Booked via API');
+      const event = {
+        summary: titleParts.join(' - '),
+        description: descParts.join('\n'),
+        start: { dateTime: startDateTime, timeZone: timezone },
+        end: { dateTime: endDateTime, timeZone: timezone },
+        reminders: { useDefault: false, overrides: [{ method: 'email', minutes: 60 }, { method: 'popup', minutes: 30 }] },
+      };
+      const calendarId = client.google_calendar_id || 'primary';
+      const resp = await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`,
+        { method: 'POST', headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(event) }
+      );
+      if (!resp.ok) { console.error('API createAppointment Google error:', await resp.text().catch(() => '')); return { ok: false, code: 'calendar_error', error: 'Failed to create the calendar event.' }; }
+      googleEventId = (await resp.json()).id;
+    }
+
+    const [sY, sMo, sD] = p.date.split('-').map(Number);
+    const startIso = zonedWallTimeToUTC(sY, sMo, sD, reqHr, reqMin, timezone).toISOString();
+
+    const record = {
+      client_id: p.clientId,
+      google_event_id: googleEventId,
+      customer_name: p.customerName,
+      customer_phone: p.customerPhone || null,
+      customer_email: p.customerEmail || null,
+      appointment_time: startIso,
+      duration,
+      service_type: p.serviceType || null,
+      staff_name: p.staffName || null,
+      notes: p.notes || null,
+      status: 'confirmed',
+      booking_source: googleConnected ? 'api' : 'api_record_only',
+    };
+    const { data: appt, error: insErr } = await insertAppointmentRow(record);
+    if (insErr || !appt) { console.error('API createAppointment insert error:', insErr && insErr.message); return { ok: false, code: 'api_error', error: 'Failed to save the appointment.' }; }
+
+    emitApptEvent(client, 'appointment.booked', appt);
+    return { ok: true, appointment: appt, record_only: !googleConnected };
+  } catch (err) {
+    console.error('createAppointmentApi error:', err);
+    return { ok: false, code: 'api_error', error: 'Server error while creating the appointment.' };
+  }
+}
+
+// Reschedule an existing appointment to a new date/time (and optionally change
+// duration). Patches the Google event when the appointment has one.
+// params: { date, time, durationMinutes, checkAvailability }
+async function rescheduleAppointmentApi(appt, params) {
+  const p = params || {};
+  try {
+    if (!appt) return { ok: false, code: 'not_found', error: 'Appointment not found.' };
+    if (appt.status === 'canceled' || appt.status === 'cancelled') return { ok: false, code: 'invalid_request', error: 'A canceled appointment cannot be rescheduled.' };
+    if (!p.date || !/^\d{4}-\d{2}-\d{2}$/.test(p.date)) return { ok: false, code: 'invalid_request', error: 'date is required in YYYY-MM-DD format.' };
+    const time24 = parseTimeTo24Hr(p.time);
+    if (!time24) return { ok: false, code: 'invalid_request', error: 'time is required.' };
+
+    const client = await fetchOwnedClientFull(appt.client_id);
+    if (!client) return { ok: false, code: 'not_found', error: 'Client not found.' };
+
+    const timezone = client.timezone || 'America/New_York';
+    const duration = Number(p.durationMinutes) || appt.duration || client.appointment_duration || 30;
+    const [reqHr, reqMin] = time24.split(':').map(Number);
+
+    if (appt.google_event_id && client.google_calendar_connected === true) {
+      if (p.checkAvailability !== false) {
+        const avail = await getAvailableSlots(appt.client_id, p.date, { durationOverride: duration, bufferMinutes: 0 });
+        if (!avail.success) return { ok: false, code: 'calendar_error', error: 'Could not read the calendar to confirm availability.' };
+        const want = formatSlotLabel(reqHr, reqMin).replace(/\s+/g, ' ').trim().toLowerCase();
+        // The appointment's own current slot is legitimately "busy" against
+        // itself; availability already excludes it only if it moved days, so we
+        // accept the target when it is free OR unchanged.
+        const free = (avail.slots || []).some((s) => s.replace(/\s+/g, ' ').trim().toLowerCase() === want);
+        if (!free) return { ok: false, code: 'slot_unavailable', error: 'That time is not available.', available_slots: avail.slots || [] };
+      }
+      const accessToken = await refreshAccessToken(client);
+      if (!accessToken) return { ok: false, code: 'calendar_error', error: 'Calendar authentication failed.' };
+      const startDateTime = `${p.date}T${time24}:00`;
+      const totalMinutes = reqHr * 60 + reqMin + duration;
+      const endDateTime = `${p.date}T${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}:00`;
+      const calendarId = client.google_calendar_id || 'primary';
+      const resp = await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(appt.google_event_id)}`,
+        { method: 'PATCH', headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ start: { dateTime: startDateTime, timeZone: timezone }, end: { dateTime: endDateTime, timeZone: timezone } }) }
+      );
+      if (!resp.ok) { console.error('API reschedule Google error:', await resp.text().catch(() => '')); return { ok: false, code: 'calendar_error', error: 'Failed to update the calendar event.' }; }
+    }
+
+    const [nY, nMo, nD] = p.date.split('-').map(Number);
+    const newStartIso = zonedWallTimeToUTC(nY, nMo, nD, reqHr, reqMin, timezone).toISOString();
+    const previousTime = appt.appointment_time;
+    const updates = { appointment_time: newStartIso, duration, status: 'confirmed', updated_at: new Date().toISOString() };
+    const { data: updated, error: updErr } = await supabase.from('appointments').update(updates).eq('id', appt.id).select('*').single();
+    if (updErr || !updated) { console.error('API reschedule update error:', updErr && updErr.message); return { ok: false, code: 'api_error', error: 'Failed to save the new time.' }; }
+
+    emitApptEvent(client, 'appointment.rescheduled', updated, { previous_appointment_time: previousTime });
+    return { ok: true, appointment: updated };
+  } catch (err) {
+    console.error('rescheduleAppointmentApi error:', err);
+    return { ok: false, code: 'api_error', error: 'Server error while rescheduling.' };
+  }
+}
+
+// Cancel an appointment. Deletes the Google event when present, marks the row
+// canceled (kept for history), and fires appointment.canceled.
+async function cancelAppointmentApi(appt, params) {
+  const p = params || {};
+  try {
+    if (!appt) return { ok: false, code: 'not_found', error: 'Appointment not found.' };
+    if (appt.status === 'canceled' || appt.status === 'cancelled') return { ok: true, appointment: appt, already: true };
+
+    const client = await fetchOwnedClientFull(appt.client_id);
+    if (!client) return { ok: false, code: 'not_found', error: 'Client not found.' };
+
+    if (appt.google_event_id && client.google_calendar_connected === true) {
+      const accessToken = await refreshAccessToken(client);
+      if (accessToken) {
+        const calendarId = client.google_calendar_id || 'primary';
+        const resp = await fetch(
+          `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(appt.google_event_id)}`,
+          { method: 'DELETE', headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        // 410 Gone means it was already deleted on Google; treat as success.
+        if (!resp.ok && resp.status !== 410 && resp.status !== 404) {
+          console.error('API cancel Google error:', resp.status, await resp.text().catch(() => ''));
+          return { ok: false, code: 'calendar_error', error: 'Failed to remove the calendar event.' };
+        }
+      }
+    }
+
+    const updates = { status: 'canceled', updated_at: new Date().toISOString() };
+    if (p.reason) updates.notes = appt.notes ? `${appt.notes}\n[Canceled: ${p.reason}]` : `[Canceled: ${p.reason}]`;
+    const { data: updated, error: updErr } = await supabase.from('appointments').update(updates).eq('id', appt.id).select('*').single();
+    if (updErr || !updated) { console.error('API cancel update error:', updErr && updErr.message); return { ok: false, code: 'api_error', error: 'Failed to cancel the appointment.' }; }
+
+    emitApptEvent(client, 'appointment.canceled', updated, { cancel_reason: p.reason || null });
+    return { ok: true, appointment: updated };
+  } catch (err) {
+    console.error('cancelAppointmentApi error:', err);
+    return { ok: false, code: 'api_error', error: 'Server error while canceling.' };
+  }
+}
+
 module.exports = {
   getAvailableSlots,
   bookAppointment,
   canOfferApptCustomerSms,
   refreshAccessToken,
   lookupServiceConfig,
+  // API-facing appointment writes (REST /api/v1/appointments)
+  createAppointmentApi,
+  rescheduleAppointmentApi,
+  cancelAppointmentApi,
   // exported for tests / reuse
   zonedWallTimeToUTC,
   getTzOffsetMinutes,

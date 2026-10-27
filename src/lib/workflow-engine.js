@@ -427,6 +427,31 @@ async function advanceEnrollment(enrOrId) {
 //   { terminal:true }                  end the run
 //   { nextNodeId }                     continue to this node (undefined -> linear)
 //   { failed:true, nextNodeId, detail} action failed but run continues
+// Send the business owner a copy of a text the customer just received, used by
+// the Send SMS / AI SMS steps when "also text a copy to the business owner" is
+// on. The copy is wrapped so the owner knows who it went to and that the
+// customer's replies land in the dashboard inbox (not back to this copy text).
+// Recipient is notification_phone, else owner_phone. Best effort: a failure is
+// reported in the step detail but never fails the step itself.
+async function sendOwnerCopy(enr, client, contact, ctx, customerMessage) {
+  const ownerPhone = (client && (client.notification_phone || client.owner_phone)) || null;
+  if (!ownerPhone) return { sent: false, reason: 'no_owner_path' };
+  const name = (contact && contact.name) || (ctx && ctx.customer_name) || null;
+  const phone = (contact && contact.phone) || (ctx && ctx.caller_phone) || null;
+  const who = (name && phone) ? `${name} (${phone})` : (name || phone || 'your caller');
+  const ownerMessage =
+    `Copy of the text just sent to ${who}:\n\n` +
+    `"${customerMessage}"\n\n` +
+    `If they reply, it shows up in your Messages inbox. Reply to them from there, not from this text.`;
+  try {
+    const { sendClientSms } = require('../routes/sms');
+    const r = await sendClientSms({ clientId: enr.client_id, to: ownerPhone, message: ownerMessage, sentBy: { name: 'Workflow (owner copy)' } });
+    return r && r.error ? { sent: false, reason: r.details || r.error } : { sent: true };
+  } catch (e) {
+    return { sent: false, reason: (e && e.message) || 'owner_copy_error' };
+  }
+}
+
 async function executeNode(node, env) {
   const { enr, client, contact, ctx, tokenMap, graph } = env;
   const type = node.type;
@@ -461,12 +486,16 @@ async function executeNode(node, env) {
     case 'send_sms': {
       const message = renderTemplate(data.message || '', tokenMap);
       const r = await doSendSms(enr, message);
-      return { nextNodeId: linearNext(graph, node.id), failed: !r.sent, detail: { sent: r.sent, reason: r.reason, message_id: r.messageId } };
+      // Optionally send the business owner a copy of what the customer just got
+      // (data.copy_to_owner). Best effort; it never fails the caller send.
+      const ownerCopy = data.copy_to_owner ? await sendOwnerCopy(enr, client, contact, ctx, message) : undefined;
+      return { nextNodeId: linearNext(graph, node.id), failed: !r.sent, detail: { sent: r.sent, reason: r.reason, message_id: r.messageId, owner_copy: ownerCopy } };
     }
     case 'ai_sms': {
       const message = await generateAiSms(node, client, ctx, tokenMap);
       const r = await doSendSms(enr, message);
-      return { nextNodeId: linearNext(graph, node.id), failed: !r.sent, detail: { sent: r.sent, reason: r.reason, generated: message.slice(0, 160) } };
+      const ownerCopy = data.copy_to_owner ? await sendOwnerCopy(enr, client, contact, ctx, message) : undefined;
+      return { nextNodeId: linearNext(graph, node.id), failed: !r.sent, detail: { sent: r.sent, reason: r.reason, generated: message.slice(0, 160), owner_copy: ownerCopy } };
     }
     case 'notify_owner': {
       // Text the business owner (not the customer). Best effort.
