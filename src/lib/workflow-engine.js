@@ -370,7 +370,15 @@ async function advanceEnrollment(enrOrId) {
         await persistProgress(enr, { status: 'stopped', stopped_reason: goal, next_run_at: null, claimed_at: null, completed_at: new Date().toISOString() });
         return;
       }
-      const respectQuiet = !(node.data && node.data.respect_quiet_hours === false);
+      // Post-call follow-ups are a reactive reply to someone who just called the
+      // business, so they are exempt from quiet hours by default: a caller at 2am
+      // should get their reply now, not have it held until 9am where it is stale.
+      // Drip / scheduled sends (non-call triggers) still honor quiet hours. A node
+      // can force either way with data.respect_quiet_hours (true = always hold,
+      // false = never hold).
+      const callTriggered = ['call.completed', 'call.transferred', 'call.escalated'].includes(enr.trigger_event);
+      const quietPref = (node.data && typeof node.data.respect_quiet_hours === 'boolean') ? node.data.respect_quiet_hours : null;
+      const respectQuiet = quietPref !== null ? quietPref : !callTriggered;
       if (respectQuiet) {
         const hold = quietHoldUntil(tz);
         if (hold) { // hold the SEND (do not advance past this node) until daytime
