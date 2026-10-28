@@ -1315,6 +1315,14 @@ async function updateAgencySettings(req, res) {
             }
           }
         }
+        // logo_scale: nav logo size multiplier (not a color). Keep it only when
+        // it is a real number, clamped to [1, 1.5] so a bigger logo can never
+        // overflow the fixed nav bar. 1 (default) is not stored.
+        const rawScale = Number(bo.logo_scale);
+        if (Number.isFinite(rawScale)) {
+          const scale = Math.min(1.5, Math.max(1, rawScale));
+          if (scale > 1) cleaned.logo_scale = Math.round(scale * 100) / 100;
+        }
         // If all values were stripped, store null instead of empty object
         sanitizedUpdates.branding_overrides = Object.keys(cleaned).length > 0 ? cleaned : null;
       }
