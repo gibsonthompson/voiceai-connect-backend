@@ -1304,7 +1304,7 @@ router.get('/templates', requireAdmin, async (req, res) => {
 // POST /api/admin/templates - Create platform template
 router.post('/templates', requireAdmin, async (req, res) => {
   try {
-    const { name, description, type = 'email', subject, body, is_follow_up, sequence_name, sequence_order, delay_days } = req.body;
+    const { name, description, type = 'email', subject, body, is_follow_up, sequence_name, sequence_order, delay_days, buyer_type } = req.body;
 
     if (!name || !body) return res.status(400).json({ error: 'Name and body are required' });
     if (type === 'email' && !subject) return res.status(400).json({ error: 'Subject is required for email templates' });
@@ -1318,6 +1318,9 @@ router.post('/templates', requireAdmin, async (req, res) => {
         sequence_name: sequence_name || null,
         sequence_order: sequence_order ? parseInt(sequence_order) : null,
         delay_days: delay_days ? parseInt(delay_days) : null,
+        // Platform templates: buyer_type is the buyer persona (marketing agency,
+        // new entrepreneur, etc.) used to group and filter the template library.
+        buyer_type: buyer_type || null,
         is_default: false,
       })
       .select()
@@ -1432,6 +1435,7 @@ router.post('/templates/:templateId/duplicate', requireAdmin, async (req, res) =
         sequence_name: null,
         sequence_order: null,
         delay_days: original.delay_days,
+        buyer_type: original.buyer_type || null,
         is_default: false,
       })
       .select()

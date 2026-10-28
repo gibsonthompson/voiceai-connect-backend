@@ -203,7 +203,8 @@ router.post('/:agencyId/templates', async (req, res) => {
       is_follow_up,
       sequence_name,
       sequence_order,
-      delay_days
+      delay_days,
+      buyer_type
     } = req.body;
 
     if (!name || !body) {
@@ -227,6 +228,9 @@ router.post('/:agencyId/templates', async (req, res) => {
         sequence_name: sequence_name || null,
         sequence_order: sequence_order || null,
         delay_days: delay_days || null,
+        // For agency templates, buyer_type holds the canonical lead-industry
+        // value so the composer can auto-match a template to a lead's industry.
+        buyer_type: buyer_type || null,
         is_default: false
       })
       .select()
@@ -388,6 +392,7 @@ router.post('/:agencyId/templates/:templateId/duplicate', async (req, res) => {
         sequence_name: null,  // Don't copy sequence info
         sequence_order: null,
         delay_days: original.delay_days,
+        buyer_type: original.buyer_type || null,
         is_default: false
       })
       .select()
