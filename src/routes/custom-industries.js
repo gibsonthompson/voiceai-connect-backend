@@ -327,7 +327,7 @@ router.post('/:agencyId/custom-industries', async (req, res) => {
             voice_id: 'XrExE9yKIg1WjnnlVkGX',
             model: 'gpt-4o-mini',
             temperature: 0.7,
-            voice_speed: 1,
+            voice_speed: 1.1,
             is_active: true,
             updated_at: new Date().toISOString(),
           }, { onConflict: 'agency_id,industry' });

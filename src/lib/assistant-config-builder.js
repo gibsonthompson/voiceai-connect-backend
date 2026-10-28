@@ -2005,7 +2005,10 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   let voiceId = config.voiceId;
   let temperature = config.temperature;
   let modelId = DEFAULT_LLM_MODEL;
-  let voiceSpeed;
+  // Default speaking speed. Bumped above 1.0 because the ElevenLabs v4 voices
+  // run a touch slow at normal rate; a client/template voice_speed still
+  // overrides this. Kept inside VAPI's supported 0.7-1.2 range.
+  let voiceSpeed = 1.1;
   // Per-industry template pipeline (Scale). tts_model / transcriber_model were
   // being saved by the AI Lab template editor but NEVER read here, so the Voice
   // engine + Speech recognition selectors did nothing on live calls. Now read

@@ -1357,7 +1357,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         tts_model: customTemplate?.tts_model || 'eleven_v4_turbo',
         transcriber_model: customTemplate?.transcriber_model || 'nova-3',
         temperature: customTemplate?.temperature || 0.7,
-        voice_speed: customTemplate?.voice_speed ?? 1,
+        voice_speed: customTemplate?.voice_speed ?? 1.1,
         background_denoising: customTemplate?.background_denoising ?? true,
         knowledge_base_data: customTemplate?.knowledge_base_data || null,
         updated_at: customTemplate?.updated_at || null,
@@ -1370,7 +1370,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         tts_model: 'eleven_v4_turbo',
         transcriber_model: 'nova-3',
         temperature: 0.7,
-        voice_speed: 1,
+        voice_speed: 1.1,
         background_denoising: true,
       },
       placeholders: [
