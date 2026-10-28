@@ -189,7 +189,10 @@ router.post('/:agencyId/workflows', async (req, res) => {
       };
       triggerType = body.trigger_type || 'call.completed';
       triggerConfig = body.trigger_config || {};
-      stopOn = body.stop_on || {}; entryRules = body.entry_rules || { reenroll: false };
+      // Default a hand-built workflow to fire every time, not once-per-contact.
+      // (Was { reenroll: false }, i.e. one enrollment per caller for life, which
+      // silently blocked every follow-up after a caller's first-ever call.)
+      stopOn = body.stop_on || {}; entryRules = body.entry_rules || { reenroll: true, cooldown_hours: 0 };
       name = name || 'Untitled workflow';
     }
 

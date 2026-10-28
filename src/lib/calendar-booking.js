@@ -17,6 +17,14 @@
 //   failures fail safe, and DST boundaries are handled in the conversion.
 // ====================================================================
 const { supabase } = require('./supabase');
+const ghl = require('./ghl-calendar');
+
+// Short local-time label for a slot ISO in a timezone (GHL availability hints).
+function ghlSlotLabel(iso, timeZone) {
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone, hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(iso));
+  } catch (e) { return String(iso); }
+}
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CALENDAR_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CALENDAR_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
@@ -823,6 +831,10 @@ async function insertAppointmentRow(record) {
     const r3 = Object.assign({}, record); delete r3.customer_email;
     ({ data, error } = await attempt(r3));
   }
+  if (error && error.message && /ghl_event_id/.test(error.message)) {
+    const r4 = Object.assign({}, record); delete r4.ghl_event_id;
+    ({ data, error } = await attempt(r4));
+  }
   return { data, error };
 }
 
@@ -852,13 +864,53 @@ async function createAppointmentApi(params) {
     let duration = Number(p.durationMinutes) || (serviceConfig && serviceConfig.duration_minutes) || client.appointment_duration || 30;
     const bufferMinutes = (serviceConfig && serviceConfig.buffer_minutes) || 0;
 
+    // Requested instant, computed once so every provider path and the record
+    // insert share it. (reqHr/reqMin were previously scoped inside the Google
+    // branch, which left the record-only path referencing them undefined.)
+    const [reqHr, reqMin] = time24.split(':').map(Number);
+    const [sY, sMo, sD] = p.date.split('-').map(Number);
+    const startIso = zonedWallTimeToUTC(sY, sMo, sD, reqHr, reqMin, timezone).toISOString();
+    const endIso = new Date(new Date(startIso).getTime() + duration * 60000).toISOString();
+
+    // Provider routing: GHL when it is the selected, connected calendar; else
+    // Google when connected; else record-only (a real row, no external write).
+    const useGhl = client.calendar_provider === 'ghl' && client.ghl_connected === true && !!client.ghl_access_token && !!client.ghl_calendar_id;
     const googleConnected = client.google_calendar_connected === true;
     let googleEventId = null;
+    let ghlEventId = null;
+    let bookingSource = 'api_record_only';
 
-    if (googleConnected) {
-      // Google path: availability-check (unless explicitly disabled), then write
-      // the real calendar event, reusing the same engine the AI uses.
-      const [reqHr, reqMin] = time24.split(':').map(Number);
+    if (useGhl) {
+      // GoHighLevel path: upsert the contact, (optionally) check availability,
+      // then book a real appointment in the client's GHL calendar. GHL's native
+      // triggers then fire the agency's workflows off the new contact/booking.
+      const token = await ghl.getValidAccessToken(client);
+      if (!token) return { ok: false, code: 'calendar_error', error: 'GoHighLevel authentication failed. Reconnect the calendar.' };
+      if (p.checkAvailability !== false) {
+        const dayStart = zonedWallTimeToUTC(sY, sMo, sD, 0, 0, timezone).getTime();
+        const fs = await ghl.getFreeSlots(token, client.ghl_calendar_id, dayStart, dayStart + 24 * 60 * 60 * 1000, { timezone, durationMinutes: duration });
+        if (!fs.ok) return { ok: false, code: 'calendar_error', error: 'Could not read GoHighLevel availability.' };
+        const wantMs = new Date(startIso).getTime();
+        const free = (fs.slots || []).some((s) => new Date(s).getTime() === wantMs);
+        if (!free) return { ok: false, code: 'slot_unavailable', error: 'That time is not available.', available_slots: (fs.slots || []).map((s) => ghlSlotLabel(s, timezone)) };
+      }
+      const uc = await ghl.upsertContact(token, client.ghl_location_id, { name: p.customerName, phone: p.customerPhone || undefined, email: p.customerEmail || undefined });
+      if (!uc.ok || !uc.id) return { ok: false, code: 'calendar_error', error: 'Could not create the contact in GoHighLevel.' };
+      const titleParts = [p.serviceType || 'Appointment'];
+      if (p.staffName) titleParts.push(p.staffName);
+      titleParts.push(p.customerName);
+      const ca = await ghl.createAppointment(token, {
+        calendarId: client.ghl_calendar_id, locationId: client.ghl_location_id, contactId: uc.id,
+        startTime: startIso, endTime: endIso, title: titleParts.join(' - '),
+      });
+      if (!ca.ok) {
+        const unavailable = /slot|avail|conflict|not available/i.test(ca.error || '');
+        return { ok: false, code: unavailable ? 'slot_unavailable' : 'calendar_error', error: unavailable ? 'That time is not available.' : 'GoHighLevel did not accept the booking.' };
+      }
+      ghlEventId = ca.id;
+      bookingSource = 'api_ghl';
+    } else if (googleConnected) {
+      // Google path: availability-check (unless disabled), then write the event.
       if (p.checkAvailability !== false) {
         const avail = await getAvailableSlots(p.clientId, p.date, { durationOverride: duration, bufferMinutes });
         if (!avail.success) return { ok: false, code: 'calendar_error', error: 'Could not read the calendar to confirm availability.' };
@@ -894,10 +946,8 @@ async function createAppointmentApi(params) {
       );
       if (!resp.ok) { console.error('API createAppointment Google error:', await resp.text().catch(() => '')); return { ok: false, code: 'calendar_error', error: 'Failed to create the calendar event.' }; }
       googleEventId = (await resp.json()).id;
+      bookingSource = 'api';
     }
-
-    const [sY, sMo, sD] = p.date.split('-').map(Number);
-    const startIso = zonedWallTimeToUTC(sY, sMo, sD, reqHr, reqMin, timezone).toISOString();
 
     const record = {
       client_id: p.clientId,
@@ -911,13 +961,14 @@ async function createAppointmentApi(params) {
       staff_name: p.staffName || null,
       notes: p.notes || null,
       status: 'confirmed',
-      booking_source: googleConnected ? 'api' : 'api_record_only',
+      booking_source: bookingSource,
     };
+    if (ghlEventId) record.ghl_event_id = ghlEventId;
     const { data: appt, error: insErr } = await insertAppointmentRow(record);
     if (insErr || !appt) { console.error('API createAppointment insert error:', insErr && insErr.message); return { ok: false, code: 'api_error', error: 'Failed to save the appointment.' }; }
 
     emitApptEvent(client, 'appointment.booked', appt);
-    return { ok: true, appointment: appt, record_only: !googleConnected };
+    return { ok: true, appointment: appt, record_only: !googleEventId && !ghlEventId };
   } catch (err) {
     console.error('createAppointmentApi error:', err);
     return { ok: false, code: 'api_error', error: 'Server error while creating the appointment.' };
@@ -943,7 +994,25 @@ async function rescheduleAppointmentApi(appt, params) {
     const duration = Number(p.durationMinutes) || appt.duration || client.appointment_duration || 30;
     const [reqHr, reqMin] = time24.split(':').map(Number);
 
-    if (appt.google_event_id && client.google_calendar_connected === true) {
+    if (appt.ghl_event_id && client.ghl_connected === true) {
+      // GoHighLevel reschedule: PUT the appointment with a new start/end.
+      const token = await ghl.getValidAccessToken(client);
+      if (!token) return { ok: false, code: 'calendar_error', error: 'GoHighLevel authentication failed. Reconnect the calendar.' };
+      const [gY, gMo, gD] = p.date.split('-').map(Number);
+      const newStart = zonedWallTimeToUTC(gY, gMo, gD, reqHr, reqMin, timezone).toISOString();
+      const newEnd = new Date(new Date(newStart).getTime() + duration * 60000).toISOString();
+      if (p.checkAvailability !== false && client.ghl_calendar_id) {
+        const dayStart = zonedWallTimeToUTC(gY, gMo, gD, 0, 0, timezone).getTime();
+        const fs = await ghl.getFreeSlots(token, client.ghl_calendar_id, dayStart, dayStart + 24 * 60 * 60 * 1000, { timezone, durationMinutes: duration });
+        if (fs.ok) {
+          const wantMs = new Date(newStart).getTime();
+          const free = (fs.slots || []).some((s) => new Date(s).getTime() === wantMs);
+          if (!free) return { ok: false, code: 'slot_unavailable', error: 'That time is not available.', available_slots: (fs.slots || []).map((s) => ghlSlotLabel(s, timezone)) };
+        }
+      }
+      const up = await ghl.updateAppointment(token, appt.ghl_event_id, { startTime: newStart, endTime: newEnd });
+      if (!up.ok) { console.error('API reschedule GHL error:', up.status, up.error); return { ok: false, code: 'calendar_error', error: 'Failed to update the GoHighLevel appointment.' }; }
+    } else if (appt.google_event_id && client.google_calendar_connected === true) {
       if (p.checkAvailability !== false) {
         const avail = await getAvailableSlots(appt.client_id, p.date, { durationOverride: duration, bufferMinutes: 0 });
         if (!avail.success) return { ok: false, code: 'calendar_error', error: 'Could not read the calendar to confirm availability.' };
@@ -993,7 +1062,14 @@ async function cancelAppointmentApi(appt, params) {
     const client = await fetchOwnedClientFull(appt.client_id);
     if (!client) return { ok: false, code: 'not_found', error: 'Client not found.' };
 
-    if (appt.google_event_id && client.google_calendar_connected === true) {
+    if (appt.ghl_event_id && client.ghl_connected === true) {
+      // GoHighLevel cancel: set appointmentStatus cancelled (GHL has no delete).
+      const token = await ghl.getValidAccessToken(client);
+      if (token) {
+        const r = await ghl.cancelAppointment(token, appt.ghl_event_id);
+        if (!r.ok) { console.error('API cancel GHL error:', r.status, r.error); return { ok: false, code: 'calendar_error', error: 'Failed to cancel the GoHighLevel appointment.' }; }
+      }
+    } else if (appt.google_event_id && client.google_calendar_connected === true) {
       const accessToken = await refreshAccessToken(client);
       if (accessToken) {
         const calendarId = client.google_calendar_id || 'primary';
@@ -1022,8 +1098,35 @@ async function cancelAppointmentApi(appt, params) {
   }
 }
 
+// Provider-aware availability for the REST availability endpoint. Routes to GHL
+// free-slots for a GHL client, otherwise the Google engine. Returns the same
+// shape ({ success, slots, date }) either way so the endpoint stays uniform.
+async function getAvailabilityForClient(clientId, date, opts) {
+  try {
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return { success: false, error: 'Invalid date' };
+    const client = await fetchOwnedClientFull(clientId);
+    if (!client) return { success: false, error: 'Client not found' };
+    if (client.calendar_provider === 'ghl' && client.ghl_connected === true && client.ghl_calendar_id) {
+      const token = await ghl.getValidAccessToken(client);
+      if (!token) return { success: false, error: 'Calendar not connected' };
+      const tz = client.timezone || 'America/New_York';
+      const [y, mo, d] = date.split('-').map(Number);
+      const dayStart = zonedWallTimeToUTC(y, mo, d, 0, 0, tz).getTime();
+      const dur = (opts && opts.durationOverride) || client.appointment_duration || 30;
+      const fs = await ghl.getFreeSlots(token, client.ghl_calendar_id, dayStart, dayStart + 24 * 60 * 60 * 1000, { timezone: tz, durationMinutes: dur });
+      if (!fs.ok) return { success: false, error: 'Failed to read availability' };
+      return { success: true, slots: (fs.slots || []).map((s) => ghlSlotLabel(s, tz)), date, provider: 'ghl' };
+    }
+    return getAvailableSlots(clientId, date, opts);
+  } catch (err) {
+    console.error('getAvailabilityForClient error:', err);
+    return { success: false, error: 'Failed to get availability' };
+  }
+}
+
 module.exports = {
   getAvailableSlots,
+  getAvailabilityForClient,
   bookAppointment,
   canOfferApptCustomerSms,
   refreshAccessToken,

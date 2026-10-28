@@ -50,7 +50,7 @@ const TEMPLATES = {
           respect_quiet_hours: false,
           message: "Hi {{first_name}}, sorry we couldn't finish up on the phone just now. This is {{business_name}}. How can we help? Reply here and we'll get right back to you.",
         } },
-        { id: 'w1', type: 'wait', data: { minutes: 1440 } },
+        { id: 'w1', type: 'wait', data: { minutes: 240 } },
         { id: 's2', type: 'send_sms', data: {
           message: "Hi {{first_name}}, just following up from {{business_name}}. We're still happy to help whenever you're ready, just reply here.",
         } },
@@ -88,7 +88,7 @@ const TEMPLATES = {
     graph: {
       nodes: [
         { id: 'trigger', type: 'trigger', data: {} },
-        { id: 'w1', type: 'wait', data: { minutes: 120 } },
+        { id: 'w1', type: 'wait', data: { minutes: 2 } },
         { id: 's1', type: 'send_sms', data: {
           message: "Thanks for calling {{business_name}}, {{first_name}}. If there's anything else we can help with, just reply here.",
         } },

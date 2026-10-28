@@ -20,7 +20,7 @@ const {
 } = require('../../middleware/api-auth');
 const { EVENT_TYPES, sendPing, isSafeWebhookUrl } = require('../../lib/webhooks');
 const {
-  getAvailableSlots,
+  getAvailabilityForClient,
   createAppointmentApi, rescheduleAppointmentApi, cancelAppointmentApi,
 } = require('../../lib/calendar-booking');
 
@@ -599,10 +599,10 @@ router.get('/clients/:id/availability', async (req, res) => {
     const opts = {};
     const dur = parseInt(req.query.duration, 10);
     if (Number.isFinite(dur) && dur > 0) opts.durationOverride = dur;
-    const result = await getAvailableSlots(req.params.id, date, opts);
+    const result = await getAvailabilityForClient(req.params.id, date, opts);
     if (!result.success) {
-      // "Calendar not connected" is the expected case for a non-Google client:
-      // report it as a clean 409 rather than a server error.
+      // "Calendar not connected" is the expected case for a client with no
+      // calendar: report it as a clean 409 rather than a server error.
       if (result.error === 'Calendar not connected') {
         return res.status(409).json({ error: { type: 'calendar_not_connected', message: 'This client has no connected calendar, so live availability is not available. You can still create a record-only appointment.' } });
       }
