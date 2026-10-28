@@ -1302,7 +1302,7 @@ async function updateAgencySettings(req, res) {
           return res.status(400).json({ error: 'branding_overrides must be an object or null' });
         }
         const validKeys = [
-          'nav_bg', 'nav_text', 'page_bg', 'card_bg', 'card_border',
+          'nav_bg', 'nav_text', 'nav_accent', 'page_bg', 'card_bg', 'card_border',
           'button_text', 'text_primary', 'text_muted'
         ];
         // Strip any invalid keys
@@ -1316,11 +1316,11 @@ async function updateAgencySettings(req, res) {
           }
         }
         // logo_scale: nav logo size multiplier (not a color). Keep it only when
-        // it is a real number, clamped to [1, 4]. The nav logo box grows to fit,
-        // so larger values just make the top logo taller. 1 (default) is not stored.
+        // it is a real number, clamped to [1, 1.5] so a bigger logo can never
+        // overflow the fixed nav bar. 1 (default) is not stored.
         const rawScale = Number(bo.logo_scale);
         if (Number.isFinite(rawScale)) {
-          const scale = Math.min(4, Math.max(1, rawScale));
+          const scale = Math.min(1.5, Math.max(1, rawScale));
           if (scale > 1) cleaned.logo_scale = Math.round(scale * 100) / 100;
         }
         // If all values were stripped, store null instead of empty object
