@@ -1301,6 +1301,31 @@ router.get('/templates', requireAdmin, async (req, res) => {
   }
 });
 
+// PUT /api/admin/templates/reorder - Persist manual drag-and-drop order.
+// MUST be defined before '/templates/:templateId' so Express doesn't match
+// "reorder" as a templateId. Body: { items: [{ id, sort_order }] }.
+router.put('/templates/reorder', requireAdmin, async (req, res) => {
+  try {
+    const { items } = req.body;
+    if (!Array.isArray(items)) return res.status(400).json({ error: 'items array required' });
+
+    for (const it of items) {
+      if (!it || !it.id) continue;
+      const order = Number.isFinite(Number(it.sort_order)) ? parseInt(it.sort_order) : null;
+      await supabase
+        .from('outreach_templates')
+        .update({ sort_order: order })
+        .eq('id', it.id)
+        .is('agency_id', null);
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Admin reorder templates error:', error);
+    res.status(500).json({ error: 'Failed to reorder templates' });
+  }
+});
+
 // POST /api/admin/templates - Create platform template
 router.post('/templates', requireAdmin, async (req, res) => {
   try {
