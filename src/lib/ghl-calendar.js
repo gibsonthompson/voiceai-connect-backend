@@ -32,12 +32,16 @@ const GHL_AUTH_BASE = 'https://marketplace.gohighlevel.com';
 const TOKEN_URL = `${GHL_BASE}/oauth/token`;
 
 // Scopes the integration needs (space-separated in the authorize URL).
+// Trimmed to exactly what the code exercises: upsert a contact, list
+// calendars, read free slots, and create/reschedule/cancel appointments.
+// (free-slots and calendar listing are covered by calendars.readonly;
+// appointment create/update/cancel by calendars/events.write.) Add more
+// only when a feature actually calls for it, since widening scopes forces
+// every already-connected customer to re-authorize.
 const GHL_SCOPES = [
-  'contacts.readonly', 'contacts.write',
-  'calendars.readonly', 'calendars.write',
-  'calendars/events.readonly', 'calendars/events.write',
-  'conversations.write', 'conversations/message.write',
-  'workflows.readonly', 'locations.readonly',
+  'contacts.write',
+  'calendars.readonly',
+  'calendars/events.write',
 ].join(' ');
 
 function assertConfigured() {

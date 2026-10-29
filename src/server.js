@@ -2322,7 +2322,7 @@ app.post('/api/knowledge-base/update', async (req, res) => {
 // ============================================================================
 
 app.use('/api/auth/google-calendar', googleCalendarAuthRoutes);
-app.use('/api/auth/ghl', ghlAuthRoutes);
+app.use('/api/auth/crm-calendar', ghlAuthRoutes);
 app.use('/api/calendar', calendarRoutes);
 
 app.post('/api/assistant/update-calendar', async (req, res) => {
