@@ -1737,7 +1737,7 @@ async function createClientPortal(req, res) {
 
     const session = await stripe.billingPortal.sessions.create({
       customer: client.stripe_connected_customer_id,
-      return_url: `${agencyUrl}/client/billing`
+      return_url: `${agencyUrl}/client/settings`
     }, { stripeAccount: agency.stripe_account_id });
 
     res.json({ success: true, url: session.url });
