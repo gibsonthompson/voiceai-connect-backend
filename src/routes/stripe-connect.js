@@ -1587,6 +1587,27 @@ async function createClientCheckout(req, res) {
       });
     }
 
+    // Option A plan-selection guard. When the agency has NOT enabled client
+    // self-service plan changes, a client may still ACTIVATE (pay for) the plan
+    // the agency assigned them, but may not pick a DIFFERENT tier. Agency and
+    // super_admin callers are never gated (they manage the plan on the client's
+    // behalf). This is the server-side backstop for the restricted plan list on
+    // /client/upgrade-required; a direct POST of another plan is refused here.
+    const decodedChk = decodeToken(req);
+    const isOwnClientChk = decodedChk?.clientId && decodedChk.clientId === client.id;
+    const isManagingAgencyChk = decodedChk?.agencyId && decodedChk.agencyId === client.agency_id;
+    const isSuperAdminChk = decodedChk?.role === 'super_admin';
+    if (isOwnClientChk && !isManagingAgencyChk && !isSuperAdminChk && !agency.allow_client_plan_changes) {
+      const assignedPlan = (client.plan_type || '').toLowerCase();
+      const requestedPlan = (plan || '').toLowerCase();
+      if (assignedPlan && requestedPlan !== assignedPlan) {
+        return res.status(403).json({
+          error: 'client_plan_selection_disabled',
+          message: 'Plan changes are managed by your provider.',
+        });
+      }
+    }
+
     if (!agency.stripe_account_id || !agency.stripe_charges_enabled) {
       return res.status(400).json({ error: 'Agency has not completed Stripe Connect setup' });
     }
@@ -1737,7 +1758,7 @@ async function createClientPortal(req, res) {
 
     const session = await stripe.billingPortal.sessions.create({
       customer: client.stripe_connected_customer_id,
-      return_url: `${agencyUrl}/client/settings`
+      return_url: `${agencyUrl}/client/billing`
     }, { stripeAccount: agency.stripe_account_id });
 
     res.json({ success: true, url: session.url });
