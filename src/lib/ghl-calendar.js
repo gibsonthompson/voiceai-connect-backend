@@ -64,6 +64,12 @@ function buildAuthorizeUrl(redirectUri, state) {
   u.searchParams.set('client_id', GHL_CLIENT_ID);
   u.searchParams.set('redirect_uri', redirectUri);
   u.searchParams.set('scope', GHL_SCOPES);
+  // A DRAFT (unpublished) marketplace app has no default published version for
+  // chooselocation to resolve, so the bare authorize URL returns "No integration
+  // found with the id". Passing the draft version id (as version_id) makes it
+  // resolve. Set GHL_VERSION_ID while the app is in draft; remove it once the
+  // app is approved and the published version resolves on its own.
+  if (process.env.GHL_VERSION_ID) u.searchParams.set('version_id', process.env.GHL_VERSION_ID);
   if (state) u.searchParams.set('state', state);
   return u.toString();
 }
