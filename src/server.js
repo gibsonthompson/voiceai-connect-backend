@@ -1020,13 +1020,14 @@ app.get('/api/agency/:agencyId/dashboard', requireAgencyAccess('dashboard'), asy
 });
 
 // ============================================================================
-// FIRST-CLIENT COMMAND CENTER
-// Everything the "Get your first client" page needs in one call: the acquisition
-// funnel (messages -> demo calls -> trials -> paying), the setup-checklist state,
-// recent demo-call leads to follow up, and this-week outreach reps + streak. All
-// read-only; each block is guarded so one failing query never blanks the page.
+// ACQUISITION COMMAND CENTER
+// Everything the Acquisition page needs in one call: the acquisition funnel
+// (messages -> demo calls -> trials -> paying), the setup-checklist state, recent
+// demo-call leads to follow up, and this-week outreach reps + streak. Stays useful
+// after the first client lands (ongoing pipeline tracking). All read-only; each
+// block is guarded so one failing query never blanks the page.
 // ============================================================================
-app.get('/api/agency/:agencyId/first-client', requireAgencyAccess('dashboard'), async (req, res) => {
+app.get('/api/agency/:agencyId/acquisition', requireAgencyAccess('dashboard'), async (req, res) => {
   try {
     const { agencyId } = req.params;
     const now = Date.now();
@@ -1105,7 +1106,7 @@ app.get('/api/agency/:agencyId/first-client', requireAgencyAccess('dashboard'), 
       hasFirstClient: paying > 0,
     });
   } catch (error) {
-    console.error('first-client endpoint error:', error);
+    console.error('acquisition endpoint error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
