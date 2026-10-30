@@ -28,7 +28,12 @@ const GHL_CLIENT_ID = process.env.GHL_CLIENT_ID;
 const GHL_CLIENT_SECRET = process.env.GHL_CLIENT_SECRET;
 
 // Marketplace OAuth authorize + token endpoints.
-const GHL_AUTH_BASE = 'https://marketplace.gohighlevel.com';
+// White-label apps must build the authorize (chooselocation) URL on the
+// LeadConnector domain, not marketplace.gohighlevel.com. Using the branded
+// domain for a white-label app returns "No integration found with the id"
+// because the integration is registered under the LeadConnector context.
+// Override with GHL_AUTH_BASE only if needed.
+const GHL_AUTH_BASE = process.env.GHL_AUTH_BASE || 'https://marketplace.leadconnectorhq.com';
 const TOKEN_URL = `${GHL_BASE}/oauth/token`;
 
 // Scopes the integration needs (space-separated in the authorize URL).
