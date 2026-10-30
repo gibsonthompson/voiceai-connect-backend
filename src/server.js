@@ -2414,6 +2414,12 @@ app.post('/api/knowledge-base/update', async (req, res) => {
 // ============================================================================
 
 app.use('/api/auth/google-calendar', googleCalendarAuthRoutes);
+app.use('/api/auth/crm-calendar', ghlAuthRoutes);
+// Legacy alias: the client dashboard and the OAuth redirect URI use the neutral
+// /api/auth/crm-calendar path, but the marketplace app (or older clients) may
+// still reference /api/auth/ghl. Mounting the same router at both keeps connect,
+// callback, status, and disconnect working whichever path is used, and fixes the
+// 404 the client dashboard hit on disconnect after the path was renamed.
 app.use('/api/auth/ghl', ghlAuthRoutes);
 app.use('/api/calendar', calendarRoutes);
 
