@@ -674,6 +674,19 @@ router.get('/:agencyId/demo-calls', async (req, res) => {
       return res.status(400).json({ error: countError.message });
     }
 
+    // This-week count, so the Demo Phone tab can show "X all-time, Y this week".
+    // Non-blocking: a failure here just leaves thisWeek at 0.
+    let thisWeek = 0;
+    try {
+      const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
+      const { count: weekCount } = await supabase
+        .from('demo_calls')
+        .select('id', { count: 'exact', head: true })
+        .eq('agency_id', agencyId)
+        .gte('created_at', weekAgo);
+      thisWeek = weekCount || 0;
+    } catch (e) { /* leave thisWeek at 0 */ }
+
     // Fetch calls
     const { data: calls, error } = await supabase
       .from('demo_calls')
@@ -691,6 +704,7 @@ router.get('/:agencyId/demo-calls', async (req, res) => {
       success: true,
       calls: calls || [],
       total: count || 0,
+      thisWeek,
       limit,
       offset,
     });

@@ -1010,31 +1010,102 @@ app.get('/api/agency/:agencyId/dashboard', requireAgencyAccess('dashboard'), asy
     const totalCalls = clientList.reduce((sum, c) => sum + (liveCalls[c.id] || 0), 0);
     const recentClients = clientList.slice(0, 5).map(c => ({ ...c, calls_this_month: liveCalls[c.id] || 0 }));
 
-    // Demo-line calls (the agency's own demo number). Each one is a warm lead:
-    // a prospect called the demo and heard the AI answer. We surface an all-time
-    // count, a this-week count (the number that signals momentum), and the few
-    // most recent so the dashboard can prompt a follow-up. Non-blocking: a demo
-    // metric must never fail the whole dashboard.
+    console.log(`📊 Dashboard loaded for agency ${agencyId}: ${clientList.length} clients (${realClients.length} real), $${mrr/100} MRR`);
+
+    res.json({ clientCount: realClients.length, mrr, totalCalls, recentClients });
+  } catch (error) {
+    console.error('Error fetching dashboard:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// FIRST-CLIENT COMMAND CENTER
+// Everything the "Get your first client" page needs in one call: the acquisition
+// funnel (messages -> demo calls -> trials -> paying), the setup-checklist state,
+// recent demo-call leads to follow up, and this-week outreach reps + streak. All
+// read-only; each block is guarded so one failing query never blanks the page.
+// ============================================================================
+app.get('/api/agency/:agencyId/first-client', requireAgencyAccess('dashboard'), async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const now = Date.now();
+    const weekAgo = new Date(now - 7 * 86400000).toISOString();
+    const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+
+    const { data: agency } = await supabase
+      .from('agencies')
+      .select('demo_phone_number, stripe_charges_enabled, price_starter, price_pro, price_growth')
+      .eq('id', agencyId).single();
+
+    // Clients: trials + paying (real, non-test); whether a test client exists.
+    const { data: clients } = await supabase
+      .from('clients').select('subscription_status, is_test_client').eq('agency_id', agencyId);
+    const clientList = clients || [];
+    const realClients = clientList.filter(c => !c.is_test_client);
+    const paying = realClients.filter(c => c.subscription_status === 'active').length;
+    const trials = realClients.filter(c => ['trial', 'trialing'].includes(c.subscription_status)).length;
+    const hasTestClient = clientList.some(c => c.is_test_client);
+
+    // Demo calls (warm leads).
     let demoCallsAllTime = 0, demoCallsThisWeek = 0, recentDemoCalls = [];
     try {
-      const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
-      const [allTimeRes, weekRes, recentRes] = await Promise.all([
+      const [a, w, r] = await Promise.all([
         supabase.from('demo_calls').select('id', { count: 'exact', head: true }).eq('agency_id', agencyId),
         supabase.from('demo_calls').select('id', { count: 'exact', head: true }).eq('agency_id', agencyId).gte('created_at', weekAgo),
         supabase.from('demo_calls').select('id, caller_phone, caller_name, business_name, interest_level, created_at').eq('agency_id', agencyId).order('created_at', { ascending: false }).limit(5),
       ]);
-      demoCallsAllTime = allTimeRes.count || 0;
-      demoCallsThisWeek = weekRes.count || 0;
-      recentDemoCalls = recentRes.data || [];
-    } catch (demoErr) {
-      console.warn(`Demo-call stats failed for agency ${agencyId} (non-blocking):`, demoErr.message);
-    }
+      demoCallsAllTime = a.count || 0; demoCallsThisWeek = w.count || 0; recentDemoCalls = r.data || [];
+    } catch (e) { console.warn(`first-client demo stats failed (${agencyId}):`, e.message); }
 
-    console.log(`📊 Dashboard loaded for agency ${agencyId}: ${clientList.length} clients (${realClients.length} real), $${mrr/100} MRR, ${demoCallsAllTime} demo calls`);
+    // Outreach from the activity log (platform-sent email + SMS), lead list, streak.
+    let messagesThisWeek = 0, messagesAllTime = 0, outreachToday = 0, streak = 0, hasLeadList = false;
+    try {
+      const sent = ['email_sent', 'sms_sent'];
+      const [allTime, week, today, leadCount, recentDays] = await Promise.all([
+        supabase.from('activity').select('id', { count: 'exact', head: true }).eq('agency_id', agencyId).in('action_type', sent),
+        supabase.from('activity').select('id', { count: 'exact', head: true }).eq('agency_id', agencyId).in('action_type', sent).gte('created_at', weekAgo),
+        supabase.from('activity').select('id', { count: 'exact', head: true }).eq('agency_id', agencyId).in('action_type', sent).gte('created_at', startOfToday.toISOString()),
+        supabase.from('leads').select('id', { count: 'exact', head: true }).eq('agency_id', agencyId),
+        supabase.from('activity').select('created_at').eq('agency_id', agencyId).in('action_type', sent).gte('created_at', new Date(now - 30 * 86400000).toISOString()),
+      ]);
+      messagesAllTime = allTime.count || 0;
+      messagesThisWeek = week.count || 0;
+      outreachToday = today.count || 0;
+      hasLeadList = (leadCount.count || 0) > 0;
+      // Streak: consecutive days (ending today, or yesterday if nothing yet today)
+      // that had at least one outreach message.
+      const days = new Set((recentDays.data || []).map(r => new Date(r.created_at).toISOString().slice(0, 10)));
+      const d = new Date(); d.setHours(0, 0, 0, 0);
+      if (!days.has(d.toISOString().slice(0, 10))) d.setDate(d.getDate() - 1);
+      while (days.has(d.toISOString().slice(0, 10))) { streak++; d.setDate(d.getDate() - 1); }
+    } catch (e) { console.warn(`first-client activity stats failed (${agencyId}):`, e.message); }
 
-    res.json({ clientCount: realClients.length, mrr, totalCalls, recentClients, demoCallsAllTime, demoCallsThisWeek, recentDemoCalls });
+    // Setup checklist, all verifiable from real state.
+    const DEFAULT_PRICES = { starter: 4900, pro: 9900, growth: 14900 };
+    const pricingSet = !!(agency && (
+      (agency.price_starter ?? DEFAULT_PRICES.starter) !== DEFAULT_PRICES.starter ||
+      (agency.price_pro ?? DEFAULT_PRICES.pro) !== DEFAULT_PRICES.pro ||
+      (agency.price_growth ?? DEFAULT_PRICES.growth) !== DEFAULT_PRICES.growth
+    ));
+    const checklist = {
+      demoLive: !!agency?.demo_phone_number,
+      testClient: hasTestClient,
+      pricingSet,
+      stripeConnected: !!agency?.stripe_charges_enabled,
+      leadList: hasLeadList,
+      firstOutreach: messagesAllTime > 0,
+    };
+
+    res.json({
+      funnel: { messagesThisWeek, messagesAllTime, demoCallsThisWeek, demoCallsAllTime, trials, paying },
+      checklist,
+      recentDemoCalls,
+      reps: { outreachToday, goal: 30, streak },
+      hasFirstClient: paying > 0,
+    });
   } catch (error) {
-    console.error('Error fetching dashboard:', error);
+    console.error('first-client endpoint error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
