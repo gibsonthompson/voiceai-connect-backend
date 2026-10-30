@@ -162,31 +162,31 @@ const INDUSTRY_CONFIG = {
 // Angela, Charlotte) must be present/shared in the platform's ElevenLabs account.
 const ELEVENLABS_VOICES = [
   // ── American female ──
-  { id: 'zGjIP4SZlMnY9m93k97r', name: 'Hope', description: 'Clear, relatable, charismatic — modern conversational', gender: 'female', accent: 'American', recommended: true },
-  { id: 'EST9Ui6982FZPSi7gCHi', name: 'Elise', description: 'Warm, natural, engaging — modern conversational', gender: 'female', accent: 'American', recommended: true },
-  { id: 'FUfBrNit0NNZAwb58KWH', name: 'Angela', description: 'Friendly, natural — modern conversational', gender: 'female', accent: 'American', recommended: true },
-  { id: 'cgSgspJ2msm6clMCkdW9', name: 'Jessica', description: 'Playful, bright, warm — friendly front desk', gender: 'female', accent: 'American' },
-  { id: 'EXAVITQu4vr4xnSDxMaL', name: 'Sarah', description: 'Mature, reassuring — medical and professional', gender: 'female', accent: 'American' },
-  { id: 'FGY2WhTYpPnrIDTdsKH5', name: 'Laura', description: 'Upbeat, youthful — approachable and energetic', gender: 'female', accent: 'American' },
-  { id: 'XrExE9yKIg1WjnnlVkGX', name: 'Matilda', description: 'Knowledgeable, professional — hospitality and retail', gender: 'female', accent: 'American' },
+  { id: 'zGjIP4SZlMnY9m93k97r', name: 'Hope', description: 'Clear, relatable, charismatic - modern conversational', gender: 'female', accent: 'American', recommended: true },
+  { id: 'EST9Ui6982FZPSi7gCHi', name: 'Elise', description: 'Warm, natural, engaging - modern conversational', gender: 'female', accent: 'American', recommended: true },
+  { id: 'FUfBrNit0NNZAwb58KWH', name: 'Angela', description: 'Friendly, natural - modern conversational', gender: 'female', accent: 'American', recommended: true },
+  { id: 'cgSgspJ2msm6clMCkdW9', name: 'Jessica', description: 'Playful, bright, warm - friendly front desk', gender: 'female', accent: 'American' },
+  { id: 'EXAVITQu4vr4xnSDxMaL', name: 'Sarah', description: 'Mature, reassuring - medical and professional', gender: 'female', accent: 'American' },
+  { id: 'FGY2WhTYpPnrIDTdsKH5', name: 'Laura', description: 'Upbeat, youthful - approachable and energetic', gender: 'female', accent: 'American' },
+  { id: 'XrExE9yKIg1WjnnlVkGX', name: 'Matilda', description: 'Knowledgeable, professional - hospitality and retail', gender: 'female', accent: 'American' },
   // ── British female ──
-  { id: '6fZce9LFNG3iEITDfqZZ', name: 'Charlotte', description: 'Warm, clear, modern — polished British front desk', gender: 'female', accent: 'British', recommended: true },
-  { id: 'Xb7hH8MSUJpSbSDYk0k2', name: 'Alice', description: 'Clear, engaging — corporate British', gender: 'female', accent: 'British' },
-  { id: 'pFZP5JQG7iQjIQuC4Bku', name: 'Lily', description: 'Velvety British accent — upscale businesses', gender: 'female', accent: 'British' },
+  { id: '6fZce9LFNG3iEITDfqZZ', name: 'Charlotte', description: 'Warm, clear, modern - polished British front desk', gender: 'female', accent: 'British', recommended: true },
+  { id: 'Xb7hH8MSUJpSbSDYk0k2', name: 'Alice', description: 'Clear, engaging - corporate British', gender: 'female', accent: 'British' },
+  { id: 'pFZP5JQG7iQjIQuC4Bku', name: 'Lily', description: 'Velvety British accent - upscale businesses', gender: 'female', accent: 'British' },
   // ── American male ──
-  { id: 'cjVigY5qzO86Huf0OWal', name: 'Eric', description: 'Smooth, trustworthy — tuned for voice agents', gender: 'male', accent: 'American', recommended: true },
-  { id: 'bIHbv24MWmeRgasZH58o', name: 'Will', description: 'Relaxed, conversational — easygoing and natural', gender: 'male', accent: 'American', recommended: true },
-  { id: 'nPczCjzI2devNBz1zQrb', name: 'Brian', description: 'Deep, resonant — professional and corporate', gender: 'male', accent: 'American' },
-  { id: 'iP95p4xoKVk53GoZ742B', name: 'Chris', description: 'Charming, down-to-earth — natural conversational', gender: 'male', accent: 'American' },
+  { id: 'cjVigY5qzO86Huf0OWal', name: 'Eric', description: 'Smooth, trustworthy - tuned for voice agents', gender: 'male', accent: 'American', recommended: true },
+  { id: 'bIHbv24MWmeRgasZH58o', name: 'Will', description: 'Relaxed, conversational - easygoing and natural', gender: 'male', accent: 'American', recommended: true },
+  { id: 'nPczCjzI2devNBz1zQrb', name: 'Brian', description: 'Deep, resonant - professional and corporate', gender: 'male', accent: 'American' },
+  { id: 'iP95p4xoKVk53GoZ742B', name: 'Chris', description: 'Charming, down-to-earth - natural conversational', gender: 'male', accent: 'American' },
   // ── British male ──
-  { id: 'JBFqnCBsd6RMkjVDRZzb', name: 'George', description: 'Warm, captivating — premium British', gender: 'male', accent: 'British', recommended: true },
-  { id: 'onwK4e9ZLuTAKqWW03F9', name: 'Daniel', description: 'Steady British broadcaster — premium businesses', gender: 'male', accent: 'British' },
+  { id: 'JBFqnCBsd6RMkjVDRZzb', name: 'George', description: 'Warm, captivating - premium British', gender: 'male', accent: 'British', recommended: true },
+  { id: 'onwK4e9ZLuTAKqWW03F9', name: 'Daniel', description: 'Steady British broadcaster - premium businesses', gender: 'male', accent: 'British' },
   // ── Australian male ──
-  { id: 'IKne3meq5aSn9XLyUdCD', name: 'Charlie', description: 'Confident, energetic — Australian conversational', gender: 'male', accent: 'Australian', recommended: true },
+  { id: 'IKne3meq5aSn9XLyUdCD', name: 'Charlie', description: 'Confident, energetic - Australian conversational', gender: 'male', accent: 'Australian', recommended: true },
 ];
 
 // ============================================================================
-// DEFAULT PROMPTS — Match INDUSTRY_CONFIGS in vapi.js
+// DEFAULT PROMPTS - Match INDUSTRY_CONFIGS in vapi.js
 // These use {businessName} as a literal placeholder (not template literal).
 // Used by the template editor UI to show agencies the default prompt.
 // ============================================================================
@@ -1359,6 +1359,10 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         temperature: customTemplate?.temperature || 0.7,
         voice_speed: customTemplate?.voice_speed ?? 1.1,
         background_denoising: customTemplate?.background_denoising ?? true,
+        voice_stability: customTemplate?.voice_stability ?? 0.4,
+        voice_style: customTemplate?.voice_style ?? 0.35,
+        voice_similarity_boost: customTemplate?.voice_similarity_boost ?? 0.8,
+        voice_speaker_boost: customTemplate?.voice_speaker_boost ?? true,
         knowledge_base_data: customTemplate?.knowledge_base_data || null,
         updated_at: customTemplate?.updated_at || null,
       },
@@ -1372,6 +1376,10 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         temperature: 0.7,
         voice_speed: 1.1,
         background_denoising: true,
+        voice_stability: 0.4,
+        voice_style: 0.35,
+        voice_similarity_boost: 0.8,
+        voice_speaker_boost: true,
       },
       placeholders: [
         { variable: '{businessName}', description: 'The client\'s business name (auto-filled)' },
@@ -1388,7 +1396,7 @@ router.get('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
 // ============================================================================
 router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (req, res) => {
   const { agencyId, industry } = req.params;
-  const { system_prompt, first_message, voice_id, temperature, is_active, model, knowledge_base_data, voice_speed, tts_model, transcriber_model, background_denoising } = req.body;
+  const { system_prompt, first_message, voice_id, temperature, is_active, model, knowledge_base_data, voice_speed, tts_model, transcriber_model, background_denoising, voice_stability, voice_style, voice_similarity_boost, voice_speaker_boost } = req.body;
   
   const resolved = await resolveIndustryConfig(agencyId, industry);
   if (!resolved) {
@@ -1434,6 +1442,15 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
     const vs = parseFloat(voice_speed);
     if (!isNaN(vs) && vs >= 0.7 && vs <= 1.2) finalSpeed = vs;
   }
+
+  // ElevenLabs voice-quality knobs (AI Lab sliders). Each numeric is stored only
+  // when a valid 0-1 value is sent, else null (falls back to the platform
+  // default at call time). Speaker boost is a plain boolean, else null.
+  const clamp01 = (v) => { const n = parseFloat(v); return (!isNaN(n) && n >= 0 && n <= 1) ? n : null; };
+  const finalStability = clamp01(voice_stability);
+  const finalStyle = clamp01(voice_style);
+  const finalSimilarity = clamp01(voice_similarity_boost);
+  const finalSpeakerBoost = (typeof voice_speaker_boost === 'boolean') ? voice_speaker_boost : null;
   
   try {
     const { data, error } = await supabase
@@ -1450,6 +1467,10 @@ router.put('/:agencyId/ai-templates/:industry', requireEnterprisePlan, async (re
         temperature: temp,
         voice_speed: finalSpeed,
         background_denoising: finalDenoising,
+        voice_stability: finalStability,
+        voice_style: finalStyle,
+        voice_similarity_boost: finalSimilarity,
+        voice_speaker_boost: finalSpeakerBoost,
         knowledge_base_data: knowledge_base_data || null,
         is_active: is_active !== false,
         updated_at: new Date().toISOString(),

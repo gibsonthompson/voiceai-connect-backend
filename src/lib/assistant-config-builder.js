@@ -108,6 +108,13 @@ const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 const DEFAULT_LLM_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
 const DEFAULT_TRANSCRIBER_MODEL = process.env.DEEPGRAM_MODEL || 'nova-2';  // Deepgram STT default
 const ELEVENLABS_TTS_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_v4_turbo';
+// ElevenLabs voice-quality fleet defaults (0-1). Used when neither the client
+// nor the agency template sets a value. Lower stability = more expressive and
+// less robotic; style adds emphasis; speaker boost sharpens the voice on a line.
+const DEFAULT_VOICE_STABILITY = 0.4;
+const DEFAULT_VOICE_STYLE = 0.35;
+const DEFAULT_VOICE_SIMILARITY = 0.8;
+const DEFAULT_VOICE_SPEAKER_BOOST = true;
 const FLUX_EOT_THRESHOLD_DEFAULT = 0.6;   // Flux end-of-turn sensitivity (sane default, not user-facing)
 const FLUX_EOT_TIMEOUT_MS_DEFAULT = 3000; // Flux hard cap before it ends the turn
 
@@ -1905,21 +1912,25 @@ function buildTranscriber(transcriberModel) {
 
 // ElevenLabs TTS voice block, honoring voice speed. ttsModel is a specific
 // ElevenLabs model (e.g. eleven_v3); falls back to flash v2.5.
-function buildVoice(voiceId, voiceSpeed, ttsModel) {
+function buildVoice(voiceId, voiceSpeed, ttsModel, settings) {
   const model = (typeof ttsModel === 'string' && ttsModel.startsWith('eleven')) ? ttsModel : ELEVENLABS_TTS_MODEL;
   const speedOk = Number(voiceSpeed) >= 0.7 && Number(voiceSpeed) <= 1.2;
   // Voice-quality settings so the receptionist sounds natural, not robotic:
   // lower stability lets it vary its intonation instead of droning in a flat
   // monotone, a little style adds natural emphasis, and speaker boost keeps it
-  // clear on a phone line. Fleet defaults; per-client tuning can override later.
+  // clear on a phone line. Values cascade per-client -> agency template (AI Lab
+  // sliders) -> platform fleet default; any unset or out-of-range value falls
+  // back to the fleet default here.
+  const s = settings || {};
+  const unit = (v, d) => { const n = Number(v); return (Number.isFinite(n) && n >= 0 && n <= 1) ? n : d; };
   return {
     provider: '11labs',
     model,
     voiceId,
-    stability: 0.4,
-    similarityBoost: 0.8,
-    style: 0.35,
-    useSpeakerBoost: true,
+    stability: unit(s.stability, DEFAULT_VOICE_STABILITY),
+    similarityBoost: unit(s.similarityBoost, DEFAULT_VOICE_SIMILARITY),
+    style: unit(s.style, DEFAULT_VOICE_STYLE),
+    useSpeakerBoost: (typeof s.useSpeakerBoost === 'boolean') ? s.useSpeakerBoost : DEFAULT_VOICE_SPEAKER_BOOST,
     ...(speedOk ? { speed: Number(voiceSpeed) } : {}),
   };
 }
@@ -2032,6 +2043,10 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   let tplTtsModel;             // 'eleven_*' (a specific ElevenLabs model)
   let tplTranscriberModel;     // 'nova-3' | 'nova-2' | 'flux-general-multi' | 'flux-general-en'
   let tplBackgroundDenoising;  // boolean | undefined (per-industry Krisp default)
+  let tplVoiceStability;       // 0-1 | undefined (ElevenLabs stability)
+  let tplVoiceStyle;           // 0-1 | undefined (ElevenLabs style)
+  let tplVoiceSimilarity;      // 0-1 | undefined (ElevenLabs similarity boost)
+  let tplVoiceSpeakerBoost;    // boolean | undefined (ElevenLabs speaker boost)
 
   if (agency?.id && supabase) {
     try {
@@ -2041,7 +2056,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
       if (effectivePlan === 'scale') {
         const { data: template } = await supabase
           .from('agency_prompt_templates')
-          .select('voice_id, temperature, model, voice_speed, tts_model, transcriber_model, background_denoising')
+          .select('voice_id, temperature, model, voice_speed, tts_model, transcriber_model, background_denoising, voice_stability, voice_style, voice_similarity_boost, voice_speaker_boost')
           .eq('agency_id', agency.id)
           .eq('industry', industryKey)
           .eq('is_active', true)
@@ -2055,6 +2070,10 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
           tplTtsModel = template.tts_model || tplTtsModel;
           tplTranscriberModel = template.transcriber_model || tplTranscriberModel;
           if (template.background_denoising != null) tplBackgroundDenoising = template.background_denoising;
+          if (template.voice_stability != null) tplVoiceStability = template.voice_stability;
+          if (template.voice_style != null) tplVoiceStyle = template.voice_style;
+          if (template.voice_similarity_boost != null) tplVoiceSimilarity = template.voice_similarity_boost;
+          if (template.voice_speaker_boost != null) tplVoiceSpeakerBoost = template.voice_speaker_boost;
         }
       }
     } catch { /* Use defaults */ }
@@ -2092,6 +2111,16 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     : (tplBackgroundDenoising != null) ? (tplBackgroundDenoising !== false)
     : true;
 
+  // Voice-quality cascade: per-client override -> agency template (AI Lab
+  // sliders) -> platform fleet default (the fallback is applied in buildVoice).
+  const firstDefined = (...vals) => vals.find((v) => v != null);
+  const voiceSettings = {
+    stability: firstDefined(client.voice_stability, tplVoiceStability),
+    style: firstDefined(client.voice_style, tplVoiceStyle),
+    similarityBoost: firstDefined(client.voice_similarity_boost, tplVoiceSimilarity),
+    useSpeakerBoost: firstDefined(client.voice_speaker_boost, tplVoiceSpeakerBoost),
+  };
+
   const systemPrompt = await buildSystemPrompt(client, agency, callerContext, toolConfig, isAfterHours, canAutoBook, handoff, transferStaff);
   // Auto-escalation is live only when the escalation tool is actually attached
   // (telnyx_cc, transfer handoff, not after-hours) AND the client opted in. Drives
@@ -2126,7 +2155,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     },
     // Real-time TTS. ElevenLabs flash v2.5 (~75ms first audio, honors speed),
     // or the effective ElevenLabs model (e.g. eleven_v3). See buildVoice.
-    voice: buildVoice(voiceId, voiceSpeed, ttsModelEff),
+    voice: buildVoice(voiceId, voiceSpeed, ttsModelEff, voiceSettings),
     // Latency: smart endpointing. Flux owns end-of-turn (waitSeconds only);
     // nova uses VAPI smart endpointing + punctuation plan. See buildStartSpeakingPlan.
     startSpeakingPlan: buildStartSpeakingPlan(transcriberModelEff),
