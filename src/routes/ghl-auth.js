@@ -138,6 +138,7 @@ router.get('/callback', async (req, res) => {
       ghl_company_id: tokens.companyId || null,
       ghl_calendar_id: calendarId,
       ghl_user_type: tokens.userType || 'Location',
+      ghl_user_id: tokens.userId || null,
       updated_at: new Date().toISOString(),
     }).eq('id', clientId);
     if (updErr) {
@@ -179,6 +180,7 @@ router.post('/disconnect', async (req, res) => {
       ghl_company_id: null,
       ghl_calendar_id: null,
       ghl_user_type: null,
+      ghl_user_id: null,
       updated_at: new Date().toISOString(),
     };
     // Only clear the provider if GHL was the selected one, so we don't stomp a

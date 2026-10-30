@@ -631,9 +631,14 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
       const [gY, gMo, gD] = date.split('-').map(Number);
       const ghlStartIso = zonedWallTimeToUTC(gY, gMo, gD, hr, min, timezone).toISOString();
       const ghlEndIso = new Date(new Date(ghlStartIso).getTime() + duration * 60000).toISOString();
+      // Assign a user so GHL renders it on the calendar grid (not just the
+      // contact): a calendar team member if there is one, else the user who
+      // connected the account.
+      const assignedUserId = await ghl.resolveAssignedUserId(token, client.ghl_calendar_id, client.ghl_user_id);
       const ca = await ghl.createAppointment(token, {
         calendarId: client.ghl_calendar_id, locationId: client.ghl_location_id, contactId: uc.id,
         startTime: ghlStartIso, endTime: ghlEndIso, title: eventTitle, appointmentStatus: 'confirmed',
+        assignedUserId: assignedUserId || undefined,
       });
       if (!ca.ok) { console.error('GHL createAppointment failed:', ca.status, ca.error); return { success: false, error: 'Failed to create appointment' }; }
       ghlEventId = ca.id;
@@ -971,9 +976,14 @@ async function createAppointmentApi(params) {
       const titleParts = [p.serviceType || 'Appointment'];
       if (p.staffName) titleParts.push(p.staffName);
       titleParts.push(p.customerName);
+      // Assign a user so GHL renders it on the calendar grid (not just the
+      // contact): a calendar team member if there is one, else the user who
+      // connected the account.
+      const assignedUserId = await ghl.resolveAssignedUserId(token, client.ghl_calendar_id, client.ghl_user_id);
       const ca = await ghl.createAppointment(token, {
         calendarId: client.ghl_calendar_id, locationId: client.ghl_location_id, contactId: uc.id,
         startTime: startIso, endTime: endIso, title: titleParts.join(' - '),
+        assignedUserId: assignedUserId || undefined,
       });
       if (!ca.ok) {
         const unavailable = /slot|avail|conflict|not available/i.test(ca.error || '');

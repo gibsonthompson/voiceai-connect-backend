@@ -189,6 +189,32 @@ async function listCalendars(token, locationId) {
   return { ok: true, calendars };
 }
 
+// Fetch one calendar's config (used to resolve a team member to assign an
+// appointment to).
+async function getCalendar(token, calendarId) {
+  const r = await ghlFetch(token, 'GET', `/calendars/${encodeURIComponent(calendarId)}`);
+  if (!r.ok) return { ok: false, status: r.status, calendar: null };
+  const calendar = (r.json && (r.json.calendar || r.json)) || null;
+  return { ok: !!calendar, calendar };
+}
+
+// Resolve a userId to assign an appointment to, so GHL renders it on the
+// calendar grid. GHL's grid is organized by assigned user, and API bookings
+// default to no assignee, so they land on the contact but not the grid. Tries
+// the calendar's team members first (Service / Round-Robin / Collective / Class
+// calendars have them), then falls back to the supplied user (the person who
+// connected the account, always a valid location user). Returns null only when
+// neither is available.
+async function resolveAssignedUserId(token, calendarId, fallbackUserId) {
+  try {
+    const gc = await getCalendar(token, calendarId);
+    const tms = (gc.calendar && gc.calendar.teamMembers) || [];
+    const withId = tms.find((t) => t && t.userId);
+    if (withId && withId.userId) return withId.userId;
+  } catch (e) { /* fall through to the fallback user */ }
+  return fallbackUserId || null;
+}
+
 // Get free slots for a calendar between two instants. GHL wants epoch millis and
 // a <= 31-day range. Returns an array of ISO slot start strings.
 async function getFreeSlots(token, calendarId, startMs, endMs, { timezone, durationMinutes } = {}) {
@@ -248,6 +274,8 @@ module.exports = {
   getValidAccessToken,
   upsertContact,
   listCalendars,
+  getCalendar,
+  resolveAssignedUserId,
   getFreeSlots,
   createAppointment,
   updateAppointment,
