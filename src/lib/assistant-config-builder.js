@@ -1908,7 +1908,20 @@ function buildTranscriber(transcriberModel) {
 function buildVoice(voiceId, voiceSpeed, ttsModel) {
   const model = (typeof ttsModel === 'string' && ttsModel.startsWith('eleven')) ? ttsModel : ELEVENLABS_TTS_MODEL;
   const speedOk = Number(voiceSpeed) >= 0.7 && Number(voiceSpeed) <= 1.2;
-  return { provider: '11labs', model, voiceId, ...(speedOk ? { speed: Number(voiceSpeed) } : {}) };
+  // Voice-quality settings so the receptionist sounds natural, not robotic:
+  // lower stability lets it vary its intonation instead of droning in a flat
+  // monotone, a little style adds natural emphasis, and speaker boost keeps it
+  // clear on a phone line. Fleet defaults; per-client tuning can override later.
+  return {
+    provider: '11labs',
+    model,
+    voiceId,
+    stability: 0.4,
+    similarityBoost: 0.8,
+    style: 0.35,
+    useSpeakerBoost: true,
+    ...(speedOk ? { speed: Number(voiceSpeed) } : {}),
+  };
 }
 
 // startSpeakingPlan, how long VAPI waits before the assistant responds.
@@ -2008,10 +2021,10 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   let voiceId = config.voiceId;
   let temperature = config.temperature;
   let modelId = DEFAULT_LLM_MODEL;
-  // Default speaking speed. Bumped above 1.0 because the ElevenLabs v4 voices
-  // run a touch slow at normal rate; a client/template voice_speed still
-  // overrides this. Kept inside VAPI's supported 0.7-1.2 range.
-  let voiceSpeed = 1.1;
+  // Default speaking speed. The ElevenLabs v4 voices speak slowly at 1.0 and
+  // sound flat, so default to the top of VAPI's supported 0.7-1.2 range for a
+  // brisker, more natural pace. A client/template voice_speed still overrides.
+  let voiceSpeed = 1.2;
   // Per-industry template pipeline (Scale). tts_model / transcriber_model were
   // being saved by the AI Lab template editor but NEVER read here, so the Voice
   // engine + Speech recognition selectors did nothing on live calls. Now read
