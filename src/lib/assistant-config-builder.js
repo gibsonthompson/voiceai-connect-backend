@@ -1968,12 +1968,15 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   // connected Google Calendar. The plan gate is already enforced at connect
   // time (google-calendar-auth.js checkPlanAccess), so if connected is true the
   // plan allowed it. HIPAA forces collect-request, so it can never auto-book.
-  const calendarConnected = client.google_calendar_connected === true;
+  // A connected calendar is Google OR a selected+connected GoHighLevel calendar.
+  // Either one gives the AI real availability + booking on the call.
+  const calendarConnected = client.google_calendar_connected === true ||
+    (client.calendar_provider === 'ghl' && client.ghl_connected === true && !!client.ghl_access_token && !!client.ghl_calendar_id);
   const bookingMode = hipaaMode ? 'collect_request' : (client.booking_mode || 'auto_book');
   const canAutoBook = bookingMode === 'auto_book' && calendarConnected;
 
   if (bookingMode === 'auto_book' && !calendarConnected && !hipaaMode) {
-    console.log('📅 Auto-book requested but Google Calendar NOT connected, degrading to collect-request (no booking tools)');
+    console.log('📅 Auto-book requested but no calendar connected (Google or GoHighLevel), degrading to collect-request (no booking tools)');
   } else if (canAutoBook) {
     console.log('📅 Auto-book active (calendar connected), booking tools attached');
   }

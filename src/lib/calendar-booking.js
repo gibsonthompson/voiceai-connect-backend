@@ -244,7 +244,36 @@ async function getAvailableSlots(clientId, date, options) {
       .eq('id', clientId)
       .single();
 
-    if (error || !client || !client.google_calendar_connected) {
+    if (error || !client) {
+      return { success: false, error: 'Calendar not connected' };
+    }
+
+    // GoHighLevel path: GHL computes real availability server-side (from the
+    // calendar's config + existing appointments), so fetch its free slots for the
+    // day and return them as time labels in the SAME format as the Google path
+    // (formatSlotLabel), so the book_appointment double-check compares cleanly for
+    // either provider. Mirrors getAvailabilityForClient / createAppointmentApi.
+    const useGhlAvail = client.calendar_provider === 'ghl' && client.ghl_connected === true && !!client.ghl_access_token && !!client.ghl_calendar_id;
+    if (useGhlAvail) {
+      const gtoken = await ghl.getValidAccessToken(client);
+      if (!gtoken) return { success: false, error: 'Calendar authentication failed' };
+      const gtz = client.timezone || 'America/New_York';
+      const [gy, gmo, gd] = date.split('-').map(Number);
+      const gDayStart = zonedWallTimeToUTC(gy, gmo, gd, 0, 0, gtz).getTime();
+      const gdur = (options && options.durationOverride) || client.appointment_duration || 30;
+      const fs = await ghl.getFreeSlots(gtoken, client.ghl_calendar_id, gDayStart, gDayStart + 24 * 60 * 60 * 1000, { timezone: gtz, durationMinutes: gdur });
+      if (!fs.ok) return { success: false, error: 'Failed to read the calendar' };
+      const labels = (fs.slots || []).map((s) => {
+        const parts = new Intl.DateTimeFormat('en-US', { timeZone: gtz, hour: '2-digit', minute: '2-digit', hour12: false, hourCycle: 'h23' }).formatToParts(new Date(s));
+        const h = Number((parts.find((p) => p.type === 'hour') || {}).value);
+        const m = Number((parts.find((p) => p.type === 'minute') || {}).value);
+        return formatSlotLabel(h % 24, m);
+      });
+      console.log(`📅 GHL availability for ${date} (${gtz}): ${labels.length} slots (duration: ${gdur}min)`);
+      return { success: true, slots: labels, date, provider: 'ghl' };
+    }
+
+    if (!client.google_calendar_connected) {
       return { success: false, error: 'Calendar not connected' };
     }
 
@@ -469,13 +498,22 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
       return { success: false, error: 'Client not found' };
     }
 
-    if (!client.google_calendar_connected) {
+    // Provider routing: GHL when it is the selected, connected calendar; else
+    // Google. The live receptionist books into whichever the client connected.
+    const useGhl = client.calendar_provider === 'ghl' && client.ghl_connected === true && !!client.ghl_access_token && !!client.ghl_calendar_id;
+    const googleConnected = client.google_calendar_connected === true;
+    if (!useGhl && !googleConnected) {
       return { success: false, error: 'Calendar not connected - appointment request noted for callback' };
     }
 
-    const accessToken = await refreshAccessToken(client);
-    if (!accessToken) {
-      return { success: false, error: 'Calendar authentication failed' };
+    // Google needs its access token up front; the GHL branch below fetches its
+    // own token when it writes the appointment.
+    let accessToken = null;
+    if (googleConnected && !useGhl) {
+      accessToken = await refreshAccessToken(client);
+      if (!accessToken) {
+        return { success: false, error: 'Calendar authentication failed' };
+      }
     }
 
     const time24 = parseTimeTo24Hr(time);
@@ -576,55 +614,87 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     if (notes) descParts.push(`Notes: ${notes}`);
     descParts.push('', 'Booked via AI Receptionist');
 
-    const event = {
-      summary: eventTitle,
-      description: descParts.join('\n'),
-      start: {
-        dateTime: startDateTime,
-        timeZone: timezone,
-      },
-      end: {
-        dateTime: endDateTime,
-        timeZone: timezone,
-      },
-      reminders: {
-        useDefault: false,
-        overrides: [
-          { method: 'email', minutes: 60 },
-          { method: 'popup', minutes: 30 },
-        ],
-      },
-    };
+    // Provider write. Either path produces an event id we store on the row; the
+    // post-booking logic (DB row, webhook, confirmation SMS) is shared below.
+    let googleEventId = null;
+    let ghlEventId = null;
+    let calendarLink = null;
 
-    const calendarId = client.google_calendar_id || 'primary';
-    const response = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
+    if (useGhl) {
+      // GoHighLevel: upsert the contact, then book into the connected GHL
+      // calendar. Mirrors createAppointmentApi, so the agency's GHL workflows
+      // fire off the new contact + booking. Times are sent as UTC ISO instants.
+      const token = await ghl.getValidAccessToken(client);
+      if (!token) return { success: false, error: 'Calendar authentication failed' };
+      const uc = await ghl.upsertContact(token, client.ghl_location_id, { name: customerName, phone: customerPhone || undefined });
+      if (!uc.ok || !uc.id) { console.error('GHL contact upsert failed before booking'); return { success: false, error: 'Failed to create appointment' }; }
+      const [gY, gMo, gD] = date.split('-').map(Number);
+      const ghlStartIso = zonedWallTimeToUTC(gY, gMo, gD, hr, min, timezone).toISOString();
+      const ghlEndIso = new Date(new Date(ghlStartIso).getTime() + duration * 60000).toISOString();
+      const ca = await ghl.createAppointment(token, {
+        calendarId: client.ghl_calendar_id, locationId: client.ghl_location_id, contactId: uc.id,
+        startTime: ghlStartIso, endTime: ghlEndIso, title: eventTitle, appointmentStatus: 'confirmed',
+      });
+      if (!ca.ok) { console.error('GHL createAppointment failed:', ca.status, ca.error); return { success: false, error: 'Failed to create appointment' }; }
+      ghlEventId = ca.id;
+      console.log('✅ Appointment booked in GoHighLevel:', ca.id);
+    } else {
+      const event = {
+        summary: eventTitle,
+        description: descParts.join('\n'),
+        start: {
+          dateTime: startDateTime,
+          timeZone: timezone,
         },
-        body: JSON.stringify(event),
-      }
-    );
+        end: {
+          dateTime: endDateTime,
+          timeZone: timezone,
+        },
+        reminders: {
+          useDefault: false,
+          overrides: [
+            { method: 'email', minutes: 60 },
+            { method: 'popup', minutes: 30 },
+          ],
+        },
+      };
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Failed to create event:', errorText);
-      return { success: false, error: 'Failed to create appointment' };
+      const calendarId = client.google_calendar_id || 'primary';
+      const response = await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(event),
+        }
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Failed to create event:', errorText);
+        return { success: false, error: 'Failed to create appointment' };
+      }
+
+      const createdEvent = await response.json();
+      googleEventId = createdEvent.id;
+      calendarLink = createdEvent.htmlLink || null;
+      console.log('✅ Appointment booked:', createdEvent.id);
     }
 
-    const createdEvent = await response.json();
-    console.log('✅ Appointment booked:', createdEvent.id);
-
     // Save to our database (staff_name column may not exist yet - fallback gracefully)
+    const [aptY, aptMo, aptD] = date.split('-').map(Number);
+    const apptStartIso = ghlEventId
+      ? zonedWallTimeToUTC(aptY, aptMo, aptD, hr, min, timezone).toISOString()
+      : new Date(startDateTime).toISOString();
     const appointmentRecord = {
       client_id: clientId,
-      google_event_id: createdEvent.id,
+      google_event_id: googleEventId,
       customer_name: customerName,
       customer_phone: customerPhone,
-      appointment_time: new Date(startDateTime).toISOString(),
+      appointment_time: apptStartIso,
       duration,
       service_type: serviceType,
       staff_name: staffName || null,
@@ -632,6 +702,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
       status: 'confirmed',
       booking_source: 'ai_receptionist',
     };
+    if (ghlEventId) appointmentRecord.ghl_event_id = ghlEventId;
     let insertedApptId = null;
     {
       const { data: ins, error: apptError } = await supabase.from('appointments').insert(appointmentRecord).select('id').single();
@@ -667,9 +738,10 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
           notes: notes || null,
           status: 'confirmed',
           booking_source: 'ai_receptionist',
-          google_event_id: createdEvent.id,
-          google_calendar_id: client.google_calendar_id || 'primary',
-          calendar_link: createdEvent.htmlLink || null,
+          google_event_id: googleEventId,
+          ghl_event_id: ghlEventId,
+          google_calendar_id: googleEventId ? (client.google_calendar_id || 'primary') : null,
+          calendar_link: calendarLink,
           created_at: new Date().toISOString(),
         });
       }
