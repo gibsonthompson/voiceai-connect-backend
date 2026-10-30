@@ -1113,6 +1113,25 @@ app.get('/api/agency/:agencyId/clients/:clientId', requireAgencyAccess('clients'
         client.base_price_cents = p.base_cents;
         client.effective_price_cents = p.effective_cents;
         client.price_discount = p.discount;
+
+        // Next billing date for the subscription card (unix seconds). A Stripe
+        // Connect subscription carries current_period_end on the agency's
+        // connected account; Paystack/Flutterwave store their own next charge.
+        // Manual clients bill no recurring date, so this stays unset for them.
+        try {
+          if (client.stripe_connected_subscription_id && agencyRow.stripe_account_id) {
+            const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+            const sub = await stripe.subscriptions.retrieve(
+              client.stripe_connected_subscription_id,
+              { stripeAccount: agencyRow.stripe_account_id }
+            );
+            if (sub && sub.current_period_end) client.current_period_end = sub.current_period_end;
+          } else if (client.flutterwave_next_charge_at) {
+            client.current_period_end = Math.floor(new Date(client.flutterwave_next_charge_at).getTime() / 1000);
+          } else if (client.paystack_next_charge_at) {
+            client.current_period_end = Math.floor(new Date(client.paystack_next_charge_at).getTime() / 1000);
+          }
+        } catch (e2) { console.warn('billing date enrich failed:', e2.message); }
       }
     } catch (e) { console.warn('effective price enrich failed:', e.message); }
 
