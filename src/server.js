@@ -1010,9 +1010,29 @@ app.get('/api/agency/:agencyId/dashboard', requireAgencyAccess('dashboard'), asy
     const totalCalls = clientList.reduce((sum, c) => sum + (liveCalls[c.id] || 0), 0);
     const recentClients = clientList.slice(0, 5).map(c => ({ ...c, calls_this_month: liveCalls[c.id] || 0 }));
 
-    console.log(`📊 Dashboard loaded for agency ${agencyId}: ${clientList.length} clients (${realClients.length} real), $${mrr/100} MRR`);
+    // Demo-line calls (the agency's own demo number). Each one is a warm lead:
+    // a prospect called the demo and heard the AI answer. We surface an all-time
+    // count, a this-week count (the number that signals momentum), and the few
+    // most recent so the dashboard can prompt a follow-up. Non-blocking: a demo
+    // metric must never fail the whole dashboard.
+    let demoCallsAllTime = 0, demoCallsThisWeek = 0, recentDemoCalls = [];
+    try {
+      const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
+      const [allTimeRes, weekRes, recentRes] = await Promise.all([
+        supabase.from('demo_calls').select('id', { count: 'exact', head: true }).eq('agency_id', agencyId),
+        supabase.from('demo_calls').select('id', { count: 'exact', head: true }).eq('agency_id', agencyId).gte('created_at', weekAgo),
+        supabase.from('demo_calls').select('id, caller_phone, caller_name, business_name, interest_level, created_at').eq('agency_id', agencyId).order('created_at', { ascending: false }).limit(5),
+      ]);
+      demoCallsAllTime = allTimeRes.count || 0;
+      demoCallsThisWeek = weekRes.count || 0;
+      recentDemoCalls = recentRes.data || [];
+    } catch (demoErr) {
+      console.warn(`Demo-call stats failed for agency ${agencyId} (non-blocking):`, demoErr.message);
+    }
 
-    res.json({ clientCount: realClients.length, mrr, totalCalls, recentClients });
+    console.log(`📊 Dashboard loaded for agency ${agencyId}: ${clientList.length} clients (${realClients.length} real), $${mrr/100} MRR, ${demoCallsAllTime} demo calls`);
+
+    res.json({ clientCount: realClients.length, mrr, totalCalls, recentClients, demoCallsAllTime, demoCallsThisWeek, recentDemoCalls });
   } catch (error) {
     console.error('Error fetching dashboard:', error);
     res.status(500).json({ error: 'Server error' });
@@ -1113,25 +1133,6 @@ app.get('/api/agency/:agencyId/clients/:clientId', requireAgencyAccess('clients'
         client.base_price_cents = p.base_cents;
         client.effective_price_cents = p.effective_cents;
         client.price_discount = p.discount;
-
-        // Next billing date for the subscription card (unix seconds). A Stripe
-        // Connect subscription carries current_period_end on the agency's
-        // connected account; Paystack/Flutterwave store their own next charge.
-        // Manual clients bill no recurring date, so this stays unset for them.
-        try {
-          if (client.stripe_connected_subscription_id && agencyRow.stripe_account_id) {
-            const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-            const sub = await stripe.subscriptions.retrieve(
-              client.stripe_connected_subscription_id,
-              { stripeAccount: agencyRow.stripe_account_id }
-            );
-            if (sub && sub.current_period_end) client.current_period_end = sub.current_period_end;
-          } else if (client.flutterwave_next_charge_at) {
-            client.current_period_end = Math.floor(new Date(client.flutterwave_next_charge_at).getTime() / 1000);
-          } else if (client.paystack_next_charge_at) {
-            client.current_period_end = Math.floor(new Date(client.paystack_next_charge_at).getTime() / 1000);
-          }
-        } catch (e2) { console.warn('billing date enrich failed:', e2.message); }
       }
     } catch (e) { console.warn('effective price enrich failed:', e.message); }
 
@@ -2341,7 +2342,7 @@ app.post('/api/knowledge-base/update', async (req, res) => {
 // ============================================================================
 
 app.use('/api/auth/google-calendar', googleCalendarAuthRoutes);
-app.use('/api/auth/crm-calendar', ghlAuthRoutes);
+app.use('/api/auth/ghl', ghlAuthRoutes);
 app.use('/api/calendar', calendarRoutes);
 
 app.post('/api/assistant/update-calendar', async (req, res) => {
