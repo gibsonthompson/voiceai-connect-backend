@@ -17,7 +17,10 @@
 // ============================================================================
 
 const BRAND_NAME = 'VoiceAI Connect';
-const LOGO_URL = 'https://www.myvoiceaiconnect.com/icon-512x512.png';
+// The full wordmark used in the website header (white "VoiceAI" + mint
+// "Connect" on transparent), so the email header matches the site. It sits
+// directly on the dark header bar, no white chip and no separate brand text.
+const LOGO_URL = 'https://www.myvoiceaiconnect.com/voiceai-connect-logo.png';
 const SUPPORT_EMAIL = 'support@myvoiceaiconnect.com';
 const MARKETING_URL = 'https://myvoiceaiconnect.com';
 
@@ -42,11 +45,8 @@ function renderBrandedEmail({ preheader = '', heading = '', bodyHtml = '', cta =
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef2f7;">
   <tr><td align="center" style="padding:28px 12px 44px;">
     <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #e2e8f0;">
-      <tr><td style="background:#0b0b0c;padding:22px 28px;">
-        <table role="presentation" cellpadding="0" cellspacing="0"><tr>
-          <td style="vertical-align:middle;"><span style="display:inline-block;width:34px;height:34px;background:#ffffff;border-radius:8px;text-align:center;line-height:34px;"><img src="${LOGO_URL}" width="24" height="24" alt="${BRAND_NAME}" style="width:24px;height:24px;vertical-align:middle;border:0;"></span></td>
-          <td style="vertical-align:middle;padding-left:12px;font-family:Arial,Helvetica,sans-serif;font-size:17px;font-weight:700;color:#ffffff;letter-spacing:.2px;">${BRAND_NAME}</td>
-        </tr></table>
+      <tr><td style="background:#0b0b0c;padding:20px 28px;">
+        <img src="${LOGO_URL}" height="26" alt="${BRAND_NAME}" style="height:26px;width:auto;display:block;border:0;">
       </td></tr>
       <tr><td style="padding:34px 32px 8px;font-family:Arial,Helvetica,sans-serif;">
         <h1 style="margin:0 0 16px;font-size:22px;line-height:1.3;color:#0f172a;">${heading}</h1>
