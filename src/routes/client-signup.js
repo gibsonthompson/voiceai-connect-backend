@@ -761,6 +761,21 @@ async function extractQueryToolId(assistantId) {
 // provisioning; BYOT (Twilio) numbers always return vapi_direct.
 // ============================================================================
 async function provisionPhoneForClient(agency, clientData, assistantId, voiceRouting = 'vapi_direct', planType = 'starter') {
+  // DEMO agencies (agencies.skip_number_provisioning = true) skip real Telnyx
+  // number provisioning, so the client signup flow can be demoed or recorded
+  // repeatedly without renting a billable number each time. The client is still
+  // created with its VAPI assistant; it just gets a clearly-fake placeholder
+  // number so the dashboard shows something in the number slot. 555 is the
+  // fictional, non-dialable area code; a random 7-digit suffix keeps each demo
+  // client's number unique (phone_number is UNIQUE) and it never routes. This is
+  // the single choke point for all creation paths (public signup, agency
+  // add-client, reactivation), so one guard covers them. Never set this flag on
+  // a real agency, or its clients get an unreachable placeholder number.
+  if (agency && agency.skip_number_provisioning === true) {
+    const placeholder = `+1555${String(Math.floor(1000000 + Math.random() * 9000000))}`;
+    console.log(`[demo] Agency "${agency.name || agency.id}": skipping phone provisioning, using placeholder ${placeholder}`);
+    return { number: placeholder, vapiPhoneId: null, telnyxNumberId: null, provisioningMethod: 'demo_skip', voiceRouting };
+  }
   const agencyCountry = (agency.country || 'US').toUpperCase();
   // The number's country follows the CLIENT's location (its business country),
   // falling back to the agency's. This is what lets a Canadian agency (or a
