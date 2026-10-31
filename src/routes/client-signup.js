@@ -777,7 +777,12 @@ async function provisionPhoneForClient(agency, clientData, assistantId, voiceRou
   // a real agency, or its clients get an unreachable placeholder number.
   if (agency && agency.skip_number_provisioning === true) {
     const DEMO_AREA_CODES = ['212', '213', '305', '312', '404', '415', '469', '512', '602', '617', '646', '702', '713', '720', '786', '804', '818', '832', '917', '984'];
-    const area = DEMO_AREA_CODES[Math.floor(Math.random() * DEMO_AREA_CODES.length)];
+    // Per-agency override: if the agency has a demo_area_code set (e.g. '404'),
+    // every demo placeholder for its clients uses that area code so the numbers
+    // look local to that agency. Must be a valid NANP area code (3 digits, first
+    // 2-9); otherwise fall back to a random demo area code.
+    const forcedArea = typeof agency.demo_area_code === 'string' ? agency.demo_area_code.replace(/\D/g, '') : '';
+    const area = /^[2-9]\d{2}$/.test(forcedArea) ? forcedArea : DEMO_AREA_CODES[Math.floor(Math.random() * DEMO_AREA_CODES.length)];
     let exchange;
     do {
       exchange = `${2 + Math.floor(Math.random() * 8)}${Math.floor(Math.random() * 10)}${Math.floor(Math.random() * 10)}`;
