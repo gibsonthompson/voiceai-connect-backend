@@ -762,17 +762,28 @@ async function extractQueryToolId(assistantId) {
 // ============================================================================
 async function provisionPhoneForClient(agency, clientData, assistantId, voiceRouting = 'vapi_direct', planType = 'starter') {
   // DEMO agencies (agencies.skip_number_provisioning = true) skip real Telnyx
-  // number provisioning, so the client signup flow can be demoed or recorded
+  // number provisioning so the client signup flow can be demoed or recorded
   // repeatedly without renting a billable number each time. The client is still
-  // created with its VAPI assistant; it just gets a clearly-fake placeholder
-  // number so the dashboard shows something in the number slot. 555 is the
-  // fictional, non-dialable area code; a random 7-digit suffix keeps each demo
-  // client's number unique (phone_number is UNIQUE) and it never routes. This is
-  // the single choke point for all creation paths (public signup, agency
-  // add-client, reactivation), so one guard covers them. Never set this flag on
+  // created with its VAPI assistant; it just gets a realistic-looking PLACEHOLDER
+  // number so the dashboard looks legitimate on screen. The placeholder is a
+  // random valid-format US number: a real area code, a valid NXX exchange (first
+  // digit 2-9, never 555 or an N11 like 411/911), and 4 random line digits. It is
+  // display-only: no VAPI phone object, never imported or routed, so the app
+  // never dials or texts it, and the randomness keeps each demo client's number
+  // unique (phone_number is UNIQUE). Because it is a random real-format number it
+  // could in theory match a real line, so it is for on-screen demo use only,
+  // never to actually dial. This is the single choke point for every creation
+  // path (public signup, agency add-client, reactivation). Never set this flag on
   // a real agency, or its clients get an unreachable placeholder number.
   if (agency && agency.skip_number_provisioning === true) {
-    const placeholder = `+1555${String(Math.floor(1000000 + Math.random() * 9000000))}`;
+    const DEMO_AREA_CODES = ['212', '213', '305', '312', '404', '415', '469', '512', '602', '617', '646', '702', '713', '720', '786', '804', '818', '832', '917', '984'];
+    const area = DEMO_AREA_CODES[Math.floor(Math.random() * DEMO_AREA_CODES.length)];
+    let exchange;
+    do {
+      exchange = `${2 + Math.floor(Math.random() * 8)}${Math.floor(Math.random() * 10)}${Math.floor(Math.random() * 10)}`;
+    } while (exchange === '555' || (exchange[1] === '1' && exchange[2] === '1'));
+    const line = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
+    const placeholder = `+1${area}${exchange}${line}`;
     console.log(`[demo] Agency "${agency.name || agency.id}": skipping phone provisioning, using placeholder ${placeholder}`);
     return { number: placeholder, vapiPhoneId: null, telnyxNumberId: null, provisioningMethod: 'demo_skip', voiceRouting };
   }
