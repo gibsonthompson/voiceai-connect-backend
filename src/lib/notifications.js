@@ -321,9 +321,22 @@ async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency) {
     console.warn(`⚠️ sendWelcomeSMS skipped for ${businessName}: no AI phone number provisioned yet`);
     return { skipped: true, reason: 'no_number' };
   }
-  // The AI number sits on its own line at the very bottom so it is easy to spot
-  // and tap from the text.
-  const message = `Welcome to ${brandName}!\nYour AI receptionist for ${businessName} is ready.\n\nYour AI phone number:\n${numberDisplay}`;
+  // White-labeled client login link so the client actually has a way INTO their
+  // dashboard to set a password, load their script, and turn on call forwarding.
+  // Without it the welcome text was a dead end (no link anywhere), which is how a
+  // signup could sit the whole trial without ever completing setup. Precedence
+  // matches the signup URL: verified marketing domain, then slug subdomain, then
+  // the platform domain. The login page itself handles a never-set password
+  // (it calls recover-setup and routes to /auth/set-password), so a plain
+  // /client/login link works whether or not a password has been set yet.
+  const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
+  const loginBase = (agency?.marketing_domain && agency?.domain_verified)
+    ? `https://${agency.marketing_domain}`
+    : (agency?.slug ? `https://${agency.slug}.${platformDomain}` : `https://${platformDomain}`);
+  const loginUrl = `${loginBase}/client/login`;
+  // The AI number sits on its own line so it is easy to spot and tap, and the
+  // login link follows with the one action that actually makes calls work.
+  const message = `Welcome to ${brandName}!\nYour AI receptionist for ${businessName} is ready.\n\nYour AI number:\n${numberDisplay}\n\nFinish setup and turn on call forwarding here:\n${loginUrl}`;
   // Send FROM the agency's demo number, not the client's brand-new AI number.
   // The demo number was SMS-provisioned (messaging profile + approved 10DLC
   // campaign) when the agency onboarded, so it is already carrier-propagated and
