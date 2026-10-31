@@ -28,6 +28,30 @@ const fetch = require('node-fetch');
 const { looksLikeStreetAddress, pickStreetAddress } = require('./address-utils');
 
 // ============================================================================
+// URL NORMALIZATION
+// A website URL saved without a protocol (e.g. "atlantaroofing.com") is NOT a
+// valid absolute URL: new URL("atlantaroofing.com") throws "Invalid URL". The
+// Jina homepage fetch tolerates the bare host, but every link-discovery call
+// (extractInternalLinks / fetchSitemapUrls / the FAQ origin probe) runs
+// new URL(websiteUrl) directly and throws the moment the scheme is missing —
+// which silently collapses a multi-page crawl down to just the homepage.
+// Normalize once so a bare host, a scheme-relative "//host", or extra
+// whitespace all resolve to a proper https:// URL before any new URL() runs.
+// ============================================================================
+function normalizeWebsiteUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return rawUrl;
+  let url = rawUrl.trim();
+  if (!url) return url;
+  if (url.startsWith('//')) url = `https:${url}`;        // scheme-relative
+  else if (!/^https?:\/\//i.test(url)) url = `https://${url}`; // bare host
+  try {
+    return new URL(url).href.replace(/\/$/, '');
+  } catch {
+    return url; // leave untouched if still unparseable; callers guard with try/catch
+  }
+}
+
+// ============================================================================
 // JINA READER — Fetch a single page as clean markdown
 // ============================================================================
 async function fetchPageWithJina(url, timeoutMs = 15000) {
@@ -67,6 +91,7 @@ async function fetchPageWithJina(url, timeoutMs = 15000) {
 // ============================================================================
 function extractInternalLinks(markdown, baseUrl) {
   const links = new Set();
+  baseUrl = normalizeWebsiteUrl(baseUrl);
 
   try {
     const urlObj = new URL(baseUrl);
@@ -116,6 +141,7 @@ function extractInternalLinks(markdown, baseUrl) {
 // ============================================================================
 async function fetchSitemapUrls(baseUrl) {
   const urls = [];
+  baseUrl = normalizeWebsiteUrl(baseUrl);
   try {
     const urlObj = new URL(baseUrl);
     const sitemapUrl = `${urlObj.origin}/sitemap.xml`;
@@ -434,11 +460,16 @@ function formatStructuredSection(data, websiteUrl) {
 // MAIN: createKnowledgeBaseFromWebsite
 // FIXED: knownLength on Buffer upload prevents "Unexpected end of form"
 // ============================================================================
-async function createKnowledgeBaseFromWebsite(websiteUrl, businessName) {
+async function createKnowledgeBaseFromWebsite(rawWebsiteUrl, businessName) {
   const startTime = Date.now();
 
+  // Normalize ONCE up front. A URL saved without a protocol would otherwise
+  // scrape the homepage (via Jina) but throw "Invalid URL" on every link-
+  // discovery call, dropping the crawl to a single page.
+  const websiteUrl = normalizeWebsiteUrl(rawWebsiteUrl);
+
   try {
-    console.log(`🌐 Scraping website: ${websiteUrl}`);
+    console.log(`🌐 Scraping website: ${websiteUrl}${websiteUrl !== rawWebsiteUrl ? ` (normalized from "${rawWebsiteUrl}")` : ''}`);
 
     // ── Step 1: Scrape homepage ──────────────────────────────────────────
     const homepageContent = await fetchPageWithJina(websiteUrl);
