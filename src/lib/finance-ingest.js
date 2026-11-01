@@ -83,6 +83,7 @@ async function ingestBankText({ text, sender, id, source = 'sms' } = {}) {
     raw: String(text || '').slice(0, 320),
     source: source,
     confidence: parsed.confidence,
+    recurring: parsed.recurring,
   });
 
   const result = await hq.upsertItems(row);

@@ -350,7 +350,7 @@ function fuzzyScore(query, text) {
 function buildTxn({
   amount, direction = 'out', merchant = '', category = 'Other', account = '',
   business = '', type = 'personal', postedDate = null, note = '', raw = '',
-  source = 'sms', confidence = null, id = null, sender = '',
+  source = 'sms', confidence = null, id = null, sender = '', recurring = false,
 } = {}) {
   const ts = Date.now();
   const data = {
@@ -368,6 +368,7 @@ function buildTxn({
     raw: String(raw || ''),
     source: ['manual', 'email'].includes(source) ? source : 'sms',
     confidence: confidence == null ? null : Number(confidence),
+    recurring: !!recurring,
     del: false,
     ts,
     mtime: ts,

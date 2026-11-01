@@ -64,7 +64,8 @@ Otherwise return:
   "business": string,                    // if type is business, the single best match from this list: ${businesses}. Otherwise "".
   "category": string,                    // for personal pick ONE of: ${PERSONAL_CATEGORIES.join(', ')}. For business pick ONE of: ${BUSINESS_CATEGORIES.join(', ')}.
   "confidence": number,                  // 0 to 1, your confidence in the category + type.
-  "note": string                         // "" unless something is genuinely useful (e.g. "recurring", "foreign transaction").
+  "recurring": boolean,                  // true if this is a subscription or clearly repeating charge (see rule below). false for one-off purchases.
+  "note": string                         // "" unless something is genuinely useful (e.g. "foreign transaction", "annual plan").
 }
 
 Reasoning rules:
@@ -72,6 +73,7 @@ Reasoning rules:
 - These merchants are almost always a BUSINESS cost, usually for VoiceAI Connect: ${BUSINESS_MERCHANT_HINTS.join(', ')}. Telnyx/Twilio -> Telephony. Vapi/Anthropic/OpenAI/ElevenLabs/Deepgram -> AI & Compute. Vercel/Supabase/AWS/Cloudflare/DigitalOcean/Google Cloud -> Hosting. GitHub/software tools -> Software. Stripe -> Payments.
 - When a merchant is ambiguous between personal and business, default to personal unless it clearly matches a business (SaaS, infrastructure, ads, contractors).
 - A deposit, direct deposit, payroll, refund, Zelle/Venmo in, or transfer in is direction "in". For personal income use category "Income"; for business income use "Income".
+- Set recurring=true for subscriptions and clearly repeating bills: streaming (Netflix/Spotify/Hulu/Disney+/YouTube Premium/Apple), SaaS and software tools, gym or club memberships, insurance, rent or mortgage, phone/internet/utilities, and cloud infrastructure billed on a cycle (Vercel/Supabase/AWS/Telnyx/Vapi/Anthropic). One-off buys (groceries, gas, restaurants, retail, a single transfer or payment) are recurring=false. When unsure, use false.
 - Never invent an amount. If you cannot find a dollar amount, return {"isTransaction": false}.`;
 }
 
@@ -137,6 +139,7 @@ async function parseBankSms(text, ctx = {}) {
       business: type === 'business' ? String(parsed.business || '').trim().slice(0, 60) : '',
       category,
       confidence: (parsed.confidence != null && isFinite(Number(parsed.confidence))) ? Number(parsed.confidence) : null,
+      recurring: parsed.recurring === true || category === 'Subscriptions',
       note: String(parsed.note || '').trim().slice(0, 120),
     };
   } catch (e) {
