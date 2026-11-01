@@ -112,14 +112,17 @@ function classifyByKeyword(query) {
 }
 
 // ── LLM classifier (primary) ─────────────────────────────────────────────────
-function buildClassifierPrompt(query) {
+function buildClassifierPrompt(query, siteText) {
   const list = CATALOG
     .map((c) => `- ${c.value} (${c.label}): ${c.description}. e.g. ${c.kw.slice(0, 6).join(', ')}`)
     .join('\n');
+  const siteBlock = siteText
+    ? `\nThe request includes a website. Here is text read from that site. Use it as the PRIMARY signal for the business type, name, and city:\n"""${String(siteText).slice(0, 2000)}"""\n`
+    : '';
   return `An agency owner is setting up an AI phone receptionist and typed this request:
 
 """${String(query).slice(0, 500)}"""
-
+${siteBlock}
 Match it to the single best-fitting receptionist template from this list, or decide none fits.
 
 TEMPLATES:
@@ -129,7 +132,7 @@ Rules:
 - Map a specific business to its parent template: "orthodontist" -> dental, "AC repair" -> hvac, "nail bar" -> salon_spa, "personal injury lawyer" -> legal.
 - If the business type does NOT reasonably fit any template, set "industry" to null (a custom template will be generated).
 - Only set "needs_clarification" to true when you genuinely cannot tell what kind of business it is (e.g. "make me money", "a receptionist"). Then give one short "clarifying_question".
-- Extract the business name, the city/location, and any website, if present. Set "sub_vertical" to the specific business type in 1-3 words (e.g. "nail salon", "orthodontics", "personal injury law").
+- Extract the business name, the city/location, and any website, if present. When website text is provided above, prefer it as the source of the business name, city, and what the business actually does. Set "sub_vertical" to the specific business type in 1-3 words (e.g. "nail salon", "orthodontics", "personal injury law").
 - "confidence": "high" when the type is explicit and clearly one template; "medium" when plausible but could be custom or a neighboring template; "low" for a weak guess.
 
 Respond with ONLY strict minified JSON, no prose, in exactly this shape:
@@ -145,7 +148,7 @@ function parseJsonLoose(text) {
   try { return JSON.parse(t.slice(start, end + 1)); } catch { return null; }
 }
 
-async function classifyWithLLM(query, timeoutMs = 9000) {
+async function classifyWithLLM(query, siteText, timeoutMs = 9000) {
   if (!ANTHROPIC_API_KEY) return null;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -162,7 +165,7 @@ async function classifyWithLLM(query, timeoutMs = 9000) {
         model: 'claude-sonnet-4-6',
         max_tokens: 400,
         temperature: 0,
-        messages: [{ role: 'user', content: buildClassifierPrompt(query) }],
+        messages: [{ role: 'user', content: buildClassifierPrompt(query, siteText) }],
       }),
     });
     clearTimeout(timer);
@@ -239,14 +242,29 @@ router.post('/:agencyId/ai-lab/match', async (req, res) => {
     if (!query) return res.status(400).json({ error: 'Describe the business, e.g. "an AI receptionist for a dental office".' });
     if (query.length > 500) return res.status(400).json({ error: 'That is a bit long, keep it to a sentence or two.' });
 
-    // Primary: LLM semantic routing. Fallback: keyword matcher (so the bar still
-    // works if the Anthropic call is down or unconfigured).
-    let raw = await classifyWithLLM(query);
-    let source = 'llm';
+    // If the request includes a website, read its homepage so the classifier can
+    // identify the business from real content (and pull its name/city), not just
+    // from the words typed. Best-effort and time-boxed; a miss just falls back to
+    // the text. This is what makes pasting a bare link actually work.
+    const urlInQuery = extractUrl(query);
+    let siteText = null;
+    if (urlInQuery) {
+      try {
+        const { fetchPageWithJina } = require('../lib/website-scraper');
+        const page = await fetchPageWithJina(urlInQuery, 8000);
+        if (page) siteText = String(page).replace(/\s+/g, ' ').trim().slice(0, 2000);
+      } catch (e) { console.warn('ai-lab match: homepage read failed (continuing):', e.message); }
+    }
+
+    // Primary: LLM semantic routing (grounded by the site text when we have it).
+    // Fallback: keyword matcher, run over the query plus any site text, so the
+    // bar still works if the Anthropic call is down or unconfigured.
+    let raw = await classifyWithLLM(query, siteText);
+    let source = siteText ? 'llm+site' : 'llm';
     if (!raw) {
-      const kw = classifyByKeyword(query);
-      raw = { industry: kw.industry, confidence: kw.confidence, sub_vertical: null, business_name: null, city: null, website_url: null, needs_clarification: false, clarifying_question: null };
-      source = 'keyword';
+      const kw = classifyByKeyword(siteText ? `${query} ${siteText}` : query);
+      raw = { industry: kw.industry, confidence: kw.confidence, sub_vertical: null, business_name: null, city: null, website_url: urlInQuery || null, needs_clarification: false, clarifying_question: null };
+      source = siteText ? 'keyword+site' : 'keyword';
     }
 
     const decision = decideRouting(raw, query);
