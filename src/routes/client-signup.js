@@ -2311,4 +2311,7 @@ module.exports = {
   getClientProvisioningStatus,
   signupRateLimiter,
   reprovisionStrandedClients,
+  // Exported so AI Lab's /build can assign a number through the same demo-aware
+  // path (demo agencies get the placeholder, real ones get a real number).
+  provisionPhoneForClient,
 };

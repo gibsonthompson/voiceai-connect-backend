@@ -201,6 +201,7 @@ const { handleAgencySignup, handleAgencyOnboarding } = require('./routes/agency-
 const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySettings, analyzeLogoBranding, verifyAgencyDomain, connectPaystack, disconnectPaystack, connectFlutterwave, disconnectFlutterwave, getAgencyLegal, updateAgencyLegal } = require('./routes/agency-settings');
 const demoPhoneRoutes = require('./routes/demo-phone');
 const customIndustriesRoutes = require('./routes/custom-industries');
+const aiLabRoutes = require('./routes/ai-lab');
 const workflowRoutes = require('./routes/workflows');
 const clientWorkflowRoutes = require('./routes/client-workflows');
 const referralRoutes = require('./routes/referrals');
@@ -1926,6 +1927,7 @@ app.get('/api/domain-test', (req, res) => {
 setupProcessErrorHandlers();
 app.use('/api/agency', demoPhoneRoutes);
 app.use('/api/agency', customIndustriesRoutes);
+app.use('/api/agency', aiLabRoutes);
 app.use('/api/agency', workflowRoutes);
 // Discount codes (Pro/Scale): agencies create codes their clients redeem at checkout.
 app.use('/api/agency', require('./routes/discount-codes'));
