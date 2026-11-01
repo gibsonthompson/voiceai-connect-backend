@@ -216,10 +216,11 @@ Rules:
 - "sub_vertical": the specific business type in 1-3 words.
 - "services": up to 8 real services the business offers, each a short name and a one-line description. Use the website if provided; otherwise infer the 3-5 most typical services for this kind of business and mark them as typical by leaving description generic. Never invent specific prices.
 - "faqs": up to 6 question/answer pairs a caller would actually ask (hours, location, booking, pricing approach, emergencies). Only include answers you can support from the site or that are safe, generic truths; leave "a" empty if unknown.
+- "staff": only real, named people found on the site (owner, doctors, agents, stylists), each with name and role. Do NOT invent staff; return an empty array if none are named.
 - Extract business_name, city, website_url when present.
 
 Respond with ONLY strict minified JSON, no prose, exactly:
-{"industry":"<value or null>","confidence":"high|medium|low","sub_vertical":"<string or null>","business_name":"<string or null>","city":"<string or null>","website_url":"<string or null>","services":[{"name":"","description":""}],"faqs":[{"q":"","a":""}],"needs_clarification":false,"clarifying_question":"<string or null>"}`;
+{"industry":"<value or null>","confidence":"high|medium|low","sub_vertical":"<string or null>","business_name":"<string or null>","city":"<string or null>","website_url":"<string or null>","services":[{"name":"","description":""}],"faqs":[{"q":"","a":""}],"staff":[{"name":"","role":""}],"needs_clarification":false,"clarifying_question":"<string or null>"}`;
 }
 
 function parseJsonLoose(text) {
@@ -304,6 +305,18 @@ function normalizeFaqs(arr) {
   return out;
 }
 
+function normalizeStaff(arr) {
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  for (const s of arr) {
+    const name = cleanStr(s && s.name);
+    if (!name) continue;
+    out.push({ name: name.slice(0, 80), role: (cleanStr(s && s.role) || '').slice(0, 80) });
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
 // ── Turn a raw classification into a routing decision ────────────────────────
 function decideRouting(raw, query) {
   const urlFromText = extractUrl(query);
@@ -350,11 +363,14 @@ function decideRouting(raw, query) {
 
 // Fold the confirmed services, FAQs and extra notes into one markdown block that
 // is appended to the website knowledge so the receptionist actually knows them.
-function buildExtraKnowledgeText({ services, faqs, additionalInfo, hours, city }) {
+function buildExtraKnowledgeText({ services, faqs, staff, additionalInfo, hours, city }) {
   const parts = [];
   if (city) parts.push(`# Location\nThe business serves ${city}.`);
   if (Array.isArray(services) && services.length) {
     parts.push('# Services\n' + services.map((s) => `- ${s.name}${s.description ? ': ' + s.description : ''}`).join('\n'));
+  }
+  if (Array.isArray(staff) && staff.length) {
+    parts.push('# Team\n' + staff.map((s) => `- ${s.name}${s.role ? ` (${s.role})` : ''}`).join('\n'));
   }
   if (Array.isArray(faqs) && faqs.length) {
     const qa = faqs.filter((f) => f && f.q && f.a).map((f) => `Q: ${f.q}\nA: ${f.a}`);
@@ -417,6 +433,7 @@ router.post('/:agencyId/ai-lab/intake', async (req, res) => {
     decision.read_website = !!siteText;
     decision.services = normalizeServices(raw.services);
     decision.faqs = normalizeFaqs(raw.faqs);
+    decision.staff = normalizeStaff(raw.staff);
     return res.json(decision);
   } catch (e) {
     console.error('ai-lab intake error:', e.message);
@@ -442,13 +459,14 @@ router.post('/:agencyId/ai-lab/suggest-greeting', async (req, res) => {
   }
 });
 
-// ── POST /:agencyId/ai-lab/build (THE COMMIT) ────────────────────────────────
-// Turn the collected package into a real receptionist: an assistant grounded by
-// the full website scrape plus the confirmed services/FAQs, then provision a
-// number (the only place a number is bought) and create the client. The FIRST
-// build for an agency with no test client becomes its TEST client; later builds
-// are regular clients.
-router.post('/:agencyId/ai-lab/build', async (req, res) => {
+// ── POST /:agencyId/ai-lab/create (STEP 1 of commit: build, NO number) ───────
+// Turn the collected package into a REAL client: an assistant grounded by the
+// full website scrape plus the confirmed services/FAQs/staff, the hours, voice
+// and greeting written to the client, and the services/staff rows created. No
+// phone number is provisioned here, so the client is NOT billed yet (billing is
+// number-gated). The FIRST create for an agency with no test client becomes its
+// TEST client; later creates are regular clients. Creating is free on any plan.
+router.post('/:agencyId/ai-lab/create', async (req, res) => {
   const { agencyId } = req.params;
   const body = req.body || {};
   const industry = String(body.industry || '').trim();
@@ -457,10 +475,10 @@ router.post('/:agencyId/ai-lab/build', async (req, res) => {
   const websiteUrl = String(body.website_url || '').trim();
   const subVertical = String(body.sub_vertical || '').trim();
 
-  // Full package (all optional; absent falls back to sensible defaults).
   const hours = sanitizeHours(body.hours);
   const services = normalizeServices(body.services);
   const faqs = normalizeFaqs(body.faqs);
+  const staff = normalizeStaff(body.staff);
   const additionalInfo = cleanStr(body.additional_info);
   const voiceId = cleanStr(body.voice_id);
   const greeting = cleanStr(body.greeting);
@@ -478,70 +496,38 @@ router.post('/:agencyId/ai-lab/build', async (req, res) => {
     }
 
     const isTest = !agency.test_client_id;
-
-    // Buying a number is the paid action; the whole conversation up to here was
-    // free. Gate it at the commit (unless this is a demo agency that uses
-    // placeholder numbers).
-    const planType = String(agency.plan_type || '').toLowerCase();
-    const demoSkip = agency.skip_number_provisioning === true;
-    if (!demoSkip && planType === 'free') {
-      return res.status(403).json({
-        error: 'upgrade_required', upgrade_required: true, feature: 'ai_lab_build', current_plan: 'free',
-        title: 'Going live assigns a phone number',
-        message: 'Going live buys a real phone number so you can call the receptionist and hear it. Start your free trial to go live.',
-        cta: 'Start your free trial', upgrade_url: '/agency/settings?tab=billing',
-      });
-    }
-
     const titleCase = (s) => s.replace(/\b\w/g, (m) => m.toUpperCase());
     const businessName = businessNameIn
       || (isTest ? `${agency.name} - Test Business` : (subVertical ? titleCase(subVertical) : 'New Receptionist'));
     const agencyCountry = (agency.country || 'US').toUpperCase();
 
-    // 1) Knowledge base: scrape the full site (if any), then fold in the
-    //    confirmed services, FAQs and notes so the receptionist knows them even
-    //    when they are not on the website.
+    // 1) Knowledge base: full site scrape (if any) + confirmed services/staff/FAQs/notes.
     let kbData = null;
     if (websiteUrl) {
       try {
         const { createKnowledgeBaseFromWebsite } = require('../lib/website-scraper');
         kbData = await createKnowledgeBaseFromWebsite(websiteUrl, businessName);
-      } catch (e) { console.warn('ai-lab build: scrape failed (continuing):', e.message); }
+      } catch (e) { console.warn('ai-lab create: scrape failed (continuing):', e.message); }
     }
-    const extra = buildExtraKnowledgeText({ services, faqs, additionalInfo, hours, city });
+    const extra = buildExtraKnowledgeText({ services, faqs, staff, additionalInfo, hours, city });
     if (extra) {
       if (!kbData) kbData = { websiteContent: '' };
       kbData.websiteContent = `${kbData.websiteContent || ''}\n\n${extra}`.trim();
     }
 
-    // 2) Assistant. createIndustryAssistant resolves built-in AND custom industry
-    //    keys and folds in the knowledge base (website + our extra block).
+    // 2) Assistant (no number attached yet). Costs nothing until a number is bought.
     const { createIndustryAssistant } = require('../lib/vapi');
     const assistant = await createIndustryAssistant(businessName, industry, kbData, agency.phone || null, null, agencyId);
 
-    // 3) Provision the number (the last step). Demo agencies get a placeholder.
-    //    Non-fatal: a receptionist with no number is still created and the number
-    //    can be assigned later.
-    let phoneNumber = null, vapiPhoneId = null, provisioningMethod = null;
-    try {
-      const { provisionPhoneForClient } = require('./client-signup');
-      const r = await provisionPhoneForClient(
-        agency,
-        { businessCity: city, businessState: '', businessName, phone: agency.phone || '', country: agencyCountry },
-        assistant.id, 'vapi_direct', planType || 'starter'
-      );
-      phoneNumber = r.number || null; vapiPhoneId = r.vapiPhoneId || null; provisioningMethod = r.provisioningMethod || null;
-    } catch (e) { console.warn('ai-lab build: number provisioning failed (continuing):', e.message); }
-
-    // 4) Create the client with the full package applied. The assistant is
-    //    dynamic, so voice/greeting/hours are read from these columns at call
-    //    time; services live in client_services (written next).
+    // 3) Create the client with the full package, but NO number. status 'active'
+    //    so it shows normally in the dashboard; billing is number-gated, so a
+    //    numberless client is not charged to the agency's monthly fee.
     const { data: client, error: insErr } = await supabase.from('clients').insert({
       agency_id: agencyId,
       business_name: businessName,
       business_city: city || null,
       country: agencyCountry,
-      phone_number: phoneNumber,
+      phone_number: null,
       owner_name: agency.name,
       owner_phone: agency.phone || '+10000000000',
       email: agency.email,
@@ -551,9 +537,7 @@ router.post('/:agencyId/ai-lab/build', async (req, res) => {
       knowledge_base_id: kbData?.knowledgeBaseId || null,
       knowledge_base_content: kbData?.content || null,
       vapi_assistant_id: assistant.id,
-      vapi_phone_number: phoneNumber,
-      vapi_phone_id: vapiPhoneId,
-      provisioning_method: provisioningMethod || 'platform',
+      provisioning_method: 'unprovisioned',
       business_hours: hours,
       voice_id: voiceId || null,
       greeting_message: greeting || null,
@@ -563,28 +547,95 @@ router.post('/:agencyId/ai-lab/build', async (req, res) => {
       plan_type: isTest ? 'growth' : 'starter',
       is_test_client: isTest,
       calls_this_month: 0,
-    }).select('id, business_name, phone_number, is_test_client, industry').single();
-    if (insErr) { console.error('ai-lab build: client insert failed:', insErr.message); return res.status(500).json({ error: 'Could not create the receptionist.' }); }
+    }).select('id, business_name, industry, is_test_client').single();
+    if (insErr) { console.error('ai-lab create: client insert failed:', insErr.message); return res.status(500).json({ error: 'Could not create the receptionist.' }); }
 
-    // 5) Services -> client_services (non-fatal; the KB already carries them too).
+    // 4) Services -> client_services, Staff -> staff_members (non-fatal; KB carries them too).
     if (services.length) {
       try {
         const rows = services.map((s) => ({ client_id: client.id, name: s.name, description: s.description || null, is_active: true }));
-        const { error: svcErr } = await supabase.from('client_services').insert(rows);
-        if (svcErr) console.warn('ai-lab build: services insert failed (continuing):', svcErr.message);
-      } catch (e) { console.warn('ai-lab build: services insert threw (continuing):', e.message); }
+        const { error: e2 } = await supabase.from('client_services').insert(rows);
+        if (e2) console.warn('ai-lab create: services insert failed (continuing):', e2.message);
+      } catch (e) { console.warn('ai-lab create: services insert threw (continuing):', e.message); }
+    }
+    if (staff.length) {
+      try {
+        const rows = staff.map((s) => ({ client_id: client.id, name: s.name, role: s.role || null, is_active: true }));
+        const { error: e3 } = await supabase.from('staff_members').insert(rows);
+        if (e3) console.warn('ai-lab create: staff insert failed (continuing):', e3.message);
+      } catch (e) { console.warn('ai-lab create: staff insert threw (continuing):', e.message); }
     }
 
     if (isTest) await supabase.from('agencies').update({ test_client_id: client.id }).eq('id', agencyId);
 
-    console.log(`🧪 AI Lab build for ${agency.name}: ${businessName} (${industry}, ${isTest ? 'test' : 'client'}) -> ${phoneNumber || 'no number'} [${services.length} services, ${faqs.length} faqs]`);
-    return res.json({ success: true, client_id: client.id, is_test: client.is_test_client, business_name: client.business_name, phone_number: client.phone_number, industry: client.industry });
+    console.log(`🧪 AI Lab create for ${agency.name}: ${businessName} (${industry}, ${isTest ? 'test' : 'client'}, NO number) [${services.length} services, ${staff.length} staff, ${faqs.length} faqs]`);
+    return res.json({ success: true, client_id: client.id, is_test: client.is_test_client, business_name: client.business_name, industry: client.industry, has_number: false });
   } catch (e) {
-    console.error('ai-lab build error:', e.message);
-    return res.status(500).json({ error: 'Could not build the receptionist right now.' });
+    console.error('ai-lab create error:', e.message);
+    return res.status(500).json({ error: 'Could not create the receptionist right now.' });
+  }
+});
+
+// ── POST /:agencyId/ai-lab/:clientId/buy-number (STEP 2: the ONLY provisioning) ─
+// Buy and attach a real phone number to a client created above. This is the paid
+// action: it is what makes the client billable, so the free-plan gate lives here,
+// not at create. Demo agencies get a placeholder number.
+router.post('/:agencyId/ai-lab/:clientId/buy-number', async (req, res) => {
+  const { agencyId, clientId } = req.params;
+  try {
+    const { supabase, getAgencyById } = require('../lib/supabase');
+    const agency = await getAgencyById(agencyId);
+    if (!agency) return res.status(404).json({ error: 'Agency not found' });
+
+    const { data: client, error: cErr } = await supabase
+      .from('clients')
+      .select('id, agency_id, business_name, business_city, business_state, country, vapi_assistant_id, phone_number')
+      .eq('id', clientId).eq('agency_id', agencyId).single();
+    if (cErr || !client) return res.status(404).json({ error: 'Receptionist not found.' });
+    if (client.phone_number) {
+      return res.json({ success: true, already: true, client_id: client.id, phone_number: client.phone_number });
+    }
+    if (!client.vapi_assistant_id) return res.status(400).json({ error: 'This receptionist has no assistant to attach a number to.' });
+
+    // Buying a number is the paid action (unless this is a demo agency that uses
+    // placeholder numbers).
+    const planType = String(agency.plan_type || '').toLowerCase();
+    const demoSkip = agency.skip_number_provisioning === true;
+    if (!demoSkip && planType === 'free') {
+      return res.status(403).json({
+        error: 'upgrade_required', upgrade_required: true, feature: 'ai_lab_number', current_plan: 'free',
+        title: 'Buying a number is a paid action',
+        message: 'A phone number is what makes the receptionist live and callable, and what the monthly fee covers. Start your free trial to buy one.',
+        cta: 'Start your free trial', upgrade_url: '/agency/settings?tab=billing',
+      });
+    }
+
+    const agencyCountry = (agency.country || 'US').toUpperCase();
+    const { provisionPhoneForClient } = require('./client-signup');
+    const r = await provisionPhoneForClient(
+      agency,
+      { businessCity: client.business_city || '', businessState: client.business_state || '', businessName: client.business_name, phone: agency.phone || '', country: (client.country || agencyCountry).toUpperCase() },
+      client.vapi_assistant_id, 'vapi_direct', planType || 'starter'
+    );
+    const phoneNumber = r.number || null;
+    if (!phoneNumber) return res.status(503).json({ error: 'Could not get a number right now. Try again in a moment.' });
+
+    const { error: uErr } = await supabase.from('clients').update({
+      phone_number: phoneNumber,
+      vapi_phone_number: phoneNumber,
+      vapi_phone_id: r.vapiPhoneId || null,
+      provisioning_method: r.provisioningMethod || 'platform',
+    }).eq('id', client.id);
+    if (uErr) { console.error('ai-lab buy-number: client update failed:', uErr.message); return res.status(500).json({ error: 'Number was obtained but could not be saved. Contact support.' }); }
+
+    console.log(`📞 AI Lab buy-number for ${agency.name}: ${client.business_name} -> ${phoneNumber}`);
+    return res.json({ success: true, client_id: client.id, phone_number: phoneNumber });
+  } catch (e) {
+    console.error('ai-lab buy-number error:', e.message);
+    return res.status(500).json({ error: 'Could not buy a number right now.' });
   }
 });
 
 module.exports = router;
 // Exported for unit tests (no network).
-module.exports._internal = { CATALOG, extractUrl, classifyByKeyword, decideRouting, parseJsonLoose, normalizeServices, normalizeFaqs, sanitizeHours, buildExtraKnowledgeText };
+module.exports._internal = { CATALOG, extractUrl, classifyByKeyword, decideRouting, parseJsonLoose, normalizeServices, normalizeFaqs, normalizeStaff, sanitizeHours, buildExtraKnowledgeText };

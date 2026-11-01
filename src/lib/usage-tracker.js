@@ -403,12 +403,16 @@ async function ensureFreeUsageBilling(agencyId) {
 const CLIENT_TRIAL_STATUSES = ['trial', 'trialing'];
 
 async function getBillableClientCount(agencyId, planType) {
+  // A client is only billable once it has a phone number. A receptionist can be
+  // created and fully configured without a number (e.g. from the AI Lab builder);
+  // it is not charged to the agency until a number is actually provisioned.
   let query = supabase
     .from('clients')
     .select('id', { count: 'exact', head: true })
     .eq('agency_id', agencyId)
     .eq('status', 'active')
-    .eq('is_test_client', false);
+    .eq('is_test_client', false)
+    .not('phone_number', 'is', null);
 
   if (planType === 'pro') {
     query = query.or(
