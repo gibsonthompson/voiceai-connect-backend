@@ -1512,14 +1512,38 @@ async function createIndustryAssistant(businessName, industry, knowledgeBaseData
       hooks
     };
 
-    const response = await fetch('https://api.vapi.ai/assistant', {
+    const postAssistant = (cfg) => fetch('https://api.vapi.ai/assistant', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${VAPI_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(assistantConfig)
+      body: JSON.stringify(cfg)
     });
+
+    let response = await postAssistant(assistantConfig);
+
+    // A customer-entered owner phone can be syntactically +1########## yet not a
+    // real, dialable number, which VAPI rejects on the transfer destination.
+    // Transfer-to-owner is non-essential, so instead of 500ing the whole signup
+    // we retry ONCE without the transfer tool and transfer hook. The assistant
+    // is still created; transfer can be re-enabled once a valid number is set.
+    if (!response.ok) {
+      const errText = await response.text();
+      const hasTransfer = tools.some((t) => t.type === 'transferCall')
+        || hooks.some((h) => Array.isArray(h.do) && h.do.some((d) => d.type === 'tool' && d.tool && d.tool.type === 'transferCall'));
+      const isTransferNumErr = /e\.?164|valid phone number|destinations/i.test(errText);
+      if (hasTransfer && isTransferNumErr) {
+        console.warn(`⚠️ VAPI rejected the transfer number for ${businessName}; retrying assistant WITHOUT owner transfer. VAPI said: ${errText.slice(0, 220)}`);
+        const safeTools = tools.filter((t) => t.type !== 'transferCall');
+        const safeHooks = hooks.filter((h) => !(Array.isArray(h.do) && h.do.some((d) => d.type === 'tool' && d.tool && d.tool.type === 'transferCall')));
+        const retryModel = { ...assistantConfig.model };
+        if (safeTools.length > 0) retryModel.tools = safeTools; else delete retryModel.tools;
+        response = await postAssistant({ ...assistantConfig, model: retryModel, hooks: safeHooks });
+      } else {
+        throw new Error(`VAPI API error: ${errText}`);
+      }
+    }
 
     if (!response.ok) throw new Error(`VAPI API error: ${await response.text()}`);
 
