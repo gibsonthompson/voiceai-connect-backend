@@ -242,18 +242,23 @@ async function changeAgencyPlan(req, res) {
       updateItems.push({ price: target.minutePrice });
     }
 
+    // A free agency upgrading to a paid plan gets the same 14-day trial new
+    // signups get: set trial_end 14 days out and suppress proration so NOTHING
+    // is charged today. Guarded to free/starter -> paid only, so Pro<->Scale
+    // switches (already-paying agencies) are never handed a trial. If the sub is
+    // already trialing, leave its existing trial window alone.
+    const upgradingFromFree = ['free', 'starter'].includes(String(agency.plan_type || '').toLowerCase());
+    const giveTrial = upgradingFromFree && sub.status !== 'trialing';
+    const trialEndUnix = Math.floor(Date.now() / 1000) + 14 * 24 * 60 * 60;
+
+    const subUpdate = { metadata: { ...(sub.metadata || {}), plan } };
     if (updateItems.length > 0) {
-      await stripe.subscriptions.update(agency.stripe_subscription_id, {
-        items: updateItems,
-        proration_behavior: 'create_prorations',
-        metadata: { ...(sub.metadata || {}), plan },
-      });
-    } else {
-      // Prices already match the target (only metadata was stale). Sync it.
-      await stripe.subscriptions.update(agency.stripe_subscription_id, {
-        metadata: { ...(sub.metadata || {}), plan },
-      });
+      subUpdate.items = updateItems;
+      // On a trial start, suppress the proration so the upgrade is $0 today.
+      subUpdate.proration_behavior = giveTrial ? 'none' : 'create_prorations';
     }
+    if (giveTrial) subUpdate.trial_end = trialEndUnix;
+    await stripe.subscriptions.update(agency.stripe_subscription_id, subUpdate);
 
     console.log(`📈 change-plan: agency ${agency_id} ${agency.plan_type} -> ${plan} (subscription ${agency.stripe_subscription_id})`);
 
@@ -261,10 +266,27 @@ async function changeAgencyPlan(req, res) {
     // immediately instead of waiting on / racing the webhook.
     await applyPlanChange(agency_id, plan, agency.stripe_subscription_id);
 
+    // Reflect the trial in our DB immediately (the subscription.updated webhook
+    // also syncs subscription_status + trial_ends_at from Stripe within seconds).
+    if (giveTrial) {
+      await supabase
+        .from('agencies')
+        .update({
+          subscription_status: 'trial',
+          status: 'trial',
+          trial_ends_at: new Date(trialEndUnix * 1000).toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', agency_id);
+    }
+
     return res.json({
       success: true,
       plan,
-      message: `You're now on ${target.name}.`,
+      trial: giveTrial,
+      message: giveTrial
+        ? `Your 14-day free trial of ${target.name} has started. $0 today.`
+        : `You're now on ${target.name}.`,
     });
   } catch (err) {
     console.error('change-plan error:', err);
