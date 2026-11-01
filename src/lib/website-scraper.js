@@ -54,16 +54,23 @@ function normalizeWebsiteUrl(rawUrl) {
 // ============================================================================
 // JINA READER — Fetch a single page as clean markdown
 // ============================================================================
-async function fetchPageWithJina(url, timeoutMs = 15000) {
+// A Jina Reader API key (set JINA_API_KEY) gives far more reliable rendering of
+// JS-heavy sites and much higher rate limits than the anonymous free tier. It is
+// the main lever against thin-content ("terrible") results. Harmless when unset.
+const JINA_API_KEY = process.env.JINA_API_KEY || null;
+const BROWSER_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+
+async function fetchPageWithJina(url, timeoutMs = 12000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    const headers = { 'Accept': 'text/plain' };
+    if (JINA_API_KEY) headers['Authorization'] = `Bearer ${JINA_API_KEY}`;
     const response = await fetch(`https://r.jina.ai/${url}`, {
       signal: controller.signal,
-      headers: {
-        'Accept': 'text/plain',
-      }
+      headers,
     });
     clearTimeout(timer);
 
@@ -83,6 +90,38 @@ async function fetchPageWithJina(url, timeoutMs = 15000) {
       console.warn(`⚠️ Jina fetch failed for ${url}:`, error.message);
     }
     return null;
+  }
+}
+
+// Fast reachability check for a GUESSED url (the FAQ/help path probes). A dead
+// guess sent straight to Jina burns a full Jina timeout; a HEAD against the real
+// site settles it in a second or two, so only pages that actually exist are ever
+// handed to Jina. Returns false on 404/5xx, blocked HEAD we can't confirm, or any
+// network error, so a probe is only kept when the page is genuinely there.
+async function urlLikelyExists(url, timeoutMs = 4000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let res = await fetch(url, {
+      method: 'HEAD',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: { 'User-Agent': BROWSER_UA },
+    });
+    // Some servers reject HEAD (405/501) but serve GET. Confirm with a 1-byte GET.
+    if (res.status === 405 || res.status === 501) {
+      res = await fetch(url, {
+        method: 'GET',
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: { 'User-Agent': BROWSER_UA, 'Range': 'bytes=0-0' },
+      });
+    }
+    clearTimeout(timer);
+    return res.ok;
+  } catch {
+    clearTimeout(timer);
+    return false;
   }
 }
 
@@ -472,7 +511,7 @@ async function createKnowledgeBaseFromWebsite(rawWebsiteUrl, businessName) {
     console.log(`🌐 Scraping website: ${websiteUrl}${websiteUrl !== rawWebsiteUrl ? ` (normalized from "${rawWebsiteUrl}")` : ''}`);
 
     // ── Step 1: Scrape homepage ──────────────────────────────────────────
-    const homepageContent = await fetchPageWithJina(websiteUrl);
+    const homepageContent = await fetchPageWithJina(websiteUrl, 15000);
     if (!homepageContent) {
       console.warn('⚠️ Homepage scrape returned no content');
       return null;
@@ -484,13 +523,21 @@ async function createKnowledgeBaseFromWebsite(rawWebsiteUrl, businessName) {
     const sitemapLinks = await fetchSitemapUrls(websiteUrl);
 
     const allLinks = new Set([...internalLinks, ...sitemapLinks]);
-    // Always probe common FAQ/help paths. FAQ pages are the highest-value
-    // content for a receptionist and are often linked only from a nav or a
-    // sub-page the homepage markdown misses. Dead guesses just return no content
-    // from Jina and get dropped, so this only ever adds real pages.
+    // Probe a SMALL set of common FAQ/help paths, but VERIFY each one exists with
+    // a fast HEAD before handing it to Jina. Previously seven guesses (most of
+    // them dead) were sent straight to Jina and each burned a full ~15s timeout;
+    // now a dead guess is settled in a second or two and never reaches Jina, and
+    // only pages that are really there get scraped.
     try {
       const origin = new URL(websiteUrl).origin;
-      ['faq', 'faqs', 'frequently-asked-questions', 'frequently-asked', 'questions', 'help', 'support'].forEach(p => allLinks.add(`${origin}/${p}`));
+      const probePaths = ['faq', 'faqs', 'help'];
+      const probed = await Promise.all(
+        probePaths.map(async (p) => {
+          const u = `${origin}/${p}`;
+          return (await urlLikelyExists(u)) ? u : null;
+        })
+      );
+      for (const u of probed) if (u) allLinks.add(u);
     } catch { /* ignore */ }
     console.log(`   🔗 Discovered ${allLinks.size} unique internal links (${internalLinks.length} from page, ${sitemapLinks.length} from sitemap, + FAQ path probes)`);
 
@@ -511,7 +558,7 @@ async function createKnowledgeBaseFromWebsite(rawWebsiteUrl, businessName) {
     // One page per type keeps coverage broad, EXCEPT FAQ: sites routinely split
     // FAQs across several pages and they are the highest-value content here, so
     // let several FAQ pages through. ('other' pages were never deduped.)
-    const typeCap = (t) => (t === 'faq' ? 4 : t === 'other' ? Infinity : 1);
+    const typeCap = (t) => (t === 'faq' ? 2 : t === 'other' ? Infinity : 1);
 
     for (const link of scoredLinks) {
       if (pagesToScrape.length >= MAX_PAGES) break;
