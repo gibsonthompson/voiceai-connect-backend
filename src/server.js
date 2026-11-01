@@ -1928,6 +1928,8 @@ setupProcessErrorHandlers();
 app.use('/api/agency', demoPhoneRoutes);
 app.use('/api/agency', customIndustriesRoutes);
 app.use('/api/agency', aiLabRoutes);
+// Public marketing-site demo (no auth; rate-limited inside the router).
+app.use('/api/public', require('./routes/public-demo'));
 app.use('/api/agency', workflowRoutes);
 // Discount codes (Pro/Scale): agencies create codes their clients redeem at checkout.
 app.use('/api/agency', require('./routes/discount-codes'));
