@@ -6,11 +6,11 @@
 // that still need a human to follow up (not spam, not transferred to a person,
 // no appointment booked). Agents clear them - mark done, add a note, or reopen.
 //
-//   GET  /:agencyId/cc/messages              -> the worklist (open by default)
-//   GET  /:agencyId/cc/messages/count        -> open count (nav badge / tile)
-//   POST /:agencyId/cc/messages/:callId/resolve  -> mark done (optional note)
-//   POST /:agencyId/cc/messages/:callId/reopen   -> back to open
-//   POST /:agencyId/cc/messages/:callId/note     -> set/update the note only
+//   GET  /:callCenterId/messages              -> the worklist (open by default)
+//   GET  /:callCenterId/messages/count        -> open count (nav badge / tile)
+//   POST /:callCenterId/messages/:callId/resolve  -> mark done (optional note)
+//   POST /:callCenterId/messages/:callId/reopen   -> back to open
+//   POST /:callCenterId/messages/:callId/note     -> set/update the note only
 //
 // "Open" means a follow-up candidate with no done row. That parent-filtered-by-
 // child-null query is served by the cc_followup_inbox view, so filtering and
@@ -21,33 +21,33 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
-const { requireAgencyAccess } = require('./auth');
+const { requireCallCenterAccess } = require('./auth');
 
-async function resolveScope(decoded, agencyId) {
-  if (decoded && decoded.role === 'agency_staff') {
+async function resolveScope(decoded, callCenterId) {
+  if (decoded && decoded.role === 'cc_agent') {
     const { data: m } = await supabase
       .from('team_members').select('assigned_client_ids')
-      .eq('member_user_id', decoded.userId).eq('entity_type', 'agency').eq('entity_id', agencyId).single();
+      .eq('member_user_id', decoded.userId).eq('entity_type', 'call_center').eq('entity_id', callCenterId).single();
     if (m && Array.isArray(m.assigned_client_ids)) return m.assigned_client_ids;
   }
   return null;
 }
-async function scopedClients(req, agencyId) {
+async function scopedClients(req, callCenterId) {
   const { data: clients } = await supabase
-    .from('clients').select('id, business_name').eq('agency_id', agencyId);
+    .from('clients').select('id, business_name').eq('call_center_id', callCenterId);
   let list = clients || [];
-  const scope = await resolveScope(req.user, agencyId);
+  const scope = await resolveScope(req.user, callCenterId);
   if (Array.isArray(scope)) { const ok = new Set(scope); list = list.filter((c) => ok.has(c.id)); }
   return list;
 }
 
 // The display name to stamp on a resolution. Staff: their team_members name;
 // owner/impersonation: a name off the token, else a sensible fallback.
-async function resolverName(decoded, agencyId) {
-  if (decoded && decoded.role === 'agency_staff' && decoded.userId) {
+async function resolverName(decoded, callCenterId) {
+  if (decoded && decoded.role === 'cc_agent' && decoded.userId) {
     const { data: m } = await supabase
       .from('team_members').select('display_name')
-      .eq('member_user_id', decoded.userId).eq('entity_type', 'agency').eq('entity_id', agencyId).maybeSingle();
+      .eq('member_user_id', decoded.userId).eq('entity_type', 'call_center').eq('entity_id', callCenterId).maybeSingle();
     if (m && m.display_name) return m.display_name;
   }
   return (decoded && (decoded.name || [decoded.first_name, decoded.last_name].filter(Boolean).join(' ') || decoded.email)) || 'Manager';
@@ -69,21 +69,21 @@ const RANGE_DAYS = { '7d': 7, '30d': 30, '90d': 90 };
 const VIEW_COLS = 'id, created_at, client_id, agency_id, caller_phone, customer_name, customer_phone, duration_seconds, ai_summary, summary, service_requested, urgency_level, sentiment, followup_outcome, caller_spoke, followup_status, followup_note, followup_resolved_by, followup_resolved_at';
 
 // Resolve + scope-check a call for a write. Returns { call } or { error, code }.
-async function scopedCall(req, agencyId, callId) {
+async function scopedCall(req, callCenterId, callId) {
   const { data: call } = await supabase
     .from('calls').select('id, client_id').eq('id', callId).maybeSingle();
   if (!call) return { error: 'Call not found', code: 404 };
-  const clients = await scopedClients(req, agencyId);
+  const clients = await scopedClients(req, callCenterId);
   const ok = new Set(clients.map((c) => c.id));
   if (!ok.has(call.client_id)) return { error: 'Call not found', code: 404 };
   return { call };
 }
 
-// ---- GET /:agencyId/cc/messages -------------------------------------------
-router.get('/:agencyId/cc/messages', requireAgencyAccess('dashboard'), async (req, res) => {
+// ---- GET /:callCenterId/messages -------------------------------------------
+router.get('/:callCenterId/cc/messages', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId } = req.params;
-    const clients = await scopedClients(req, agencyId);
+    const { callCenterId } = req.params;
+    const clients = await scopedClients(req, callCenterId);
     const nameById = new Map(clients.map((c) => [c.id, c.business_name || 'Business']));
     let clientIds = clients.map((c) => c.id);
 
@@ -99,7 +99,7 @@ router.get('/:agencyId/cc/messages', requireAgencyAccess('dashboard'), async (re
 
     const status = (req.query.status || 'open').toString();
     let q = supabase.from('cc_followup_inbox').select(VIEW_COLS, { count: 'exact' })
-      .eq('agency_id', agencyId).in('client_id', clientIds);
+      .in('client_id', clientIds);
     if (status === 'open' || status === 'done') q = q.eq('followup_status', status);
 
     // Date window (default: all, since a follow-up does not expire by date).
@@ -123,7 +123,7 @@ router.get('/:agencyId/cc/messages', requireAgencyAccess('dashboard'), async (re
     // the current filters/paging.
     const { count: openTotal } = await supabase.from('cc_followup_inbox')
       .select('id', { count: 'exact', head: true })
-      .eq('agency_id', agencyId).in('client_id', clientIds).eq('followup_status', 'open');
+      .in('client_id', clientIds).eq('followup_status', 'open');
 
     const rows = (data || []).map((c) => ({
       id: c.id,
@@ -164,16 +164,16 @@ function toBizList(clients) {
     .sort((a, b) => a.businessName.localeCompare(b.businessName));
 }
 
-// ---- GET /:agencyId/cc/messages/count -------------------------------------
-router.get('/:agencyId/cc/messages/count', requireAgencyAccess('dashboard'), async (req, res) => {
+// ---- GET /:callCenterId/messages/count -------------------------------------
+router.get('/:callCenterId/cc/messages/count', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId } = req.params;
-    const clients = await scopedClients(req, agencyId);
+    const { callCenterId } = req.params;
+    const clients = await scopedClients(req, callCenterId);
     const clientIds = clients.map((c) => c.id);
     if (clientIds.length === 0) return res.json({ success: true, open: 0 });
     const { count } = await supabase.from('cc_followup_inbox')
       .select('id', { count: 'exact', head: true })
-      .eq('agency_id', agencyId).in('client_id', clientIds).eq('followup_status', 'open');
+      .in('client_id', clientIds).eq('followup_status', 'open');
     res.json({ success: true, open: count || 0 });
   } catch (e) {
     console.error('cc/messages count error:', e.message);
@@ -181,18 +181,18 @@ router.get('/:agencyId/cc/messages/count', requireAgencyAccess('dashboard'), asy
   }
 });
 
-// ---- POST /:agencyId/cc/messages/:callId/resolve --------------------------
-router.post('/:agencyId/cc/messages/:callId/resolve', requireAgencyAccess('dashboard'), async (req, res) => {
+// ---- POST /:callCenterId/messages/:callId/resolve --------------------------
+router.post('/:callCenterId/cc/messages/:callId/resolve', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId, callId } = req.params;
-    const chk = await scopedCall(req, agencyId, callId);
+    const { callCenterId, callId } = req.params;
+    const chk = await scopedCall(req, callCenterId, callId);
     if (chk.error) return res.status(chk.code).json({ success: false, error: chk.error });
 
     const note = typeof req.body?.note === 'string' ? req.body.note.trim().slice(0, 2000) : null;
-    const name = await resolverName(req.user, agencyId);
+    const name = await resolverName(req.user, callCenterId);
     const { error } = await supabase.from('call_followups').upsert({
       call_id: callId,
-      agency_id: agencyId,
+      call_center_id: callCenterId,
       client_id: chk.call.client_id,
       status: 'done',
       note,
@@ -209,16 +209,16 @@ router.post('/:agencyId/cc/messages/:callId/resolve', requireAgencyAccess('dashb
   }
 });
 
-// ---- POST /:agencyId/cc/messages/:callId/reopen ---------------------------
-router.post('/:agencyId/cc/messages/:callId/reopen', requireAgencyAccess('dashboard'), async (req, res) => {
+// ---- POST /:callCenterId/messages/:callId/reopen ---------------------------
+router.post('/:callCenterId/cc/messages/:callId/reopen', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId, callId } = req.params;
-    const chk = await scopedCall(req, agencyId, callId);
+    const { callCenterId, callId } = req.params;
+    const chk = await scopedCall(req, callCenterId, callId);
     if (chk.error) return res.status(chk.code).json({ success: false, error: chk.error });
 
     const { error } = await supabase.from('call_followups').upsert({
       call_id: callId,
-      agency_id: agencyId,
+      call_center_id: callCenterId,
       client_id: chk.call.client_id,
       status: 'open',
       resolved_by: null,
@@ -234,11 +234,11 @@ router.post('/:agencyId/cc/messages/:callId/reopen', requireAgencyAccess('dashbo
   }
 });
 
-// ---- POST /:agencyId/cc/messages/:callId/note -----------------------------
-router.post('/:agencyId/cc/messages/:callId/note', requireAgencyAccess('dashboard'), async (req, res) => {
+// ---- POST /:callCenterId/messages/:callId/note -----------------------------
+router.post('/:callCenterId/cc/messages/:callId/note', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId, callId } = req.params;
-    const chk = await scopedCall(req, agencyId, callId);
+    const { callCenterId, callId } = req.params;
+    const chk = await scopedCall(req, callCenterId, callId);
     if (chk.error) return res.status(chk.code).json({ success: false, error: chk.error });
 
     const note = typeof req.body?.note === 'string' ? req.body.note.trim().slice(0, 2000) : '';
@@ -246,7 +246,7 @@ router.post('/:agencyId/cc/messages/:callId/note', requireAgencyAccess('dashboar
     const { data: existing } = await supabase.from('call_followups').select('status').eq('call_id', callId).maybeSingle();
     const { error } = await supabase.from('call_followups').upsert({
       call_id: callId,
-      agency_id: agencyId,
+      call_center_id: callCenterId,
       client_id: chk.call.client_id,
       status: existing?.status || 'open',
       note,

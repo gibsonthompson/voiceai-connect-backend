@@ -23,25 +23,25 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
-const { requireAgencyAccess } = require('./auth');
+const { requireCallCenterAccess } = require('./auth');
 const { resolveVapiRecordingUrl } = require('../lib/vapi-recording');
 
-// Agent scoping (mirrors cc-analytics): a non-null assigned_client_ids array
-// limits an agency_staff viewer to those clients. Null = unrestricted.
-async function resolveScope(decoded, agencyId) {
-  if (decoded && decoded.role === 'agency_staff') {
+// Agent scoping: a cc_agent with a non-null assigned_client_ids array is limited
+// to those businesses. Owners and managers are unrestricted. Null = all.
+async function resolveScope(decoded, callCenterId) {
+  if (decoded && decoded.role === 'cc_agent') {
     const { data: m } = await supabase
       .from('team_members').select('assigned_client_ids')
-      .eq('member_user_id', decoded.userId).eq('entity_type', 'agency').eq('entity_id', agencyId).single();
+      .eq('member_user_id', decoded.userId).eq('entity_type', 'call_center').eq('entity_id', callCenterId).single();
     if (m && Array.isArray(m.assigned_client_ids)) return m.assigned_client_ids;
   }
   return null;
 }
-async function scopedClients(req, agencyId) {
+async function scopedClients(req, callCenterId) {
   const { data: clients } = await supabase
-    .from('clients').select('id, business_name').eq('agency_id', agencyId);
+    .from('clients').select('id, business_name').eq('call_center_id', callCenterId);
   let list = clients || [];
-  const scope = await resolveScope(req.user, agencyId);
+  const scope = await resolveScope(req.user, callCenterId);
   if (Array.isArray(scope)) { const ok = new Set(scope); list = list.filter((c) => ok.has(c.id)); }
   return list;
 }
@@ -96,10 +96,10 @@ const DETAIL_COLS = 'id, created_at, client_id, caller_phone, customer_name, cus
 //   q, business(clientId), outcome(booked|transferred|took_over|spam),
 //   handledBy(agent name), range(7d|30d|90d|all), from, to, page, limit
 // ---------------------------------------------------------------------------
-router.get('/:agencyId/cc/calls', requireAgencyAccess('dashboard'), async (req, res) => {
+router.get('/:callCenterId/cc/calls', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId } = req.params;
-    const clients = await scopedClients(req, agencyId);
+    const { callCenterId } = req.params;
+    const clients = await scopedClients(req, callCenterId);
     const nameById = new Map(clients.map((c) => [c.id, c.business_name || 'Business']));
     let clientIds = clients.map((c) => c.id);
 
@@ -197,9 +197,9 @@ function toBizList(clients) {
 // ---------------------------------------------------------------------------
 // GET /:agencyId/cc/calls/:callId  — one call's full detail.
 // ---------------------------------------------------------------------------
-router.get('/:agencyId/cc/calls/:callId', requireAgencyAccess('dashboard'), async (req, res) => {
+router.get('/:callCenterId/cc/calls/:callId', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId, callId } = req.params;
+    const { callCenterId, callId } = req.params;
 
     const { data: call, error } = await supabase
       .from('calls').select(DETAIL_COLS).eq('id', callId).maybeSingle();
@@ -207,7 +207,7 @@ router.get('/:agencyId/cc/calls/:callId', requireAgencyAccess('dashboard'), asyn
     if (!call) return res.status(404).json({ success: false, error: 'Call not found' });
 
     // Enforce the viewer's scope: the call's business must be one they can see.
-    const clients = await scopedClients(req, agencyId);
+    const clients = await scopedClients(req, callCenterId);
     const okIds = new Set(clients.map((c) => c.id));
     if (!okIds.has(call.client_id)) return res.status(404).json({ success: false, error: 'Call not found' });
 

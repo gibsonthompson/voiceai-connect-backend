@@ -57,7 +57,7 @@ const JWT_EXPIRES_IN = '30d';
 
 function generateToken(user) {
   return jwt.sign(
-    { userId: user.id, email: user.email, role: user.role, agencyId: user.agency_id, clientId: user.client_id },
+    { userId: user.id, email: user.email, role: user.role, agencyId: user.agency_id, clientId: user.client_id, callCenterId: user.call_center_id },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES_IN }
   );
@@ -139,6 +139,67 @@ async function agencyLogin(req, res) {
 
     res.json(responsePayload);
   } catch (error) { console.error('❌ Agency login error:', error); res.status(500).json({ error: 'Login failed' }); }
+}
+
+// ============================================================================
+// CALL CENTER LOGIN
+// ----------------------------------------------------------------------------
+// Call centers are their own account type (not an agency). Roles: cc_owner,
+// cc_manager, cc_agent. Mirrors agencyLogin but resolves the call_centers
+// record and scopes manager/agent staff via team_members entity_type=
+// 'call_center'. The token carries callCenterId (see generateToken).
+// ============================================================================
+async function callCenterLogin(req, res) {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+
+    const user = await getUserByEmailForRoles(email.toLowerCase(), ['cc_owner', 'cc_manager', 'cc_agent', 'super_admin']);
+    if (!user) return res.status(401).json({ error: 'Invalid email or password' });
+    if (!user.call_center_id && user.role !== 'super_admin') return res.status(401).json({ error: 'Invalid credentials for call center login' });
+    if (!user.password_hash) return res.status(401).json({ error: 'Password not set', message: 'Please set your password using the link in your welcome email' });
+
+    const validPassword = await bcrypt.compare(password, user.password_hash);
+    if (!validPassword) return res.status(401).json({ error: 'Invalid email or password' });
+
+    const { data: callCenter, error: ccError } = await supabase.from('call_centers').select('*').eq('id', user.call_center_id).single();
+    if (ccError) console.error('❌ Call center fetch error:', ccError);
+
+    const requiresUpgrade = !!(callCenter && callCenter.status === 'suspended');
+
+    // Manager/agent scoping via the generic team_members table (entity_type='call_center').
+    let teamPermissions = null;
+    let assignedClientIds = null;
+    let isManagerMember = false;
+    if (user.role === 'cc_manager' || user.role === 'cc_agent') {
+      const { data: teamMember } = await supabase.from('team_members').select('permissions, notification_prefs, status, assigned_client_ids, is_manager').eq('member_user_id', user.id).eq('entity_type', 'call_center').eq('entity_id', user.call_center_id).single();
+      if (teamMember) {
+        if (teamMember.status === 'disabled') return res.status(403).json({ error: 'Your account has been disabled by the call center.' });
+        teamPermissions = teamMember.permissions;
+        assignedClientIds = Array.isArray(teamMember.assigned_client_ids) ? teamMember.assigned_client_ids : null;
+        isManagerMember = teamMember.is_manager === true || user.role === 'cc_manager';
+      } else {
+        isManagerMember = user.role === 'cc_manager';
+      }
+    }
+
+    await supabase.from('users').update({ last_login: new Date().toISOString() }).eq('id', user.id);
+    if (user.call_center_id) await supabase.from('call_centers').update({ last_login_at: new Date().toISOString() }).eq('id', user.call_center_id);
+
+    const token = generateToken(user);
+    console.log('✅ Call center login:', user.email, '| Call center:', callCenter?.name, '| Role:', user.role);
+
+    const responsePayload = {
+      success: true, token,
+      user: { id: user.id, email: user.email, first_name: user.first_name, last_name: user.last_name, role: user.role, call_center_id: user.call_center_id, permissions: teamPermissions, assigned_client_ids: assignedClientIds, is_manager: isManagerMember },
+      call_center: callCenter
+    };
+    if (requiresUpgrade) {
+      responsePayload.requires_upgrade = true;
+      responsePayload.redirect = '/cc/reactivate';
+    }
+    res.json(responsePayload);
+  } catch (error) { console.error('❌ Call center login error:', error); res.status(500).json({ error: 'Login failed' }); }
 }
 
 // ============================================================================
@@ -339,7 +400,7 @@ async function setPassword(req, res) {
 
     const authToken = generateToken(user);
     console.log('✅ Password set for:', user.email);
-    res.json({ success: true, message: 'Password set successfully', token: authToken, user: { id: user.id, email: user.email, role: user.role } });
+    res.json({ success: true, message: 'Password set successfully', token: authToken, user: { id: user.id, email: user.email, role: user.role, agency_id: user.agency_id, client_id: user.client_id, call_center_id: user.call_center_id } });
   } catch (error) { console.error('❌ Set password error:', error); res.status(500).json({ error: 'Failed to set password' }); }
 }
 
@@ -628,6 +689,72 @@ function requireAgencyAccess(permissionKey) {
 }
 
 // ============================================================================
+// CALL CENTER ACCESS MIDDLEWARE (hard)
+// ----------------------------------------------------------------------------
+// Mirror of requireAgencyAccess for routes carrying a :callCenterId param.
+// Proves the caller owns the call center via the token's callCenterId claim.
+// cc_owner passes; cc_manager / cc_agent pass the Page-Access permission gate
+// and the per-business assignment scoping (team_members entity_type=
+// 'call_center'). super_admin passes any call center.
+// ============================================================================
+function requireCallCenterAccess(permissionKey) {
+  return async (req, res, next) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+      const token = authHeader.split(' ')[1];
+      let decoded;
+      try { decoded = jwt.verify(token, JWT_SECRET); }
+      catch { return res.status(401).json({ error: 'Invalid or expired token' }); }
+      req.user = decoded;
+
+      const routeCallCenterId = req.params.callCenterId;
+      if (!routeCallCenterId) return res.status(400).json({ error: 'callCenterId required' });
+
+      if (decoded.role === 'super_admin') return next();
+
+      const callerCallCenterId = decoded.callCenterId || null;
+      if (!callerCallCenterId || callerCallCenterId !== routeCallCenterId) {
+        return res.status(403).json({ error: 'Not authorized for this call center' });
+      }
+
+      if (decoded.role === 'cc_owner') return next();
+
+      if (decoded.role === 'cc_manager' || decoded.role === 'cc_agent') {
+        const { data: member } = await supabase
+          .from('team_members')
+          .select('permissions, status, assigned_client_ids, is_manager')
+          .eq('member_user_id', decoded.userId)
+          .eq('entity_type', 'call_center')
+          .eq('entity_id', callerCallCenterId)
+          .single();
+
+        if (!member || member.status === 'disabled') {
+          return res.status(403).json({ error: 'Access disabled' });
+        }
+        if (member.permissions && member.permissions[permissionKey] === false) {
+          return res.status(403).json({ error: `You do not have permission to access ${permissionKey}.` });
+        }
+        // Agent business-assignment scoping on :clientId routes. Managers are
+        // unrestricted; an agent with a non-null assignment may only act on
+        // businesses assigned to them.
+        if (req.params.clientId && member.is_manager !== true && Array.isArray(member.assigned_client_ids) && !member.assigned_client_ids.includes(req.params.clientId)) {
+          return res.status(403).json({ error: 'This business is not assigned to you.' });
+        }
+        return next();
+      }
+
+      return res.status(403).json({ error: 'Not authorized for this call center' });
+    } catch (error) {
+      console.error('❌ requireCallCenterAccess error:', error);
+      return res.status(500).json({ error: 'Authorization check failed' });
+    }
+  };
+}
+
+// ============================================================================
 // CLIENT OWNERSHIP MIDDLEWARE (hard)
 // ----------------------------------------------------------------------------
 // Mirror of requireAgencyAccess for routes carrying a :clientId param. Requires
@@ -731,4 +858,4 @@ function requireClientAccess(permissionKey) {
   };
 }
 
-module.exports = { agencyLogin, clientLogin, recoverAccountSetup, verifyToken, setPassword, changePassword, authMiddleware, requirePermission, requirePermissionIfAuthed, requireAgencyAccess, requireClientAccess, generateToken };
+module.exports = { agencyLogin, callCenterLogin, clientLogin, recoverAccountSetup, verifyToken, setPassword, changePassword, authMiddleware, requirePermission, requirePermissionIfAuthed, requireAgencyAccess, requireCallCenterAccess, requireClientAccess, generateToken };

@@ -9,11 +9,11 @@
 // with their call count and last call. Agents and managers can also add and edit
 // contacts by hand, and start a text to one from the Texts tab.
 //
-//   GET  /:agencyId/cc/contacts                 -> list across scoped businesses
-//   GET  /:agencyId/cc/contacts/:contactId      -> one contact + its call history
-//   POST /:agencyId/cc/contacts                 -> add a contact to a business
-//   PUT  /:agencyId/cc/contacts/:contactId      -> edit name/email/address/status/tags
-//   DELETE /:agencyId/cc/contacts/:contactId    -> remove a contact
+//   GET  /:callCenterId/contacts                 -> list across scoped businesses
+//   GET  /:callCenterId/contacts/:contactId      -> one contact + its call history
+//   POST /:callCenterId/contacts                 -> add a contact to a business
+//   PUT  /:callCenterId/contacts/:contactId      -> edit name/email/address/status/tags
+//   DELETE /:callCenterId/contacts/:contactId    -> remove a contact
 //
 // Scoped to the viewer exactly like the rest of /cc: an owner/manager sees every
 // business, an agent only the businesses assigned to them.
@@ -22,23 +22,23 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
-const { requireAgencyAccess } = require('./auth');
+const { requireCallCenterAccess } = require('./auth');
 
 // ---- scoping (same model as cc-sms / cc-messages) --------------------------
-async function resolveScope(decoded, agencyId) {
-  if (decoded && decoded.role === 'agency_staff') {
+async function resolveScope(decoded, callCenterId) {
+  if (decoded && decoded.role === 'cc_agent') {
     const { data: m } = await supabase
       .from('team_members').select('assigned_client_ids')
-      .eq('member_user_id', decoded.userId).eq('entity_type', 'agency').eq('entity_id', agencyId).maybeSingle();
+      .eq('member_user_id', decoded.userId).eq('entity_type', 'call_center').eq('entity_id', callCenterId).maybeSingle();
     if (m && Array.isArray(m.assigned_client_ids)) return m.assigned_client_ids;
   }
   return null;
 }
-async function scopedClients(req, agencyId) {
+async function scopedClients(req, callCenterId) {
   const { data: clients } = await supabase
-    .from('clients').select('id, business_name').eq('agency_id', agencyId);
+    .from('clients').select('id, business_name').eq('call_center_id', callCenterId);
   let list = clients || [];
-  const scope = await resolveScope(req.user, agencyId);
+  const scope = await resolveScope(req.user, callCenterId);
   if (Array.isArray(scope)) { const ok = new Set(scope); list = list.filter((c) => ok.has(c.id)); }
   return list;
 }
@@ -74,11 +74,11 @@ function phoneCandidates(stored) {
 }
 
 // Resolve + scope-check a contact. Returns { contact, businessName } or { error, code }.
-async function scopedContact(req, agencyId, contactId) {
+async function scopedContact(req, callCenterId, contactId) {
   const { data: contact } = await supabase
     .from('client_contacts').select('*').eq('id', contactId).maybeSingle();
   if (!contact) return { error: 'Contact not found', code: 404 };
-  const clients = await scopedClients(req, agencyId);
+  const clients = await scopedClients(req, callCenterId);
   const ok = new Set(clients.map((c) => c.id));
   if (!ok.has(contact.client_id)) return { error: 'Contact not found', code: 404 };
   const nameById = new Map(clients.map((c) => [c.id, c.business_name || 'Business']));
@@ -104,11 +104,11 @@ function mapContact(c, nameById) {
   };
 }
 
-// ---- GET /:agencyId/cc/contacts -------------------------------------------
-router.get('/:agencyId/cc/contacts', requireAgencyAccess('dashboard'), async (req, res) => {
+// ---- GET /:callCenterId/contacts -------------------------------------------
+router.get('/:callCenterId/cc/contacts', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId } = req.params;
-    const clients = await scopedClients(req, agencyId);
+    const { callCenterId } = req.params;
+    const clients = await scopedClients(req, callCenterId);
     const nameById = new Map(clients.map((c) => [c.id, c.business_name || 'Business']));
     let clientIds = clients.map((c) => c.id);
 
@@ -150,11 +150,11 @@ router.get('/:agencyId/cc/contacts', requireAgencyAccess('dashboard'), async (re
   }
 });
 
-// ---- GET /:agencyId/cc/contacts/:contactId --------------------------------
-router.get('/:agencyId/cc/contacts/:contactId', requireAgencyAccess('dashboard'), async (req, res) => {
+// ---- GET /:callCenterId/contacts/:contactId --------------------------------
+router.get('/:callCenterId/cc/contacts/:contactId', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId, contactId } = req.params;
-    const chk = await scopedContact(req, agencyId, contactId);
+    const { callCenterId, contactId } = req.params;
+    const chk = await scopedContact(req, callCenterId, contactId);
     if (chk.error) return res.status(chk.code).json({ success: false, error: chk.error });
 
     // Call history: match by calls.contact_id AND phone candidates, merged.
@@ -179,17 +179,17 @@ router.get('/:agencyId/cc/contacts/:contactId', requireAgencyAccess('dashboard')
   }
 });
 
-// ---- POST /:agencyId/cc/contacts ------------------------------------------
-router.post('/:agencyId/cc/contacts', requireAgencyAccess('dashboard'), async (req, res) => {
+// ---- POST /:callCenterId/contacts ------------------------------------------
+router.post('/:callCenterId/cc/contacts', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId } = req.params;
+    const { callCenterId } = req.params;
     const clientId = (req.body?.clientId || '').toString();
     const phoneRaw = (req.body?.phone || '').toString();
     if (!clientId) return res.status(400).json({ success: false, error: 'Pick a business for this contact.' });
     if (!phoneRaw.trim()) return res.status(400).json({ success: false, error: 'A phone number is required.' });
 
     // Scope-check: the chosen business must be in the viewer's scope.
-    const clients = await scopedClients(req, agencyId);
+    const clients = await scopedClients(req, callCenterId);
     const client = clients.find((c) => c.id === clientId);
     if (!client) return res.status(404).json({ success: false, error: 'Business not found' });
 
@@ -202,7 +202,7 @@ router.post('/:agencyId/cc/contacts', requireAgencyAccess('dashboard'), async (r
 
     const row = {
       client_id: clientId,
-      agency_id: agencyId,
+      call_center_id: callCenterId,
       name: (req.body?.name || '').toString().trim() || 'Unknown',
       phone,
       email: (req.body?.email || '').toString().trim() || null,
@@ -223,11 +223,11 @@ router.post('/:agencyId/cc/contacts', requireAgencyAccess('dashboard'), async (r
   }
 });
 
-// ---- PUT /:agencyId/cc/contacts/:contactId --------------------------------
-router.put('/:agencyId/cc/contacts/:contactId', requireAgencyAccess('dashboard'), async (req, res) => {
+// ---- PUT /:callCenterId/contacts/:contactId --------------------------------
+router.put('/:callCenterId/cc/contacts/:contactId', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId, contactId } = req.params;
-    const chk = await scopedContact(req, agencyId, contactId);
+    const { callCenterId, contactId } = req.params;
+    const chk = await scopedContact(req, callCenterId, contactId);
     if (chk.error) return res.status(chk.code).json({ success: false, error: chk.error });
 
     const updates = {};
@@ -256,11 +256,11 @@ router.put('/:agencyId/cc/contacts/:contactId', requireAgencyAccess('dashboard')
   }
 });
 
-// ---- DELETE /:agencyId/cc/contacts/:contactId -----------------------------
-router.delete('/:agencyId/cc/contacts/:contactId', requireAgencyAccess('dashboard'), async (req, res) => {
+// ---- DELETE /:callCenterId/contacts/:contactId -----------------------------
+router.delete('/:callCenterId/cc/contacts/:contactId', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId, contactId } = req.params;
-    const chk = await scopedContact(req, agencyId, contactId);
+    const { callCenterId, contactId } = req.params;
+    const chk = await scopedContact(req, callCenterId, contactId);
     if (chk.error) return res.status(chk.code).json({ success: false, error: chk.error });
     const { error } = await supabase.from('client_contacts').delete().eq('id', contactId).eq('client_id', chk.contact.client_id);
     if (error) return res.status(400).json({ success: false, error: 'Could not delete the contact.' });

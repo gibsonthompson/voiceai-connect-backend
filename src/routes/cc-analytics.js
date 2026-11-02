@@ -19,7 +19,7 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
-const { requireAgencyAccess } = require('./auth');
+const { requireCallCenterAccess } = require('./auth');
 
 const LIVE_STATUSES = [
   'active', 'ringing_gate', 'confirming', 'transferring', 'bridged',
@@ -35,22 +35,22 @@ function dateOf(iso) { try { return etDate.format(new Date(iso)); } catch { retu
 
 // Agent scoping: a non-null assigned_client_ids array limits an agency_staff
 // viewer to those clients. Null = unrestricted (owner/manager/plain staff).
-async function resolveScope(decoded, agencyId) {
-  if (decoded && decoded.role === 'agency_staff') {
+async function resolveScope(decoded, callCenterId) {
+  if (decoded && decoded.role === 'cc_agent') {
     const { data: m } = await supabase
       .from('team_members').select('assigned_client_ids')
-      .eq('member_user_id', decoded.userId).eq('entity_type', 'agency').eq('entity_id', agencyId).single();
+      .eq('member_user_id', decoded.userId).eq('entity_type', 'call_center').eq('entity_id', callCenterId).single();
     if (m && Array.isArray(m.assigned_client_ids)) return m.assigned_client_ids;
   }
   return null;
 }
 
 // The viewer's in-scope clients (id -> business_name).
-async function scopedClients(req, agencyId) {
+async function scopedClients(req, callCenterId) {
   const { data: clients } = await supabase
-    .from('clients').select('id, business_name').eq('agency_id', agencyId);
+    .from('clients').select('id, business_name').eq('call_center_id', callCenterId);
   let list = clients || [];
-  const scope = await resolveScope(req.user, agencyId);
+  const scope = await resolveScope(req.user, callCenterId);
   if (Array.isArray(scope)) { const ok = new Set(scope); list = list.filter(c => ok.has(c.id)); }
   return list;
 }
@@ -76,10 +76,10 @@ const CALL_COLS = 'id, created_at, client_id, caller_phone, customer_name, custo
 // ---------------------------------------------------------------------------
 // GET /:agencyId/cc/overview  - today's live-ops snapshot for the home screen.
 // ---------------------------------------------------------------------------
-router.get('/:agencyId/cc/overview', requireAgencyAccess('dashboard'), async (req, res) => {
+router.get('/:callCenterId/cc/overview', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId } = req.params;
-    const clients = await scopedClients(req, agencyId);
+    const { callCenterId } = req.params;
+    const clients = await scopedClients(req, callCenterId);
     const nameById = new Map(clients.map(c => [c.id, c.business_name || 'Business']));
     const clientIds = clients.map(c => c.id);
     if (clientIds.length === 0) {
@@ -101,7 +101,7 @@ router.get('/:agencyId/cc/overview', requireAgencyAccess('dashboard'), async (re
     // Agents on the roster (active).
     const { count: agentsActive } = await supabase
       .from('team_members').select('id', { count: 'exact', head: true })
-      .eq('entity_type', 'agency').eq('entity_id', agencyId).neq('status', 'disabled');
+      .eq('entity_type', 'call_center').eq('entity_id', callCenterId).neq('status', 'disabled');
 
     // Calls in the last 48h, then filter to the ET calendar "today".
     const { data: rows } = await supabase
@@ -161,12 +161,12 @@ function emptyToday() {
 // ---------------------------------------------------------------------------
 // GET /:agencyId/cc/analytics?range=7d|30d|90d  - deep call analytics.
 // ---------------------------------------------------------------------------
-router.get('/:agencyId/cc/analytics', requireAgencyAccess('analytics'), async (req, res) => {
+router.get('/:callCenterId/cc/analytics', requireCallCenterAccess('analytics'), async (req, res) => {
   try {
-    const { agencyId } = req.params;
+    const { callCenterId } = req.params;
     const days = ({ '7d': 7, '30d': 30, '90d': 90 })[String(req.query.range || '30d')] || 30;
 
-    const clients = await scopedClients(req, agencyId);
+    const clients = await scopedClients(req, callCenterId);
     const nameById = new Map(clients.map(c => [c.id, c.business_name || 'Business']));
     const clientIds = clients.map(c => c.id);
     if (clientIds.length === 0) return res.json({ success: true, range: `${days}d`, totals: emptyTotals(), byDay: [], byHour: hourArray(), byBusiness: [], byAgent: [] });

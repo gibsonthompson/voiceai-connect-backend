@@ -8,12 +8,12 @@
 // through the ONE shared send path (routes/sms.js sendClientSms), so transport
 // choice, threading, opt-out and logging never drift between surfaces.
 //
-//   GET  /:agencyId/cc/sms/conversations                      -> inbox list
-//   GET  /:agencyId/cc/sms/conversations/:conversationId      -> one thread
-//   POST /:agencyId/cc/sms/conversations/:conversationId/send -> reply
-//   POST /:agencyId/cc/sms/conversations/:conversationId/read -> mark read
-//   POST /:agencyId/cc/sms/conversations/:conversationId/archive -> toggle
-//   GET  /:agencyId/cc/sms/unread                             -> badge count
+//   GET  /:callCenterId/sms/conversations                      -> inbox list
+//   GET  /:callCenterId/sms/conversations/:conversationId      -> one thread
+//   POST /:callCenterId/sms/conversations/:conversationId/send -> reply
+//   POST /:callCenterId/sms/conversations/:conversationId/read -> mark read
+//   POST /:callCenterId/sms/conversations/:conversationId/archive -> toggle
+//   GET  /:callCenterId/sms/unread                             -> badge count
 //
 // Scoped to the viewer exactly like /cc: an owner/manager sees every business,
 // an agent only the businesses assigned to them (team_members.assigned_client_ids).
@@ -22,24 +22,24 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
-const { requireAgencyAccess } = require('./auth');
+const { requireCallCenterAccess } = require('./auth');
 const { sendClientSms } = require('./sms');
 
 // Agents are scoped to their assigned businesses; owner/manager get null (all).
-async function resolveScope(decoded, agencyId) {
-  if (decoded && decoded.role === 'agency_staff') {
+async function resolveScope(decoded, callCenterId) {
+  if (decoded && decoded.role === 'cc_agent') {
     const { data: m } = await supabase
       .from('team_members').select('assigned_client_ids')
-      .eq('member_user_id', decoded.userId).eq('entity_type', 'agency').eq('entity_id', agencyId).maybeSingle();
+      .eq('member_user_id', decoded.userId).eq('entity_type', 'call_center').eq('entity_id', callCenterId).maybeSingle();
     if (m && Array.isArray(m.assigned_client_ids)) return m.assigned_client_ids;
   }
   return null;
 }
-async function scopedClients(req, agencyId) {
+async function scopedClients(req, callCenterId) {
   const { data: clients } = await supabase
-    .from('clients').select('id, business_name').eq('agency_id', agencyId);
+    .from('clients').select('id, business_name').eq('call_center_id', callCenterId);
   let list = clients || [];
-  const scope = await resolveScope(req.user, agencyId);
+  const scope = await resolveScope(req.user, callCenterId);
   if (Array.isArray(scope)) { const ok = new Set(scope); list = list.filter((c) => ok.has(c.id)); }
   return list;
 }
@@ -70,12 +70,12 @@ async function archivedSetForViewer(req) {
 
 // This viewer's display name, stamped on an outbound text so a manager sees which
 // agent replied. Agency staff -> their team name; owner -> token name/email.
-async function senderName(req, agencyId) {
+async function senderName(req, callCenterId) {
   const d = req.user || {};
-  if (d.role === 'agency_staff' && (d.userId || d.id)) {
+  if (d.role === 'cc_agent' && (d.userId || d.id)) {
     try {
       const { data: m } = await supabase.from('team_members').select('display_name')
-        .eq('member_user_id', d.userId || d.id).eq('entity_type', 'agency').eq('entity_id', agencyId).maybeSingle();
+        .eq('member_user_id', d.userId || d.id).eq('entity_type', 'call_center').eq('entity_id', callCenterId).maybeSingle();
       if (m && m.display_name) return m.display_name;
     } catch (e) { /* fall through */ }
   }
@@ -84,13 +84,13 @@ async function senderName(req, agencyId) {
 
 // Resolve + scope-check a conversation for a read/write. Returns { conv, client_id }
 // or { error, code }.
-async function scopedConversation(req, agencyId, conversationId) {
+async function scopedConversation(req, callCenterId, conversationId) {
   const { data: conv } = await supabase
     .from('sms_conversations')
     .select('id, client_id, caller_phone, caller_name, is_archived, unread_count')
     .eq('id', conversationId).maybeSingle();
   if (!conv) return { error: 'Conversation not found', code: 404 };
-  const clients = await scopedClients(req, agencyId);
+  const clients = await scopedClients(req, callCenterId);
   const ok = new Set(clients.map((c) => c.id));
   if (!ok.has(conv.client_id)) return { error: 'Conversation not found', code: 404 };
   const nameById = new Map(clients.map((c) => [c.id, c.business_name || 'Business']));
@@ -113,11 +113,11 @@ function mapRow(c, nameById, archivedSet) {
   };
 }
 
-// ---- GET /:agencyId/cc/sms/conversations ----------------------------------
-router.get('/:agencyId/cc/sms/conversations', requireAgencyAccess('dashboard'), async (req, res) => {
+// ---- GET /:callCenterId/sms/conversations ----------------------------------
+router.get('/:callCenterId/cc/sms/conversations', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId } = req.params;
-    const clients = await scopedClients(req, agencyId);
+    const { callCenterId } = req.params;
+    const clients = await scopedClients(req, callCenterId);
     const nameById = new Map(clients.map((c) => [c.id, c.business_name || 'Business']));
     let clientIds = clients.map((c) => c.id);
 
@@ -175,11 +175,11 @@ router.get('/:agencyId/cc/sms/conversations', requireAgencyAccess('dashboard'), 
   }
 });
 
-// ---- GET /:agencyId/cc/sms/unread -----------------------------------------
-router.get('/:agencyId/cc/sms/unread', requireAgencyAccess('dashboard'), async (req, res) => {
+// ---- GET /:callCenterId/sms/unread -----------------------------------------
+router.get('/:callCenterId/cc/sms/unread', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId } = req.params;
-    const clients = await scopedClients(req, agencyId);
+    const { callCenterId } = req.params;
+    const clients = await scopedClients(req, callCenterId);
     const clientIds = clients.map((c) => c.id);
     if (clientIds.length === 0) return res.json({ success: true, unread: 0, latest: null });
     const archivedSet = await archivedSetForViewer(req);
@@ -209,11 +209,11 @@ router.get('/:agencyId/cc/sms/unread', requireAgencyAccess('dashboard'), async (
   }
 });
 
-// ---- GET /:agencyId/cc/sms/conversations/:conversationId ------------------
-router.get('/:agencyId/cc/sms/conversations/:conversationId', requireAgencyAccess('dashboard'), async (req, res) => {
+// ---- GET /:callCenterId/sms/conversations/:conversationId ------------------
+router.get('/:callCenterId/cc/sms/conversations/:conversationId', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId, conversationId } = req.params;
-    const chk = await scopedConversation(req, agencyId, conversationId);
+    const { callCenterId, conversationId } = req.params;
+    const chk = await scopedConversation(req, callCenterId, conversationId);
     if (chk.error) return res.status(chk.code).json({ success: false, error: chk.error });
 
     const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 100));
@@ -260,20 +260,20 @@ router.get('/:agencyId/cc/sms/conversations/:conversationId', requireAgencyAcces
   }
 });
 
-// ---- POST /:agencyId/cc/sms/conversations/:conversationId/send ------------
+// ---- POST /:callCenterId/sms/conversations/:conversationId/send ------------
 // The agent never passes a raw number: we send to the thread's own caller, from
 // the thread's business number, via the shared send path.
-router.post('/:agencyId/cc/sms/conversations/:conversationId/send', requireAgencyAccess('dashboard'), async (req, res) => {
+router.post('/:callCenterId/cc/sms/conversations/:conversationId/send', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId, conversationId } = req.params;
+    const { callCenterId, conversationId } = req.params;
     const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
     if (!message) return res.status(400).json({ success: false, error: 'Message is required' });
 
-    const chk = await scopedConversation(req, agencyId, conversationId);
+    const chk = await scopedConversation(req, callCenterId, conversationId);
     if (chk.error) return res.status(chk.code).json({ success: false, error: chk.error });
     if (!chk.conv.caller_phone) return res.status(400).json({ success: false, error: 'This thread has no caller number to reply to' });
 
-    const who = await senderName(req, agencyId);
+    const who = await senderName(req, callCenterId);
     const result = await sendClientSms({ clientId: chk.conv.client_id, to: chk.conv.caller_phone, message, sentBy: { userId: viewerId(req), name: who } });
     if (result.error) return res.status(result.code || 500).json({ success: false, error: result.error, details: result.details });
 
@@ -295,11 +295,11 @@ router.post('/:agencyId/cc/sms/conversations/:conversationId/send', requireAgenc
   }
 });
 
-// ---- POST /:agencyId/cc/sms/conversations/:conversationId/read ------------
-router.post('/:agencyId/cc/sms/conversations/:conversationId/read', requireAgencyAccess('dashboard'), async (req, res) => {
+// ---- POST /:callCenterId/sms/conversations/:conversationId/read ------------
+router.post('/:callCenterId/cc/sms/conversations/:conversationId/read', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId, conversationId } = req.params;
-    const chk = await scopedConversation(req, agencyId, conversationId);
+    const { callCenterId, conversationId } = req.params;
+    const chk = await scopedConversation(req, callCenterId, conversationId);
     if (chk.error) return res.status(chk.code).json({ success: false, error: chk.error });
     const { error } = await supabase.from('sms_conversations').update({ unread_count: 0 }).eq('id', conversationId);
     if (error) return res.status(400).json({ success: false, error: error.message });
@@ -310,11 +310,11 @@ router.post('/:agencyId/cc/sms/conversations/:conversationId/read', requireAgenc
   }
 });
 
-// ---- POST /:agencyId/cc/sms/conversations/:conversationId/archive ---------
-router.post('/:agencyId/cc/sms/conversations/:conversationId/archive', requireAgencyAccess('dashboard'), async (req, res) => {
+// ---- POST /:callCenterId/sms/conversations/:conversationId/archive ---------
+router.post('/:callCenterId/cc/sms/conversations/:conversationId/archive', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId, conversationId } = req.params;
-    const chk = await scopedConversation(req, agencyId, conversationId);
+    const { callCenterId, conversationId } = req.params;
+    const chk = await scopedConversation(req, callCenterId, conversationId);
     if (chk.error) return res.status(chk.code).json({ success: false, error: chk.error });
     const archived = req.body?.archived === true;
     const uid = viewerId(req);
@@ -330,14 +330,14 @@ router.post('/:agencyId/cc/sms/conversations/:conversationId/archive', requireAg
   }
 });
 
-// ---- POST /:agencyId/cc/sms/start -----------------------------------------
+// ---- POST /:callCenterId/sms/start -----------------------------------------
 // Start (or reopen) a conversation by texting a number for a business. Used by
 // the Texts "New text" composer, both to a saved contact and to a new number.
 // The shared send path finds-or-creates the thread, so sending to an existing
 // number just adds to that thread. Returns the conversationId to open.
-router.post('/:agencyId/cc/sms/start', requireAgencyAccess('dashboard'), async (req, res) => {
+router.post('/:callCenterId/cc/sms/start', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const { agencyId } = req.params;
+    const { callCenterId } = req.params;
     const clientId = (req.body?.clientId || '').toString();
     const to = (req.body?.to || '').toString();
     const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
@@ -346,10 +346,10 @@ router.post('/:agencyId/cc/sms/start', requireAgencyAccess('dashboard'), async (
     if (!message) return res.status(400).json({ success: false, error: 'Write a message to send.' });
 
     // Scope-check: the chosen business must be in the viewer's scope.
-    const clients = await scopedClients(req, agencyId);
+    const clients = await scopedClients(req, callCenterId);
     if (!clients.some((c) => c.id === clientId)) return res.status(404).json({ success: false, error: 'Business not found' });
 
-    const who = await senderName(req, agencyId);
+    const who = await senderName(req, callCenterId);
     const result = await sendClientSms({ clientId, to, message, sentBy: { userId: viewerId(req), name: who } });
     if (result.error) return res.status(result.code || 500).json({ success: false, error: result.error, details: result.details });
 

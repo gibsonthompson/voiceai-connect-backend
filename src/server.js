@@ -248,7 +248,6 @@ const agencyTemplatesRoutes = require('./routes/agency-templates');
 const aiPlaygroundRoutes = require('./routes/ai-playground');
 const leadScraperRoutes = require('./routes/lead-scraper');
 const byotRoutes = require('./routes/byot');
-const agencyCarriersRoutes = require('./routes/agency-carriers');
 const abandonedCartRoutes = require('./routes/abandoned-cart');
 const abandonedCheckoutCleanupRoutes = require('./routes/abandoned-checkout-cleanup');
 // Manual client monthly usage reset (manual-billing clients have no Stripe
@@ -320,9 +319,10 @@ const {
   suspendManualClient
 } = require('./routes/stripe-connect');
 
-const { 
-  agencyLogin, 
-  clientLogin, 
+const {
+  agencyLogin,
+  callCenterLogin,
+  clientLogin,
   verifyToken,
   setPassword,
   changePassword,
@@ -331,9 +331,12 @@ const {
   requirePermission,
   requirePermissionIfAuthed,
   requireAgencyAccess,
+  requireCallCenterAccess,
   requireClientAccess,
   generateToken
 } = require('./routes/auth');
+const { handleCallCenterSignup } = require('./routes/call-center-signup');
+const { handleCallCenterAddClient } = require('./routes/call-center-clients');
 
 // ============================================================================
 // BODY-BASED AGENCY OWNERSHIP GUARD (2026-09-17)
@@ -456,6 +459,7 @@ app.use('/api/v1', require('./routes/v1'));  // agency-facing REST API (Scale)
 
 app.post('/api/agency/signup', handleAgencySignup);
 app.post('/api/agency/onboarding', handleAgencyOnboarding);
+app.post('/api/cc/signup', handleCallCenterSignup);
 
 // ============================================================================
 // AGENCY ACTIVATED NOTIFICATION (free path)
@@ -1936,18 +1940,20 @@ app.use('/api/agency', workflowRoutes);
 app.use('/api/agency', require('./routes/discount-codes'));
 // Call-center wallboard: live calls across all of a call-center agency's businesses.
 app.use('/api/agency', require('./routes/agency-wallboard'));
-// Call-center analytics + live-ops overview for the dedicated /cc dashboard.
+// Call-center dashboard routes. The URL shape (/api/agency/:id/cc/...) is kept
+// so the existing /cc screens need no URL changes, but the :id is now the
+// CALL-CENTER account id and every route is guarded by requireCallCenterAccess
+// and scoped to clients.call_center_id (not agency_id).
+app.use('/api/agency', require('./routes/cc-account'));
 app.use('/api/agency', require('./routes/cc-analytics'));
-// Call-center call history: searchable book of record + per-call detail.
 app.use('/api/agency', require('./routes/cc-calls'));
-// Call-center messages & callbacks inbox: the follow-up worklist agents clear.
 app.use('/api/agency', require('./routes/cc-messages'));
-// Call-center TEXTS inbox: two-way SMS across every business the center serves.
 app.use('/api/agency', require('./routes/cc-sms'));
-// Call-center CONTACTS: the mini-CRM across every business the center serves.
 app.use('/api/agency', require('./routes/cc-contacts'));
-// Call-center business config: configure a business's AI from inside /cc.
 app.use('/api/agency', require('./routes/cc-business-config'));
+// Call-center add-business: creates a call-center-owned business (call_center_id),
+// manual billing, full call control. Separate from the agency add-client path.
+app.post('/api/agency/:callCenterId/cc/clients/add', requireCallCenterAccess('clients'), handleCallCenterAddClient);
 // Call-center agent real-time plane: presence, escalation offer stream + claim.
 // Self-authenticating (JWT in header, or ?token= for the SSE stream), so it is
 // mounted on its own prefix with no shared gate.
@@ -1956,7 +1962,6 @@ app.use('/api/agency', testClientRoutes);
 app.use('/api/agency', agencyTemplatesRoutes);
 app.use('/api/agency', aiPlaygroundRoutes);
 app.use('/api/agency', byotRoutes);
-app.use('/api/agency', agencyCarriersRoutes);
 app.use('/api/agency', feedbackRoutes);
 app.use('/api/agency', supportRoutes);
 app.use('/api/agency', require('./routes/agency-support-requests'));
@@ -2181,6 +2186,7 @@ app.post('/api/voices/preview', async (req, res) => {
 // ============================================================================
 
 app.post('/api/auth/agency/login', agencyLogin);
+app.post('/api/auth/cc/login', callCenterLogin);
 app.post('/api/auth/client/login', clientLogin);
 app.post('/api/auth/verify', verifyToken);
 app.post('/api/auth/set-password', setPassword);

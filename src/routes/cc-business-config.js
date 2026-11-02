@@ -22,8 +22,7 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../lib/supabase');
-const { requireAgencyAccess } = require('./auth');
-const { canOfferApptCustomerSms } = require('../lib/calendar-booking');
+const { requireCallCenterAccess } = require('./auth');
 
 // Normalize a US/CA number to E.164, or null if it is not a plausible number.
 function toE164(input) {
@@ -58,21 +57,37 @@ function sanitizeHours(input) {
   return out;
 }
 
-// Resolve + scope-check the client against the agency.
-async function scopedClient(agencyId, clientId) {
+// Resolve + scope-check the client against the call center that owns it.
+async function scopedClient(callCenterId, clientId) {
   const { data: client } = await supabase
     .from('clients')
-    .select('id, agency_id, business_name, owner_name, owner_phone, email, industry, business_city, business_state, business_website, notification_phone, post_call_sms_enabled, transfer_phone, timezone, greeting_message, business_hours, forwarding_mode, human_handoff, service_areas, ai_tone, booking_mode, min_booking_notice_minutes, max_booking_days_ahead, hipaa_mode, recording_enabled, tool_config, vapi_phone_number, forwarding_confirmed, voice_routing')
+    .select('id, call_center_id, business_name, owner_name, owner_phone, email, industry, business_city, business_state, business_website, notification_phone, post_call_sms_enabled, transfer_phone, timezone, greeting_message, business_hours, forwarding_mode, human_handoff, service_areas, ai_tone, booking_mode, min_booking_notice_minutes, max_booking_days_ahead, hipaa_mode, recording_enabled, tool_config, vapi_phone_number, forwarding_confirmed, voice_routing')
     .eq('id', clientId).maybeSingle();
   if (!client) return { error: 'Business not found', code: 404 };
-  if (client.agency_id !== agencyId) return { error: 'Business not found', code: 404 };
+  if (client.call_center_id !== callCenterId) return { error: 'Business not found', code: 404 };
   return { client };
 }
 
 // ---- GET config -----------------------------------------------------------
-router.get('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('clients'), async (req, res) => {
+// ---- GET businesses list (the call center's book of businesses) ------------
+router.get('/:callCenterId/cc/businesses', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
-    const chk = await scopedClient(req.params.agencyId, req.params.clientId);
+    const { data, error } = await supabase
+      .from('clients')
+      .select('id, business_name, vapi_phone_number, plan_type, subscription_status, calls_this_month, monthly_call_limit, status, created_at')
+      .eq('call_center_id', req.params.callCenterId)
+      .order('business_name', { ascending: true });
+    if (error) throw error;
+    res.json({ success: true, clients: data || [] });
+  } catch (e) {
+    console.error('cc businesses list error:', e.message);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+router.get('/:callCenterId/cc/businesses/:clientId/config', requireCallCenterAccess('clients'), async (req, res) => {
+  try {
+    const chk = await scopedClient(req.params.callCenterId, req.params.clientId);
     if (chk.error) return res.status(chk.code).json({ success: false, error: chk.error });
     const c = chk.client;
     const tc = (c.tool_config && typeof c.tool_config === 'object') ? c.tool_config : {};
@@ -81,23 +96,12 @@ router.get('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
     // (null min/max). These come from the agency (Settings), falling back to the
     // platform default of 30 min notice / 60 days ahead. Surfaced so the editor
     // can show the business owner exactly what "blank = agency default" means.
-    let agencyDefaults = { minNotice: 30, maxDays: 60 };
-    // Whether this account may offer the customer booking-confirmation SMS. For a
-    // call center that is the distinct `appointment_sms_addon` upgrade; the UI
-    // shows a locked "contact us to enable" row until it is on.
-    let apptCustomerSmsUnlocked = false;
-    try {
-      const { data: ag } = await supabase.from('agencies')
-        .select('default_min_booking_notice_minutes, default_max_booking_days_ahead, plan_type, subscription_status, is_call_center, appointment_sms_addon')
-        .eq('id', req.params.agencyId).maybeSingle();
-      if (ag) {
-        agencyDefaults = {
-          minNotice: ag.default_min_booking_notice_minutes ?? 30,
-          maxDays: ag.default_max_booking_days_ahead ?? 60,
-        };
-        apptCustomerSmsUnlocked = canOfferApptCustomerSms(ag);
-      }
-    } catch (e) { /* keep platform fallback */ }
+    // Call centers have no agency Settings record, so booking-window defaults
+    // fall to the platform default (30 min notice / 60 days ahead). The customer
+    // booking-confirmation SMS is a call-center-excluded feature, so it stays
+    // locked here.
+    const agencyDefaults = { minNotice: 30, maxDays: 60 };
+    const apptCustomerSmsUnlocked = false;
 
     // Opt-out status for the recap recipient (notification_phone, else owner
     // phone). If they replied STOP they get no texts, including the recap, until
@@ -109,7 +113,7 @@ router.get('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
         const { getOptOut } = require('../lib/sms-opt-out');
         const [platform, scoped] = await Promise.all([
           getOptOut(recipientPhone, null),
-          getOptOut(recipientPhone, req.params.agencyId),
+          getOptOut(recipientPhone, req.params.callCenterId),
         ]);
         const activeRow = (platform && platform.opted_out) ? platform : ((scoped && scoped.opted_out) ? scoped : null);
         optOut = { optedOut: !!activeRow, phone: recipientPhone, since: activeRow ? activeRow.opted_out_at : null };
@@ -184,9 +188,9 @@ router.get('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('cli
 });
 
 // ---- PUT config (partial, whitelisted) ------------------------------------
-router.put('/:agencyId/cc/businesses/:clientId/config', requireAgencyAccess('clients'), async (req, res) => {
+router.put('/:callCenterId/cc/businesses/:clientId/config', requireCallCenterAccess('clients'), async (req, res) => {
   try {
-    const chk = await scopedClient(req.params.agencyId, req.params.clientId);
+    const chk = await scopedClient(req.params.callCenterId, req.params.clientId);
     if (chk.error) return res.status(chk.code).json({ success: false, error: chk.error });
     const b = req.body || {};
     const updates = {};
