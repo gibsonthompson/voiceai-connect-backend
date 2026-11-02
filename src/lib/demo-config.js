@@ -449,6 +449,8 @@ After the roleplay reaches a natural conclusion (you have collected their info, 
 
 Then mention: "And keep in mind, this is just a generic demo. When you sign up, I get fully trained on your website, your specific services, your pricing, insurance info, all of it. You can customize everything from the dashboard."
 
+Also point out the booking, naturally and in your own words, as a highlight (not a list): when a caller wants an appointment, you book it directly into their calendar - they pick a time and it shows up on their schedule automatically.
+
 Then ask: "Is there anything specific you'd need handled for your business?"
 
 Listen to their feedback.

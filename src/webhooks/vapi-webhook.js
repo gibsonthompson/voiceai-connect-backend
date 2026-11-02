@@ -541,6 +541,7 @@ async function handleDemoCall(agency, message, industryKey = null) {
         if (serviceDiscussed) {
           lines.push(`Here's what we covered:`);
           lines.push(`- ${serviceDiscussed}`);
+          lines.push(`- Books appointments right into your calendar`);
           lines.push(`- Instant text summaries after every call`);
           lines.push(`- 24/7 coverage, unlimited simultaneous calls`);
           lines.push('');
@@ -619,44 +620,39 @@ async function handleDemoCall(agency, message, industryKey = null) {
   if (agency.phone) {
     try {
       const lines = [];
-      lines.push(`Demo Call - ${agency.name}`);
-      lines.push(`━━━━━━━━━━━━━━━━━━`);
+      lines.push(`Demo Call · ${agency.name}`);
+      lines.push('');
       lines.push(`Caller: ${callerDisplay}`);
       if (businessLabel) lines.push(`Business: ${businessLabel}`);
       if (callerName && callerName !== 'Unknown') lines.push(`Contact: ${callerName}`);
       if (durationDisplay) lines.push(`Duration: ${durationDisplay}`);
-
-      if (interestLevel) {
-        lines.push(`Interest: ${interestLevel.toUpperCase()}`);
-      }
+      if (interestLevel) lines.push(`Interest: ${interestLevel.toUpperCase()}`);
       if (askedQuestions) lines.push(`Asked follow-up questions`);
       if (vapiSuccessScore) lines.push(`Demo score: ${vapiSuccessScore}/10`);
 
+      // Full summary, never truncated. SMS is sent as however many segments it
+      // needs rather than cut off mid-sentence.
       if (summary) {
-        lines.push(`━━━━━━━━━━━━━━━━━━`);
-        let truncSummary = summary;
-        if (summary.length > 300) {
-          truncSummary = summary.slice(0, 297);
-          const lastSpace = truncSummary.lastIndexOf(' ');
-          if (lastSpace > 200) truncSummary = truncSummary.slice(0, lastSpace);
-          truncSummary += '...';
-        }
-        lines.push(truncSummary);
+        lines.push('');
+        lines.push(summary);
       }
 
-      lines.push(`━━━━━━━━━━━━━━━━━━`);
+      lines.push('');
       if (interestLevel === 'high') {
-        lines.push(`Hot lead - follow up within the hour.`);
+        lines.push(`Hot lead, follow up within the hour.`);
       } else if (interestLevel === 'medium') {
-        lines.push(`Warm lead - follow up within 24 hours.`);
+        lines.push(`Warm lead, follow up within 24 hours.`);
       } else {
         lines.push(callerPhone && callerPhone !== 'Unknown'
-          ? `Follow-up SMS sent to caller`
-          : `No caller phone - follow-up not sent`
+          ? `Follow-up SMS sent to caller.`
+          : `No caller phone, follow-up not sent.`
         );
       }
 
-      await sendAndLogSMS({
+      // Send FROM the demo line (recognizable + white-label), with the same
+      // platform fallback the prospect text uses, not the shared platform
+      // number by default.
+      await sendDemoProspectSMS(agency, {
         phone: agency.phone,
         message: lines.join('\n'),
         agencyId: agency.id,
