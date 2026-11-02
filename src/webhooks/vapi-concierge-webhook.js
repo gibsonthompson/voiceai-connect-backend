@@ -41,6 +41,28 @@ const SIGNUP_URL = process.env.PLATFORM_SIGNUP_URL || 'https://www.myvoiceaiconn
 const DEMO_HOMESERVICES_NUMBER = process.env.DEMO_HOMESERVICES_NUMBER || null;
 const DEMO_AGENCY_NUMBER = process.env.DEMO_AGENCY_NUMBER || null;
 
+// Concierge texts should come FROM the concierge line, not the platform SMS
+// number. Defaults to the concierge/demo line (404) 201-7505; override with
+// CONCIERGE_SMS_FROM if the number ever changes. The two live-call texts also
+// prefer the dialed number carried on the webhook when present. The line must be
+// SMS-enabled; if the send from it fails, sendConciergeSMS falls back to the
+// platform number so a text is never dropped.
+const CONCIERGE_SMS_FROM = process.env.CONCIERGE_SMS_FROM || '+14042017505';
+function conciergeFrom(message) {
+  return message?.phoneNumber?.number
+    || message?.call?.phoneNumber?.number
+    || CONCIERGE_SMS_FROM
+    || null;
+}
+async function sendConciergeSMS(params, from) {
+  const sent = await sendAndLogSMS({ ...params, from });
+  if (!sent && from) {
+    console.warn(`⚠️ Concierge SMS from ${from} failed; retrying from the platform number.`);
+    return sendAndLogSMS({ ...params, from: null, metadata: { ...(params.metadata || {}), fallback: 'platform' } });
+  }
+  return sent;
+}
+
 // Guardrail: hard cap on a single demo call so a stuck/abusive call can't run up
 // unbounded voice cost on the public number.
 const MAX_CALL_SECONDS = Number(process.env.CONCIERGE_MAX_CALL_SECONDS || 600);
@@ -318,14 +340,14 @@ async function handleConciergeWebhook(req, res) {
             // air on the live call) for the result. Persistent Node process on
             // DigitalOcean keeps the promise alive after we respond. The AI has
             // already told them it's coming, so we just confirm it's on the way.
-            sendAndLogSMS({
+            sendConciergeSMS({
               phone: callerPhone,
               message: `Your 14-day free trial of VoiceAI Connect Pro (full white-label):\n${SIGNUP_URL}`,
               agencyId: null,
               recipientType: 'prospect',
               messageType: 'concierge_signup_link',
               metadata: { source: 'concierge_live_call' },
-            })
+            }, conciergeFrom(message))
               .then(() => console.log(`✅ Concierge texted signup link (live) to ${callerPhone}`))
               .catch((e) => console.warn('⚠️ Concierge send_signup_link failed:', e.message));
             ok = true;
@@ -404,14 +426,14 @@ async function handleConciergeWebhook(req, res) {
                 'Ready to launch your own agency? Start a 14-day free trial of Pro or Scale:',
                 SIGNUP_URL,
               ];
-          await sendAndLogSMS({
+          await sendConciergeSMS({
             phone: callerPhone,
             message: lines.join('\n'),
             agencyId: null,
             recipientType: 'prospect',
             messageType: 'concierge_followup',
             metadata: { transferred, durationSeconds },
-          });
+          }, conciergeFrom(message));
           console.log('✅ Concierge follow-up SMS sent');
         } catch (smsErr) {
           console.warn('⚠️ Concierge follow-up SMS failed:', smsErr.message);

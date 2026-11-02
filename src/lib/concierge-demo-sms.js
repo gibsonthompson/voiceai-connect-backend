@@ -102,14 +102,21 @@ async function sendConciergeDemoCallerSMS({ callerPhone, kind, summary }) {
   }
 
   try {
-    await sendAndLogSMS({
+    // Send FROM the concierge line (default (404) 201-7505, override with
+    // CONCIERGE_SMS_FROM), not the platform SMS number; fall back to the platform
+    // number if that line can't send SMS so a reframe text is never dropped.
+    const from = process.env.CONCIERGE_SMS_FROM || '+14042017505';
+    const base = {
       phone: callerPhone,
       message: body,
       agencyId: null,
       recipientType: 'prospect',
       messageType: `concierge_demo_${kind}`,
-      metadata: { kind },
-    });
+    };
+    const sent = await sendAndLogSMS({ ...base, metadata: { kind }, from });
+    if (!sent && from) {
+      await sendAndLogSMS({ ...base, metadata: { kind, fallback: 'platform' }, from: null });
+    }
     console.log(`✅ Concierge demo SMS (${kind}) sent to ${callerPhone}`);
     return true;
   } catch (e) {
