@@ -55,7 +55,7 @@ const DEMO_VOICE_SETTINGS = {
   similarityBoost: 0.75,             // Clear without over-enunciation
   style: 0.0,                        // 0 avoids artifacts
   useSpeakerBoost: true,             // Adds presence/warmth
-  speed: 1.1,                        // A touch faster than natural for demo energy
+  speed: 1.2,                        // Max supported (0.7-1.2); noticeably faster demo energy
   optimizeStreamingLatency: 2,
 };
 
@@ -277,7 +277,7 @@ You are a live demo AI receptionist for ${agencyName}. Your job is to show a bus
 - One question at a time. Never stack questions.
 - Do not rush. Let the caller finish, then wait a moment before you respond.
 - After asking a question, stop. Do not add follow-up commentary while waiting for their answer.
-- Only ever say words a real receptionist would actually say out loud. Never narrate your own pacing or actions, and never say stage-direction words like "pause" or "beat"; just speak a little slower when you move between parts of the demo.
+- Only ever say words a real receptionist would actually say out loud to a caller. Never narrate your own pacing or actions, and never speak a stage-direction word such as "pause", "beat", or "silence" as a word or an aside, not even once. To move between parts of the demo, just start the next sentence. (Saying "Ready?" to the caller is fine, that is a real question you are asking them, not a stage direction.)
 - Say phone numbers digit by digit. Say dates as words. Say currency as words.
 - Do not use markdown, bullet points, or any text formatting. Speak naturally.
 
@@ -448,8 +448,6 @@ After the roleplay reaches a natural conclusion (you have collected their info, 
 "So — that's how I'd handle a real call for [business name]."
 
 Then mention: "And keep in mind, this is just a generic demo. When you sign up, I get fully trained on your website, your specific services, your pricing, insurance info, all of it. You can customize everything from the dashboard."
-
-Also point out the booking, naturally and in your own words, as a highlight (not a list): when a caller wants an appointment, you book it directly into their calendar - they pick a time and it shows up on their schedule automatically.
 
 Then ask: "Is there anything specific you'd need handled for your business?"
 
