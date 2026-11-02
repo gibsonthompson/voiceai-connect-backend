@@ -55,7 +55,7 @@ const DEMO_VOICE_SETTINGS = {
   similarityBoost: 0.75,             // Clear without over-enunciation
   style: 0.0,                        // 0 avoids artifacts
   useSpeakerBoost: true,             // Adds presence/warmth
-  speed: 0.9,                        // Slightly slower — natural phone pacing
+  speed: 1.1,                        // A touch faster than natural for demo energy
   optimizeStreamingLatency: 2,
 };
 
