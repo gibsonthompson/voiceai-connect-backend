@@ -248,6 +248,7 @@ const agencyTemplatesRoutes = require('./routes/agency-templates');
 const aiPlaygroundRoutes = require('./routes/ai-playground');
 const leadScraperRoutes = require('./routes/lead-scraper');
 const byotRoutes = require('./routes/byot');
+const agencyCarriersRoutes = require('./routes/agency-carriers');
 const abandonedCartRoutes = require('./routes/abandoned-cart');
 const abandonedCheckoutCleanupRoutes = require('./routes/abandoned-checkout-cleanup');
 // Manual client monthly usage reset (manual-billing clients have no Stripe
@@ -1955,6 +1956,7 @@ app.use('/api/agency', testClientRoutes);
 app.use('/api/agency', agencyTemplatesRoutes);
 app.use('/api/agency', aiPlaygroundRoutes);
 app.use('/api/agency', byotRoutes);
+app.use('/api/agency', agencyCarriersRoutes);
 app.use('/api/agency', feedbackRoutes);
 app.use('/api/agency', supportRoutes);
 app.use('/api/agency', require('./routes/agency-support-requests'));

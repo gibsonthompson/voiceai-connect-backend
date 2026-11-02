@@ -1879,6 +1879,118 @@ async function getTelnyxCredentialId() {
 }
 
 // ============================================================================
+// BRING YOUR OWN CARRIER (BYOC) — VAPI byo-sip-trunk credential + number import
+// ----------------------------------------------------------------------------
+// Lets a client keep its EXISTING DID on its own/local carrier's SIP trunk
+// instead of buying a Telnyx number. These are additive and never touched by
+// the default Telnyx (vapi_direct / telnyx_cc) provisioning path.
+//
+// Mechanics verified against VAPI docs on 2026-11-02:
+//   • Credential: POST {base}/credential, provider 'byo-sip-trunk', gateways:
+//     [{ ip, inboundEnabled:true }]. Gateways must be IP ADDRESSES — an FQDN
+//     like sip.telnyx.com returns HTTP 400. Optional outboundAuthenticationPlan
+//     { authUsername, authPassword } (+ sipRegisterPlan.realm) for register auth.
+//   • Number: POST {base}/phone-number, provider 'byo-phone-number',
+//     numberE164CheckEnabled:false (so non-NANP DIDs import), credentialId.
+//   • Carrier forwards the DID to {number}@<credentialId>.sip.vapi.ai (US) or
+//     .sip.eu.vapi.ai (EU). Carrier must allowlist VAPI signaling IPs
+//     US 44.229.228.186/32 + 44.238.177.138/32 (EU 63.182.83.170/32) and RTP
+//     UDP 40000-60000, or inbound INVITEs 401. API host and SIP host must share
+//     a region; EU requires VAPI's Premier Success Package.
+// ============================================================================
+function vapiApiBaseForRegion(region) {
+  return (String(region || 'us').toLowerCase() === 'eu') ? 'https://api.eu.vapi.ai' : 'https://api.vapi.ai';
+}
+
+// Create (or reuse) the VAPI byo-sip-trunk credential for a carrier profile.
+// Returns the credentialId. Pass opts.authPassword (decrypted) only when the
+// carrier uses credential auth; it is never read from the carrier row here so
+// this file stays free of the encryption dependency.
+async function getOrCreateSipTrunkCredential(carrier, opts = {}) {
+  if (!VAPI_API_KEY) throw new Error('VAPI_API_KEY not set - cannot create SIP trunk credential');
+  if (!carrier) throw new Error('getOrCreateSipTrunkCredential: no carrier profile');
+  const base = vapiApiBaseForRegion(carrier.region);
+
+  // Reuse the cached credential if it still exists on VAPI.
+  if (carrier.vapi_sip_trunk_credential_id) {
+    try {
+      const chk = await fetch(`${base}/credential/${carrier.vapi_sip_trunk_credential_id}`, {
+        headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` },
+      });
+      if (chk.ok) return carrier.vapi_sip_trunk_credential_id;
+      console.warn(`⚠️ cached BYOC credential ${carrier.vapi_sip_trunk_credential_id} not found on VAPI (HTTP ${chk.status}); recreating`);
+    } catch (e) { /* fall through to create */ }
+  }
+
+  const gateways = (carrier.gateway_ips || [])
+    .map(ip => String(ip || '').trim())
+    .filter(Boolean)
+    .map(ip => ({ ip, inboundEnabled: true }));
+  if (!gateways.length) throw new Error(`carrier "${carrier.name || carrier.id}" has no gateway IPs (IPs required, not hostnames)`);
+
+  const body = {
+    provider: 'byo-sip-trunk',
+    name: `BYOC ${carrier.name || carrier.id}`.slice(0, 60),
+    gateways,
+  };
+  if (carrier.auth_type === 'credential' && carrier.auth_username && opts.authPassword) {
+    body.outboundAuthenticationPlan = {
+      authUsername: carrier.auth_username,
+      authPassword: opts.authPassword,
+    };
+    if (carrier.sip_realm) {
+      body.outboundAuthenticationPlan.sipRegisterPlan = { realm: carrier.sip_realm };
+    }
+  }
+
+  const res = await fetch(`${base}/credential`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`VAPI byo-sip-trunk credential failed (HTTP ${res.status}): ${t.slice(0, 200)}`);
+  }
+  const cred = await res.json();
+  if (!cred || !cred.id) throw new Error('VAPI credential create returned no id');
+  console.log(`✅ BYOC SIP trunk credential ready for carrier "${carrier.name}": ${cred.id}`);
+  return cred.id;
+}
+
+// Import a client's EXISTING DID into VAPI as a byo-phone-number against a
+// carrier's SIP trunk credential (BYOC Path 2, direct to VAPI). Returns the VAPI
+// phone object ({ id, number, ... }). The caller still points the number's
+// serverUrl at /webhook/vapi (via configurePhoneWebhook) so inbound fires
+// assistant-request and the client is resolved by number, exactly like a Telnyx
+// vapi_direct number.
+async function importByoNumber(number, credentialId, options = {}) {
+  if (!VAPI_API_KEY) throw new Error('VAPI_API_KEY not set - cannot import BYO number');
+  if (!number) throw new Error('importByoNumber: no number');
+  if (!credentialId) throw new Error('importByoNumber: no credentialId');
+  const base = vapiApiBaseForRegion(options.region);
+
+  const res = await fetch(`${base}/phone-number`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      provider: 'byo-phone-number',
+      name: String(options.name || `BYOC ${number}`).slice(0, 40),
+      number: String(number),
+      numberE164CheckEnabled: false,
+      credentialId,
+    }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`VAPI byo-phone-number import failed for ${number} (HTTP ${res.status}): ${t.slice(0, 200)}`);
+  }
+  const data = await res.json();
+  console.log(`✅ BYOC number imported to VAPI: ${data.number || number} → ${data.id}`);
+  return data;
+}
+
+// ============================================================================
 // 10DLC CAMPAIGN ID. Resolved once per process.
 // Prefers TELNYX_10DLC_CAMPAIGN_ID if set; otherwise derives it from the
 // platform SMS number (which already sends on the approved campaign) by reading
@@ -2763,6 +2875,8 @@ module.exports = {
   createIndustryAssistant,
   provisionPhoneNumber,
   provisionLocalPhone,
+  getOrCreateSipTrunkCredential,
+  importByoNumber,
   // Whisper warm transfer (telnyx_cc) infrastructure
   ensureWhisperInfra,
   pointNumberAtCallControl,

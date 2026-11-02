@@ -104,12 +104,16 @@ const { supabase, getAgencyById, getClientByEmail } = require('../lib/supabase')
 const { storeSuggestionsFromScrape } = require('../lib/scrape-suggestions');
 const { getPlan, getAgencyPlans, getVisiblePlans } = require('../lib/plans');
 const { timezoneFromPhone } = require('../lib/area-code-timezone');
-const { 
-  createIndustryAssistant, 
+const {
+  createIndustryAssistant,
   provisionLocalPhone,
   createKnowledgeBaseFromWebsite,
-  fullyReleaseNumber
+  fullyReleaseNumber,
+  getOrCreateSipTrunkCredential,
+  importByoNumber,
+  ensureWhisperInfra
 } = require('../lib/vapi');
+const { decrypt } = require('../lib/encryption');
 const { 
   formatPhoneE164,
   sendWelcomeSMS,
@@ -760,6 +764,100 @@ async function extractQueryToolId(assistantId) {
 // no webhook to configure. telnyx_cc only applies to platform (Telnyx)
 // provisioning; BYOT (Twilio) numbers always return vapi_direct.
 // ============================================================================
+// ============================================================================
+// BYOC PROVISIONING (Bring Your Own Carrier)
+// The client keeps its EXISTING DID on its own/local carrier's SIP trunk. No
+// Telnyx or Twilio number is purchased.
+//   byo_vapi:      import the DID into VAPI via the carrier's byo-sip-trunk
+//                  credential, then point it at /webhook/vapi so assistant-
+//                  request resolves the client by number — mirrors vapi_direct.
+//                  Custom Telnyx whisper/live-monitor do NOT apply (this bypasses
+//                  Telnyx Call Control); VAPI-native warm transfer is available.
+//   byo_telnyx_cc: the carrier terminates the DID into our Telnyx Call Control
+//                  app, so calls run through the existing telnyx_cc engine with
+//                  full feature parity. No DID purchase, no VAPI phone object;
+//                  inbound resolves the client by the DID (getClientByVapiPhone
+//                  Number on payload.to), exactly like a platform telnyx_cc
+//                  number. The carrier->Telnyx interconnect is a one-time manual
+//                  setup per carrier (see POST /carriers/:id/test).
+// Returns the same shape as provisionPhoneForClient's other paths.
+// ============================================================================
+function normalizeByoNumber(raw) {
+  if (!raw) return null;
+  let p = String(raw).trim().replace(/[()\s.-]/g, '');
+  if (p.startsWith('+')) return p;
+  const d = p.replace(/\D/g, '');
+  if (d.length === 10) return `+1${d}`;
+  if (d.length === 11 && d.startsWith('1')) return `+${d}`;
+  return d ? `+${d}` : null;
+}
+
+async function provisionByoCarrierNumber(agency, clientData, assistantId, numberSource) {
+  const byoNumber = normalizeByoNumber(clientData.byoNumber);
+  if (!byoNumber) throw new Error("Bring-your-own-carrier requires the client's existing phone number.");
+  const carrierId = clientData.carrierId;
+  if (!carrierId) throw new Error('Bring-your-own-carrier requires selecting a carrier.');
+
+  // Carrier must belong to THIS agency (defense in depth beyond the UI).
+  const { data: carrier, error: cErr } = await supabase
+    .from('agency_carriers').select('*').eq('id', carrierId).eq('agency_id', agency.id).single();
+  if (cErr || !carrier) throw new Error('The selected carrier was not found for this agency.');
+
+  // ── Path 3: carrier terminates into our Telnyx Call Control ──
+  if (numberSource === 'byo_telnyx_cc') {
+    // Ensure the shared whisper infra exists; the carrier forwards inbound to it
+    // and the client resolves by the DID, exactly like a platform telnyx_cc
+    // number. No number purchase and no VAPI phone object.
+    try { await ensureWhisperInfra(); }
+    catch (e) { console.warn(`⚠️ BYOC telnyx_cc: ensureWhisperInfra warning: ${e.message}`); }
+    console.log(`✅ BYOC (telnyx_cc) client number ${byoNumber} via carrier ${carrier.name}`);
+    return {
+      number: byoNumber,
+      vapiPhoneId: null,
+      telnyxNumberId: null,
+      provisioningMethod: 'byo_telnyx_cc',
+      numberSource: 'byo_telnyx_cc',
+      carrierId: carrier.id,
+      voiceRouting: 'telnyx_cc',
+    };
+  }
+
+  // ── Path 2: import the DID into VAPI via the carrier SIP trunk ──
+  let authPassword = null;
+  if (carrier.auth_type === 'credential' && carrier.auth_password_encrypted) {
+    try { authPassword = decrypt(carrier.auth_password_encrypted); }
+    catch (e) { throw new Error('The carrier credential could not be decrypted; re-enter it in Settings.'); }
+  }
+
+  const credentialId = await getOrCreateSipTrunkCredential(carrier, { authPassword });
+
+  // Cache the (possibly newly created) VAPI credential id back on the carrier.
+  if (credentialId && credentialId !== carrier.vapi_sip_trunk_credential_id) {
+    await supabase.from('agency_carriers')
+      .update({ vapi_sip_trunk_credential_id: credentialId, updated_at: new Date().toISOString() })
+      .eq('id', carrier.id).then(() => {}, () => {});
+  }
+
+  const imported = await importByoNumber(byoNumber, credentialId, {
+    region: carrier.region,
+    name: clientData.businessName,
+  });
+
+  // Point the imported number at /webhook/vapi (assistant-request model), so the
+  // client is resolved by number — identical to the Telnyx vapi_direct path.
+  await configurePhoneWebhook(imported.id, assistantId);
+
+  console.log(`✅ BYOC (byo_vapi) number ${byoNumber} imported via carrier ${carrier.name} → VAPI ${imported.id}`);
+  return {
+    number: byoNumber,
+    vapiPhoneId: imported.id,
+    provisioningMethod: 'byo_vapi',
+    numberSource: 'byo_vapi',
+    carrierId: carrier.id,
+    voiceRouting: 'vapi_direct',
+  };
+}
+
 async function provisionPhoneForClient(agency, clientData, assistantId, voiceRouting = 'vapi_direct', planType = 'starter') {
   // DEMO agencies (agencies.skip_number_provisioning = true) skip real Telnyx
   // number provisioning so the client signup flow can be demoed or recorded
@@ -792,6 +890,16 @@ async function provisionPhoneForClient(agency, clientData, assistantId, voiceRou
     console.log(`[demo] Agency "${agency.name || agency.id}": skipping phone provisioning, using placeholder ${placeholder}`);
     return { number: placeholder, vapiPhoneId: null, telnyxNumberId: null, provisioningMethod: 'demo_skip', voiceRouting };
   }
+
+  // ── BYOC: client brings its own carrier number (no DID purchase) ──
+  // number_source is orthogonal to voiceRouting and takes precedence over the
+  // Telnyx/Twilio purchase paths below. Default 'telnyx' falls straight through,
+  // so every existing caller is completely unchanged.
+  const _numberSource = clientData.numberSource || 'telnyx';
+  if (_numberSource === 'byo_vapi' || _numberSource === 'byo_telnyx_cc') {
+    return await provisionByoCarrierNumber(agency, clientData, assistantId, _numberSource);
+  }
+
   const agencyCountry = (agency.country || 'US').toUpperCase();
   // The number's country follows the CLIENT's location (its business country),
   // falling back to the agency's. This is what lets a Canadian agency (or a
@@ -1719,7 +1827,11 @@ async function handleAgencyAddClient(req, res) {
       planType = 'starter',
       pricingMode = 'plan',
       customPricing = null,
-      tempPassword
+      tempPassword,
+      // BYOC (bring your own carrier). Default 'telnyx' = unchanged behavior.
+      number_source: numberSource = 'telnyx',
+      byo_number: byoNumber = null,
+      carrier_id: carrierId = null
     } = req.body;
 
     const errors = [];
@@ -1866,7 +1978,10 @@ async function handleAgencyAddClient(req, res) {
         businessState,
         businessName,
         phone,
-        country: clientCountry
+        country: clientCountry,
+        numberSource,
+        byoNumber,
+        carrierId
       }, assistant.id, voiceRouting, resolvedPlanType);
     } catch (phoneError) {
       // Phone provisioning failed, clean up orphaned VAPI resources
@@ -1937,6 +2052,11 @@ async function handleAgencyAddClient(req, res) {
       business_website: websiteUrl || null,
       provisioning_method: phoneResult?.provisioningMethod || 'platform',
       voice_routing: phoneResult.voiceRouting || 'vapi_direct',
+      // BYOC: where the number came from + which carrier. Default telnyx keeps
+      // existing clients unchanged. byo_number stores the client's own DID.
+      number_source: phoneResult.numberSource || 'telnyx',
+      carrier_id: phoneResult.carrierId || null,
+      byo_number: (phoneResult.numberSource && phoneResult.numberSource !== 'telnyx') ? phoneResult.number : null,
       // Inherit nav defaults from agency
       nav_bg: agency.default_client_nav_bg || null,
       nav_text: agency.default_client_nav_text || null,
