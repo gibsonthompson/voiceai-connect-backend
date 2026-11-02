@@ -483,6 +483,8 @@ router.post('/:agencyId/ai-lab/create', async (req, res) => {
   const voiceId = cleanStr(body.voice_id);
   const greeting = cleanStr(body.greeting);
   const aiTone = cleanStr(body.ai_tone);
+  const clientEmailIn = cleanStr(body.client_email);
+  const validEmail = clientEmailIn && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(clientEmailIn) ? clientEmailIn : null;
 
   try {
     const { supabase, getAgencyById } = require('../lib/supabase');
@@ -530,7 +532,10 @@ router.post('/:agencyId/ai-lab/create', async (req, res) => {
       phone_number: null,
       owner_name: agency.name,
       owner_phone: agency.phone || '+10000000000',
-      email: agency.email,
+      // The client's OWN email when provided, so billing, receipts and Stripe
+      // Link key off the client, not the agency. Falls back to the agency email
+      // only when none was given.
+      email: validEmail || agency.email,
       industry,
       business_website: websiteUrl || null,
       website_url: websiteUrl || null,
@@ -543,7 +548,12 @@ router.post('/:agencyId/ai-lab/create', async (req, res) => {
       greeting_message: greeting || null,
       ai_tone: aiTone || null,
       status: 'active',
-      subscription_status: 'active',
+      // A real client created here has not paid the agency yet, so it starts
+      // 'pending_payment' (accurate badge, and it surfaces the Collect payment
+      // action on the client page). The agency's own test client is not a paying
+      // client, so it stays 'active'. Billing is number-gated either way, so a
+      // numberless client is never charged regardless of this value.
+      subscription_status: isTest ? 'active' : 'pending_payment',
       plan_type: isTest ? 'growth' : 'starter',
       is_test_client: isTest,
       calls_this_month: 0,
@@ -633,6 +643,47 @@ router.post('/:agencyId/ai-lab/:clientId/buy-number', async (req, res) => {
   } catch (e) {
     console.error('ai-lab buy-number error:', e.message);
     return res.status(500).json({ error: 'Could not buy a number right now.' });
+  }
+});
+
+// ── POST /:agencyId/ai-lab/:clientId/client-email ────────────────────────────
+// Set (or correct) the client's billing email so the Stripe customer, receipts
+// and Stripe Link key off the CLIENT, not the agency. Also updates the Stripe
+// customer on the connected account when one already exists, so an existing
+// checkout customer stops showing the agency owner's own Link account.
+router.post('/:agencyId/ai-lab/:clientId/client-email', async (req, res) => {
+  const { agencyId, clientId } = req.params;
+  const email = cleanStr(req.body && req.body.email);
+  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    return res.status(400).json({ error: 'Enter a valid email for the client.' });
+  }
+  try {
+    const { supabase, getAgencyById } = require('../lib/supabase');
+    const agency = await getAgencyById(agencyId);
+    if (!agency) return res.status(404).json({ error: 'Agency not found' });
+
+    const { data: client, error: cErr } = await supabase
+      .from('clients')
+      .select('id, agency_id, stripe_connected_customer_id')
+      .eq('id', clientId).eq('agency_id', agencyId).single();
+    if (cErr || !client) return res.status(404).json({ error: 'Receptionist not found.' });
+
+    const { error: uErr } = await supabase.from('clients').update({ email }).eq('id', client.id);
+    if (uErr) { console.error('ai-lab client-email: update failed:', uErr.message); return res.status(500).json({ error: 'Could not save the email.' }); }
+
+    // Keep the Stripe customer in step when it already exists (best-effort).
+    if (client.stripe_connected_customer_id && agency.stripe_account_id) {
+      try {
+        const Stripe = require('stripe');
+        const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+        await stripe.customers.update(client.stripe_connected_customer_id, { email }, { stripeAccount: agency.stripe_account_id });
+      } catch (e) { console.warn('ai-lab client-email: Stripe customer update failed (continuing):', e.message); }
+    }
+
+    return res.json({ success: true, email });
+  } catch (e) {
+    console.error('ai-lab client-email error:', e.message);
+    return res.status(500).json({ error: 'Could not save the email right now.' });
   }
 });
 
