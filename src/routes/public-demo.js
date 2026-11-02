@@ -19,6 +19,14 @@
 const express = require('express');
 const router = express.Router();
 
+// Serves the shared master knowledge base so the marketing support bot (which
+// runs in the frontend) reads the same single source as the dashboard bot.
+const { SUPPORT_KNOWLEDGE } = require('../lib/support-knowledge');
+router.get('/support-knowledge', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=300');
+  res.json({ knowledge: SUPPORT_KNOWLEDGE });
+});
+
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
 const DEEPGRAM_MODEL = process.env.DEEPGRAM_MODEL || 'nova-3';
