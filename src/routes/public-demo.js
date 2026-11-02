@@ -168,11 +168,12 @@ router.post('/demo-receptionist', async (req, res) => {
 
     const businessName = cleanStr(data.business_name) || 'your business';
     const industry = cleanStr(data.industry) || '';
+    const city = cleanStr(data.city) || null;
     const greeting = cleanStr(data.greeting) || `Thanks for calling ${businessName}, how can I help you today?`;
     const facts = Array.isArray(data.facts) ? data.facts.map((f) => cleanStr(f)).filter(Boolean).slice(0, 8) : [];
 
     const assistant = buildAssistant({ businessName, industry, greeting, facts });
-    return res.json({ success: true, business_name: businessName, industry, greeting, read_website: !!siteText, assistant });
+    return res.json({ success: true, business_name: businessName, industry, city, greeting, read_website: !!siteText, website_url: url || null, facts, assistant });
   } catch (e) {
     console.error('public-demo error:', e.message);
     return res.status(500).json({ error: 'Could not build the demo right now. Try again in a moment.' });
