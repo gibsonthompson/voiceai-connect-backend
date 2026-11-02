@@ -37,6 +37,12 @@ const DEMO_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL';
 // sounds robotic) at a small latency cost. Set ELEVENLABS_TTS_MODEL to
 // eleven_multilingual_v2 for the highest quality, or eleven_flash_v2_5 for the
 // lowest latency.
+// NOTE: eleven_v4_turbo (and v3/v4) do NOT support the `speed` voice setting -
+// their schema only takes stability + similarity_boost, so the `speed` below is
+// silently ignored on v4. Staying on v4 for voice quality is a deliberate choice;
+// pacing on v4 is controlled via inline audio tags, not a speed value. If speed
+// control is ever wanted, switch to turbo_v2_5 / flash_v2_5 here AND set the
+// ELEVENLABS_TTS_MODEL env var to match (it overrides this default).
 const ELEVEN_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_v4_turbo';
 // Appended to the demo prompt so the sales demo sounds as human as the real
 // receptionist (same guidance as the client prompts in lib/vapi.js).

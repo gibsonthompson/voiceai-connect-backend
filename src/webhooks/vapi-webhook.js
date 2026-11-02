@@ -429,6 +429,21 @@ async function handleDemoCall(agency, message, industryKey = null) {
   // cache miss (restart, scale-out) still recovers a clean name.
   const callId = call.id || null;
 
+  // Skip a PREMATURE end-of-call delivery. VAPI sometimes fires the end-of-call
+  // report once on hang-up (before it has computed the analysis: no summary, no
+  // structured data, no duration) and then re-delivers the complete report
+  // seconds later. Acting on the early one sends a stub "empty" admin SMS (just
+  // the header + caller) and a premature follow-up, then the full one lands too.
+  // Defer to the complete delivery; do NOT mark it seen or insert, so the real
+  // report still processes. A genuine short call still carries a duration or
+  // analysis, so this only drops the truly-empty early fire.
+  const _hasAnalysis = !!(vapiSummary || vapiStructured || vapiSuccessScore
+    || (message.analysis && Object.keys(message.analysis).length > 0));
+  if (!_hasAnalysis && !durationSeconds) {
+    console.log(`⏳ Premature demo end-of-call-report for ${callId} (no analysis/duration yet) - deferring to the complete delivery`);
+    return { deferred: true };
+  }
+
   // Idempotency. VAPI re-delivers end-of-call-report when the handler is slow to
   // return 200 (this one runs AI summary + SMS work first). A duplicate delivery
   // would send a SECOND prospect follow-up text - and because the cached business
@@ -525,10 +540,16 @@ async function handleDemoCall(agency, message, industryKey = null) {
   // "this is the demo you get to hand to businesses" angle instead of the normal
   // agency-branded demo follow-up. isConciergeDemoNumber returns null for every
   // other agency demo, so all existing demo follow-ups are unaffected.
-  const _conciergeAgencyDemo = isConciergeDemoNumber(agency.demo_phone_number) === 'agency';
-  if (_conciergeAgencyDemo && callerPhone && callerPhone !== 'Unknown') {
+  // Only the agency-buyer reframe, and only when the concierge ACTUALLY
+  // transferred this caller in (same gate as the home-services reframe at the
+  // client path). A direct call to this number is not a concierge prospect, so
+  // it falls through to the normal demo follow-up instead of the buyer pitch.
+  const _conciergeAgencyDemo = isConciergeDemoNumber(agency.demo_phone_number) === 'agency'
+    && callerPhone && callerPhone !== 'Unknown'
+    && consumeConciergeTransfer(callerPhone) === 'agency';
+  if (_conciergeAgencyDemo) {
     await sendConciergeDemoCallerSMS({ callerPhone, kind: 'agency' });
-    console.log('📲 Concierge agency demo: reframed SMS sent to caller');
+    console.log('📲 Concierge agency demo: reframed SMS sent to caller (real transfer)');
   } else if (callerPhone && callerPhone !== 'Unknown') {
     try {
       if (industryKey) {
