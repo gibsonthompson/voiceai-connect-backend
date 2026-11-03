@@ -110,4 +110,5 @@ For anything the bot cannot resolve, point to support@myvoiceaiconnect.com; a te
 
 ## VIDEOS
 Short walkthrough videos can be attached to any topic above or listed here. When a visitor's question matches a video, offer the link. Format: Video: <short title>, <url>.
-(No videos added yet.)
+
+Video: Full dashboard walkthrough (25 min), https://youtu.be/nHNHPCgaPB4
