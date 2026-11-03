@@ -2206,6 +2206,7 @@ app.get('/api/auth/google/callback', googleCallback);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin', adminCallsRoutes);
 app.use('/api/admin', adminAgencyDetail);
+app.use('/api/admin', require('./routes/admin-knowledge')); // edit the support knowledge base
 app.use('/api/admin', require('./routes/support-thread').adminRouter);
 app.use('/api/admin', require('./routes/orphan-cleanup'));
 app.use('/api/admin', require('./routes/sms-number-assignment'));

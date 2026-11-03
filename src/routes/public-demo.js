@@ -21,10 +21,10 @@ const router = express.Router();
 
 // Serves the shared master knowledge base so the marketing support bot (which
 // runs in the frontend) reads the same single source as the dashboard bot.
-const { SUPPORT_KNOWLEDGE } = require('../lib/support-knowledge');
-router.get('/support-knowledge', (req, res) => {
-  res.set('Cache-Control', 'public, max-age=300');
-  res.json({ knowledge: SUPPORT_KNOWLEDGE });
+const { getSupportKnowledge } = require('../lib/support-knowledge');
+router.get('/support-knowledge', async (req, res) => {
+  res.set('Cache-Control', 'public, max-age=120');
+  res.json({ knowledge: await getSupportKnowledge() });
 });
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;

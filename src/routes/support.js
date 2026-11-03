@@ -32,7 +32,7 @@ router.use('/:agencyId/support', requireAgencyAccess('dashboard'));
 // ============================================================================
 // SYSTEM PROMPT — VoiceAI Connect support knowledge base
 // ============================================================================
-const { SUPPORT_KNOWLEDGE } = require('../lib/support-knowledge');
+const { getSupportKnowledge } = require('../lib/support-knowledge');
 
 // ============================================================================
 // OPERATOR LENS — the dashboard support assistant. Facts come from the shared
@@ -56,10 +56,7 @@ Keep replies clean and conversational. A short bold label or a tight numbered li
 ## VIDEOS
 If the knowledge base lists a video whose topic matches what the operator asked, share the link. Only share links that appear in the knowledge base, never invent one.
 
-Use the knowledge base below as your single source of truth.
-
-KNOWLEDGE BASE:
-${SUPPORT_KNOWLEDGE}`;
+Use the knowledge base below as your single source of truth.`;
 
 // ============================================================================
 // POST /:agencyId/support/chat
@@ -77,7 +74,8 @@ router.post('/:agencyId/support/chat', async (req, res) => {
     }
 
     // Build context-aware system prompt
-    let contextPrompt = OPERATOR_LENS;
+    const knowledge = await getSupportKnowledge();
+    let contextPrompt = `${OPERATOR_LENS}\n\nKNOWLEDGE BASE:\n${knowledge}`;
     if (agencyName) contextPrompt += `\n\nYou are currently helping ${agencyName}.`;
     if (agencyPlan) {
       contextPrompt += ` They are on the ${agencyPlan} plan.`;
