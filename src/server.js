@@ -1951,6 +1951,12 @@ app.use('/api/agency', require('./routes/cc-messages'));
 app.use('/api/agency', require('./routes/cc-sms'));
 app.use('/api/agency', require('./routes/cc-contacts'));
 app.use('/api/agency', require('./routes/cc-business-config'));
+// Call-center live wallboard: in-progress calls across the call center's own
+// businesses (scoped by call_center_id). Mirror of agency-wallboard, cc-guarded.
+app.use('/api/agency', require('./routes/cc-wallboard'));
+// Call-center logo/brand analysis (stateless image → palette). Same handler as
+// the agency route, cc-guarded so a call-center session can use branding too.
+app.post('/api/agency/:callCenterId/cc/branding/analyze-logo', requireCallCenterAccess('settings'), analyzeLogoBranding);
 // Call-center team: managers + agents (entity_type='call_center'). Mirrors the
 // agency team routes but is call-center-keyed and guarded by
 // requireCallCenterAccess, so it never touches the agency team path (team.js).

@@ -23,7 +23,7 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { supabase } = require('../lib/supabase');
-const { requireAgencyAccess } = require('./auth');
+const { requireAgencyAccess, requireCallCenterAccess } = require('./auth');
 const presence = require('../lib/agent-presence');
 const offers = require('../lib/escalation-offers');
 const { channelForAgent, subscribeAgent, broadcastToAgent, broadcastToAgents } = require('../lib/agent-channel');
@@ -402,6 +402,81 @@ router.post('/:agencyId/agents/test-offer', requireAgencyAccess('team'), async (
 
   broadcastToAgents(offeredTo, { type: 'offer', offer: { ...shapeOffer(offer), test: true } });
   res.json({ success: true, offered: offeredTo.length });
+});
+
+// ---- GET /api/cc/:callCenterId/cc/presence (manager bar, call-center) ------
+// The call-center manager presence bar + agents page roster. Lists the call
+// center's agents (team_members entity_type='call_center') with their live
+// presence. Until the call-center real-time presence engine is wired (agents
+// heartbeating online), presence rows do not exist for cc agents, so everyone
+// reads as offline here. This returns 200 with the real roster so the bar and
+// the agents page render instead of 403ing. Scoped + guarded for the call
+// center; the agency presence route above is untouched.
+router.get('/:callCenterId/cc/presence', requireCallCenterAccess('dashboard'), async (req, res) => {
+  try {
+    const callCenterId = req.params.callCenterId;
+
+    // The agent roster (not managers). availability_hours drives on-schedule.
+    const { data: members } = await supabase
+      .from('team_members')
+      .select('member_user_id, display_name, availability_hours, is_manager, status')
+      .eq('entity_type', 'call_center').eq('entity_id', callCenterId);
+
+    const agentRows = (members || []).filter((m) => m.is_manager !== true && m.status !== 'disabled');
+    const memberIds = agentRows.map((m) => m.member_user_id);
+
+    // Live presence, if any rows exist for these agents. agent_presence is
+    // keyed by member_user_id (globally unique), so a filter by the roster's
+    // ids returns the right rows without needing the owner column. None yet =
+    // everyone offline.
+    let presenceByUser = {};
+    if (memberIds.length) {
+      try {
+        const { data: pres } = await supabase
+          .from('agent_presence')
+          .select('member_user_id, status, busy, busy_client_id, online_since, last_seen, session_calls')
+          .in('member_user_id', memberIds);
+        for (const p of (pres || [])) presenceByUser[p.member_user_id] = p;
+      } catch { /* presence table best-effort */ }
+    }
+
+    // On-schedule flag in the call center's timezone (best-effort; default on).
+    let tz = 'America/New_York';
+    try { const { data: cc } = await supabase.from('call_centers').select('timezone').eq('id', callCenterId).maybeSingle(); if (cc && cc.timezone) tz = cc.timezone; } catch {}
+    let nowTz = null;
+    try { nowTz = presence.hoursNowInTz(tz); } catch {}
+
+    const ONLINE_WINDOW_MS = 45 * 1000; // a heartbeat within 45s counts as online
+    const agents = agentRows.map((m) => {
+      const p = presenceByUser[m.member_user_id] || null;
+      const lastSeen = p && p.last_seen ? new Date(p.last_seen).getTime() : 0;
+      const online = !!(p && lastSeen && (Date.now() - lastSeen) < ONLINE_WINDOW_MS);
+      let onSchedule = true;
+      try { onSchedule = presence.isAgentOnSchedule(m.availability_hours || null, tz, nowTz); } catch { onSchedule = true; }
+      return {
+        memberUserId: m.member_user_id,
+        displayName: m.display_name || null,
+        online,
+        status: p && p.status === 'away' ? 'away' : 'available',
+        busy: !!(p && p.busy),
+        busyClientId: (p && p.busy_client_id) || null,
+        sessionCalls: (p && p.session_calls) || 0,
+        scheduleEnabled: !!(m.availability_hours && m.availability_hours.enabled),
+        override: !!(m.availability_hours && m.availability_hours.override),
+        onSchedule,
+      };
+    });
+
+    res.json({
+      success: true,
+      online: agents.filter((a) => a.online).length,
+      available: agents.filter((a) => a.online && a.status === 'available' && !a.busy && a.onSchedule).length,
+      agents,
+    });
+  } catch (e) {
+    console.error('cc-agents: cc presence failed:', e.message);
+    res.status(500).json({ success: false, error: 'Could not load presence.' });
+  }
 });
 
 // Shape an offer row for the client: only what the pop needs, no internals.
