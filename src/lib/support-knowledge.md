@@ -37,7 +37,7 @@ No revenue share, no hidden fees, no holdbacks. Upgrades (Free to Pro or Scale, 
 
 ## FREE TRIALS (TWO SEPARATE SYSTEMS)
 Agency level: Pro and Scale include a 14-day free trial. A credit card is required to start it, the card is not charged until the trial ends, and the trial can be canceled anytime before then. Requiring a card keeps trials reserved for serious operators, which helps keep platform pricing low. The Free plan has no trial because there is no platform fee; it activates instantly with no card.
-Client level: every plan includes a 7-day free trial for the businesses the agency onboards, full AI receptionist service before the first billing cycle.
+Client level: the trial for the businesses an agency onboards is fully customizable and set by that agency, so there is no single fixed length. In Settings, then Billing, the agency chooses the trial length (anywhere from 0 days, which starts billing immediately, up to 365 days; it defaults to 7 days until the agency changes it), whether a credit card is required to start the trial, whether a setup fee is charged upfront or after the trial, and whether usage minutes are billed during the trial. During the trial the client gets full AI receptionist service before their first billing cycle. When someone asks how long the client trial is, explain that their agency sets it and that the default is 7 days unless they changed it, rather than stating a fixed number.
 
 ## WHAT THE AI RECEPTIONIST DOES
 - Answers calls 24/7 and responds in about two seconds.
@@ -51,7 +51,7 @@ Client level: every plan includes a 7-day free trial for the businesses the agen
 - Sends a summary after every call with the intent and sentiment, and everything is saved with recordings and time-coded transcripts in the client dashboard.
 
 ## ONBOARDING A CLIENT (UNDER 60 SECONDS)
-A local business signs up through the agency's branded page with just its name, email, phone, business name, industry, and city. The system provisions the AI assistant, a voice, and a local phone number automatically in under a minute. The client gets a welcome text and email with their AI number and login. If the business has a website, the AI reads it automatically to learn the business. There is no A2P registration delay, no files to send, and no technical setup on the client's end. The client forwards their business line to the AI number or uses it directly.
+A local business signs up through the agency's branded page with just its name, email, phone, business name, industry, and city. The system provisions the AI assistant, a voice, and a local phone number automatically in under a minute. The client gets a welcome text (SMS) with their AI number and a link to finish setup and turn on call forwarding. No welcome email is sent. If the business has a website, the AI reads it automatically to learn the business. There is no A2P registration delay, no files to send, and no technical setup on the client's end. The client forwards their business line to the AI number or uses it directly.
 
 ## THE AGENCY DASHBOARD (WHAT IS IN IT, AND HOW TO DO THINGS)
 - Dashboard: client count, monthly revenue, calls this month, a setup checklist for new agencies, the test client card, the demo phone section with outreach templates, and the client signup link.
@@ -109,6 +109,4 @@ A single missed call costs a small service business roughly $500, and a full-tim
 For anything the bot cannot resolve, point to support@myvoiceaiconnect.com; a team member replies within one business day. If a visitor asks to talk to a person or is frustrated, acknowledge it and tell them to use the "Talk to a person" button in the chat to leave their contact info.
 
 ## VIDEOS
-Short walkthrough videos can be attached to any topic above or listed here. When a visitor's question matches a video, offer the link. Format: Video: <short title>, <url>.
-
-Video: Full dashboard walkthrough (25 min), https://youtu.be/nHNHPCgaPB4
+There are no walkthrough videos to share yet. Do not offer, mention, or link any video unless it is listed in a "VIDEO LIBRARY" section of this knowledge base. When videos are added there, share one only when its topic directly answers what the person asked, and never more than one. Never invent a video or a link.
