@@ -1951,6 +1951,11 @@ app.use('/api/agency', require('./routes/cc-messages'));
 app.use('/api/agency', require('./routes/cc-sms'));
 app.use('/api/agency', require('./routes/cc-contacts'));
 app.use('/api/agency', require('./routes/cc-business-config'));
+// Call-center team: managers + agents (entity_type='call_center'). Mirrors the
+// agency team routes but is call-center-keyed and guarded by
+// requireCallCenterAccess, so it never touches the agency team path (team.js).
+// URL shape /api/agency/:callCenterId/cc/team keeps the /cc screens unchanged.
+app.use('/api/agency', require('./routes/cc-team'));
 // Call-center add-business: creates a call-center-owned business (call_center_id),
 // manual billing, full call control. Separate from the agency add-client path.
 app.post('/api/agency/:callCenterId/cc/clients/add', requireCallCenterAccess('clients'), handleCallCenterAddClient);
@@ -2206,7 +2211,6 @@ app.get('/api/auth/google/callback', googleCallback);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin', adminCallsRoutes);
 app.use('/api/admin', adminAgencyDetail);
-app.use('/api/admin', require('./routes/admin-knowledge')); // edit the support knowledge base
 app.use('/api/admin', require('./routes/support-thread').adminRouter);
 app.use('/api/admin', require('./routes/orphan-cleanup'));
 app.use('/api/admin', require('./routes/sms-number-assignment'));
