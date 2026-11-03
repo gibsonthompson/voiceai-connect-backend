@@ -101,21 +101,38 @@ router.post('/:agencyId/support/chat', async (req, res) => {
       content: m.content,
     }));
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1000,
-        temperature: 0.3,
-        system: contextPrompt,
-        messages: claudeMessages,
-      }),
-    });
+    // Hard timeout on the upstream AI call. Without it, a stalled connection
+    // leaves the whole request hanging until the platform gateway kills it with
+    // no response, which the browser surfaces as a raw CORS error. Aborting at
+    // 30s instead turns that into a clean 500 (which still carries CORS
+    // headers), so the client shows a normal "try again" and can retry.
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), 30000);
+    let response;
+    try {
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 1000,
+          temperature: 0.3,
+          system: contextPrompt,
+          messages: claudeMessages,
+        }),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      const timedOut = err && err.name === 'AbortError';
+      console.error('Claude API fetch failed:', timedOut ? 'timeout after 30s' : (err && err.message));
+      return res.status(timedOut ? 504 : 502).json({ error: 'Support assistant is taking too long. Please try again.' });
+    } finally {
+      clearTimeout(abortTimer);
+    }
 
     if (!response.ok) {
       const errText = await response.text();
