@@ -28,7 +28,7 @@ const FormData = require('form-data');
 const fetch = require('node-fetch');
 const { supabase } = require('../lib/supabase');
 const { INDUSTRY_MAPPING } = require('../lib/vapi');
-const { requireAgencyAccess } = require('./auth');
+const { requireAgencyAccess, requireCallCenterAccess } = require('./auth');
 
 // ----------------------------------------------------------------------------
 // OWNERSHIP GUARD — covers GET/PUT /:agencyId/clients/:clientId/knowledge-base
@@ -36,6 +36,11 @@ const { requireAgencyAccess } = require('./auth');
 // the exported updateClientKnowledgeBase() function below.
 // ----------------------------------------------------------------------------
 router.use('/:agencyId/clients/:clientId/knowledge-base', requireAgencyAccess('clients'));
+// Call-center ownership guard — same KB editor, but the business is owned by a
+// call center (clients.call_center_id), so the caller proves call-center access
+// instead of agency access. Each handler below still re-checks the client
+// belongs to THIS call center before touching it.
+router.use('/:callCenterId/cc/businesses/:clientId/knowledge-base', requireCallCenterAccess('clients'));
 
 let INDUSTRY_KNOWLEDGE_BASES;
 try {
@@ -506,6 +511,106 @@ router.post('/:agencyId/clients/:clientId/knowledge-base/rescrape', async (req, 
     });
   } catch (error) {
     console.error('Error re-scraping website:', error);
+    res.status(500).json({ success: false, error: error.message || 'Server error' });
+  }
+});
+
+// ============================================================================
+// CALL-CENTER KNOWLEDGE BASE
+// ----------------------------------------------------------------------------
+// The same editor, for a business a call center owns (clients.call_center_id).
+// These mirror the agency GET/PUT above but scope the client by call_center_id,
+// and reuse every helper in this file (fetchContentFromVapi, generateDefault-
+// Content, INDUSTRY_MAPPING, and the shared updateKnowledgeBase). The agency
+// routes above are untouched.
+// ============================================================================
+
+// GET /:callCenterId/cc/businesses/:clientId/knowledge-base
+router.get('/:callCenterId/cc/businesses/:clientId/knowledge-base', async (req, res) => {
+  try {
+    const { callCenterId, clientId } = req.params;
+
+    const { data: client, error } = await supabase
+      .from('clients')
+      .select('id, vapi_assistant_id, industry, business_name, knowledge_base_content, knowledge_base_data, knowledge_base_updated_at, business_website')
+      .eq('id', clientId)
+      .eq('call_center_id', callCenterId)
+      .single();
+
+    if (error || !client) {
+      return res.status(404).json({ success: false, error: 'Business not found' });
+    }
+
+    const industryKey = INDUSTRY_MAPPING[client.industry] || 'professional_services';
+    const kbData = client.knowledge_base_data || {};
+    const structured = (kbData.fileId || kbData.toolId) ? {} : kbData;
+    const data = {
+      faqs: structured.faqs || '',
+      services: structured.services || '',
+      businessHours: structured.businessHours || '',
+      additionalInfo: structured.additionalInfo || '',
+    };
+    const websiteUrl = client.business_website || '';
+    const updated_at = client.knowledge_base_updated_at || null;
+
+    if (client.knowledge_base_content) {
+      return res.json({ success: true, content: client.knowledge_base_content, data, websiteUrl, updated_at, industry: industryKey, business_name: client.business_name, has_website: !!client.business_website, source: 'cache' });
+    }
+
+    if (client.vapi_assistant_id) {
+      const vapiData = await fetchContentFromVapi(client.vapi_assistant_id);
+      if (vapiData?.content) {
+        await supabase.from('clients').update({ knowledge_base_content: vapiData.content, knowledge_base_data: { fileId: vapiData.fileId, toolId: vapiData.toolId } }).eq('id', clientId);
+        return res.json({ success: true, content: vapiData.content, data, websiteUrl, updated_at, industry: industryKey, business_name: client.business_name, has_website: !!client.business_website, source: 'vapi' });
+      }
+    }
+
+    const defaultContent = generateDefaultContent(client.business_name, industryKey);
+    await supabase.from('clients').update({ knowledge_base_content: defaultContent }).eq('id', clientId);
+    return res.json({ success: true, content: defaultContent, data, websiteUrl, updated_at, industry: industryKey, business_name: client.business_name, has_website: !!client.business_website, source: 'generated' });
+  } catch (error) {
+    console.error('Error fetching cc knowledge base:', error);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+// PUT /:callCenterId/cc/businesses/:clientId/knowledge-base
+// The cc KB editor only sends the structured shape (websiteUrl + faqs +
+// additionalInfo, optionally scrapeWebsite), the same as the end-client "My
+// Business" editor. Verify the business belongs to this call center, then
+// delegate to the shared updateKnowledgeBase (which looks the client up by id
+// alone) so the document is assembled, the structured copy is preserved, and
+// VAPI is re-provisioned exactly as on the client and agency sides.
+router.put('/:callCenterId/cc/businesses/:clientId/knowledge-base', async (req, res) => {
+  try {
+    const { callCenterId, clientId } = req.params;
+    const b = req.body || {};
+    const STRUCTURED_KEYS = ['faqs', 'services', 'businessHours', 'additionalInfo', 'websiteUrl', 'scrapeWebsite'];
+    const isStructured = STRUCTURED_KEYS.some((k) => b[k] !== undefined);
+
+    const { data: owned, error: ownErr } = await supabase
+      .from('clients')
+      .select('id')
+      .eq('id', clientId)
+      .eq('call_center_id', callCenterId)
+      .single();
+    if (ownErr || !owned) return res.status(404).json({ success: false, error: 'Business not found' });
+
+    if (isStructured) {
+      const { updateKnowledgeBase } = require('./knowledge-base');
+      req.body.clientId = clientId;
+      return updateKnowledgeBase(req, res);
+    }
+
+    // Legacy blob save (content only). The cc editor does not send this, but
+    // keep parity with the agency route. updateClientKnowledgeBase is agency-
+    // scoped, so do the cc-scoped update inline.
+    const content = typeof b.content === 'string' ? b.content.trim() : '';
+    if (content.length < 50) return res.status(400).json({ success: false, error: 'Content is required (minimum 50 characters)' });
+    await supabase.from('clients').update({ knowledge_base_content: content, knowledge_base_updated_at: new Date().toISOString() }).eq('id', clientId);
+    return res.json({ success: true, content });
+  } catch (error) {
+    console.error('Error updating cc knowledge base:', error);
     res.status(500).json({ success: false, error: error.message || 'Server error' });
   }
 });
