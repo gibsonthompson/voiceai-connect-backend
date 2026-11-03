@@ -2022,7 +2022,7 @@ router.post('/api/voice/request-transfer', async (req, res) => {
 
     const { data: client } = await supabase
       .from('clients')
-      .select('vapi_phone_number, owner_phone, transfer_phone, tool_config, agency_id, owner_name, business_name, business_hours, timezone')
+      .select('vapi_phone_number, owner_phone, transfer_phone, tool_config, agency_id, call_center_id, owner_name, business_name, business_hours, timezone')
       .eq('id', session.client_id)
       .single();
 
@@ -2084,11 +2084,22 @@ router.post('/api/voice/request-transfer', async (req, res) => {
     // whole block is best-effort - any error falls through to the business line.
     try {
       const escAgencyId = client?.agency_id || session.agency_id;
+      // A business is owned by EITHER an agency or a call center. A call-center-
+      // owned business always escalates to its call center's agents; an agency
+      // business only when that agency signed up as a call center.
+      const escCallCenterId = client?.call_center_id || null;
       let isCallCenter = false;
-      if (escAgencyId) {
+      if (escCallCenterId) {
+        isCallCenter = true;
+      } else if (escAgencyId) {
         const { data: agency } = await supabase.from('agencies').select('is_call_center').eq('id', escAgencyId).maybeSingle();
         isCallCenter = !!(agency && agency.is_call_center);
       }
+      // Owner scope passed to the presence/offer engine and the phone-agent
+      // lookup below. Exactly one of agencyId / callCenterId.
+      const escOwner = escCallCenterId ? { callCenterId: escCallCenterId } : { agencyId: escAgencyId };
+      const escEntityType = escCallCenterId ? 'call_center' : 'agency';
+      const escEntityId = escCallCenterId || escAgencyId;
       ccIsCallCenter = isCallCenter;
       if (isCallCenter && aiDirectRouting && chosenNumber) {
         // AI-direct-to-department is on AND the AI matched a specific person /
@@ -2097,12 +2108,12 @@ router.post('/api/voice/request-transfer', async (req, res) => {
         console.log(`telnyx-voice: AI-direct routing on + department matched ("${transferToLabel}") - bypassing agent offer`);
         handoffIntent = { type: 'business', delivery: 'business', reason: `AI routed to ${transferToLabel || 'a department'}` };
       } else if (isCallCenter) {
-        const avail = await agentPresence.listAvailableForClient({ agencyId: escAgencyId, clientId: session.client_id });
+        const avail = await agentPresence.listAvailableForClient({ ...escOwner, clientId: session.client_id });
         if (!avail.length) ccAgentPathExhausted = true;
         if (avail.length) {
           const offeredTo = avail.map((a) => a.memberUserId);
           const offer = await escalationOffers.createOffer({
-            agencyId: escAgencyId, clientId: session.client_id, sessionId: session.id,
+            ...escOwner, clientId: session.client_id, sessionId: session.id,
             vapiCallId, callerNumber: session.caller_number || null,
             businessName: client?.business_name || null,
             reason: 'A caller asked to speak with a person', summary,
@@ -2148,7 +2159,7 @@ router.post('/api/voice/request-transfer', async (req, res) => {
                   try {
                     const { data: tm } = await supabase.from('team_members')
                       .select('agent_phone, display_name')
-                      .eq('entity_type', 'agency').eq('entity_id', escAgencyId)
+                      .eq('entity_type', escEntityType).eq('entity_id', escEntityId)
                       .eq('member_user_id', o.claimed_by).maybeSingle();
                     ph = tm?.agent_phone || null;
                     if (tm?.display_name) recipientName = firstName(tm.display_name);

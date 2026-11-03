@@ -6,17 +6,21 @@
 //
 //   POST /api/cc/agent/heartbeat        -> presence upsert (online + available)
 //   POST /api/cc/agent/status           -> flip available / away
+//   POST /api/cc/agent/override         -> agent flips their own availability override
+//   POST /api/cc/agent/delivery         -> agent sets browser vs phone delivery
+//   GET  /api/cc/agent/me               -> agent's own availability snapshot
 //   GET  /api/cc/agent/stream           -> SSE: live escalation offers for me
-//                                          (auth by ?token=, like the monitor)
 //   POST /api/cc/offer/:offerId/claim   -> race to take an offered call (atomic)
-//   POST /api/cc/offer/:offerId/decline -> dismiss my pop (others keep theirs)
-//   GET  /api/cc/:agencyId/agents/presence -> who is online (manager bar)
-//   POST /api/cc/:agencyId/agents/test-offer -> fire a demo pop (manager only)
+//   POST /api/cc/offer/:offerId/decline -> dismiss my pop
+//   GET  /api/cc/:agencyId/agents/presence     -> agency manager presence bar
+//   POST /api/cc/:agencyId/agents/test-offer   -> agency demo pop (manager only)
+//   GET  /api/cc/:callCenterId/cc/presence     -> call-center manager presence bar
 //
-// Agent-centric routes resolve the caller from the JWT (agencyId + userId), the
-// same local verification the live monitor uses. The manager routes use the
-// shared requireAgencyAccess middleware. Nothing here touches a live call path;
-// it is the plumbing the escalation hook (Stage 2) drives.
+// OWNER-AGNOSTIC: an agent is owned by EITHER an agency (token.agencyId, roles
+// agency_owner/agency_staff) OR a call center (token.callCenterId, roles
+// cc_owner/cc_manager/cc_agent). resolveAgent returns which, and every presence/
+// offer call is scoped to that owner. Passing an agency token reproduces the
+// original agency behavior exactly.
 // ============================================================================
 
 const express = require('express');
@@ -36,31 +40,60 @@ function decodeToken(raw) {
   try { return jwt.verify(token, JWT_SECRET); } catch { return null; }
 }
 
-// Every agent-centric route needs a logged-in agency user (owner or staff). The
-// agency + agent identity comes from the token, never the body.
+// Resolve the logged-in agent from the token, and WHICH owner they belong to.
+// Call center (cc_* role + callCenterId) or agency (agency_* role / impersonation
+// + agencyId). The owner + agent identity come from the token, never the body.
 function resolveAgent(decoded) {
   if (!decoded) return null;
   const role = decoded.role;
-  const agencyId = decoded.agencyId || (decoded.type === 'agency' ? decoded.id : null);
   const memberUserId = decoded.userId || decoded.id || null;
-  if (!agencyId || !memberUserId) return null;
+  if (!memberUserId) return null;
+
+  if (role === 'cc_owner' || role === 'cc_manager' || role === 'cc_agent') {
+    const callCenterId = decoded.callCenterId || null;
+    if (!callCenterId) return null;
+    return { agencyId: null, callCenterId, memberUserId, role };
+  }
+
+  const agencyId = decoded.agencyId || (decoded.type === 'agency' ? decoded.id : null);
+  if (!agencyId) return null;
   if (role !== 'agency_owner' && role !== 'agency_staff' && decoded.type !== 'agency') return null;
-  return { agencyId, memberUserId, role };
+  return { agencyId, callCenterId: null, memberUserId, role };
 }
 
-// Pull the agent's saved delivery + phone + name from team_members (staff only;
-// owners have no member row and default to a browser seat).
-async function agentProfile(agencyId, memberUserId) {
+// The owner scope for presence/offer lib calls: exactly one of agencyId /
+// callCenterId. Spread into every lib call so it is scoped correctly.
+function ownerArgs(agent) {
+  return agent.callCenterId ? { callCenterId: agent.callCenterId } : { agencyId: agent.agencyId };
+}
+// team_members scope + timezone table for this owner.
+function ownerEntity(agent) {
+  return agent.callCenterId
+    ? { entityType: 'call_center', entityId: agent.callCenterId, tzTable: 'call_centers' }
+    : { entityType: 'agency', entityId: agent.agencyId, tzTable: 'agencies' };
+}
+
+// Pull the agent's saved delivery + phone + name + hours from their team_members
+// row (owner-scoped). Owners have no member row and default to a browser seat.
+async function agentProfile(agent) {
+  const { entityType, entityId } = ownerEntity(agent);
   try {
     const { data } = await supabase
       .from('team_members')
       .select('display_name, call_delivery, agent_phone, availability_hours')
-      .eq('entity_type', 'agency').eq('entity_id', agencyId)
-      .eq('member_user_id', memberUserId)
+      .eq('entity_type', entityType).eq('entity_id', entityId)
+      .eq('member_user_id', agent.memberUserId)
       .maybeSingle();
     if (data) return { displayName: data.display_name || null, callDelivery: data.call_delivery || 'browser', agentPhone: data.agent_phone || null, availabilityHours: data.availability_hours || null };
   } catch { /* fall through */ }
   return { displayName: null, callDelivery: 'browser', agentPhone: null, availabilityHours: null };
+}
+
+// The owner's timezone, for the working-hours gate. Best-effort; defaults ET.
+async function ownerTimezone(agent) {
+  const { entityId, tzTable } = ownerEntity(agent);
+  try { const { data } = await supabase.from(tzTable).select('timezone').eq('id', entityId).maybeSingle(); if (data && data.timezone) return data.timezone; } catch {}
+  return 'America/New_York';
 }
 
 // ---- POST /api/cc/agent/heartbeat -----------------------------------------
@@ -69,9 +102,9 @@ router.post('/agent/heartbeat', async (req, res) => {
   if (!agent) return res.status(401).json({ success: false, error: 'Unauthorized' });
 
   const status = (req.body && req.body.status) === 'away' ? 'away' : 'available';
-  const prof = await agentProfile(agent.agencyId, agent.memberUserId);
+  const prof = await agentProfile(agent);
   await presence.heartbeat({
-    agencyId: agent.agencyId,
+    ...ownerArgs(agent),
     memberUserId: agent.memberUserId,
     displayName: prof.displayName,
     callDelivery: prof.callDelivery,
@@ -79,20 +112,16 @@ router.post('/agent/heartbeat', async (req, res) => {
     status,
   });
 
-  // Catch a (re)connecting agent up on any offer still open for them.
-  const open = await offers.listOpenForAgent({ agencyId: agent.agencyId, memberUserId: agent.memberUserId });
+  const open = await offers.listOpenForAgent({ ...ownerArgs(agent), memberUserId: agent.memberUserId });
 
-  // Tell the agent whether they are within their working hours right now, so the
-  // console can explain the quiet. No schedule / override => always on; only
-  // pays the agency-timezone lookup when a schedule is actually set.
   const ah = prof.availabilityHours;
   const scheduleEnabled = !!(ah && ah.enabled);
   const override = !!(ah && ah.override);
   let onSchedule = true;
   if (scheduleEnabled && !override) {
     try {
-      const { data: ag } = await supabase.from('agencies').select('timezone').eq('id', agent.agencyId).single();
-      onSchedule = presence.isAgentOnSchedule(ah, (ag && ag.timezone) || 'America/New_York');
+      const tz = await ownerTimezone(agent);
+      onSchedule = presence.isAgentOnSchedule(ah, tz);
     } catch (e) { onSchedule = true; }
   }
 
@@ -112,29 +141,21 @@ router.post('/agent/status', async (req, res) => {
   const agent = resolveAgent(decodeToken(req.headers.authorization));
   if (!agent) return res.status(401).json({ success: false, error: 'Unauthorized' });
   const status = (req.body && req.body.status) === 'away' ? 'away' : 'available';
-  await presence.setStatus({ agencyId: agent.agencyId, memberUserId: agent.memberUserId, status });
+  await presence.setStatus({ ...ownerArgs(agent), memberUserId: agent.memberUserId, status });
   res.json({ success: true, status });
 });
 
 // ---- GET /api/cc/agent/me -------------------------------------------------
-// Read-only snapshot for the agent's own availability page: their saved working
-// hours, whether they are on schedule right now, their override flag, their
-// current presence status, and delivery. No writes (so it never fights the
-// heartbeat loop that owns presence status).
 router.get('/agent/me', async (req, res) => {
   const agent = resolveAgent(decodeToken(req.query.token || req.headers.authorization));
   if (!agent) return res.status(401).json({ success: false, error: 'Unauthorized' });
 
-  const prof = await agentProfile(agent.agencyId, agent.memberUserId);
+  const prof = await agentProfile(agent);
   const ah = prof.availabilityHours;
   const scheduleEnabled = !!(ah && ah.enabled);
   const override = !!(ah && ah.override);
 
-  let timezone = 'America/New_York';
-  try {
-    const { data: ag } = await supabase.from('agencies').select('timezone').eq('id', agent.agencyId).single();
-    if (ag && ag.timezone) timezone = ag.timezone;
-  } catch (e) {}
+  const timezone = await ownerTimezone(agent);
 
   let onSchedule = true;
   if (scheduleEnabled && !override) {
@@ -145,7 +166,7 @@ router.get('/agent/me', async (req, res) => {
   try {
     const { data: pres } = await supabase.from('agent_presence')
       .select('status')
-      .eq('agency_id', agent.agencyId).eq('member_user_id', agent.memberUserId)
+      .eq('member_user_id', agent.memberUserId)
       .maybeSingle();
     if (pres && pres.status === 'away') status = 'away';
   } catch (e) {}
@@ -165,20 +186,16 @@ router.get('/agent/me', async (req, res) => {
 });
 
 // ---- POST /api/cc/agent/override ------------------------------------------
-// The agent flips their OWN availability override (make myself available now,
-// even outside my set hours). The override lives in team_members.availability_hours
-// (the same flag a manager can set from the Agents page), so routing and the
-// manager presence bar pick it up on the next lookup. We preserve the rest of the
-// schedule and only change the override boolean.
 router.post('/agent/override', async (req, res) => {
   const agent = resolveAgent(decodeToken(req.headers.authorization));
   if (!agent) return res.status(401).json({ success: false, error: 'Unauthorized' });
   const override = !!(req.body && req.body.override === true);
+  const { entityType, entityId } = ownerEntity(agent);
 
   try {
     const { data: tm } = await supabase.from('team_members')
       .select('availability_hours')
-      .eq('entity_type', 'agency').eq('entity_id', agent.agencyId)
+      .eq('entity_type', entityType).eq('entity_id', entityId)
       .eq('member_user_id', agent.memberUserId)
       .maybeSingle();
     if (!tm) return res.status(404).json({ success: false, error: 'No agent profile to update.' });
@@ -187,7 +204,7 @@ router.post('/agent/override', async (req, res) => {
     const next = { ...cur, override };
     const { error } = await supabase.from('team_members')
       .update({ availability_hours: next })
-      .eq('entity_type', 'agency').eq('entity_id', agent.agencyId)
+      .eq('entity_type', entityType).eq('entity_id', entityId)
       .eq('member_user_id', agent.memberUserId);
     if (error) throw error;
 
@@ -199,16 +216,13 @@ router.post('/agent/override', async (req, res) => {
 });
 
 // ---- POST /api/cc/agent/delivery ------------------------------------------
-// The agent sets how calls reach them: a browser seat (take the call in the
-// console) or their own phone (we ring the number below). Writes the agent's own
-// team_members row. A phone seat requires a phone number.
 router.post('/agent/delivery', async (req, res) => {
   const agent = resolveAgent(decodeToken(req.headers.authorization));
   if (!agent) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  const { entityType, entityId } = ownerEntity(agent);
 
   const callDelivery = (req.body && req.body.callDelivery) === 'phone' ? 'phone' : 'browser';
   const rawPhone = (req.body && typeof req.body.agentPhone === 'string') ? req.body.agentPhone.trim() : '';
-  // Keep digits (and a leading +) so a formatted input still stores cleanly.
   const agentPhone = rawPhone ? rawPhone.replace(/[^\d+]/g, '') : '';
   if (callDelivery === 'phone' && agentPhone.replace(/\D/g, '').length < 10) {
     return res.status(400).json({ success: false, error: 'Enter a valid phone number to take calls on your phone.' });
@@ -217,18 +231,16 @@ router.post('/agent/delivery', async (req, res) => {
   try {
     const { data: tm } = await supabase.from('team_members')
       .select('member_user_id')
-      .eq('entity_type', 'agency').eq('entity_id', agent.agencyId)
+      .eq('entity_type', entityType).eq('entity_id', entityId)
       .eq('member_user_id', agent.memberUserId)
       .maybeSingle();
     if (!tm) return res.status(404).json({ success: false, error: 'No agent profile to update.' });
 
     const update = { call_delivery: callDelivery };
-    // Only overwrite the stored number when one was provided, so switching back
-    // to browser does not wipe a number they may want to keep.
     if (agentPhone) update.agent_phone = agentPhone;
     const { error } = await supabase.from('team_members')
       .update(update)
-      .eq('entity_type', 'agency').eq('entity_id', agent.agencyId)
+      .eq('entity_type', entityType).eq('entity_id', entityId)
       .eq('member_user_id', agent.memberUserId);
     if (error) throw error;
 
@@ -264,9 +276,8 @@ router.get('/agent/stream', async (req, res) => {
   };
 
   send('hello', { agentId: agent.memberUserId, channel: channelForAgent(agent.memberUserId), ts: Date.now() });
-  // Refresh presence on connect and catch up on any live offer.
-  presence.heartbeat({ agencyId: agent.agencyId, memberUserId: agent.memberUserId }).catch(() => {});
-  offers.listOpenForAgent({ agencyId: agent.agencyId, memberUserId: agent.memberUserId })
+  presence.heartbeat({ ...ownerArgs(agent), memberUserId: agent.memberUserId }).catch(() => {});
+  offers.listOpenForAgent({ ...ownerArgs(agent), memberUserId: agent.memberUserId })
     .then((open) => { for (const o of open) send('event', { type: 'offer', offer: shapeOffer(o) }); })
     .catch(() => {});
 
@@ -282,23 +293,20 @@ router.get('/agent/stream', async (req, res) => {
 });
 
 // ---- POST /api/cc/offer/:offerId/claim ------------------------------------
-// Race to take an offered call. The atomic claim means exactly one agent wins;
-// losers get { won:false }. On a win we tell the other offered agents the offer
-// is taken so their pops clear, and hand the winner the context their take-over
-// needs (clientId + callId for a browser jump-in, or a "we are dialing you" note
-// for a phone seat).
 router.post('/offer/:offerId/claim', async (req, res) => {
   const agent = resolveAgent(decodeToken(req.headers.authorization));
   if (!agent) return res.status(401).json({ success: false, error: 'Unauthorized' });
 
   const offer = await offers.getOffer(req.params.offerId);
   if (!offer) return res.status(404).json({ success: false, error: 'That call is no longer available.' });
-  if (offer.agency_id !== agent.agencyId) return res.status(403).json({ success: false, error: 'Forbidden' });
+  // The offer must belong to this agent's owner (agency or call center).
+  const ownsOffer = agent.callCenterId ? (offer.call_center_id === agent.callCenterId) : (offer.agency_id === agent.agencyId);
+  if (!ownsOffer) return res.status(403).json({ success: false, error: 'Forbidden' });
   if (offer.status !== 'open') {
     return res.json({ success: true, won: false, reason: offer.status === 'claimed' ? 'taken' : offer.status });
   }
 
-  const prof = await agentProfile(agent.agencyId, agent.memberUserId);
+  const prof = await agentProfile(agent);
   const claimed = await offers.claimOffer(offer.id, {
     memberUserId: agent.memberUserId,
     displayName: prof.displayName,
@@ -308,12 +316,9 @@ router.post('/offer/:offerId/claim', async (req, res) => {
     return res.json({ success: true, won: false, reason: 'taken' });
   }
 
-  // Mark the winner busy so they are not offered a second call mid-takeover.
-  presence.setBusy({ agencyId: agent.agencyId, memberUserId: agent.memberUserId, busy: true, busyClientId: offer.client_id }).catch(() => {});
-  // Count this as a call answered this session (for the manager presence hover).
-  presence.incrementSessionCalls({ agencyId: agent.agencyId, memberUserId: agent.memberUserId }).catch(() => {});
+  presence.setBusy({ ...ownerArgs(agent), memberUserId: agent.memberUserId, busy: true, busyClientId: offer.client_id }).catch(() => {});
+  presence.incrementSessionCalls({ ...ownerArgs(agent), memberUserId: agent.memberUserId }).catch(() => {});
 
-  // Clear the pop for everyone else who was offered this call.
   const others = (Array.isArray(offer.offered_to) ? offer.offered_to : []).filter((id) => id !== agent.memberUserId);
   if (others.length) broadcastToAgents(others, { type: 'offer_taken', offerId: offer.id, by: prof.displayName || 'A teammate' });
 
@@ -326,22 +331,17 @@ router.post('/offer/:offerId/claim', async (req, res) => {
 });
 
 // ---- POST /api/cc/offer/:offerId/decline ----------------------------------
-// Just dismiss this agent's own pop. The offer stays open for the others; if all
-// decline it simply expires and the call path hands the caller back to the AI.
 router.post('/offer/:offerId/decline', async (req, res) => {
   const agent = resolveAgent(decodeToken(req.headers.authorization));
   if (!agent) return res.status(401).json({ success: false, error: 'Unauthorized' });
   res.json({ success: true });
 });
 
-// ---- GET /api/cc/:agencyId/agents/presence (manager bar) ------------------
+// ---- GET /api/cc/:agencyId/agents/presence (AGENCY manager bar) -----------
 router.get('/:agencyId/agents/presence', requireAgencyAccess('team'), async (req, res) => {
   const agencyId = req.params.agencyId;
   const list = await presence.listForAgency(agencyId);
 
-  // Annotate each agent with their working-hours state (in the agency timezone)
-  // so the bar can show who is actually on: an off-hours agent is online but not
-  // offered calls. Best-effort; on any failure everyone reads as on-schedule.
   let tz = 'America/New_York';
   const hoursByUser = {};
   try { const { data: ag } = await supabase.from('agencies').select('timezone').eq('id', agencyId).single(); if (ag && ag.timezone) tz = ag.timezone; } catch (e) {}
@@ -371,9 +371,7 @@ router.get('/:agencyId/agents/presence', requireAgencyAccess('team'), async (req
   });
 });
 
-// ---- POST /api/cc/:agencyId/agents/test-offer (manager only) --------------
-// Fire a demo escalation pop at the available agents for a business, so the
-// screen-pop can be verified end-to-end before the live call path is wired.
+// ---- POST /api/cc/:agencyId/agents/test-offer (AGENCY manager only) --------
 router.post('/:agencyId/agents/test-offer', requireAgencyAccess('team'), async (req, res) => {
   const agencyId = req.params.agencyId;
   const clientId = (req.body && req.body.clientId) || null;
@@ -404,19 +402,15 @@ router.post('/:agencyId/agents/test-offer', requireAgencyAccess('team'), async (
   res.json({ success: true, offered: offeredTo.length });
 });
 
-// ---- GET /api/cc/:callCenterId/cc/presence (manager bar, call-center) ------
+// ---- GET /api/cc/:callCenterId/cc/presence (CALL-CENTER manager bar) -------
 // The call-center manager presence bar + agents page roster. Lists the call
 // center's agents (team_members entity_type='call_center') with their live
-// presence. Until the call-center real-time presence engine is wired (agents
-// heartbeating online), presence rows do not exist for cc agents, so everyone
-// reads as offline here. This returns 200 with the real roster so the bar and
-// the agents page render instead of 403ing. Scoped + guarded for the call
-// center; the agency presence route above is untouched.
+// presence (by member_user_id, which agent_presence is now keyed on). Returns
+// 200 with the roster; agents with no recent heartbeat read as offline.
 router.get('/:callCenterId/cc/presence', requireCallCenterAccess('dashboard'), async (req, res) => {
   try {
     const callCenterId = req.params.callCenterId;
 
-    // The agent roster (not managers). availability_hours drives on-schedule.
     const { data: members } = await supabase
       .from('team_members')
       .select('member_user_id, display_name, availability_hours, is_manager, status')
@@ -425,10 +419,6 @@ router.get('/:callCenterId/cc/presence', requireCallCenterAccess('dashboard'), a
     const agentRows = (members || []).filter((m) => m.is_manager !== true && m.status !== 'disabled');
     const memberIds = agentRows.map((m) => m.member_user_id);
 
-    // Live presence, if any rows exist for these agents. agent_presence is
-    // keyed by member_user_id (globally unique), so a filter by the roster's
-    // ids returns the right rows without needing the owner column. None yet =
-    // everyone offline.
     let presenceByUser = {};
     if (memberIds.length) {
       try {
@@ -437,20 +427,18 @@ router.get('/:callCenterId/cc/presence', requireCallCenterAccess('dashboard'), a
           .select('member_user_id, status, busy, busy_client_id, online_since, last_seen, session_calls')
           .in('member_user_id', memberIds);
         for (const p of (pres || [])) presenceByUser[p.member_user_id] = p;
-      } catch { /* presence table best-effort */ }
+      } catch { /* presence best-effort */ }
     }
 
-    // On-schedule flag in the call center's timezone (best-effort; default on).
     let tz = 'America/New_York';
     try { const { data: cc } = await supabase.from('call_centers').select('timezone').eq('id', callCenterId).maybeSingle(); if (cc && cc.timezone) tz = cc.timezone; } catch {}
     let nowTz = null;
     try { nowTz = presence.hoursNowInTz(tz); } catch {}
 
-    const ONLINE_WINDOW_MS = 45 * 1000; // a heartbeat within 45s counts as online
     const agents = agentRows.map((m) => {
       const p = presenceByUser[m.member_user_id] || null;
-      const lastSeen = p && p.last_seen ? new Date(p.last_seen).getTime() : 0;
-      const online = !!(p && lastSeen && (Date.now() - lastSeen) < ONLINE_WINDOW_MS);
+      const lastSeen = p && p.last_seen ? Date.parse(p.last_seen) : 0;
+      const online = !!(p && lastSeen && (Date.now() - lastSeen) < presence.ONLINE_WINDOW_MS);
       let onSchedule = true;
       try { onSchedule = presence.isAgentOnSchedule(m.availability_hours || null, tz, nowTz); } catch { onSchedule = true; }
       return {

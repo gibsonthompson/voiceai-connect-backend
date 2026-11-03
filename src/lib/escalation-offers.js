@@ -22,14 +22,16 @@ const { supabase } = require('./supabase');
 const OFFER_TTL_MS = parseInt(process.env.ESCALATION_OFFER_TTL_MS || '', 10) || 25000;
 
 async function createOffer({
-  agencyId, clientId, sessionId, vapiCallId, callerNumber,
+  agencyId, callCenterId, clientId, sessionId, vapiCallId, callerNumber,
   businessName, reason, summary, collected, offeredTo,
 }) {
-  if (!agencyId || !clientId) return null;
+  if ((!agencyId && !callCenterId) || !clientId) return null;
   try {
     const now = Date.now();
     const row = {
-      agency_id: agencyId,
+      // An offer belongs to EITHER an agency or a call center (one is set).
+      agency_id: callCenterId ? null : agencyId,
+      call_center_id: callCenterId || null,
       client_id: clientId,
       session_id: sessionId || null,
       vapi_call_id: vapiCallId || null,
@@ -105,13 +107,15 @@ async function resolveOffer(id, status, extra) {
 
 // Open offers addressed to this agent that have not expired - so an agent whose
 // stream (re)connects mid-offer immediately sees the pop.
-async function listOpenForAgent({ agencyId, memberUserId }) {
-  if (!agencyId || !memberUserId) return [];
+async function listOpenForAgent({ agencyId, callCenterId, memberUserId }) {
+  if ((!agencyId && !callCenterId) || !memberUserId) return [];
+  const ownerCol = callCenterId ? 'call_center_id' : 'agency_id';
+  const ownerId = callCenterId || agencyId;
   try {
     const { data } = await supabase
       .from('escalation_offers')
       .select('*')
-      .eq('agency_id', agencyId)
+      .eq(ownerCol, ownerId)
       .eq('status', 'open')
       .gte('expires_at', new Date().toISOString())
       .order('created_at', { ascending: false })
