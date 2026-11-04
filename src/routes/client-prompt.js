@@ -158,6 +158,14 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
     const finalSpeed = hasSpeed ? speed : client.voice_speed;
     const finalTtsModel = hasTtsModel ? tts_model : client.tts_model;
     const finalTranscriberModel = hasTranscriberModel ? transcriber_model : client.transcriber_model;
+    // Keyterms to bias the transcriber, so a dashboard test call hears domain
+    // words the same way a live call does (live calls resolve these in
+    // buildDynamicAssistantConfig). Client's own list wins, else the industry
+    // default (e.g. pest-control vocabulary).
+    const _industryCfg = INDUSTRY_CONFIGS[INDUSTRY_MAPPING[client.industry] || 'professional_services'] || {};
+    const finalKeyterms = (Array.isArray(client.transcriber_keyterms) && client.transcriber_keyterms.length)
+      ? client.transcriber_keyterms
+      : (_industryCfg.keyterms || null);
     const denoisingOn = hasDenoising
       ? background_denoising === true
       : ((client.tool_config && client.tool_config.backgroundDenoising) !== false);
@@ -254,7 +262,7 @@ router.put('/:agencyId/clients/:clientId/prompt', async (req, res) => {
 
       // --- transcriber + endpointing, rebuilt from the effective transcriber model ---
       if (hasTranscriberModel) {
-        patchPayload.transcriber = buildTranscriber(finalTranscriberModel);
+        patchPayload.transcriber = buildTranscriber(finalTranscriberModel, finalKeyterms);
         patchPayload.startSpeakingPlan = buildStartSpeakingPlan(finalTranscriberModel);
       }
 

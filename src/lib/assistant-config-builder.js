@@ -106,7 +106,14 @@ const BACKEND_URL = process.env.BACKEND_URL || 'https://api.voiceaiconnect.com';
 // now runs on 4.1. Set OPENAI_MODEL to roll the fleet back/forward.
 // ============================================================================
 const DEFAULT_LLM_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
-const DEFAULT_TRANSCRIBER_MODEL = process.env.DEEPGRAM_MODEL || 'nova-2';  // Deepgram STT default
+// Fleet STT default: Deepgram Flux, their conversational model. Nova-3-level
+// accuracy, native end-of-turn (so short one-word answers like "ants" are not
+// re-asked), and keyterm prompting. flux-general-multi keeps EN+ES. Was nova-2.
+const DEFAULT_TRANSCRIBER_MODEL = process.env.DEEPGRAM_MODEL || 'flux-general-multi';
+// Fleet TTS default: ElevenLabs v4 Turbo, the newest and highest-quality
+// real-time voice. Note v4 has no speed/style control, so the voice_speed below
+// has no effect on a v4 voice (it only applies to a speed-capable model a client
+// opts into, e.g. Turbo/Flash v2.5).
 const ELEVENLABS_TTS_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_v4_turbo';
 // ElevenLabs voice-quality fleet defaults (0-1). Used when neither the client
 // nor the agency template sets a value. Lower stability = more expressive and
@@ -115,7 +122,7 @@ const DEFAULT_VOICE_STABILITY = 0.4;
 const DEFAULT_VOICE_STYLE = 0.35;
 const DEFAULT_VOICE_SIMILARITY = 0.8;
 const DEFAULT_VOICE_SPEAKER_BOOST = true;
-const FLUX_EOT_THRESHOLD_DEFAULT = 0.6;   // Flux end-of-turn sensitivity (sane default, not user-facing)
+const FLUX_EOT_THRESHOLD_DEFAULT = 0.7;   // Flux end-of-turn sensitivity; 0.7 = VAPI balanced default (0.6 risks cutting callers off)
 const FLUX_EOT_TIMEOUT_MS_DEFAULT = 3000; // Flux hard cap before it ends the turn
 
 const DEFAULT_TOOL_CONFIG = {
@@ -1902,12 +1909,33 @@ function isFluxModel(m) {
 
 // Deepgram transcriber block from a model string. Nova keeps language:'multi'
 // (EN+ES). Flux owns end-of-turn, so it gets the internal eot defaults instead.
-function buildTranscriber(transcriberModel) {
+//
+// keyterms (optional): domain words to bias recognition toward, so short or
+// easily-confused words (a one-word "ants", "living room" vs "lemon roll") are
+// caught. Deepgram exposes this two ways and the field differs by model:
+//   - nova-3 and Flux  -> `keyterm` (plain terms, no weights)
+//   - nova-2 (legacy)  -> `keywords` (older boosting feature)
+// Passed through only when provided, so any model with no keyterms behaves
+// exactly as before.
+function buildTranscriber(transcriberModel, keyterms) {
   const m = transcriberModel || DEFAULT_TRANSCRIBER_MODEL;
+  const kt = Array.isArray(keyterms)
+    ? [...new Set(keyterms.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim()))].slice(0, 100)
+    : [];
   if (isFluxModel(m)) {
-    return { provider: 'deepgram', model: m, eotThreshold: FLUX_EOT_THRESHOLD_DEFAULT, eotTimeoutMs: FLUX_EOT_TIMEOUT_MS_DEFAULT };
+    const t = { provider: 'deepgram', model: m, eotThreshold: FLUX_EOT_THRESHOLD_DEFAULT, eotTimeoutMs: FLUX_EOT_TIMEOUT_MS_DEFAULT };
+    // Flux-multi auto-detects language and can start a Spanish call in English;
+    // hint EN+ES so bilingual calls lock in (matches the prior nova language:'multi').
+    if (m.includes('multi')) t.languages = ['en', 'es'];
+    if (kt.length) t.keyterm = kt;
+    return t;
   }
-  return { provider: 'deepgram', model: m, language: 'multi' };
+  const t = { provider: 'deepgram', model: m, language: 'multi' };
+  if (kt.length) {
+    if (m.startsWith('nova-3')) t.keyterm = kt; // nova-3 keyterm prompting
+    else t.keywords = kt;                        // nova-2 legacy keyword boosting
+  }
+  return t;
 }
 
 // ElevenLabs TTS voice block, honoring voice speed. ttsModel is a specific
@@ -2032,10 +2060,12 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
   let voiceId = config.voiceId;
   let temperature = config.temperature;
   let modelId = DEFAULT_LLM_MODEL;
-  // Default speaking speed. The ElevenLabs v4 voices speak slowly at 1.0 and
-  // sound flat, so default to the top of VAPI's supported 0.7-1.2 range for a
-  // brisker, more natural pace. A client/template voice_speed still overrides.
-  let voiceSpeed = 1.2;
+  // Default speaking speed. The fleet voice is Eleven v4 Turbo, which ignores
+  // speed, so this is inert for most calls; it only takes effect for a client
+  // who opts into a speed-capable model (Turbo/Flash v2.5). Kept at the prior
+  // default. A client/template voice_speed, or a per-industry config.voiceSpeed,
+  // overrides.
+  let voiceSpeed = config.voiceSpeed || 1.2;
   // Per-industry template pipeline (Scale). tts_model / transcriber_model were
   // being saved by the AI Lab template editor but NEVER read here, so the Voice
   // engine + Speech recognition selectors did nothing on live calls. Now read
@@ -2102,8 +2132,14 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
 
   // ── Resolve the pipeline: per-client choice first, then industry template,
   // then platform default. Two simple model strings drive everything.
-  const ttsModelEff = client.tts_model || tplTtsModel || undefined;                    // undefined -> flash
-  const transcriberModelEff = client.transcriber_model || tplTranscriberModel || DEFAULT_TRANSCRIBER_MODEL;
+  const ttsModelEff = client.tts_model || tplTtsModel || config.ttsModel || undefined;                    // undefined -> flash
+  const transcriberModelEff = client.transcriber_model || tplTranscriberModel || config.transcriberModel || DEFAULT_TRANSCRIBER_MODEL;
+  // Domain keyterms to bias the transcriber. Per-client wins, else the industry
+  // default (e.g. pest-control pest/room vocabulary). Only applied on nova-3 /
+  // Flux; nova-2 falls back to the legacy keywords field inside buildTranscriber.
+  const keytermsEff = (Array.isArray(client.transcriber_keyterms) && client.transcriber_keyterms.length)
+    ? client.transcriber_keyterms
+    : (config.keyterms || null);
   // Krisp denoising: client's own setting wins, else the industry template's,
   // else ON by default.
   const clientDenoise = client.tool_config && client.tool_config.backgroundDenoising;
@@ -2144,7 +2180,7 @@ async function buildDynamicAssistantConfig(client, agency, callerContext) {
     name: sanitizeAssistantName(client.business_name),
     // Transcriber: Deepgram nova (multi, default) or Flux (model-native EoT),
     // from the effective transcriber model string. See buildTranscriber.
-    transcriber: buildTranscriber(transcriberModelEff),
+    transcriber: buildTranscriber(transcriberModelEff, keytermsEff),
     model: {
       provider: 'openai',
       model: modelId,
