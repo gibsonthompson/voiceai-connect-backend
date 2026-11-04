@@ -254,4 +254,39 @@ router.post('/:agencyId/support/escalate', async (req, res) => {
   }
 });
 
+// ============================================================================
+// GET /:agencyId/support/history
+// The agency's full conversation with the support bot, rebuilt from the logged
+// exchanges (support_bot_log) so it is ALWAYS available server-side: it survives
+// refreshes, new devices, and sign-out, and the owner can scroll back through
+// everything they have ever asked. Oldest first; newest at the bottom. Guarded
+// by requireAgencyAccess('dashboard') via the router.use above.
+// ============================================================================
+router.get('/:agencyId/support/history', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const { data, error } = await supabase
+      .from('support_bot_log')
+      .select('id, question, answer, created_at')
+      .eq('agency_id', agencyId)
+      .order('created_at', { ascending: false })
+      .limit(300);
+    if (error) {
+      console.error('support history error:', error.message);
+      return res.status(500).json({ error: 'Failed to load history' });
+    }
+    const rows = (data || []).reverse(); // back to chronological order
+    const messages = [];
+    for (const r of rows) {
+      const ts = r.created_at ? new Date(r.created_at).getTime() : Date.now();
+      if (r.question) messages.push({ id: `${r.id}-u`, role: 'user', content: r.question, timestamp: ts });
+      if (r.answer) messages.push({ id: `${r.id}-a`, role: 'assistant', content: r.answer, timestamp: ts });
+    }
+    return res.json({ messages });
+  } catch (e) {
+    console.error('support history error:', e.message);
+    return res.status(500).json({ error: 'Failed to load history' });
+  }
+});
+
 module.exports = router;
