@@ -18,6 +18,7 @@
 // ============================================================================
 const express = require('express');
 const router = express.Router();
+const { supabase } = require('../lib/supabase');
 
 // Serves the shared master knowledge base so the marketing support bot (which
 // runs in the frontend) reads the same single source as the dashboard bot.
@@ -185,6 +186,58 @@ router.post('/demo-receptionist', async (req, res) => {
   } catch (e) {
     console.error('public-demo error:', e.message);
     return res.status(500).json({ error: 'Could not build the demo right now. Try again in a moment.' });
+  }
+});
+
+// ============================================================================
+// POST /api/public/demo-receptionist/claim
+// Persists a receptionist the visitor built on the marketing demo so it can be
+// carried into signup and seeded as their dashboard Test AI. Returns a token
+// the signup flow passes through; the token is consumed at agency signup.
+// ============================================================================
+router.post('/demo-receptionist/claim', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const business_name = cleanStr(b.business_name);
+    if (!business_name) return res.status(400).json({ error: 'Build a receptionist first.' });
+    const facts = Array.isArray(b.facts)
+      ? b.facts.map((f) => cleanStr(f)).filter(Boolean).slice(0, 8)
+      : [];
+    // Carry the exact voice the visitor heard on the demo so the activated
+    // receptionist sounds identical. Whitelist the known fields; never store an
+    // arbitrary blob. Null when no usable voiceId is present.
+    const rv = (b.voice && typeof b.voice === 'object') ? b.voice : null;
+    const voice = (rv && typeof rv.voiceId === 'string' && rv.voiceId.trim())
+      ? {
+          provider: typeof rv.provider === 'string' ? rv.provider.slice(0, 40) : undefined,
+          model: typeof rv.model === 'string' ? rv.model.slice(0, 60) : undefined,
+          voiceId: rv.voiceId.trim().slice(0, 80),
+          stability: typeof rv.stability === 'number' ? rv.stability : undefined,
+          similarityBoost: typeof rv.similarityBoost === 'number' ? rv.similarityBoost : undefined,
+          useSpeakerBoost: typeof rv.useSpeakerBoost === 'boolean' ? rv.useSpeakerBoost : undefined,
+        }
+      : null;
+    const { data, error } = await supabase
+      .from('demo_receptionists')
+      .insert({
+        business_name: business_name.slice(0, 120),
+        industry: (cleanStr(b.industry) || '').slice(0, 60) || null,
+        city: (cleanStr(b.city) || '').slice(0, 80) || null,
+        greeting: (cleanStr(b.greeting) || '').slice(0, 1000) || null,
+        facts,
+        website_url: (cleanStr(b.website_url) || '').slice(0, 300) || null,
+        voice,
+      })
+      .select('id')
+      .single();
+    if (error || !data) {
+      console.error('claim demo error:', error?.message);
+      return res.status(500).json({ error: 'Could not save. Try again.' });
+    }
+    return res.json({ success: true, token: data.id });
+  } catch (e) {
+    console.error('claim demo error:', e.message);
+    return res.status(500).json({ error: 'Could not save right now.' });
   }
 });
 

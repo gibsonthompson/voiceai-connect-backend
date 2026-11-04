@@ -563,6 +563,42 @@ async function handleAgencySignup(req, res) {
       console.log(`✅ Default templates seeded: ${templateResult.count} templates`);
     }
 
+    // Carry over a receptionist the owner built on the marketing demo. The
+    // signup widget passes demo_token (from /api/public/demo-receptionist/claim);
+    // we stash the config on the agency so the dashboard can offer a one-click
+    // "Activate" of that exact receptionist as their Test AI. Best-effort: a bad
+    // or missing token just means they start from the generic test client.
+    const demoToken = req.body.demo_token;
+    if (demoToken) {
+      try {
+        const { data: demo } = await supabase
+          .from('demo_receptionists')
+          .select('id, business_name, industry, city, greeting, facts, website_url, voice')
+          .eq('id', demoToken)
+          .maybeSingle();
+        if (demo && demo.business_name) {
+          await supabase
+            .from('agencies')
+            .update({
+              pending_test_client: {
+                business_name: demo.business_name,
+                industry: demo.industry || null,
+                city: demo.city || null,
+                greeting: demo.greeting || null,
+                facts: Array.isArray(demo.facts) ? demo.facts : [],
+                website_url: demo.website_url || null,
+                voice: (demo.voice && typeof demo.voice === 'object') ? demo.voice : null,
+              },
+            })
+            .eq('id', agency.id);
+          await supabase.from('demo_receptionists').update({ claimed_by_agency_id: agency.id }).eq('id', demo.id);
+          console.log(`🎯 Seeded demo receptionist "${demo.business_name}" onto agency ${agency.id}`);
+        }
+      } catch (e) {
+        console.warn('⚠️ demo receptionist carry-over failed (non-fatal):', e.message);
+      }
+    }
+
     // Create user record
     const { data: user, error: userError } = await supabase
       .from('users')

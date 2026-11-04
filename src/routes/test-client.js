@@ -94,7 +94,23 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
 
     console.log(`🧪 Provisioning test client for agency: ${agency.name}`);
 
-    const testBusinessName = `${agency.name} - Test Business`;
+    // Seed from the receptionist the owner built on the marketing demo, if one
+    // was carried through signup (agencies.pending_test_client). Falls back to
+    // the generic plumbing default when there is no seed.
+    const { data: seedRow } = await supabase
+      .from('agencies')
+      .select('pending_test_client')
+      .eq('id', agencyId)
+      .single();
+    const seed = (seedRow && seedRow.pending_test_client && typeof seedRow.pending_test_client === 'object')
+      ? seedRow.pending_test_client : null;
+    const seedFacts = Array.isArray(seed?.facts) ? seed.facts.filter(Boolean).map((f) => String(f)) : [];
+    const seedKnowledge = seedFacts.length
+      ? { websiteContent: `Key facts about ${seed.business_name || 'the business'}:\n` + seedFacts.map((f) => `- ${f}`).join('\n') }
+      : null;
+
+    const testBusinessName = seed?.business_name ? String(seed.business_name).slice(0, 120) : `${agency.name} - Test Business`;
+    const testIndustry = seed?.industry ? String(seed.industry).slice(0, 60) : 'plumbing';
     const agencyCountry = (agency.country || 'US').toUpperCase();
     const agencyPhone = agency.phone ? formatPhoneE164(agency.phone, agencyCountry) : null;
     // Base the test client's number on the agency's OWN area code (from their phone),
@@ -112,13 +128,31 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
     // generic 'home_services' catch-all, which is too broad to sound good.
     const assistant = await createIndustryAssistant(
       testBusinessName,
-      'plumbing', // default test client industry
-      null,            // no knowledge base
+      testIndustry,    // seeded from the demo build, or 'plumbing' default
+      seedKnowledge,   // demo facts become the knowledge base, or null
       agencyPhone,
       null,            // no client ID yet
       agencyId
     );
     console.log(`✅ Test assistant created: ${assistant.id}`);
+
+    // Make the provisioned receptionist match what the owner heard on the demo:
+    // the same greeting (first thing a caller hears) and the same voice. Done in
+    // one PATCH right after creation. Best-effort: a failure leaves the industry
+    // default greeting/voice in place.
+    const assistantPatch = {};
+    if (seed?.greeting) assistantPatch.firstMessage = String(seed.greeting).slice(0, 1000);
+    if (seed?.voice && typeof seed.voice === 'object' && seed.voice.voiceId) assistantPatch.voice = seed.voice;
+    if (Object.keys(assistantPatch).length) {
+      try {
+        await fetch(`https://api.vapi.ai/assistant/${assistant.id}`, {
+          method: 'PATCH',
+          headers: { 'Authorization': `Bearer ${process.env.VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(assistantPatch),
+        });
+        console.log(`✅ Applied demo ${Object.keys(assistantPatch).join(' + ')} to test assistant`);
+      } catch (e) { console.warn('⚠️ demo greeting/voice patch failed:', e.message); }
+    }
 
     // Step 2: Provision phone number
     let phoneNumber = null;
@@ -179,7 +213,7 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
           sunday: { open: '9:00 AM', close: '5:00 PM', closed: true },
         },
         email: agency.email,
-        industry: 'plumbing',
+        industry: testIndustry,
         vapi_assistant_id: assistant.id,
         vapi_phone_number: phoneNumber,
         vapi_phone_id: vapiPhoneId,
@@ -198,10 +232,11 @@ router.post('/:agencyId/provision-test-client', async (req, res) => {
       return res.status(500).json({ error: 'Failed to create test client record' });
     }
 
-    // Step 4: Store test_client_id on agency
+    // Step 4: Store test_client_id on agency, and clear the demo seed now that
+    // it has been materialized into a real test client.
     await supabase
       .from('agencies')
-      .update({ test_client_id: testClient.id })
+      .update({ test_client_id: testClient.id, pending_test_client: null })
       .eq('id', agencyId);
 
     console.log(`🧪 Test client provisioned for ${agency.name}: ${testClient.business_name} → ${phoneNumber || 'no phone'}`);
@@ -234,12 +269,17 @@ router.get('/:agencyId/test-client', async (req, res) => {
 
     const { data: agency } = await supabase
       .from('agencies')
-      .select('test_client_id')
+      .select('test_client_id, pending_test_client')
       .eq('id', agencyId)
       .single();
 
+    // The receptionist the owner built on the marketing demo and carried through
+    // signup, if any, so the dashboard can show a seeded "Activate" card.
+    const pending = (agency && agency.pending_test_client && typeof agency.pending_test_client === 'object')
+      ? agency.pending_test_client : null;
+
     if (!agency?.test_client_id) {
-      return res.json({ client: null });
+      return res.json({ client: null, pending });
     }
 
     const { data: client } = await supabase
@@ -256,7 +296,7 @@ router.get('/:agencyId/test-client', async (req, res) => {
       } catch (e) { console.warn('live calls_this_month enrich failed:', e.message); }
     }
 
-    res.json({ client: client || null });
+    res.json({ client: client || null, pending });
 
   } catch (error) {
     console.error('Error fetching test client:', error);
