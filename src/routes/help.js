@@ -576,4 +576,46 @@ router.post('/message', async (req, res) => {
   }
 });
 
+// ============================================================================
+// GET /api/help/history
+// The agency's full help-widget conversation, rebuilt from widget_chat_log so
+// it is ALWAYS available server-side: it survives refreshes, new devices, and
+// sign-out, and the owner can scroll back through everything they have asked.
+// Scoped to the authenticated agency via the token (never another agency's),
+// and to the agency-dashboard widget. Marketing visitors have no token / no
+// persistent identity, so they stay session-only. Oldest first. Never throws:
+// returns an empty history on any problem so the widget never breaks.
+// ============================================================================
+router.get('/history', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.json({ messages: [] });
+    let agencyId = null;
+    try {
+      const jwt = require('jsonwebtoken');
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      agencyId = decoded.agencyId || decoded.agency_id || null;
+    } catch { return res.json({ messages: [] }); }
+    if (!agencyId) return res.json({ messages: [] });
+
+    const { data, error } = await supabase
+      .from('widget_chat_log')
+      .select('role, content, created_at')
+      .eq('agency_id', agencyId)
+      .eq('source', 'agency_dashboard')
+      .order('created_at', { ascending: false })
+      .limit(500);
+    if (error) { console.error('help history error:', error.message); return res.json({ messages: [] }); }
+
+    const messages = (data || [])
+      .reverse()
+      .filter((r) => (r.role === 'user' || r.role === 'assistant') && r.content)
+      .map((r) => ({ role: r.role, content: r.content }));
+    return res.json({ messages });
+  } catch (e) {
+    console.error('help history error:', e.message);
+    return res.json({ messages: [] });
+  }
+});
+
 module.exports = router;
