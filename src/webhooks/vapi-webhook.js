@@ -64,7 +64,7 @@
 // ============================================================================
 const { supabase, getClientByVapiPhoneNumber } = require('../lib/supabase');
 const { getPhoneNumberFromVapi } = require('../lib/vapi');
-const { sendCallNotificationSMS, sendDemoCallFollowUpSMS, sendSpamBlockedSMS } = require('../lib/notifications');
+const { sendCallNotificationSMS, sendDemoCallFollowUpSMS, sendSpamBlockedSMS, clientTrialCtaTail } = require('../lib/notifications');
 const { upsertContactFromCall } = require('../lib/contact-upsert');
 const { getCallBooking } = require('../lib/booking-call-cache');
 const { buildDynamicAssistantConfig } = require('../lib/assistant-config-builder');
@@ -617,7 +617,7 @@ async function handleDemoCall(agency, message, industryKey = null) {
         }
 
         lines.push('');
-        lines.push(`Ready to get this${businessName ? ` for ${businessName}` : ' for your business'}? Start free, no credit card needed:`);
+        lines.push(`Ready to get this${businessName ? ` for ${businessName}` : ' for your business'}? ${clientTrialCtaTail(agency)}`);
         lines.push(signupUrl);
 
         await sendDemoProspectSMS(agency, {

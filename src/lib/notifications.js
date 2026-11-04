@@ -225,6 +225,22 @@ async function sendAgencyPaymentSucceededSMS(agency) {
 // NOTE: handleDemoCall in vapi-webhook.js now inlines this and uses sendAndLogSMS.
 //       This function remains as a fallback export.
 // ============================================================================
+// Builds the demo follow-up / signup CTA tail from the agency's CLIENT trial
+// config, so the "credit card" and trial-length claims match what the prospect
+// actually sees at signup. Defaults (client_trial_days 7, require_card_for_trial
+// false) reproduce the original "free trial, no card" line.
+//   - 0 trial days: no free trial, so no trial/card claim at all
+//   - card required: name the trial length, but do NOT claim "no credit card"
+//   - no card: name the trial length and that no card is needed
+function clientTrialCtaTail(agency) {
+  const raw = agency?.client_trial_days;
+  const days = (typeof raw === 'number' && raw >= 0) ? raw : 7;
+  const cardRequired = agency?.require_card_for_trial === true;
+  if (days <= 0) return 'Get started here:';
+  if (cardRequired) return `Start your ${days}-day free trial:`;
+  return `Start your ${days}-day free trial, no credit card needed:`;
+}
+
 async function sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName, businessType, serviceDiscussed) {
   if (!callerPhone || callerPhone === 'Unknown') { console.log('⚠️ No caller phone for demo follow-up SMS'); return false; }
   const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
@@ -243,7 +259,7 @@ async function sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName, 
     lines.push(`✅ 24/7 coverage, never miss a call`);
     lines.push('');
   }
-  lines.push(`Ready to get one${callerBusinessName ? ` for ${callerBusinessName}` : ' for your business'}? Start free, no credit card needed:`);
+  lines.push(`Ready to get one${callerBusinessName ? ` for ${callerBusinessName}` : ' for your business'}? ${clientTrialCtaTail(agency)}`);
   lines.push(signupUrl);
 
   console.log(`📱 Sending demo follow-up SMS to ${callerPhone} for agency: ${agencyName}`);
@@ -351,7 +367,7 @@ async function sendClientTrialExpiredSMS(client, agency) {
   _emitLifecycle(agency?.id || client.agency_id, 'client.trial_expired', { client_id: client.id });
   const brandName = agency?.name || 'AI Receptionist';
   let upgradeUrl = agency?.marketing_domain && agency?.domain_verified ? `${agency.marketing_domain}/client/upgrade` : agency?.slug ? `${agency.slug}.myvoiceaiconnect.com/client/upgrade` : `myvoiceaiconnect.com/client/upgrade`;
-  const message = `⚠️ ${brandName} Trial Ended\n\nHi ${client.owner_name || client.business_name}, your 7-day trial has ended.\n\nYour AI receptionist is no longer answering calls.\n\nReactivate now: ${upgradeUrl}`;
+  const message = `⚠️ ${brandName} Trial Ended\n\nHi ${client.owner_name || client.business_name}, your free trial has ended.\n\nYour AI receptionist is no longer answering calls.\n\nReactivate now: ${upgradeUrl}`;
   // From the agency's warm demo number (see sendWelcomeSMS), platform fallback.
   return _logSMS({ phone: client.owner_phone, message, from: agency?.demo_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_trial_expired', metadata: { clientName: client.business_name } });
 }
@@ -654,7 +670,7 @@ module.exports = {
   sendAgencyWelcomeSMS, sendClientSignupNotificationSMS,
   sendAgencyTrialEndingSMS, sendAgencyPaymentFailedSMS,
   sendAgencySubscriptionCanceledSMS, sendAgencyPaymentSucceededSMS,
-  sendDemoCallFollowUpSMS, sendCallNotificationSMS, sendWelcomeSMS,
+  sendDemoCallFollowUpSMS, clientTrialCtaTail, sendCallNotificationSMS, sendWelcomeSMS,
   sendClientTrialExpiredSMS, sendClientPaymentFailedSMS,
   sendClientSubscriptionActivatedSMS, sendSpamBlockedSMS,
   sendEmail, sendClientEmail, sendAgencyWelcomeEmail,
