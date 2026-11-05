@@ -270,6 +270,7 @@ const usageReportRoutes = require('./routes/usage-report');
 const { getAgencyUsageSummary } = require('./lib/usage-tracker');
 const testClientRoutes = require('./routes/test-client');
 const bookingRoutes = require('./routes/booking');
+const nativeCalendarRoutes = require('./routes/native-calendar');
 const staffMembersRoutes = require('./routes/staff-members');
 const clientServicesRoutes = require('./routes/client-services');
 const cleanupOrphanedTestClients = require('./routes/cleanup-orphaned-test-clients');
@@ -2122,6 +2123,7 @@ app.use('/api/client', require('./routes/call-mode'));
 app.use('/api/client', clientContactsRoutes);
 app.use('/api/client', staffMembersRoutes);
 app.use('/api/client', clientServicesRoutes);
+app.use('/api/client', nativeCalendarRoutes); // native VoiceAI Connect calendar: settings, availability, appointment CRUD
 app.use('/api/client', toolConfigRoutes);
 app.use('/api/client', require('./routes/live-monitor')); // live call demo + monitor (SSE stream, takeover)
 app.use('/api/client', pwaTrackingRoutes);

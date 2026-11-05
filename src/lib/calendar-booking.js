@@ -273,6 +273,14 @@ async function getAvailableSlots(clientId, date, options) {
       return { success: true, slots: labels, date, provider: 'ghl' };
     }
 
+    // Native VoiceAI Connect calendar: availability is computed from our own
+    // appointments table (the source of truth) against the client's business
+    // hours, using the same slot-generation + conflict logic as the Google path
+    // below. No external calendar is read or written.
+    if (client.calendar_provider === 'native') {
+      return getNativeAvailableSlots(client, date, options);
+    }
+
     if (!client.google_calendar_connected) {
       return { success: false, error: 'Calendar not connected' };
     }
@@ -457,6 +465,139 @@ async function getAvailableSlots(clientId, date, options) {
 }
 
 // ====================================================================
+// Native VoiceAI Connect calendar availability.
+// Mirrors the Google slot engine in getAvailableSlots (business-hours slots in
+// the client's timezone, min-notice + horizon from client/agency defaults, the
+// same overlap test and SLOT_STEP), but sources busy ranges from OUR
+// appointments table instead of an external calendar. This is the source of
+// truth for native clients: every non-canceled appointment is a busy block.
+// options.excludeAppointmentId omits one row (used by reschedule so an
+// appointment never blocks its own slot).
+// ====================================================================
+async function getNativeAvailableSlots(client, date, options) {
+  try {
+    const timezone = client.timezone || 'America/New_York';
+
+    // Booking window: min notice + max horizon, client value then agency
+    // default then platform default (identical to the Google path).
+    let agencyDefaults = {};
+    if (client.agency_id) {
+      try {
+        const { data: ag } = await supabase
+          .from('agencies')
+          .select('default_min_booking_notice_minutes, default_max_booking_days_ahead')
+          .eq('id', client.agency_id)
+          .single();
+        agencyDefaults = ag || {};
+      } catch (e) { /* defaults below */ }
+    }
+    const pickNum = (...vals) => {
+      for (const v of vals) { const n = Number(v); if (v !== null && v !== undefined && v !== '' && !isNaN(n)) return n; }
+      return null;
+    };
+    const leadMinutes = pickNum(client.min_booking_notice_minutes, agencyDefaults.default_min_booking_notice_minutes, LEAD_TIME_MINUTES);
+    const maxDaysAhead = pickNum(client.max_booking_days_ahead, agencyDefaults.default_max_booking_days_ahead, 60);
+
+    if (maxDaysAhead != null && maxDaysAhead > 0) {
+      const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+      const [ty, tmo, td] = todayStr.split('-').map(Number);
+      const [ry, rmo, rd] = date.split('-').map(Number);
+      const daysOut = Math.round((Date.UTC(ry, rmo - 1, rd) - Date.UTC(ty, tmo - 1, td)) / 86400000);
+      if (daysOut > maxDaysAhead) {
+        return { success: true, slots: [], message: `We only take bookings up to ${maxDaysAhead} days ahead.`, provider: 'native' };
+      }
+    }
+
+    const businessHours = client.business_hours || {
+      monday: { open: '09:00', close: '17:00' },
+      tuesday: { open: '09:00', close: '17:00' },
+      wednesday: { open: '09:00', close: '17:00' },
+      thursday: { open: '09:00', close: '17:00' },
+      friday: { open: '09:00', close: '17:00' },
+      saturday: null,
+      sunday: null,
+    };
+
+    const [yy, mm, dd] = date.split('-').map(Number);
+    const noonLocal = zonedWallTimeToUTC(yy, mm, dd, 12, 0, timezone);
+    const dayName = noonLocal.toLocaleString('en-US', { timeZone: timezone, weekday: 'long' }).toLowerCase();
+    const hours = businessHours[dayName];
+    if (!hours || hours.closed === true || !hours.open || !hours.close) {
+      return { success: true, slots: [], message: 'Closed on this day', provider: 'native' };
+    }
+
+    const openTotal = parseTimeToMinutes(hours.open);
+    const closeTotal = parseTimeToMinutes(hours.close);
+    if (openTotal == null || closeTotal == null || closeTotal <= openTotal) {
+      return { success: true, slots: [], message: 'Closed on this day', provider: 'native' };
+    }
+
+    // Busy ranges: this client's non-canceled appointments on the local day.
+    // appointment_time is a UTC instant; duration is in minutes. The lower bound
+    // is widened so a booking that STARTS before local midnight but RUNS INTO
+    // the day is still caught.
+    const dayStartUTC = zonedWallTimeToUTC(yy, mm, dd, 0, 0, timezone);
+    const baseNoonUTC = new Date(Date.UTC(yy, mm - 1, dd, 12, 0, 0));
+    const nextNoonUTC = new Date(baseNoonUTC.getTime() + 24 * 60 * 60 * 1000);
+    const dayEndUTC = zonedWallTimeToUTC(nextNoonUTC.getUTCFullYear(), nextNoonUTC.getUTCMonth() + 1, nextNoonUTC.getUTCDate(), 0, 0, timezone);
+    const excludeId = options && options.excludeAppointmentId;
+
+    let busy = [];
+    try {
+      const lookbackMs = 12 * 60 * 60 * 1000;
+      const { data: rows, error: qErr } = await supabase
+        .from('appointments')
+        .select('id, appointment_time, duration, status')
+        .eq('client_id', client.id)
+        .gte('appointment_time', new Date(dayStartUTC.getTime() - lookbackMs).toISOString())
+        .lt('appointment_time', dayEndUTC.toISOString());
+      if (qErr) {
+        console.error('Native availability query error:', qErr.message);
+        return { success: false, error: 'Failed to read availability' };
+      }
+      busy = (rows || [])
+        .filter(r => r.status !== 'canceled' && r.status !== 'cancelled')
+        .filter(r => !excludeId || r.id !== excludeId)
+        .map(r => {
+          const start = new Date(r.appointment_time);
+          const dur = Number(r.duration) || client.appointment_duration || 30;
+          return { start, end: new Date(start.getTime() + dur * 60000) };
+        })
+        .filter(b => !isNaN(b.start.getTime()));
+    } catch (e) {
+      console.error('Native availability threw:', e.message);
+      return { success: false, error: 'Failed to read availability' };
+    }
+
+    const duration = (options && options.durationOverride) || client.appointment_duration || 30;
+    const buffer = (options && options.bufferMinutes) || 0;
+    const nowMs = Date.now();
+    const leadMs = (leadMinutes != null ? leadMinutes : LEAD_TIME_MINUTES) * 60000;
+    const slots = [];
+    const taken = [];
+
+    for (let cur = openTotal; cur + duration <= closeTotal; cur += SLOT_STEP_MINUTES) {
+      const hr = Math.floor(cur / 60);
+      const min = cur % 60;
+      const slotStartMs = zonedWallTimeToUTC(yy, mm, dd, hr, min, timezone).getTime();
+      const slotEndMs = slotStartMs + duration * 60000;
+      if (slotStartMs < nowMs + leadMs) continue;
+      const bufStartMs = slotStartMs - buffer * 60000;
+      const bufEndMs = slotEndMs + buffer * 60000;
+      const hasConflict = busy.some(b => bufStartMs < b.end.getTime() && bufEndMs > b.start.getTime());
+      if (!hasConflict) slots.push(formatSlotLabel(hr, min));
+      else if (taken.length < 4) taken.push(formatSlotLabel(hr, min));
+    }
+
+    console.log(`📅 Native availability for ${date} (${timezone}): ${slots.length} slots (duration: ${duration}min, buffer: ${buffer}min)`);
+    return { success: true, slots, date, dayName, taken, provider: 'native' };
+  } catch (err) {
+    console.error('getNativeAvailableSlots error:', err);
+    return { success: false, error: 'Failed to get availability' };
+  }
+}
+
+// ====================================================================
 // Entitlement for the CUSTOMER booking-confirmation SMS (a paid capability).
 //   - A reseller agency can offer it only on the Scale plan (trial counts as
 //     Scale, matching hasScale()).
@@ -501,15 +642,16 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     // Provider routing: GHL when it is the selected, connected calendar; else
     // Google. The live receptionist books into whichever the client connected.
     const useGhl = client.calendar_provider === 'ghl' && client.ghl_connected === true && !!client.ghl_access_token && !!client.ghl_calendar_id;
+    const useNative = client.calendar_provider === 'native';
     const googleConnected = client.google_calendar_connected === true;
-    if (!useGhl && !googleConnected) {
+    if (!useGhl && !useNative && !googleConnected) {
       return { success: false, error: 'Calendar not connected - appointment request noted for callback' };
     }
 
     // Google needs its access token up front; the GHL branch below fetches its
-    // own token when it writes the appointment.
+    // own token when it writes the appointment. Native writes no external event.
     let accessToken = null;
-    if (googleConnected && !useGhl) {
+    if (googleConnected && !useGhl && !useNative) {
       accessToken = await refreshAccessToken(client);
       if (!accessToken) {
         return { success: false, error: 'Calendar authentication failed' };
@@ -643,6 +785,12 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
       if (!ca.ok) { console.error('GHL createAppointment failed:', ca.status, ca.error); return { success: false, error: 'Failed to create appointment' }; }
       ghlEventId = ca.id;
       console.log('✅ Appointment booked in GoHighLevel:', ca.id);
+    } else if (useNative) {
+      // Native VoiceAI Connect calendar: the appointment lives only in our
+      // appointments table (the source of truth for native availability). No
+      // external event is written; googleEventId/ghlEventId stay null and it
+      // reaches the shared DB insert + webhook below.
+      console.log('✅ Appointment booked on the native calendar');
     } else {
       const event = {
         summary: eventTitle,
@@ -691,9 +839,13 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
 
     // Save to our database (staff_name column may not exist yet - fallback gracefully)
     const [aptY, aptMo, aptD] = date.split('-').map(Number);
-    const apptStartIso = ghlEventId
-      ? zonedWallTimeToUTC(aptY, aptMo, aptD, hr, min, timezone).toISOString()
-      : new Date(startDateTime).toISOString();
+    // Google's row keeps its existing naive-string instant (Google itself got
+    // the wall time + timeZone, so its event is correct); GHL and native store
+    // the instant computed from the client's timezone so the DB row is right
+    // regardless of the server's timezone.
+    const apptStartIso = googleEventId
+      ? new Date(startDateTime).toISOString()
+      : zonedWallTimeToUTC(aptY, aptMo, aptD, hr, min, timezone).toISOString();
     const appointmentRecord = {
       client_id: clientId,
       google_event_id: googleEventId,
@@ -952,6 +1104,7 @@ async function createAppointmentApi(params) {
     // Provider routing: GHL when it is the selected, connected calendar; else
     // Google when connected; else record-only (a real row, no external write).
     const useGhl = client.calendar_provider === 'ghl' && client.ghl_connected === true && !!client.ghl_access_token && !!client.ghl_calendar_id;
+    const useNative = client.calendar_provider === 'native';
     const googleConnected = client.google_calendar_connected === true;
     let googleEventId = null;
     let ghlEventId = null;
@@ -1029,6 +1182,17 @@ async function createAppointmentApi(params) {
       if (!resp.ok) { console.error('API createAppointment Google error:', await resp.text().catch(() => '')); return { ok: false, code: 'calendar_error', error: 'Failed to create the calendar event.' }; }
       googleEventId = (await resp.json()).id;
       bookingSource = 'api';
+    } else if (useNative) {
+      // Native path: confirm the slot against our own availability (which reads
+      // the appointments table), then record it. No external write.
+      if (p.checkAvailability !== false) {
+        const avail = await getAvailableSlots(p.clientId, p.date, { durationOverride: duration, bufferMinutes });
+        if (!avail.success) return { ok: false, code: 'calendar_error', error: 'Could not read the calendar to confirm availability.' };
+        const want = formatSlotLabel(reqHr, reqMin).replace(/\s+/g, ' ').trim().toLowerCase();
+        const free = (avail.slots || []).some((s) => s.replace(/\s+/g, ' ').trim().toLowerCase() === want);
+        if (!free) return { ok: false, code: 'slot_unavailable', error: 'That time is not available.', available_slots: avail.slots || [] };
+      }
+      bookingSource = 'api_native';
     }
 
     const record = {
@@ -1116,6 +1280,17 @@ async function rescheduleAppointmentApi(appt, params) {
         { method: 'PATCH', headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ start: { dateTime: startDateTime, timeZone: timezone }, end: { dateTime: endDateTime, timeZone: timezone } }) }
       );
       if (!resp.ok) { console.error('API reschedule Google error:', await resp.text().catch(() => '')); return { ok: false, code: 'calendar_error', error: 'Failed to update the calendar event.' }; }
+    } else if (client.calendar_provider === 'native') {
+      // Native reschedule: validate the new slot against our own availability
+      // (appointments table), excluding this appointment so it never blocks its
+      // own move. The row update below is the only write.
+      if (p.checkAvailability !== false) {
+        const avail = await getAvailableSlots(appt.client_id, p.date, { durationOverride: duration, bufferMinutes: 0, excludeAppointmentId: appt.id });
+        if (!avail.success) return { ok: false, code: 'calendar_error', error: 'Could not read the calendar to confirm availability.' };
+        const want = formatSlotLabel(reqHr, reqMin).replace(/\s+/g, ' ').trim().toLowerCase();
+        const free = (avail.slots || []).some((s) => s.replace(/\s+/g, ' ').trim().toLowerCase() === want);
+        if (!free) return { ok: false, code: 'slot_unavailable', error: 'That time is not available.', available_slots: avail.slots || [] };
+      }
     }
 
     const [nY, nMo, nD] = p.date.split('-').map(Number);
