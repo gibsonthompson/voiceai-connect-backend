@@ -1950,6 +1950,17 @@ async function updateAgencyLegal(req, res) {
     for (const t of LEGAL_TYPES) { if (typeof next[t] === 'string') delete next[t]; }
     if (Object.keys(clean).length > 0) next[type] = clean; else delete next[type];
 
+    // Persist the Terms <-> Billing field-sync flags when provided. Default is
+    // synced (a missing flag reads as true on the client), so we store the
+    // object as given. Only the two known flags are kept.
+    const bodySync = req.body?.sync;
+    if (bodySync && typeof bodySync === 'object' && !Array.isArray(bodySync)) {
+      next.sync = {
+        trial_terms: bodySync.trial_terms !== false,
+        refund_policy: bodySync.refund_policy !== false,
+      };
+    }
+
     const nextOverrides = Object.keys(next).length > 0 ? next : null;
     const { error } = await supabase
       .from('agencies')
