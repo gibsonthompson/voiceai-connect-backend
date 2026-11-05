@@ -3250,6 +3250,16 @@ async function ensureProvisionedOnReactivate(client, context, afterProvision = n
     if (client.vapi_assistant_id) { try { await enableAssistant(client.vapi_assistant_id); } catch (e) { console.error('Failed to enable assistant:', e.message); } }
     return { provisionedInline: true };
   }
+  // A self-signup still AWAITING manual provisioning must never be auto-provisioned
+  // by a webhook (checkout paid, subscription activated, etc.). Its number is
+  // attached only when someone presses "Provision number" in the client or agency
+  // dashboard. Billing/activation still proceed normally; the activation text just
+  // omits the number line until the button runs. Agency-added clients and genuine
+  // reactivations carry awaiting_manual_provision=false and fall through below.
+  if (client.awaiting_manual_provision === true) {
+    console.log(`⏸️ ${client.business_name} (${client.id}) is awaiting manual provision [${context}] - NOT auto-provisioning; the dashboard "Provision number" button will attach it.`);
+    return { provisionedInline: false, deferredManual: true };
+  }
   console.error(`🚨 Reactivating ${client.business_name} (${client.id}) with NO provisioned number [${context}] - re-provisioning to restore it.`);
   // Retry with backoff (idempotent) so a paid client is never stranded on a
   // single transient failure. Background runner keeps the webhook fast; the
@@ -3287,7 +3297,12 @@ async function provisionThenNotify(client, agency, plan, wasPendingPayment, cont
     try { await sendClientSubscriptionActivatedSMS(c, agency, plan); } catch (e) { console.error('Activated SMS failed:', e.message); }
   };
   const prov = await ensureProvisionedOnReactivate(client, context, sendTexts);
-  if (prov && prov.provisionedInline) { await sendTexts(); }
+  // Send activation texts inline when the number was already present, and also
+  // for a client awaiting manual provision (no number yet, and we deliberately
+  // did not provision one) so they still learn their subscription is active and
+  // can log in to attach the number. When we had to (re)provision, the texts fire
+  // from provisionWithRetry's afterProvision hook once the number is live.
+  if (prov && (prov.provisionedInline || prov.deferredManual)) { await sendTexts(); }
 }
 
 async function handleClientSubscriptionUpdated(subscription, stripeAccountId) {

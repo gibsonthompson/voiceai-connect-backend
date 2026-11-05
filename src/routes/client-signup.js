@@ -1311,14 +1311,14 @@ async function handleClientSignup(req, res) {
     // ============================================
     // STEPS 1-3: KNOWLEDGE BASE, ASSISTANT, PHONE
     // ────────────────────────────────────────────
-    // DEFERRED for card-required signups. A client who has NOT paid must never
-    // be handed a live, publishable number: the abandoned-checkout sweep reclaims
-    // a pending_payment number after 24h, which strands a client who published it
-    // and then took longer than a day to pay (the Searchvista incident). For
-    // card-required signups we create the row with NO number/assistant and
-    // provision at checkout.session.completed instead (handleClientCheckoutCompleted
-    // -> ensureProvisionedOnReactivate -> provisionClient). No-card trials and
-    // manual clients are unchanged: they provision immediately here.
+    // DEFERRED for ALL self-signups (2026-11-04). No self-signup, card-required
+    // or not, auto-provisions a number anymore. The row is created with NO
+    // number/assistant and awaiting_manual_provision=true, and the number is
+    // attached only when someone presses "Provision/Activate" in the client or
+    // agency dashboard (POST .../provision -> provisionClient). This stops a
+    // number being bought on every signup. Only handleAgencyAddClient (agency
+    // adds a client itself) still provisions immediately. The variables below
+    // stay null for the whole self-signup path.
     // ============================================
     let knowledgeBaseData = null;
     let assistant = null;
@@ -1326,64 +1326,19 @@ async function handleClientSignup(req, res) {
     let templateKB = null;
     let phoneResult = null;
 
-    if (!willRequireCard) {
-      // STEP 1: knowledge base (if website)
-      if (websiteUrl && websiteUrl.trim().length > 0) {
-        console.log('🌐 Creating knowledge base from website...');
-        try {
-          knowledgeBaseData = await createKnowledgeBaseFromWebsite(websiteUrl, businessName);
-          if (knowledgeBaseData) console.log(`✅ Knowledge base ready: ${knowledgeBaseData.knowledgeBaseId}`);
-        } catch (kbError) {
-          console.error('⚠️ Knowledge base error (non-blocking):', kbError.message);
-        }
-      }
-
-      // STEP 2: VAPI assistant
-      console.log(`🤖 Creating VAPI assistant for: ${industry}`);
-      assistant = await createIndustryAssistant(
-        businessName,
-        industry,
-        knowledgeBaseData,
-        formattedOwnerPhone,
-        null,     // clientId (not created yet)
-        agencyId  // Pass agencyId for template override lookup
-      );
-      createdAssistantId = assistant.id;
-      console.log(`✅ Assistant created: ${assistant.id}`);
-
-      queryToolId = await extractQueryToolId(assistant.id);
-      createdQueryToolId = queryToolId;
-      if (queryToolId) console.log(`🔧 Query tool ID extracted: ${queryToolId}`);
-
-      templateKB = assistant._templateKnowledgeBase || null;
-      if (templateKB) console.log(`📚 Agency template KB will be inherited by new client`);
-
-      // STEP 3: provision phone number
-      try {
-        phoneResult = await provisionPhoneForClient(agency, {
-          businessCity,
-          businessState,
-          businessName,
-          phone,
-          country: clientCountry
-        }, assistant.id, voiceRouting, planType);
-      } catch (phoneError) {
-        await cleanupVapiResources(createdAssistantId, createdQueryToolId, businessName);
-        createdAssistantId = null;
-        createdQueryToolId = null;
-        console.error('❌ Phone provisioning failed:', phoneError.message);
-        return res.status(503).json({
-          error: 'Provisioning failed',
-          message: getFriendlyProvisioningError(phoneError),
-        });
-      }
-      console.log(`✅ Phone provisioned (${phoneResult?.provisioningMethod}): ${phoneResult.number}`);
-
-      // Enable two-way SMS on the provisioned number (non-blocking)
-      try { await enableSMSForNumber(phoneResult.number); } catch (e) { console.warn('⚠️ SMS enable failed:', e.message); }
-    } else {
-      console.log(`💳 Card-required signup for ${businessName}, deferring number + assistant until checkout completes (no publishable number before payment).`);
-    }
+    // ────────────────────────────────────────────────────────────────────
+    // Self-signups NO LONGER auto-provision. The client row is created with
+    // no assistant and no number, and awaiting_manual_provision=true (set in
+    // the insert payload below). It is provisioned only when someone presses
+    // "Provision number" in the client or agency dashboard
+    // (POST .../provision -> provisionClient). This stops a number being
+    // bought on every signup. Agency-added clients (handleAgencyAddClient)
+    // are unchanged and still provision immediately. Card-required signups
+    // still run Stripe checkout below for billing; the number is attached by
+    // the button, not automatically at checkout. knowledgeBaseData, assistant,
+    // queryToolId, templateKB and phoneResult all stay null here.
+    // ────────────────────────────────────────────────────────────────────
+    console.log(`\u{1F17F}\uFE0F Self-signup for ${businessName}: number + assistant deferred to manual provision from the dashboard (awaiting_manual_provision=true).`);
 
     // ============================================
     // STEP 4: CREATE CLIENT RECORD
@@ -1420,6 +1375,9 @@ async function handleClientSignup(req, res) {
       country: clientCountry,
       phone_number: phoneResult?.number || null,
       phone_area_code: (phoneResult?.number && phoneResult.number.length >= 5) ? phoneResult.number.substring(2, 5) : null,
+      // Self-signup: created WITHOUT a number. Someone presses the dashboard
+      // "Provision number" button (client or agency) to attach it.
+      awaiting_manual_provision: true,
       owner_name: ownerName,
       owner_phone: formattedOwnerPhone,
       timezone: timezoneFromPhone(formattedOwnerPhone) || (phoneResult?.number ? timezoneFromPhone(phoneResult.number) : null) || null,
@@ -1631,14 +1589,18 @@ async function handleClientSignup(req, res) {
     // ============================================
     // STEP 8: SEND WELCOME SMS (guarded)
     // ────────────────────────────────────────────
-    // Skipped only for card-required pending_payment signups, where the welcome
-    // SMS is deferred to handleClientCheckoutCompleted (after the card is on
-    // file). A manual client has no checkout URL, so it takes the immediate-send
-    // path below, exactly like a no-card trial.
+    // The welcome SMS carries the client's new AI number, so it is sent when the
+    // number is actually attached, not at signup. provisionClient sends it at
+    // activation (the dashboard button), and the card-required webhook path
+    // defers it too. Self-signups now reach here with phoneResult=null (number
+    // deferred to manual provision), so the number-carrying send below is skipped
+    // by design; the guarded send stays for any future immediate-provision path.
     // ============================================
     if (cardRequiredCheckoutUrl) {
-      console.log('📱 Welcome SMS deferred (card-required pending_payment); webhook will send after activation');
-    } else if (formattedOwnerPhone && formattedOwnerPhone !== 'undefined' && phoneResult) {
+      console.log('📱 Welcome SMS deferred (card-required pending_payment); sent at activation');
+    } else if (!phoneResult) {
+      console.log('📱 Welcome SMS deferred (self-signup, number not provisioned yet); sent at activation');
+    } else if (formattedOwnerPhone && formattedOwnerPhone !== 'undefined') {
       console.log('📱 Sending welcome SMS...');
       await sendWelcomeSMS(formattedOwnerPhone, businessName, phoneResult.number, agency);
     } else {
@@ -1650,8 +1612,8 @@ async function handleClientSignup(req, res) {
     // ============================================
     // Card-required signups: defer this to the Stripe webhook (after payment),
     // so the platform owner is NOT alerted about signups that never complete
-    // checkout. No-card / manual clients are fully provisioned now, so they
-    // take the immediate-send path.
+    // checkout. No-card / manual self-signups notify immediately: the number is
+    // deferred, but the signup itself is real and the owner should hear about it.
     if (cardRequiredCheckoutUrl) {
       console.log('📱 Signup notification deferred (card-required pending_payment); webhook will send after payment');
     } else {
@@ -2300,6 +2262,10 @@ async function provisionClient(clientId) {
         knowledge_base_id: knowledgeBaseData?.knowledgeBaseId || null,
         knowledge_base_data: templateKB || client.knowledge_base_data || null,
         status: 'active',
+        // The number is now live, so a self-signup client is no longer waiting on
+        // a manual provision. Clearing this unconditionally is safe: agency-added
+        // and reactivated clients already have it false.
+        awaiting_manual_provision: false,
         provisioning_method: phoneResult?.provisioningMethod || 'platform',
         voice_routing: phoneResult.voiceRouting || client.voice_routing || 'vapi_direct',
         // Inherit nav defaults if not already set
@@ -2388,6 +2354,10 @@ async function reprovisionStrandedClients({ dryRun = false, limit = 25 } = {}) {
     .eq('status', 'active')
     .is('vapi_phone_number', null)
     .in('subscription_status', ['active', 'trial', 'trialing', 'manual'])
+    // Self-signup clients waiting on a manual provision are intentionally
+    // number-less; never auto-buy a number for them here (that's the whole point
+    // of the manual-provision flow). Only genuinely stranded clients get swept.
+    .or('awaiting_manual_provision.is.null,awaiting_manual_provision.eq.false')
     .or(`provisioning_started_at.is.null,provisioning_started_at.lt.${staleBefore}`)
     .limit(limit);
 

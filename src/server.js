@@ -1381,6 +1381,77 @@ app.put('/api/agency/:agencyId/clients/:clientId/industry', requireAgencyAccess(
 // GENERIC CLIENT FIELD UPDATE (business_name, owner_phone, etc.)
 // Whitelisted fields only. Used by the client detail page inline-edit UI.
 // ============================================================================
+// ============================================================================
+// MANUAL PROVISION (2026-11-04)
+// ----------------------------------------------------------------------------
+// Self-signups (signup form / embed widget) are now created WITHOUT a phone
+// number (awaiting_manual_provision=true). A number is attached only when
+// someone presses "Provision number" in the client OR agency dashboard, which
+// hits one of the two routes below. Agency-ADDED clients are unaffected (they
+// still provision immediately at add time).
+//
+// handleManualProvision is shared by both routes. It is idempotent and safe to
+// double-click: provisionClient holds an atomic claim that prevents a double-buy,
+// and a client that already has a number short-circuits. Card-required signups
+// must finish Stripe checkout first (we never publish a number before payment).
+// `scopeAgencyId`, when passed, requires the client to belong to that agency.
+async function handleManualProvision(req, res, scopeAgencyId = null) {
+  try {
+    const clientId = req.params.clientId;
+    let q = supabase
+      .from('clients')
+      .select('id, agency_id, vapi_phone_number, subscription_status, awaiting_manual_provision, business_name')
+      .eq('id', clientId);
+    if (scopeAgencyId) q = q.eq('agency_id', scopeAgencyId);
+    const { data: client, error } = await q.single();
+    if (error || !client) return res.status(404).json({ error: 'Client not found' });
+
+    // Already has a number: no-op so a stale button click is harmless.
+    if (client.vapi_phone_number) {
+      return res.json({ success: true, already_provisioned: true, awaiting_manual_provision: false, phone_number: client.vapi_phone_number });
+    }
+
+    // This button is ONLY for self-signups explicitly awaiting a manual provision.
+    // A number-less client that is NOT awaiting (a genuine reactivation or a
+    // stranded/released number) is restored by the Stripe reactivation path and
+    // the stranded-sweep cron, never here, so we refuse rather than risk an
+    // out-of-band provision or a double-buy.
+    if (client.awaiting_manual_provision !== true) {
+      return res.status(409).json({ error: 'not_awaiting', message: 'This client is not awaiting manual provisioning.' });
+    }
+
+    // Must be in a serviceable billing state. Blocks pending_payment (card-required,
+    // not yet paid) and any expired/canceled/suspended account, which must
+    // reactivate through billing rather than get a fresh number from this button.
+    const SERVICEABLE = ['trial', 'trialing', 'active', 'manual', 'past_due'];
+    const st = (client.subscription_status || '').toLowerCase();
+    if (!SERVICEABLE.includes(st)) {
+      const msg = (st === 'pending_payment' || st === 'pending')
+        ? 'Finish checkout to activate billing, then provision the number.'
+        : 'This account is not active. Reactivate the subscription before provisioning a number.';
+      return res.status(409).json({ error: 'not_serviceable', message: msg });
+    }
+
+    const updated = await provisionClient(clientId);
+    if (!updated || !updated.vapi_phone_number) {
+      // Claim not won (a provision is already running) or nothing came back.
+      return res.status(202).json({ success: false, in_progress: true, message: 'Provisioning is already underway. Refresh in a moment.' });
+    }
+    return res.json({
+      success: true,
+      awaiting_manual_provision: false,
+      phone_number: updated.vapi_phone_number,
+      vapi_assistant_id: updated.vapi_assistant_id || null,
+    });
+  } catch (e) {
+    console.error('❌ Manual provision failed:', e.message);
+    return res.status(503).json({ error: 'provisioning_failed', message: 'Could not provision the number right now. Please try again in a moment.' });
+  }
+}
+
+// Agency dashboard "Provision number" button (client detail page).
+app.post('/api/agency/:agencyId/clients/:clientId/provision', requireAgencyAccess('clients'), (req, res) => handleManualProvision(req, res, req.params.agencyId));
+
 app.put('/api/agency/:agencyId/clients/:clientId', requireAgencyAccess('clients'), async (req, res) => {
   try {
     const { agencyId, clientId } = req.params;
@@ -2106,6 +2177,12 @@ app.get('/api/client/:clientId/details', requireClientAccess(), async (req, res)
     res.status(500).json({ error: 'Failed to get client details' });
   }
 });
+
+// Client dashboard "Provision number" button. Self-signups land here without a
+// number (awaiting_manual_provision); this attaches it. Shares the same handler
+// as the agency route (requireClientAccess already scopes the token to :clientId,
+// so no agency scoping needed here).
+app.post('/api/client/:clientId/provision', requireClientAccess(), (req, res) => handleManualProvision(req, res));
 
 // ============================================================================
 // VOICES ENDPOINT (Public)
