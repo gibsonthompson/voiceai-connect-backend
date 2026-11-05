@@ -2191,10 +2191,14 @@ async function cancelClientSubscription(req, res) {
       }
     }
 
-    // Immediate teardown is agency/admin only. A client cancelling their own plan
-    // does so at period end (they keep what they paid for), so they can never
-    // instantly wipe out paid service by mistake.
-    const wantImmediate = immediate === true && (isManagingAgency || isSuperAdmin);
+    // When a client cancellation takes effect is set by the AGENCY via
+    // client_cancel_mode: 'period_end' (default, the client keeps what they paid
+    // for until the period ends) or 'immediate' (service ends now). That agency
+    // policy governs client self-cancels. Separately, an agency/admin can always
+    // force an immediate cancel on a per-action basis via immediate=true, even
+    // when the agency's default is period_end.
+    const agencyWantsImmediate = agency.client_cancel_mode === 'immediate';
+    const wantImmediate = agencyWantsImmediate || (immediate === true && (isManagingAgency || isSuperAdmin));
 
     // ── Paystack client: I own the billing schedule (no Stripe subscription).
     //    A Paystack client also has no stripe_connected_subscription_id, so this

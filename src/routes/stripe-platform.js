@@ -986,7 +986,6 @@ async function handleAgencyCheckoutCompleted(session) {
         stripe_subscription_id: session.subscription,
         trial_ends_at: null,
         numbers_release_at: null,     // came back in time: keep the client numbers
-        plan_cancel_at: null,         // reactivated: clear any pending period-end cancel
         data_retention_until: null,   // reactivated: cancel the 90-day data purge
         data_purged_at: null,
         max_team_members_agency: null,
@@ -1012,7 +1011,6 @@ async function handleAgencyCheckoutCompleted(session) {
         stripe_subscription_id: session.subscription,
         trial_ends_at: trialEndsAt,
         numbers_release_at: null,     // clear any stale grace deadline on (re)activation
-        plan_cancel_at: null,         // fresh subscription: not scheduled to cancel
         data_retention_until: null,   // reactivated: cancel the 90-day data purge
         data_purged_at: null,
         // Clear per-row team caps so plan-based defaults in routes/team.js
@@ -1145,12 +1143,6 @@ async function handleAgencySubscriptionUpdated(subscription) {
     trial_ends_at: subscription.trial_end
       ? new Date(subscription.trial_end * 1000)
       : null,
-    // Keep the period-end cancellation marker in sync with Stripe, so a cancel
-    // or resume done either in our UI OR directly in the Stripe portal is always
-    // reflected in the dashboard banner.
-    plan_cancel_at: subscription.cancel_at_period_end
-      ? new Date(((subscription.cancel_at || subscription.current_period_end) || 0) * 1000).toISOString()
-      : null,
   };
 
   if (planChanged) {
@@ -1231,7 +1223,6 @@ async function handleAgencySubscriptionDeleted(subscription) {
       plan_type: 'free',
       stripe_subscription_id: null,
       trial_ends_at: null,
-      plan_cancel_at: null,
       numbers_release_at: graceReleaseAt,
       data_retention_until: dataRetentionAt,
       data_purged_at: null,

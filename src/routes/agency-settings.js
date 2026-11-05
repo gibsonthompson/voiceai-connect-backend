@@ -228,10 +228,10 @@ function publicAgencyShape(agency) {
     cc_growth_addon: agency.cc_growth_addon === true,
     // Plan type (for feature gating)
     plan_type: agency.plan_type,
-    // When set, the agency has scheduled a period-end cancellation: they and
-    // their clients stay live until this timestamp, then the subscription ends.
-    // Powers the "Plan cancels on <date> / Resume" banner in billing settings.
-    plan_cancel_at: agency.plan_cancel_at || null,
+    // How a CLIENT cancellation ends service: 'period_end' (default, keep service
+    // until the paid period ends) or 'immediate' (end now). Set by the agency and
+    // honored by cancelClientSubscription for client self-cancels.
+    client_cancel_mode: agency.client_cancel_mode === 'immediate' ? 'immediate' : 'period_end',
     // Comp overrides. access_plan is a feature-tier override (a comped partner
     // can sit on 'scale' features while plan_type/billing stays elsewhere); the
     // frontend folds it into the effective plan so gated features unlock.
@@ -825,6 +825,7 @@ async function updateAgencySettings(req, res) {
       // and whether clients can cancel from their dashboard.
       'show_lower_plans_on_upgrade',
       'allow_client_cancel',
+      'client_cancel_mode',
       'plan_badge_1', 'plan_badge_2', 'plan_badge_3',
       // Phase 3 - white-label plan customization
       'plan_starter_name', 'plan_pro_name', 'plan_growth_name',
@@ -927,6 +928,8 @@ async function updateAgencySettings(req, res) {
     if (updates.show_client_discount_code !== undefined) updates.show_client_discount_code = updates.show_client_discount_code === true;
     if (updates.show_lower_plans_on_upgrade !== undefined) updates.show_lower_plans_on_upgrade = updates.show_lower_plans_on_upgrade === true;
     if (updates.allow_client_cancel !== undefined) updates.allow_client_cancel = updates.allow_client_cancel === true;
+    // Only the two valid modes persist; anything else falls back to the default.
+    if (updates.client_cancel_mode !== undefined) updates.client_cancel_mode = updates.client_cancel_mode === 'immediate' ? 'immediate' : 'period_end';
     for (const _bk of ['plan_badge_1', 'plan_badge_2', 'plan_badge_3']) {
       if (updates[_bk] !== undefined) updates[_bk] = (updates[_bk] == null) ? null : String(updates[_bk]).slice(0, 40);
     }
