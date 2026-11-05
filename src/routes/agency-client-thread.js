@@ -34,6 +34,43 @@ const MAX_BODY = 4000;
 let sendAndLogSMS = async () => {};
 try { ({ sendAndLogSMS } = require('../lib/sms-logger')); } catch (e) { /* SMS disabled */ }
 
+// Platform owner's phone for admin heads-up texts. Same resolution the widget
+// escalation (help.js) and support routes use.
+const SUPPORT_PHONE = process.env.SUPPORT_PHONE_NUMBER || process.env.PLATFORM_OWNER_PHONE || '+16783161454';
+
+// Text the platform owner when an agency posts into their platform-support
+// thread from the Inbox (a brand-new thread OR a reply on an existing one).
+// Before this, only the widget escalation texted the owner, so a message typed
+// straight into the Inbox bumped admin_unread silently and could sit unseen.
+// Best-effort: never blocks or fails the send.
+async function notifyPlatformOfInboxMessage({ agencyId, body, isNew }) {
+  try {
+    if (!SUPPORT_PHONE) return;
+    let who = 'An agency';
+    try {
+      const { data: agency } = await supabase.from('agencies').select('name').eq('id', agencyId).maybeSingle();
+      if (agency && agency.name) who = agency.name;
+    } catch (e) { /* name is best-effort */ }
+    const preview = String(body || '').trim().slice(0, 140);
+    const smsBody = [
+      isNew ? '🆘 New support message' : '💬 New reply',
+      `From ${who}, in your inbox.`,
+      preview ? `"${preview}"` : null,
+      'Check the admin dashboard to reply.',
+    ].filter(Boolean).join('\n');
+    await sendAndLogSMS({
+      phone: SUPPORT_PHONE,
+      message: smsBody,
+      agencyId,
+      recipientType: 'admin',
+      messageType: 'inbox_platform_message',
+      metadata: { direction: 'inbound', isNew: !!isNew },
+    });
+  } catch (e) {
+    console.error('platform inbox heads-up SMS failed (non-blocking):', e.message);
+  }
+}
+
 function clean(str, max) {
   return String(str == null ? '' : str).trim().slice(0, max);
 }
@@ -535,6 +572,7 @@ agencyRouter.post('/:agencyId/inbox/send', requireAgencyAccess('dashboard'), asy
       if (!requestId) {
         const { data: created, error } = await supabase.from('support_requests').insert({ agency_id: agencyId, user_type: 'agency', message: body, source: 'inbox', status: 'open', last_sender: 'agency', admin_unread: 1 }).select('id').single();
         if (error) throw error;
+        await notifyPlatformOfInboxMessage({ agencyId, body, isNew: true });
         return res.json({ success: true, started: true, request_id: created.id });
       }
       const { data: msg, error: insErr } = await supabase.from('support_thread_messages').insert({ request_id: requestId, sender: 'agency', body, read_by_agency: true, read_by_admin: false }).select('id').single();
@@ -543,6 +581,7 @@ agencyRouter.post('/:agencyId/inbox/send', requireAgencyAccess('dashboard'), asy
       const upd = { admin_unread: ((cur && cur.admin_unread) || 0) + 1, last_reply_at: new Date().toISOString() };
       if (cur && cur.status === 'resolved') upd.status = 'open';
       await supabase.from('support_requests').update(upd).eq('id', requestId).eq('agency_id', agencyId);
+      await notifyPlatformOfInboxMessage({ agencyId, body, isNew: false });
       return res.json({ success: true, message_id: msg.id });
     }
 

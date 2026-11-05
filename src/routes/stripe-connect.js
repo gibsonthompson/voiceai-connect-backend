@@ -966,6 +966,56 @@ async function syncConnectBranding(agencyOrId) {
   }
 }
 
+// Normalize a human-entered phone to E.164 for Stripe (US default). Strips
+// formatting and any stray bidi/control characters, so "(512) 766-3717" becomes
+// "+15127663717". Returns null when there aren't enough digits to use.
+function toE164Phone(raw) {
+  if (!raw) return null;
+  const str = String(raw).trim();
+  const hadPlus = str.startsWith('+');
+  const digits = str.replace(/[^\d]/g, '');
+  if (!digits) return null;
+  if (hadPlus) return `+${digits}`;
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  return `+${digits}`;
+}
+
+// Push the agency's customer-support phone to their connected Stripe account's
+// business_profile.support_phone, so it shows on the account's Stripe receipts
+// and invoices. There is no field for this in the Express dashboard, so the
+// platform sets it on the agency's behalf. Uses the agency's support_phone,
+// falling back to their main phone. Best-effort: never throws; callers treat it
+// as fire and forget so a Stripe hiccup never blocks a settings save.
+async function syncConnectSupportPhone(agencyOrId) {
+  try {
+    let agency = agencyOrId;
+    if (!agency || typeof agency === 'string') {
+      const agencyId = typeof agencyOrId === 'string' ? agencyOrId : null;
+      if (!agencyId) return { synced: false, reason: 'no_agency' };
+      const { data, error } = await supabase
+        .from('agencies')
+        .select('id, name, stripe_account_id, support_phone, normalized_phone, phone')
+        .eq('id', agencyId)
+        .single();
+      if (error || !data) return { synced: false, reason: 'agency_not_found' };
+      agency = data;
+    }
+    if (!agency.stripe_account_id) return { synced: false, reason: 'not_connected' };
+    const e164 = toE164Phone(agency.support_phone || agency.normalized_phone || agency.phone);
+    if (!e164) return { synced: false, reason: 'no_phone', accountId: agency.stripe_account_id };
+
+    await stripe.accounts.update(agency.stripe_account_id, {
+      business_profile: { support_phone: e164 },
+    });
+    console.log(`☎️  Support phone synced to Connect account ${agency.stripe_account_id} for ${agency.name || agency.id}: ${e164}`);
+    return { synced: true, accountId: agency.stripe_account_id, support_phone: e164 };
+  } catch (error) {
+    console.error('❌ Support phone sync failed:', error.message);
+    return { synced: false, reason: 'error', error: error.message };
+  }
+}
+
 // Express handler for an explicit resync, useful for backfilling agencies that
 // connected before this existed. Mount it wherever the other connect routes are
 // mounted, behind the same access guard as the rest of the Payments tab.
@@ -975,16 +1025,19 @@ async function syncConnectBrandingHandler(req, res) {
     if (!agencyId) return res.status(400).json({ error: 'agencyId required' });
 
     const result = await syncConnectBranding(agencyId);
+    // Backfill the support phone in the same resync, so one call covers branding
+    // + the customer-support phone that has no field in the Express dashboard.
+    const phoneResult = await syncConnectSupportPhone(agencyId);
 
-    if (!result.synced) {
+    if (!result.synced && !phoneResult.synced) {
       const status = result.reason === 'agency_not_found' ? 404
         : result.reason === 'not_connected' ? 400
         : result.reason === 'error' ? 500
         : 200;
-      return res.status(status).json({ success: false, ...result });
+      return res.status(status).json({ success: false, branding: result, support_phone: phoneResult });
     }
 
-    res.json({ success: true, ...result });
+    res.json({ success: true, ...result, support_phone: phoneResult });
   } catch (error) {
     console.error('Branding sync endpoint error:', error);
     res.status(500).json({ error: 'Failed to sync branding' });
@@ -3647,7 +3700,8 @@ module.exports = {
   cancelClientSubscription,     // agency/client/admin cancel (period-end default)
   setClientCustomPricing,       // white-glove per-client custom pricing
   syncConnectBranding,          // push agency logo + colors to their Connect account
-  syncConnectBrandingHandler,   // express handler for an explicit resync
+  syncConnectSupportPhone,      // push agency support phone to their Connect account
+  syncConnectBrandingHandler,   // express handler for an explicit resync (branding + support phone)
   handleConnectStripeWebhook,
   expireTrials,
   reconcileClientSubscriptions, // self-heal DB rows vs real Stripe status

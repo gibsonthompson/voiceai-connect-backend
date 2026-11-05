@@ -108,7 +108,7 @@ const { getAgencyPlans, generatePlanKey } = require('../lib/plans');
 // item is re-pointed to a fresh price. updateAgencySettings fires this in the
 // background after such a change. Requiring stripe-connect here is safe: it
 // does not require this module back (no circular dependency).
-const { repriceMinuteItemsForAgency } = require('./stripe-connect');
+const { repriceMinuteItemsForAgency, syncConnectSupportPhone } = require('./stripe-connect');
 const paystack = require('../lib/paystack');
 const flutterwave = require('../lib/flutterwave');
 const { encrypt } = require('../lib/encryption');
@@ -1609,6 +1609,16 @@ async function updateAgencySettings(req, res) {
           if (r?.ok) console.log(`Minute reprice sweep for ${agencyId}: repriced ${r.repriced}, attached ${r.attached}, skipped ${r.skipped}`);
         })
         .catch((e) => console.error('Minute reprice sweep failed (non-fatal):', e.message));
+    }
+
+    // If the support phone (or main phone it falls back to) changed, push it to
+    // the connected Stripe account's business_profile.support_phone so it shows
+    // on Stripe receipts/invoices. The Express dashboard has no field for this,
+    // so the platform sets it. Background + best-effort: never blocks the save.
+    if ('support_phone' in sanitizedUpdates || 'phone' in sanitizedUpdates) {
+      syncConnectSupportPhone(agencyId)
+        .then((r) => { if (r?.synced) console.log(`Support phone synced for ${agencyId}: ${r.support_phone}`); })
+        .catch((e) => console.error('Support phone sync failed (non-fatal):', e.message));
     }
 
     res.json({
