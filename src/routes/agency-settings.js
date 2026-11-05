@@ -1231,8 +1231,10 @@ async function updateAgencySettings(req, res) {
           }
         }
 
+        // -1 is the "unlimited" sentinel: minutes are never billed on this plan.
+        // Any other negative or non-integer value is invalid and falls back to 0.
         let included_minutes = Number(p.included_minutes);
-        if (!Number.isInteger(included_minutes) || included_minutes < 0) included_minutes = 0;
+        if (!Number.isInteger(included_minutes) || included_minutes < -1) included_minutes = 0;
 
         const description = typeof p.description === 'string' ? p.description.trim().slice(0, 200) : '';
         const features = (p.features && typeof p.features === 'object' && !Array.isArray(p.features)) ? p.features : {};

@@ -358,6 +358,22 @@ async function createConnectMinutePrice(agency, plan, client) {
 
   const recurring = { interval: 'month', usage_type: 'metered', meter: meterId };
 
+  if (included < 0) {
+    // Unlimited included minutes (-1): every minute is free. A single $0 tier
+    // covers all usage, so the client is never charged for voice minutes.
+    return stripe.prices.create({
+      product: product.id,
+      currency,
+      recurring,
+      billing_scheme: 'tiered',
+      tiers_mode: 'graduated',
+      tiers: [
+        { up_to: 'inf', unit_amount: 0 },
+      ],
+      metadata: { plan, kind: 'voice_minutes' },
+    }, { stripeAccount: acct });
+  }
+
   if (included > 0) {
     return stripe.prices.create({
       product: product.id,

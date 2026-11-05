@@ -85,6 +85,7 @@ async function computeOverageCents(client, agency, dueDateISO) {
     }
 
     const included = includedMinutesForPlan(agency, client.plan_type);
+    if (included < 0) return 0; // -1 = unlimited included minutes: never bill overage
     const overage = Math.max(0, totalMinutes - included);
     if (overage <= 0) return 0;
 

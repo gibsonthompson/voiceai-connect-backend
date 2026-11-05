@@ -135,7 +135,8 @@ async function getAgencyMonthlyReport(agencyId, opts = {}) {
     const mm = minutesByClient[client.id] || { billable: 0, spam: 0 };
 
     const minutesUsed = mm.billable; // non-spam
-    const billableMinutes = passThrough ? Math.max(0, minutesUsed - includedMinutes) : 0;
+    const unlimitedMinutes = includedMinutes < 0; // -1 = unlimited, never billed
+    const billableMinutes = (passThrough && !unlimitedMinutes) ? Math.max(0, minutesUsed - includedMinutes) : 0;
     const minuteChargeCents = Math.round(billableMinutes * rateCents);
     const totalCents = basePlanCents + minuteChargeCents;
     const billingMode = client.stripe_connected_subscription_id ? 'stripe' : 'manual';
@@ -233,7 +234,7 @@ function toCSV(report) {
       c.totalCalls,
       c.spamCalls,
       c.minutesUsed,
-      c.includedMinutes,
+      c.includedMinutes < 0 ? 'Unlimited' : c.includedMinutes,
       c.billableMinutes,
       formatCents(c.perMinuteRateCents),
       formatCents(c.minuteChargeCents),
@@ -267,7 +268,7 @@ function renderReportHTML(report) {
         <td style="text-align:right">${c.totalCalls}</td>
         <td style="text-align:right">${c.spamCalls}</td>
         <td style="text-align:right">${c.minutesUsed}</td>
-        <td style="text-align:right">${c.includedMinutes}</td>
+        <td style="text-align:right">${c.includedMinutes < 0 ? 'Unlimited' : c.includedMinutes}</td>
         <td style="text-align:right">${c.billableMinutes}</td>
         <td style="text-align:right">${formatCents(c.minuteChargeCents)}</td>
         <td style="text-align:right">${formatCents(c.basePlanCents)}</td>
