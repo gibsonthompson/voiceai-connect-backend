@@ -228,6 +228,10 @@ function publicAgencyShape(agency) {
     cc_growth_addon: agency.cc_growth_addon === true,
     // Plan type (for feature gating)
     plan_type: agency.plan_type,
+    // When set, the agency has scheduled a period-end cancellation: they and
+    // their clients stay live until this timestamp, then the subscription ends.
+    // Powers the "Plan cancels on <date> / Resume" banner in billing settings.
+    plan_cancel_at: agency.plan_cancel_at || null,
     // Comp overrides. access_plan is a feature-tier override (a comped partner
     // can sit on 'scale' features while plan_type/billing stays elsewhere); the
     // frontend folds it into the effective plan so gated features unlock.
@@ -1875,7 +1879,7 @@ async function disconnectFlutterwave(req, res) {
 // are always published. These handlers read and write only the field values.
 // Only whitelisted keys are accepted; everything else is ignored.
 // ============================================================================
-const LEGAL_TYPES = ['terms', 'privacy'];
+const LEGAL_TYPES = ['terms', 'privacy', 'billing'];
 const LEGAL_FIELD_KEYS = ['support_email', 'business_name', 'payment_processor', 'trial_terms', 'refund_policy', 'governing_state', 'governing_venue', 'dispute_mode'];
 const LEGAL_MAX_CHARS = 60000; // generous cap across a page's field values
 
@@ -1916,7 +1920,7 @@ async function updateAgencyLegal(req, res) {
     const { type, fields } = req.body || {};
 
     if (!LEGAL_TYPES.includes(type)) {
-      return res.status(400).json({ error: 'type must be "terms" or "privacy"' });
+      return res.status(400).json({ error: 'type must be "terms", "privacy", or "billing"' });
     }
     if (fields != null && (typeof fields !== 'object' || Array.isArray(fields))) {
       return res.status(400).json({ error: 'fields must be an object' });

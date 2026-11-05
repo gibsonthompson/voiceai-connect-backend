@@ -251,7 +251,10 @@ async function changeAgencyPlan(req, res) {
     const giveTrial = upgradingFromFree && sub.status !== 'trialing';
     const trialEndUnix = Math.floor(Date.now() / 1000) + 14 * 24 * 60 * 60;
 
-    const subUpdate = { metadata: { ...(sub.metadata || {}), plan } };
+    // Changing plan means the agency is staying, so clear any pending period-end
+    // cancellation on the subscription (no-op if none was scheduled). The DB
+    // marker is cleared alongside the plan write below.
+    const subUpdate = { metadata: { ...(sub.metadata || {}), plan }, cancel_at_period_end: false };
     if (updateItems.length > 0) {
       subUpdate.items = updateItems;
       // On a trial start, suppress the proration so the upgrade is $0 today.
@@ -265,6 +268,11 @@ async function changeAgencyPlan(req, res) {
     // Apply the DB + billing reconcile NOW so the app reflects the change
     // immediately instead of waiting on / racing the webhook.
     await applyPlanChange(agency_id, plan, agency.stripe_subscription_id);
+
+    // Staying on the platform: clear any pending period-end cancellation marker
+    // so the "Plan cancels on <date>" banner disappears immediately (the Stripe
+    // cancel_at_period_end:false above is synced by the webhook too).
+    await supabase.from('agencies').update({ plan_cancel_at: null }).eq('id', agency_id);
 
     // Reflect the trial in our DB immediately (the subscription.updated webhook
     // also syncs subscription_status + trial_ends_at from Stripe within seconds).

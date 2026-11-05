@@ -649,7 +649,11 @@ app.post('/api/agency/change-plan', requireAgencyAccessFromBody('billing'), chan
 //      'agency_cancellation' so it is filterable in the admin SMS Log.
 // ============================================================================
 app.post('/api/agency/cancel', requireAgencyAccessFromBody('billing'), async (req, res) => {
-  const { agency_id, reason, feedback } = req.body;
+  // when: 'period_end' (default) keeps the agency + all its clients fully live
+  // and billing until the current paid period ends, then Stripe's
+  // subscription.deleted runs the normal teardown. 'immediate' tears down now.
+  // resume: true un-schedules a pending period-end cancellation.
+  const { agency_id, reason, feedback, when, resume } = req.body;
 
   if (!agency_id) {
     return res.status(400).json({ error: 'agency_id required' });
@@ -672,6 +676,74 @@ app.post('/api/agency/cancel', requireAgencyAccessFromBody('billing'), async (re
       agency.subscription_status === 'trial' ||
       agency.subscription_status === 'trialing';
 
+    const stripeClient = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
+    // ── RESUME: un-schedule a pending period-end cancellation. ──
+    // Flip cancel_at_period_end back off in Stripe and clear our local marker,
+    // so the agency and its clients simply keep running with no teardown.
+    if (resume === true) {
+      if (agency.stripe_subscription_id) {
+        try {
+          await stripeClient.subscriptions.update(agency.stripe_subscription_id, { cancel_at_period_end: false });
+        } catch (e) {
+          if (e.code !== 'resource_missing') console.error('Resume (un-cancel) failed:', e.message);
+        }
+      }
+      await supabase.from('agencies').update({ plan_cancel_at: null, updated_at: new Date().toISOString() }).eq('id', agency_id);
+      console.log(`↩️  Cancellation un-scheduled for agency ${agency.name}`);
+      return res.json({ success: true, resumed: true });
+    }
+
+    // ── PERIOD-END (default): keep everything live until the paid period ends. ──
+    // Only when there is a live subscription in an active/trialing state. A
+    // past_due agency (period already lapsed) or one with no subscription falls
+    // through to the immediate teardown below. Scheduling does NOT release any
+    // number or suspend anyone now; the existing subscription.deleted cascade
+    // runs when the period actually ends.
+    const periodEndEligible = !!agency.stripe_subscription_id
+      && ['trial', 'trialing', 'active'].includes(agency.subscription_status);
+    if (when !== 'immediate' && periodEndEligible) {
+      let cancelsAtIso = null;
+      let scheduled = false;
+      try {
+        const sub = await stripeClient.subscriptions.update(agency.stripe_subscription_id, {
+          cancel_at_period_end: true,
+          cancellation_details: { feedback: reason || undefined, comment: feedback || undefined },
+        });
+        const ts = sub.cancel_at || sub.current_period_end;
+        cancelsAtIso = ts ? new Date(ts * 1000).toISOString() : null;
+        scheduled = true;
+      } catch (e) {
+        // If scheduling fails, do NOT silently fall through to an immediate
+        // teardown the agency did not ask for. Report it so they can retry.
+        console.error('Period-end schedule failed:', e.message);
+        return res.status(502).json({ error: 'Could not schedule cancellation. Please try again in a moment.' });
+      }
+      if (scheduled) {
+        await supabase.from('agencies')
+          .update({ plan_cancel_at: cancelsAtIso, updated_at: new Date().toISOString() })
+          .eq('id', agency_id);
+        // Log the cancellation intent now (feedback), keyed on the subscription
+        // so the later subscription.deleted webhook upserts the same row.
+        try {
+          await supabase.from('subscription_cancellations').upsert({
+            agency_id: agency.id,
+            stripe_subscription_id: agency.stripe_subscription_id || null,
+            source: 'app_period_end',
+            reason: reason || null,
+            feedback: feedback || null,
+            plan_type: agency.plan_type,
+            mrr_lost: agency.plan_type === 'pro' ? 9900 : agency.plan_type === 'scale' ? 49900 : 0,
+            canceled_at: new Date().toISOString(),
+            effective_at: cancelsAtIso,
+          }, { onConflict: 'stripe_subscription_id', ignoreDuplicates: false });
+        } catch (recErr) { console.error('Failed to record scheduled cancellation:', recErr.message); }
+        console.log(`🗓️  Agency ${agency.name} scheduled to cancel at period end (${cancelsAtIso})`);
+        return res.json({ success: true, scheduled: true, cancels_at: cancelsAtIso });
+      }
+    }
+
+    // ── IMMEDIATE: tear down now (the original behavior). ──
     if (agency.stripe_subscription_id) {
       const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
       try {
@@ -719,12 +791,13 @@ app.post('/api/agency/cancel', requireAgencyAccessFromBody('billing'), async (re
 
     await supabase
       .from('agencies')
-      .update({ 
-        subscription_status: 'canceled', 
+      .update({
+        subscription_status: 'canceled',
         status: 'canceled',
         demo_phone_number: null,
         demo_assistant_id: null,
         demo_vapi_phone_id: null,
+        plan_cancel_at: null,
         updated_at: new Date().toISOString()
       })
       .eq('id', agency_id);
