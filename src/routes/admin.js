@@ -1326,6 +1326,26 @@ router.put('/templates/reorder', requireAdmin, async (req, res) => {
   }
 });
 
+// POST /api/admin/templates/resync-defaults - Push the current default template
+// copy into existing agencies' rows. Defined before '/templates/:templateId' so
+// "resync-defaults" is not matched as a templateId.
+// Body: { agency_id?: string (omit for ALL agencies), force?: boolean }
+// Safe by default: only overwrites rows still carrying the old meeting-ask
+// language, leaving an agency's customizations and already-updated rows alone.
+router.post('/templates/resync-defaults', requireAdmin, async (req, res) => {
+  try {
+    const { agency_id = null, force = false } = req.body || {};
+    const { resyncDefaultTemplates } = require('../lib/default-templates');
+    const result = await resyncDefaultTemplates(agency_id, { force: !!force });
+    if (!result.success) return res.status(400).json({ error: result.error });
+    console.log(`✅ Admin resynced ${result.updated} default template(s) (${agency_id || 'ALL'}, force=${!!force})`);
+    res.json(result);
+  } catch (error) {
+    console.error('Admin resync-defaults error:', error);
+    res.status(500).json({ error: 'Failed to resync templates' });
+  }
+});
+
 // POST /api/admin/templates - Create platform template
 router.post('/templates', requireAdmin, async (req, res) => {
   try {

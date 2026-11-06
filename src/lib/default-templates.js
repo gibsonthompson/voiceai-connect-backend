@@ -482,8 +482,61 @@ async function forceSeedTemplates(agencyId) {
   }
 }
 
+/**
+ * Re-sync existing agencies' default-named templates to the CURRENT copy in
+ * DEFAULT_TEMPLATES. This is the piece that was missing: seedDefaultTemplatesIfNeeded
+ * only inserts templates whose NAME is absent, so when the default copy is
+ * rewritten (e.g. moving outreach from "book a 10-minute call" to "call our demo
+ * line"), agencies seeded earlier keep their stale bodies forever. Run this to
+ * push the new copy out.
+ *
+ * Safe by default: only rows that still carry the OLD meeting-ask language are
+ * overwritten, so an agency's own customizations and already-updated rows are
+ * left untouched. Pass { force: true } to overwrite every default-named row.
+ *
+ * @param {string|null} agencyId - A single agency, or null for ALL agencies.
+ * @param {{ force?: boolean }} [opts]
+ * @returns {Promise<{success: boolean, updated?: number, scanned?: number, error?: string}>}
+ */
+async function resyncDefaultTemplates(agencyId, opts = {}) {
+  const force = opts.force === true;
+  try {
+    const names = DEFAULT_TEMPLATES.map(t => t.name);
+    const byName = Object.fromEntries(DEFAULT_TEMPLATES.map(t => [t.name, t]));
+
+    let sel = supabase.from('outreach_templates').select('id, name, body').in('name', names);
+    // A single agency, or every agency-owned row (never the platform-level
+    // null-agency library rows).
+    sel = agencyId ? sel.eq('agency_id', agencyId) : sel.not('agency_id', 'is', null);
+    const { data: rows, error } = await sel;
+    if (error) return { success: false, error: error.message };
+
+    const OLD_MARKERS = ['10 minute', '10-minute', '10-min', 'quick chat', 'quick call', 'quick 10'];
+    const isStale = (body) => { const b = (body || '').toLowerCase(); return OLD_MARKERS.some(m => b.includes(m)); };
+
+    let updated = 0;
+    for (const r of rows || []) {
+      const tpl = byName[r.name];
+      if (!tpl) continue;
+      if (!force && !isStale(r.body)) continue; // leave customized / already-current rows alone
+      const { error: uErr } = await supabase
+        .from('outreach_templates')
+        .update({ subject: tpl.subject, body: tpl.body, description: tpl.description, updated_at: new Date().toISOString() })
+        .eq('id', r.id);
+      if (!uErr) updated++;
+      else console.error('resyncDefaultTemplates update error:', r.id, uErr.message);
+    }
+    console.log(`🔄 Resynced ${updated} default template(s) (${agencyId ? `agency ${agencyId}` : 'ALL agencies'}, force=${force})`);
+    return { success: true, updated, scanned: (rows || []).length };
+  } catch (error) {
+    console.error('resyncDefaultTemplates error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
 module.exports = {
   seedDefaultTemplatesIfNeeded,
   forceSeedTemplates,
+  resyncDefaultTemplates,
   DEFAULT_TEMPLATES
 };
