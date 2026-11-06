@@ -1325,11 +1325,12 @@ async function updateAgencySettings(req, res) {
           }
         }
         // logo_scale: nav logo size multiplier (not a color). Keep it only when
-        // it is a real number, clamped to [1, 4]. The nav logo box grows to fit,
-        // so a larger value just makes the top logo taller. 1 (default) not stored.
+        // it is a real number, clamped to [1, 6] to match the Branding slider's
+        // range (LOGO_SCALE_MAX). The nav logo box grows to fit, so a larger
+        // value just makes the top logo taller. 1 (default) not stored.
         const rawScale = Number(bo.logo_scale);
         if (Number.isFinite(rawScale)) {
-          const scale = Math.min(4, Math.max(1, rawScale));
+          const scale = Math.min(6, Math.max(1, rawScale));
           if (scale > 1) cleaned.logo_scale = Math.round(scale * 100) / 100;
         }
         // If all values were stripped, store null instead of empty object
