@@ -271,6 +271,7 @@ const { getAgencyUsageSummary } = require('./lib/usage-tracker');
 const testClientRoutes = require('./routes/test-client');
 const bookingRoutes = require('./routes/booking');
 const nativeCalendarRoutes = require('./routes/native-calendar');
+const agencyTourRoutes = require('./routes/agency-tour');
 const staffMembersRoutes = require('./routes/staff-members');
 const clientServicesRoutes = require('./routes/client-services');
 const cleanupOrphanedTestClients = require('./routes/cleanup-orphaned-test-clients');
@@ -2003,6 +2004,7 @@ app.get('/api/domain-test', (req, res) => {
 // ============================================================================
 setupProcessErrorHandlers();
 app.use('/api/agency', demoPhoneRoutes);
+app.use('/api/agency', agencyTourRoutes); // onboarding tour state (dismiss count + completed), persisted per agency
 app.use('/api/agency', customIndustriesRoutes);
 app.use('/api/agency', aiLabRoutes);
 // Public marketing-site demo (no auth; rate-limited inside the router).
