@@ -212,6 +212,8 @@ function publicAgencyShape(agency) {
     // analyzed kit (vibe, palette, roles, rationale).
     display_font: agency.display_font || null,
     body_font: agency.body_font || null,
+    marketing_display_font: agency.marketing_display_font || null,
+    marketing_body_font: agency.marketing_body_font || null,
     icon_style: agency.icon_style || null,
     brand_kit: agency.brand_kit || null,
 
@@ -444,6 +446,60 @@ async function getAgencyByIdPublic(req, res) {
   }
 }
 
+// Public config for the embeddable AI web-call widget. Given an agency and a
+// mode, returns the VAPI assistant to call plus the branding the widget renders
+// with. mode=demo uses the agency's demo assistant; mode=client&client=<id>
+// uses a specific client's assistant (scoped to the agency). No auth: this runs
+// inside the widget iframe on the agency's own site, where there is no token.
+async function getWebcallConfig(req, res) {
+  try {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const agencyId = req.query.agency;
+    const mode = String(req.query.mode || 'demo');
+    const clientId = req.query.client;
+
+    if (!agencyId || !uuid.test(String(agencyId))) return res.status(400).json({ error: 'agency parameter required' });
+    const agency = await getAgencyById(agencyId);
+    if (!agency) return res.status(404).json({ error: 'Agency not found' });
+    if (agency.status !== 'active' && agency.status !== 'trial') return res.status(403).json({ error: 'Agency not active' });
+
+    let assistantId = null;
+    let label = agency.name || 'AI Receptionist';
+    if (mode === 'client' && clientId) {
+      if (!uuid.test(String(clientId))) return res.status(400).json({ error: 'invalid client id' });
+      const { data: client } = await supabase
+        .from('clients')
+        .select('id, business_name, vapi_assistant_id, agency_id')
+        .eq('id', clientId).eq('agency_id', agency.id).maybeSingle();
+      if (!client) return res.status(404).json({ error: 'Client not found' });
+      assistantId = client.vapi_assistant_id || null;
+      label = client.business_name || label;
+    } else {
+      assistantId = agency.demo_assistant_id || null;
+    }
+    if (!assistantId) return res.status(409).json({ error: 'No assistant is set up for this web call yet' });
+
+    // Public fonts: marketing override first, then the dashboard fonts.
+    res.json({
+      success: true,
+      config: {
+        assistantId,
+        label,
+        agencyName: agency.name || null,
+        logoUrl: agency.logo_url || null,
+        primaryColor: agency.primary_color || '#01f5d1',
+        accentColor: agency.accent_color || agency.primary_color || '#01f5d1',
+        websiteTheme: agency.website_theme || 'dark',
+        displayFont: agency.marketing_display_font || agency.display_font || null,
+        bodyFont: agency.marketing_body_font || agency.body_font || null,
+      }
+    });
+  } catch (error) {
+    console.error('❌ webcall config error:', error);
+    res.status(500).json({ error: 'Failed to load web call config' });
+  }
+}
+
 // ============================================================================
 // GET AGENCY SETTINGS (agency dashboard bootstrap)
 // ----------------------------------------------------------------------------
@@ -600,6 +656,8 @@ async function getAgencySettings(req, res) {
         // full analyzed kit (vibe, palette, roles, rationale).
         display_font: agency.display_font || null,
         body_font: agency.body_font || null,
+        marketing_display_font: agency.marketing_display_font || null,
+        marketing_body_font: agency.marketing_body_font || null,
         icon_style: agency.icon_style || null,
         brand_kit: agency.brand_kit || null,
 
@@ -862,6 +920,9 @@ async function updateAgencySettings(req, res) {
       'branding_overrides',
       // AI brand kit (fonts + nav icon weight + full analyzed kit jsonb)
       'display_font', 'body_font', 'icon_style', 'brand_kit',
+      // Optional public-surface font override (marketing site, signup form,
+      // embed widgets). Blank = fall back to the dashboard display/body fonts.
+      'marketing_display_font', 'marketing_body_font',
       // Client dashboard settings
       'client_header_mode',
       'allow_client_branding',
@@ -2051,6 +2112,7 @@ async function analyzeLogoBranding(req, res) {
 module.exports = {
   getAgencyByHost,
   getAgencyByIdPublic,
+  getWebcallConfig,
   getAgencySettings,
   updateAgencySettings,
   analyzeLogoBranding,

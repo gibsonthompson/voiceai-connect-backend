@@ -198,7 +198,7 @@ app.use((req, res, next) => {
 // ============================================================================
 
 const { handleAgencySignup, handleAgencyOnboarding } = require('./routes/agency-signup');
-const { getAgencyByHost, getAgencyByIdPublic, getAgencySettings, updateAgencySettings, analyzeLogoBranding, verifyAgencyDomain, connectPaystack, disconnectPaystack, connectFlutterwave, disconnectFlutterwave, getAgencyLegal, updateAgencyLegal } = require('./routes/agency-settings');
+const { getAgencyByHost, getAgencyByIdPublic, getWebcallConfig, getAgencySettings, updateAgencySettings, analyzeLogoBranding, verifyAgencyDomain, connectPaystack, disconnectPaystack, connectFlutterwave, disconnectFlutterwave, getAgencyLegal, updateAgencyLegal } = require('./routes/agency-settings');
 const demoPhoneRoutes = require('./routes/demo-phone');
 const customIndustriesRoutes = require('./routes/custom-industries');
 const aiLabRoutes = require('./routes/ai-lab');
@@ -558,6 +558,8 @@ app.get('/api/agency/by-host', getAgencyByHost);
 // Embed-widget Path A: iframe loads myvoiceaiconnect.com/signup?agency=UUID
 // and looks the agency up by ID since there's no host-based context to derive.
 app.get('/api/agency/by-id', getAgencyByIdPublic);
+// Public config for the embeddable AI web-call widget (runs in the widget iframe).
+app.get('/api/agency/webcall-config', getWebcallConfig);
 // Dashboard bootstrap, but ALSO called with no token by app/onboarding/page.tsx
 // (agency onboarding, before a session exists) and lib/branding-context.tsx
 // (white-label branding for logged-out visitors on public pages). It therefore
