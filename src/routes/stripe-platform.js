@@ -1034,13 +1034,21 @@ async function handleAgencyCheckoutCompleted(session) {
     await syncPerClientSubscriptionItem(agencyId, plan, session.subscription);
   }
 
-  // Log event
-  await supabase.from('agency_subscription_events').insert({
-    agency_id: agencyId,
-    event_type: 'checkout_completed',
-    stripe_event_id: session.id,
-    metadata: { plan, skip_trial: skipTrial },
-  });
+  // Log event. Best-effort audit trail: a failure here (e.g. the table not yet
+  // created) must never fail the webhook or block activation, but it is logged
+  // rather than silently swallowed so a missing/renamed table is visible in the
+  // platform logs instead of leaving upgrades with no trace at all.
+  try {
+    const { error: evtErr } = await supabase.from('agency_subscription_events').insert({
+      agency_id: agencyId,
+      event_type: 'checkout_completed',
+      stripe_event_id: session.id,
+      metadata: { plan, skip_trial: skipTrial },
+    });
+    if (evtErr) console.warn('agency_subscription_events insert failed (non-fatal):', evtErr.message);
+  } catch (e) {
+    console.warn('agency_subscription_events insert threw (non-fatal):', e.message);
+  }
 
   // Notify the platform owner that a paid agency just activated, WITH the plan.
   // Guarded on the pending -> activated transition above so a webhook retry or

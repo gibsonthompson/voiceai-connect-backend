@@ -141,15 +141,23 @@ async function changeAgencyPlan(req, res) {
   const { agency_id, plan } = req.body || {};
   let lockAcquired = false;
   try {
+    // Log every inbound request so a failed upgrade is always traceable in the
+    // platform logs (previously several failure returns below logged nothing,
+    // which made a "nothing in the logs" report impossible to diagnose).
+    console.log(`🔄 change-plan request: agency ${agency_id || '(none)'} -> ${plan || '(none)'}`);
+
     if (!agency_id || !plan) {
+      console.warn('change-plan: rejected, missing agency_id or plan');
       return res.status(400).json({ error: 'agency_id and plan are required' });
     }
     if (!SWITCHABLE.includes(plan)) {
+      console.warn(`change-plan: rejected, plan "${plan}" not switchable`);
       return res.status(400).json({ error: 'plan must be one of: ' + SWITCHABLE.join(', ') });
     }
 
     const target = PLATFORM_PLANS[plan];
     if (!target || !target.platformPrice) {
+      console.error(`❌ change-plan: plan "${plan}" missing platform price env var (STRIPE_PRICE_${String(plan).toUpperCase()}_PLATFORM)`);
       return res.status(500).json({ error: `Plan "${plan}" is not fully configured (missing platform price env var).` });
     }
 
@@ -171,6 +179,7 @@ async function changeAgencyPlan(req, res) {
         if (lockErr) {
           console.warn('change-plan: lock acquire error (proceeding without lock):', lockErr.message);
         } else if (!lockRows || lockRows.length === 0) {
+          console.warn(`change-plan: agency ${agency_id} blocked by in-progress billing change lock`);
           return res.status(409).json({ error: 'change_in_progress', message: 'A plan change is already in progress. Give it a few seconds and try again.' });
         } else {
           lockAcquired = true;
@@ -185,15 +194,20 @@ async function changeAgencyPlan(req, res) {
       .select('id, plan_type, stripe_subscription_id, stripe_customer_id, subscription_status, status')
       .eq('id', agency_id)
       .single();
-    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
+    if (error || !agency) {
+      console.warn(`change-plan: agency ${agency_id} not found`);
+      return res.status(404).json({ error: 'Agency not found' });
+    }
 
     if (agency.plan_type === plan) {
+      console.log(`change-plan: agency ${agency_id} already on ${plan}, no-op`);
       return res.json({ success: true, already_on_plan: true, plan });
     }
 
     // No live subscription (Free agency): this is a NEW subscription, not a
     // switch. Tell the frontend to run the normal checkout flow.
     if (!agency.stripe_subscription_id) {
+      console.log(`change-plan: agency ${agency_id} has no subscription, routing ${plan} to checkout`);
       return res.json({ needs_checkout: true, plan });
     }
 
@@ -207,6 +221,7 @@ async function changeAgencyPlan(req, res) {
       return res.json({ needs_checkout: true, plan });
     }
     if (!['active', 'trialing', 'past_due'].includes(sub.status)) {
+      console.log(`change-plan: agency ${agency_id} subscription ${agency.stripe_subscription_id} is ${sub.status}, routing ${plan} to checkout`);
       return res.json({ needs_checkout: true, plan, note: `subscription is ${sub.status}` });
     }
 
@@ -219,14 +234,21 @@ async function changeAgencyPlan(req, res) {
     const platformItem = items.find((i) => i.price && allPlatformPrices.includes(i.price.id));
     const minuteItem = items.find((i) => i.price && allMinutePrices.includes(i.price.id));
 
-    if (!platformItem) {
-      return res.status(500).json({ error: 'Could not find the platform subscription item to switch.' });
-    }
-
     // Build the item swaps. The per-client item is reconciled by
     // applyPlanChange below, not here.
     const updateItems = [];
-    if (platformItem.price.id !== target.platformPrice) {
+    if (!platformItem) {
+      // The subscription carries no recognized platform item. This happens to a
+      // free_usage subscription whose $0 platform price is no longer one of the
+      // current env price IDs, or to a subscription assembled outside checkout.
+      // Previously this returned an unrecoverable 500 (with no log line), so the
+      // agency's upgrade silently failed and nothing showed up in the platform
+      // logs. Instead, add the target plan's platform item so the agency still
+      // moves onto the plan, exactly as convertFreeUsageToPaid does on the
+      // checkout path. Logged loudly so the underlying anomaly stays visible.
+      console.warn(`⚠️  change-plan: subscription ${agency.stripe_subscription_id} had no recognized platform item; adding ${plan} platform price instead of failing`);
+      updateItems.push({ price: target.platformPrice, quantity: 1 });
+    } else if (platformItem.price.id !== target.platformPrice) {
       updateItems.push({ id: platformItem.id, price: target.platformPrice });
     }
     if (minuteItem) {
