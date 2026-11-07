@@ -1139,6 +1139,7 @@ app.get('/api/agency/:agencyId/clients', requireAgencyAccess('clients'), async (
     // ongoing monthly. One source of truth for the dashboard and analytics.
     const { effectiveMonthlyCents } = require('./lib/plans');
     const { callsThisMonthForClients } = require('./lib/call-usage');
+    const { computeClientOnboardingStatus } = require('./lib/onboarding-status');
     const { data: agencyRow } = await supabase.from('agencies').select('*').eq('id', agencyId).single();
     const codesByName = {};
     if (agencyRow) {
@@ -1148,10 +1149,32 @@ app.get('/api/agency/:agencyId/clients', requireAgencyAccess('clients'), async (
     // Live monthly call count per client, overlaid so this list agrees with the
     // client's own dashboard (the calls table is the source of truth).
     const liveCalls = await callsThisMonthForClients((clients || []).map(c => c.id));
+
+    // Setup-progress counts: one grouped read each for services and staff across
+    // all of this agency's clients, tallied in memory, so the list stays a single
+    // round-trip instead of a query per client.
+    const clientIds = (clients || []).map((c) => c.id);
+    const serviceCounts = {};
+    const staffCounts = {};
+    if (clientIds.length) {
+      try {
+        const { data: svcRows } = await supabase.from('client_services').select('client_id').in('client_id', clientIds);
+        for (const r of (svcRows || [])) serviceCounts[r.client_id] = (serviceCounts[r.client_id] || 0) + 1;
+      } catch (e) { console.warn('client_services count failed:', e.message); }
+      try {
+        const { data: staffRows } = await supabase.from('staff_members').select('client_id').in('client_id', clientIds);
+        for (const r of (staffRows || [])) staffCounts[r.client_id] = (staffCounts[r.client_id] || 0) + 1;
+      } catch (e) { console.warn('staff_members count failed:', e.message); }
+    }
+
     const enriched = (clients || []).map((c) => {
       const dc = c.signup_discount_code ? codesByName[String(c.signup_discount_code).toUpperCase()] : null;
       const p = agencyRow ? effectiveMonthlyCents(c, agencyRow, dc) : { base_cents: 0, effective_cents: 0, discount: null };
-      return { ...c, calls_this_month: liveCalls[c.id] || 0, base_price_cents: p.base_cents, effective_price_cents: p.effective_cents, price_discount: p.discount };
+      const onboarding_status = computeClientOnboardingStatus(c, {
+        serviceCount: serviceCounts[c.id] || 0,
+        staffCount: staffCounts[c.id] || 0,
+      });
+      return { ...c, calls_this_month: liveCalls[c.id] || 0, base_price_cents: p.base_cents, effective_price_cents: p.effective_cents, price_discount: p.discount, onboarding_status };
     });
     console.log(`📋 Fetched ${enriched.length} clients for agency ${agencyId}`);
     res.json({ clients: enriched });
@@ -1242,6 +1265,23 @@ app.get('/api/agency/:agencyId/clients/:clientId', requireAgencyAccess('clients'
       const { callsThisMonthForClient } = require('./lib/call-usage');
       client.calls_this_month = await callsThisMonthForClient(client.id);
     } catch (e) { console.warn('live calls_this_month enrich failed:', e.message); }
+
+    // Setup progress (what the client has actually filled in), derived from the
+    // real data plus a services/staff row count.
+    try {
+      const { computeClientOnboardingStatus } = require('./lib/onboarding-status');
+      let serviceCount = 0;
+      let staffCount = 0;
+      try {
+        const { count } = await supabase.from('client_services').select('id', { count: 'exact', head: true }).eq('client_id', clientId);
+        serviceCount = count || 0;
+      } catch (e) { console.warn('client_services count failed:', e.message); }
+      try {
+        const { count } = await supabase.from('staff_members').select('id', { count: 'exact', head: true }).eq('client_id', clientId);
+        staffCount = count || 0;
+      } catch (e) { console.warn('staff_members count failed:', e.message); }
+      client.onboarding_status = computeClientOnboardingStatus(client, { serviceCount, staffCount });
+    } catch (e) { console.warn('onboarding_status enrich failed:', e.message); }
 
     res.json({ client });
   } catch (error) {
