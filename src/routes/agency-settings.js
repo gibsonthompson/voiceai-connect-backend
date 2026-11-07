@@ -103,6 +103,7 @@ const dns = require('dns').promises;
 const jwt = require('jsonwebtoken');
 const { supabase, getAgencyBySlug, getAgencyByDomain, getAgencyById } = require('../lib/supabase');
 const { getAgencyPlans, generatePlanKey } = require('../lib/plans');
+const { MESSAGE_DEFS } = require('../lib/agency-messages');
 // Reprice sweep for client per-minute billing. Stripe prices are immutable, so
 // a rate/included-minutes change only reaches EXISTING clients if their metered
 // item is re-pointed to a fresh price. updateAgencySettings fires this in the
@@ -602,6 +603,13 @@ async function getAgencySettings(req, res) {
         icon_style: agency.icon_style || null,
         brand_kit: agency.brand_kit || null,
 
+        // Agency's own signup link (used in demo/nurture SMS + embeds) and the
+        // per-agency overrides for automated texts, plus the catalog the editor
+        // renders (labels, audiences, variables, and the default copy).
+        custom_signup_url: agency.custom_signup_url || null,
+        message_overrides: (agency.message_overrides && typeof agency.message_overrides === 'object') ? agency.message_overrides : {},
+        message_defs: MESSAGE_DEFS,
+
         // Client dashboard settings
         client_header_mode: agency.client_header_mode || 'agency_name',
         allow_client_branding: agency.allow_client_branding || false,
@@ -899,7 +907,15 @@ async function updateAgencySettings(req, res) {
       // Default booking-window rules new/existing clients inherit unless they set
       // their own override. Range-clamped below. NULL = fall back to platform
       // default (30 min notice, 60 days ahead).
-      'default_min_booking_notice_minutes', 'default_max_booking_days_ahead'
+      'default_min_booking_notice_minutes', 'default_max_booking_days_ahead',
+      // Agency's own signup URL (e.g. their own site with the embedded signup
+      // form). When set, it is used anywhere a signup link is built for the
+      // agency: the post-demo follow-up SMS, nurture texts, and embed snippets.
+      'custom_signup_url',
+      // Per-agency overrides for the automated texts the agency sends to
+      // prospects and clients. jsonb map: { [messageKey]: string }. A key that
+      // is absent/blank falls back to the built-in default copy.
+      'message_overrides'
     ];
 
     const sanitizedUpdates = {};
@@ -948,6 +964,37 @@ async function updateAgencySettings(req, res) {
       if (updates[key] !== undefined) {
         sanitizedUpdates[key] = updates[key];
       }
+    }
+
+    // ── Custom signup URL ────────────────────────────────────────────────
+    // Blank clears to null (falls back to the derived link). A non-blank value
+    // must be an http(s) URL and reasonably short; anything else is ignored
+    // rather than written, so a bad value never clobbers a good saved one.
+    if (sanitizedUpdates.custom_signup_url !== undefined) {
+      const raw = sanitizedUpdates.custom_signup_url;
+      if (raw === null || (typeof raw === 'string' && raw.trim() === '')) {
+        sanitizedUpdates.custom_signup_url = null;
+      } else if (typeof raw === 'string' && /^https?:\/\/\S+$/i.test(raw.trim()) && raw.trim().length <= 500) {
+        sanitizedUpdates.custom_signup_url = raw.trim();
+      } else {
+        delete sanitizedUpdates.custom_signup_url;
+      }
+    }
+
+    // ── Message overrides ────────────────────────────────────────────────
+    // Keep only known message keys with non-blank string bodies (<= 2000 chars);
+    // a blank/removed key falls back to the shipped default. Always write a
+    // clean object (never arbitrary shapes) to the jsonb column.
+    if (sanitizedUpdates.message_overrides !== undefined) {
+      const raw = sanitizedUpdates.message_overrides;
+      const clean = {};
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        for (const key of Object.keys(MESSAGE_DEFS)) {
+          const val = raw[key];
+          if (typeof val === 'string' && val.trim()) clean[key] = val.trim().slice(0, 2000);
+        }
+      }
+      sanitizedUpdates.message_overrides = clean;
     }
 
     // ── Custom plan features (agency-defined feature bullets) ────────────

@@ -97,13 +97,18 @@ function getAgencyUrls(agency) {
   const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
   const platformUrl = `https://${platformDomain}`;
 
+  // Honor the agency's own signup link (their site with the embedded form) when
+  // set; otherwise derive it. Same helper the demo/nurture SMS use.
   let signupUrl;
-  if (agency.marketing_domain && agency.domain_verified) {
-    signupUrl = `https://${agency.marketing_domain}/signup`;
-  } else if (agency.slug) {
-    signupUrl = `https://${agency.slug}.${platformDomain}/signup`;
-  } else {
-    signupUrl = `${platformUrl}/signup?ref=${agency.slug || 'demo'}`;
+  try { signupUrl = require('../lib/agency-messages').buildSignupUrl(agency); } catch { signupUrl = null; }
+  if (!signupUrl) {
+    if (agency.marketing_domain && agency.domain_verified) {
+      signupUrl = `https://${agency.marketing_domain}/signup`;
+    } else if (agency.slug) {
+      signupUrl = `https://${agency.slug}.${platformDomain}/signup`;
+    } else {
+      signupUrl = `${platformUrl}/signup?ref=${agency.slug || 'demo'}`;
+    }
   }
 
   return {

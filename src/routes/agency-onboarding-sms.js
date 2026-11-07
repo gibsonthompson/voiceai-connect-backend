@@ -30,11 +30,15 @@ function getAgencyUrls(agency) {
   if (agency.marketing_domain && agency.domain_verified) baseUrl = `https://${agency.marketing_domain}`;
   else if (agency.slug) baseUrl = `https://${agency.slug}.${platformDomain}`;
   else baseUrl = platformUrl;
+  // Honor the agency's own signup link when set; else the derived /signup.
+  let signupUrl;
+  try { signupUrl = require('../lib/agency-messages').buildSignupUrl(agency); } catch { signupUrl = null; }
+  if (!signupUrl) signupUrl = `${baseUrl}/signup`;
   return {
     settingsUrl: `${platformUrl}/agency/settings`,
     clientsUrl: `${platformUrl}/agency/clients`,
     loginUrl: `${platformUrl}/agency/login`,
-    signupUrl: `${baseUrl}/signup`,
+    signupUrl,
     dashboardUrl: `${platformUrl}/agency/dashboard`,
   };
 }

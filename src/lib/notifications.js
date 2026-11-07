@@ -11,6 +11,9 @@
 const fetch = require('node-fetch');
 const { decrypt } = require('./encryption');
 const { renderBrandedEmail } = require('./email-layout');
+// Agency-editable message copy + signup/login link builders (honor
+// agencies.message_overrides and agencies.custom_signup_url).
+const { renderAgencyMessage, buildSignupUrl, buildClientLoginUrl, buildClientUpgradeUrl } = require('./agency-messages');
 
 const PLATFORM_OWNER_PHONE = process.env.PLATFORM_OWNER_PHONE || '+16783161454';
 
@@ -243,24 +246,30 @@ function clientTrialCtaTail(agency) {
 
 async function sendDemoCallFollowUpSMS(callerPhone, agency, callerBusinessName, businessType, serviceDiscussed) {
   if (!callerPhone || callerPhone === 'Unknown') { console.log('⚠️ No caller phone for demo follow-up SMS'); return false; }
-  const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
-  let signupUrl;
-  if (agency.marketing_domain && agency.domain_verified) signupUrl = `https://${agency.marketing_domain}/signup`;
-  else if (agency.slug) signupUrl = `https://${agency.slug}.${platformDomain}/signup`;
-  else signupUrl = `https://${platformDomain}/signup`;
+  const signupUrl = buildSignupUrl(agency);
 
   const agencyName = agency.name || 'our';
-  const nameNote = callerBusinessName ? ` for ${callerBusinessName}` : '';
-  const lines = [`Thanks for trying ${agencyName}'s AI receptionist demo${nameNote}! 🎉`, ''];
+  // Business suffix on the opening line is blank when the name is unknown; the
+  // "Ready to get one..." line falls back to " for your business". Both are
+  // precomputed so the default copy and any agency override resolve the same.
+  const forBusiness = callerBusinessName ? ` for ${callerBusinessName}` : '';
+  const readySuffix = callerBusinessName ? ` for ${callerBusinessName}` : ' for your business';
+  // The recap block only shows when we have something specific to recap.
+  let recapBlock = '';
   if (serviceDiscussed || callerBusinessName) {
-    lines.push(`Here's what we showed you:`);
-    if (serviceDiscussed) lines.push(`✅ ${serviceDiscussed}`);
-    lines.push(`✅ Instant text summaries after every call`);
-    lines.push(`✅ 24/7 coverage, never miss a call`);
-    lines.push('');
+    recapBlock = `Here's what we showed you:\n`;
+    if (serviceDiscussed) recapBlock += `✅ ${serviceDiscussed}\n`;
+    recapBlock += `✅ Instant text summaries after every call\n✅ 24/7 coverage, never miss a call\n\n`;
   }
-  lines.push(`Ready to get one${callerBusinessName ? ` for ${callerBusinessName}` : ' for your business'}? ${clientTrialCtaTail(agency)}`);
-  lines.push(signupUrl);
+  const message = renderAgencyMessage('demo_followup', agency, {
+    agency_name: agencyName,
+    business_name: callerBusinessName || '',
+    for_business: forBusiness,
+    ready_suffix: readySuffix,
+    recap_block: recapBlock,
+    trial_cta: clientTrialCtaTail(agency),
+    signup_url: signupUrl,
+  });
 
   console.log(`📱 Sending demo follow-up SMS to ${callerPhone} for agency: ${agencyName}`);
   // The prospect called the agency's demo number, so follow up FROM that same
@@ -296,9 +305,15 @@ async function sendCallNotificationSMS(client, agency, callData) {
 
   const { customerName, customerPhone, urgency, summary } = callData;
   const brandName = agency?.name || 'VoiceAI Connect';
-  let smsMessage = `🔔 New Call - ${client.business_name}\nCustomer: ${customerName}\nPhone: ${customerPhone}\n`;
-  if (urgency === 'high' || urgency === 'emergency') smsMessage += `⚠️ Urgency: HIGH\n`;
-  smsMessage += `Summary: ${summary}\nPowered by ${brandName}`;
+  const urgencyLine = (urgency === 'high' || urgency === 'emergency') ? '⚠️ Urgency: HIGH\n' : '';
+  const smsMessage = renderAgencyMessage('client_call_notification', agency, {
+    business_name: client.business_name,
+    customer_name: customerName,
+    customer_phone: customerPhone,
+    urgency_line: urgencyLine,
+    summary,
+    brand: brandName,
+  });
   // From the client's own AI-receptionist number (white-label + recognizable
   // to the owner), not the platform 505 number. The number is provisioned on the
   // messaging profile well before any call, so it's registered by call-time. If
@@ -345,14 +360,15 @@ async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency) {
   // the platform domain. The login page itself handles a never-set password
   // (it calls recover-setup and routes to /auth/set-password), so a plain
   // /client/login link works whether or not a password has been set yet.
-  const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
-  const loginBase = (agency?.marketing_domain && agency?.domain_verified)
-    ? `https://${agency.marketing_domain}`
-    : (agency?.slug ? `https://${agency.slug}.${platformDomain}` : `https://${platformDomain}`);
-  const loginUrl = `${loginBase}/client/login`;
+  const loginUrl = buildClientLoginUrl(agency);
   // The AI number sits on its own line so it is easy to spot and tap, and the
   // login link follows with the one action that actually makes calls work.
-  const message = `Welcome to ${brandName}!\nYour AI receptionist for ${businessName} is ready.\n\nYour AI number:\n${numberDisplay}\n\nFinish setup and turn on call forwarding here:\n${loginUrl}`;
+  const message = renderAgencyMessage('client_welcome', agency, {
+    brand: brandName,
+    business_name: businessName,
+    ai_number: numberDisplay,
+    login_url: loginUrl,
+  });
   // Send FROM the agency's demo number, not the client's brand-new AI number.
   // The demo number was SMS-provisioned (messaging profile + approved 10DLC
   // campaign) when the agency onboarded, so it is already carrier-propagated and
@@ -366,8 +382,12 @@ async function sendWelcomeSMS(phone, businessName, aiPhoneNumber, agency) {
 async function sendClientTrialExpiredSMS(client, agency) {
   _emitLifecycle(agency?.id || client.agency_id, 'client.trial_expired', { client_id: client.id });
   const brandName = agency?.name || 'AI Receptionist';
-  let upgradeUrl = agency?.marketing_domain && agency?.domain_verified ? `${agency.marketing_domain}/client/upgrade` : agency?.slug ? `${agency.slug}.myvoiceaiconnect.com/client/upgrade` : `myvoiceaiconnect.com/client/upgrade`;
-  const message = `⚠️ ${brandName} Trial Ended\n\nHi ${client.owner_name || client.business_name}, your free trial has ended.\n\nYour AI receptionist is no longer answering calls.\n\nReactivate now: ${upgradeUrl}`;
+  const upgradeUrl = buildClientUpgradeUrl(agency);
+  const message = renderAgencyMessage('client_trial_expired', agency, {
+    brand: brandName,
+    who: client.owner_name || client.business_name,
+    upgrade_url: upgradeUrl,
+  });
   // From the agency's warm demo number (see sendWelcomeSMS), platform fallback.
   return _logSMS({ phone: client.owner_phone, message, from: agency?.demo_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_trial_expired', metadata: { clientName: client.business_name } });
 }
@@ -375,7 +395,10 @@ async function sendClientTrialExpiredSMS(client, agency) {
 async function sendClientPaymentFailedSMS(client, agency) {
   _emitLifecycle(agency?.id || client.agency_id, 'client.payment_failed', { client_id: client.id });
   const brandName = agency?.name || 'AI Receptionist';
-  const message = `🚨 ${brandName} Payment Failed\n\nHi ${client.owner_name || client.business_name}, your payment failed.\n\nUpdate your payment method to keep your AI receptionist active.`;
+  const message = renderAgencyMessage('client_payment_failed', agency, {
+    brand: brandName,
+    who: client.owner_name || client.business_name,
+  });
   // From the agency's warm demo number (see sendWelcomeSMS), platform fallback.
   return _logSMS({ phone: client.owner_phone, message, from: agency?.demo_phone_number || null, agencyId: agency?.id, recipientType: 'client_owner', messageType: 'client_payment_failed', metadata: { clientName: client.business_name } });
 }
@@ -393,13 +416,20 @@ async function sendClientSubscriptionActivatedSMS(client, agency, plan) {
   // printed the literal "null" where the number should be.
   const phoneLine = phoneDisplay ? `\n\nYour AI receptionist is answering calls 24/7 at:\n📞 ${phoneDisplay}` : '';
   const onTrial = client.subscription_status === 'trial' && client.trial_ends_at;
-  let message;
+  let statusHeadline, statusLine;
   if (onTrial) {
     const endDate = new Date(client.trial_ends_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-    message = `${brandName} Free Trial Started!\n\nHi ${who}, your ${planName} plan free trial is active through ${endDate}.${phoneLine}`;
+    statusHeadline = `${brandName} Free Trial Started!`;
+    statusLine = `Hi ${who}, your ${planName} plan free trial is active through ${endDate}.`;
   } else {
-    message = `${brandName} Subscription Active!\n\nHi ${who}, your ${planName} plan is now active!${phoneLine}`;
+    statusHeadline = `${brandName} Subscription Active!`;
+    statusLine = `Hi ${who}, your ${planName} plan is now active!`;
   }
+  const message = renderAgencyMessage('client_subscription_activated', agency, {
+    status_headline: statusHeadline,
+    status_line: statusLine,
+    phone_line: phoneLine,
+  });
   // Send FROM the agency's demo number: it is already SMS-provisioned and
   // carrier-propagated (warm), so it delivers immediately, unlike the client's
   // just-bought AI number, which carriers do not yet recognize for A2P and
@@ -412,7 +442,11 @@ async function sendClientSubscriptionActivatedSMS(client, agency, plan) {
 async function sendSpamBlockedSMS(client, agency, callerPhone, spamReason) {
   if (!client.owner_phone) return false;
   const callerDisplay = formatPhoneDisplay(callerPhone) || callerPhone || 'Unknown';
-  const message = `🚫 Spam Blocked, ${client.business_name}\n\nYour AI receptionist detected and blocked a spam call.\n\nCaller: ${callerDisplay}\nType: ${spamReason || 'Robocall / telemarketer'}\n\nNo action needed, this call was not counted against your limit.`;
+  const message = renderAgencyMessage('client_spam_blocked', agency, {
+    business_name: client.business_name,
+    caller: callerDisplay,
+    spam_reason: spamReason || 'Robocall / telemarketer',
+  });
   // Post-call owner alert: send from the business's own AI number like the call
   // notification, then the agency demo number, and only the platform number as a
   // last resort, so the end client never sees the 505 platform number.
