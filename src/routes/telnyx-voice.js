@@ -1595,7 +1595,7 @@ async function handleRecordingSaved(sessionId, recordingUrl) {
 
     let agency = null;
     if (client.agency_id) {
-      const { data } = await supabase.from('agencies').select('id, name, demo_phone_number').eq('id', client.agency_id).single();
+      const { data } = await supabase.from('agencies').select('id, name, demo_phone_number, message_overrides').eq('id', client.agency_id).single();
       agency = data || null;
     }
 
