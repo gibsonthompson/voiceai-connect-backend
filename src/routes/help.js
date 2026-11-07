@@ -152,7 +152,8 @@ VoiceAI Connect is a white-label AI receptionist platform for agencies. Agencies
 
 TRY THE AI / DEMO LINE:
 - Anyone can hear the AI live right now by calling the VoiceAI Connect demo line: (404) 201-7505. It is the fastest way to experience how the receptionist sounds and handles a real call, encourage prospects to call it.
-- When someone asks how to test the demo, how to try the AI, or for the demo number, GIVE THEM THIS NUMBER directly: (404) 201-7505. You have it, so never tell them to email the team to get the number.
+- When a PROSPECT asks how to test the demo, how to try the AI, or for the demo number, GIVE THEM THIS NUMBER directly: (404) 201-7505. You have it, so never tell them to email the team to get the number.
+- CAUTION: (404) 201-7505 is the shared, public platform demo line, NOT any one agency's own demo number. For a logged-in agency asking about THEIR demo line or THEIR number, use the number in the live account context, never this shared one. Never imply this shared number is theirs.
 - This is VoiceAI Connect's own demo of the product. Separately, Pro and Scale agencies get their OWN branded demo line (a different, auto-provisioned number) that they set up in their dashboard and share with their own prospects.
 
 PLANS & PRICING:
@@ -209,6 +210,7 @@ DEMO PHONE (agency's own line for showing prospects):
 - A non-US demo number requires a PAID Twilio account. Twilio does not let trial accounts provision numbers automatically ("Trial subaccounts cannot purchase phone numbers"), so the agency must upgrade Twilio to paid first.
 - Many countries (the UK included) require an approved Twilio regulatory bundle with a registered address before the number can be activated. Set it up in the Twilio Console under Regulatory Compliance; approval takes time, so start early. Without it, Twilio refuses the number and the platform surfaces the reason.
 - The agency does NOT buy the number manually. Once Twilio is connected and eligible, the platform searches and provisions it automatically on demo creation.
+- KEEPING THE DEMO NUMBER ON UPGRADE: the Free plan's first demo line is free for 30 days, then it expires and the number is released. Upgrading to Pro or Scale KEEPS the exact same demo number the agency already has: it is never changed or re-assigned when they upgrade. Upgrading simply removes the 30-day expiry so the number becomes permanent. A demo number is only released if the agency CANCELS. So an agency worried about losing a demo number they have already shared or printed should be reassured: upgrade before it expires and they keep that exact number for good. (For a logged-in agency, their own current demo number is in the live account context; quote that, never the shared platform demo line.)
 
 CONNECTING TWILIO (BYOT):
 - Twilio is only needed for numbers OUTSIDE the US. US numbers are provisioned automatically via Telnyx with nothing to set up.
@@ -246,6 +248,7 @@ LEAD FINDER (Pro/Scale):
 - Delete leads: on the Leads page, tap "Manage" in the top right. In there you can search and filter by industry, status, source, or when a lead was added, tick the ones you want (or Select all), and delete them in bulk. Each row also has its own trash icon for a single delete. You can export the selected or filtered leads to CSV from that same Manage panel.
 
 OUTREACH (Pro/Scale):
+- MARKETING KIT: the Outreach tab includes a ready-made Marketing Kit so agencies do NOT have to design their own sales material. It has branded QR codes, a one-page flyer, and a leave-behind to hand a local business, plus the cold-call and text scripts. If an agency is making their own flyer or asks for sales/marketing material, point them to the Marketing Kit in the Outreach tab first (it is branded to them automatically).
 - 13 templates: 6 email, 3 SMS, 4 cold call scripts.
 - Merge variables for personalization.
 - Sequence tracking with follow-up queue.
@@ -313,6 +316,171 @@ SUPPORT & FEEDBACK:
 
 // -- POST /api/help/chat ---------------------------------------------
 // AI chatbot powered by Claude
+// Build a compact LIVE ACCOUNT CONTEXT block for a logged-in agency or client,
+// so the bot answers plan / trial / demo-line questions from this account's real
+// data instead of guessing (which previously led it to quote the shared platform
+// demo line as if it were the agency's own, and to say it could not see trial
+// status). Best-effort: any failure just omits the block and the bot falls back
+// to the general knowledge base.
+async function buildAccountContext({ userType, agencyId, clientId }) {
+  const now = Date.now();
+  const DAY = 24 * 60 * 60 * 1000;
+  const fmtDate = (d) => { try { return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); } catch { return String(d); } };
+  const fmtDateTime = (d) => { try { return new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch { return String(d); } };
+  const sinceIso = (days) => new Date(now - days * DAY).toISOString();
+  const clip = (s, n) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, n);
+  const cnt = (r) => (r && typeof r.count === 'number') ? r.count : 0;
+
+  try {
+    if (userType === 'agency' && agencyId) {
+      const { data: a } = await supabase
+        .from('agencies')
+        .select('name, plan_type, subscription_status, status, trial_ends_at, demo_phone_number, demo_expires_at, created_at')
+        .eq('id', agencyId)
+        .maybeSingle();
+      if (!a) return '';
+
+      const plan = String(a.plan_type || 'free').toLowerCase();
+      const planLabel = plan.charAt(0).toUpperCase() + plan.slice(1);
+
+      // All of this agency's clients (bounded). Calls/appointments hang off their ids.
+      const { data: clientsRaw } = await supabase
+        .from('clients')
+        .select('id, business_name, status, subscription_status, plan_type, vapi_phone_number, industry, created_at, trial_ends_at, calls_this_month, is_test_client')
+        .eq('agency_id', agencyId)
+        .order('created_at', { ascending: false })
+        .limit(200);
+      const allClients = clientsRaw || [];
+      const realClients = allClients.filter((c) => !c.is_test_client);
+      const testCount = allClients.length - realClients.length;
+      const clientIds = allClients.map((c) => c.id);
+      const nameById = {};
+      allClients.forEach((c) => { nameById[c.id] = c.business_name || 'Unnamed'; });
+
+      // Everything else in parallel, scoped to this agency.
+      const noIds = clientIds.length === 0;
+      const [totalCallsR, calls30R, calls7R, recentCallsR, apptR, leadsR, teamR] = await Promise.all([
+        noIds ? Promise.resolve({ count: 0 }) : supabase.from('calls').select('id', { count: 'exact', head: true }).in('client_id', clientIds),
+        noIds ? Promise.resolve({ count: 0 }) : supabase.from('calls').select('id', { count: 'exact', head: true }).in('client_id', clientIds).gte('created_at', sinceIso(30)),
+        noIds ? Promise.resolve({ count: 0 }) : supabase.from('calls').select('id', { count: 'exact', head: true }).in('client_id', clientIds).gte('created_at', sinceIso(7)),
+        noIds ? Promise.resolve({ data: [] }) : supabase.from('calls').select('client_id, created_at, caller_phone, customer_name, service_requested, summary, ai_summary, appointment_booked, urgency_level, is_spam, call_status, duration_seconds').in('client_id', clientIds).order('created_at', { ascending: false }).limit(8),
+        noIds ? Promise.resolve({ count: 0 }) : supabase.from('appointments').select('id', { count: 'exact', head: true }).in('client_id', clientIds).gte('appointment_time', new Date(now).toISOString()),
+        supabase.from('leads').select('id', { count: 'exact', head: true }).eq('agency_id', agencyId),
+        supabase.from('team_members').select('id', { count: 'exact', head: true }).eq('entity_type', 'agency').eq('entity_id', agencyId).neq('status', 'disabled'),
+      ]);
+
+      const lines = [];
+      // Profile + plan + trial + status
+      if (a.name) lines.push(`Agency: ${a.name}`);
+      lines.push(`Plan: ${planLabel}.`);
+      if (a.trial_ends_at) {
+        const d = Math.ceil((new Date(a.trial_ends_at).getTime() - now) / DAY);
+        lines.push(d > 0
+          ? `On a ${planLabel} free trial: ${d} day${d === 1 ? '' : 's'} left (ends ${fmtDate(a.trial_ends_at)}; card not charged until then).`
+          : `Their ${planLabel} trial has ended.`);
+      } else if (plan === 'free') {
+        lines.push(`On the Free plan (no trial period; Free needs no card and activates immediately).`);
+      }
+      if (a.subscription_status) lines.push(`Subscription status: ${a.subscription_status}.`);
+
+      // Demo line
+      if (a.demo_phone_number) {
+        if (plan === 'free' && a.demo_expires_at) {
+          const d = Math.ceil((new Date(a.demo_expires_at).getTime() - now) / DAY);
+          const left = d > 0 ? `, ${d} day${d === 1 ? '' : 's'} left` : '';
+          lines.push(`Their OWN demo line: ${a.demo_phone_number} (free 30-day demo, expires ${fmtDate(a.demo_expires_at)}${left}). Upgrading to Pro or Scale KEEPS this exact number and removes the expiry so it is permanent; it is only released if they cancel. Safe to keep on flyers once on a paid plan.`);
+        } else {
+          lines.push(`Their OWN demo line: ${a.demo_phone_number} (permanent on a paid plan; only released if they cancel).`);
+        }
+      } else {
+        lines.push(`No demo line provisioned yet (they can create one on the Demo Phone page).`);
+      }
+
+      // Clients
+      const byStatus = {};
+      realClients.forEach((c) => { const s = c.status || 'unknown'; byStatus[s] = (byStatus[s] || 0) + 1; });
+      const statusStr = Object.entries(byStatus).map(([s, n]) => `${n} ${s}`).join(', ') || 'none yet';
+      lines.push(`\nCLIENTS: ${realClients.length} real client${realClients.length === 1 ? '' : 's'} (${statusStr})${testCount > 0 ? ` plus ${testCount} test client${testCount === 1 ? '' : 's'}` : ''}.`);
+      const listed = realClients.slice(0, 20);
+      listed.forEach((c) => {
+        const bits = [c.business_name || 'Unnamed'];
+        if (c.status) bits.push(c.status);
+        if (c.industry) bits.push(c.industry);
+        if (c.vapi_phone_number) bits.push(`AI# ${c.vapi_phone_number}`);
+        if (typeof c.calls_this_month === 'number') bits.push(`${c.calls_this_month} call${c.calls_this_month === 1 ? '' : 's'} this month`);
+        lines.push(`  - ${bits.join(' | ')}`);
+      });
+      if (realClients.length > listed.length) lines.push(`  (and ${realClients.length - listed.length} more not listed here)`);
+
+      // Calls
+      lines.push(`\nCALLS (across all their clients): ${cnt(totalCallsR)} all-time, ${cnt(calls30R)} in the last 30 days, ${cnt(calls7R)} in the last 7 days.`);
+      const recent = recentCallsR.data || [];
+      if (recent.length) {
+        lines.push(`Most recent calls:`);
+        recent.forEach((c) => {
+          const who = nameById[c.client_id] || 'a client';
+          const sum = clip(c.ai_summary || c.summary || c.service_requested, 90);
+          const flags = [c.appointment_booked ? 'booked appt' : null, c.is_spam ? 'spam' : null, (c.urgency_level && c.urgency_level !== 'normal') ? c.urgency_level : null].filter(Boolean).join(', ');
+          lines.push(`  - ${fmtDateTime(c.created_at)} | ${who}${c.caller_phone ? ` | from ${c.caller_phone}` : ''}${sum ? ` | ${sum}` : ''}${flags ? ` [${flags}]` : ''}`);
+        });
+      }
+
+      // Appointments / leads / team
+      lines.push(`\nUpcoming appointments booked across clients: ${cnt(apptR)}.`);
+      lines.push(`Leads in the CRM: ${cnt(leadsR)}${plan === 'free' ? ' (lead finder is a Pro/Scale feature)' : ''}.`);
+      lines.push(`Active agency team members: ${cnt(teamR)}.`);
+
+      return `\n\n=== LIVE ACCOUNT CONTEXT (this specific agency, authoritative) ===\n` +
+        `Use this for ANY question about their own account: plan, trial, billing status, demo number, their clients, call activity, appointments, leads, or team. Answer from these exact values rather than generalities, and feel free to name specific clients or quote the counts. Never state a demo number other than the one listed here. The shared VoiceAI Connect demo line (404) 201-7505 in the knowledge base is a different, public number anyone can call to hear the AI; it is NOT this agency's own demo line. This snapshot lists up to 20 clients and the 8 most recent calls; if they ask about a client or call not shown, say you can see the totals but point them to the relevant dashboard page for the full list rather than guessing.\n` +
+        lines.join('\n');
+    }
+
+    if (userType === 'client' && clientId) {
+      const { data: c } = await supabase
+        .from('clients')
+        .select('business_name, industry, plan_type, status, subscription_status, trial_ends_at, vapi_phone_number, calls_this_month, google_calendar_connected')
+        .eq('id', clientId)
+        .maybeSingle();
+      if (!c) return '';
+
+      const [totalCallsR, calls7R, recentCallsR, apptR] = await Promise.all([
+        supabase.from('calls').select('id', { count: 'exact', head: true }).eq('client_id', clientId),
+        supabase.from('calls').select('id', { count: 'exact', head: true }).eq('client_id', clientId).gte('created_at', sinceIso(7)),
+        supabase.from('calls').select('created_at, caller_phone, customer_name, service_requested, summary, ai_summary, appointment_booked, urgency_level, is_spam').eq('client_id', clientId).order('created_at', { ascending: false }).limit(8),
+        supabase.from('appointments').select('id', { count: 'exact', head: true }).eq('client_id', clientId).gte('appointment_time', new Date(now).toISOString()),
+      ]);
+
+      const lines = [];
+      if (c.business_name) lines.push(`Business: ${c.business_name}${c.industry ? ` (${c.industry})` : ''}.`);
+      lines.push(`Account status: ${c.subscription_status || c.status || 'unknown'}.`);
+      if (c.trial_ends_at) {
+        const d = Math.ceil((new Date(c.trial_ends_at).getTime() - now) / DAY);
+        if (d > 0) lines.push(`On a trial: ${d} day${d === 1 ? '' : 's'} left (ends ${fmtDate(c.trial_ends_at)}).`);
+      }
+      if (c.vapi_phone_number) lines.push(`Their AI receptionist number: ${c.vapi_phone_number}.`);
+      lines.push(`Google Calendar: ${c.google_calendar_connected ? 'connected' : 'not connected'}.`);
+      lines.push(`\nCALLS: ${cnt(totalCallsR)} all-time, ${cnt(calls7R)} in the last 7 days.`);
+      const recent = recentCallsR.data || [];
+      if (recent.length) {
+        lines.push(`Most recent calls:`);
+        recent.forEach((rc) => {
+          const sum = clip(rc.ai_summary || rc.summary || rc.service_requested, 90);
+          const flags = [rc.appointment_booked ? 'booked appt' : null, rc.is_spam ? 'spam' : null, (rc.urgency_level && rc.urgency_level !== 'normal') ? rc.urgency_level : null].filter(Boolean).join(', ');
+          lines.push(`  - ${fmtDateTime(rc.created_at)}${rc.caller_phone ? ` | from ${rc.caller_phone}` : ''}${sum ? ` | ${sum}` : ''}${flags ? ` [${flags}]` : ''}`);
+        });
+      }
+      lines.push(`\nUpcoming appointments: ${cnt(apptR)}.`);
+
+      return `\n\n=== LIVE ACCOUNT CONTEXT (this specific client business, authoritative) ===\n` +
+        `Use this for ANY question about their own account, AI number, calls, or appointments. Answer from these exact values. This lists the 8 most recent calls; for the full history point them to their Calls page.\n` +
+        lines.join('\n');
+    }
+  } catch (e) {
+    console.warn('help: buildAccountContext failed (non-fatal):', e.message);
+  }
+  return '';
+}
+
 router.post('/chat', async (req, res) => {
   try {
     const { message, history = [], sessionId, audience, agencyId } = req.body;
@@ -328,7 +496,7 @@ router.post('/chat', async (req, res) => {
     // Who is asking decides how to frame the same knowledge base. Default to
     // prospect (the public bot) when the caller did not say.
     const aud = ['prospect', 'agency', 'client'].includes(audience) ? audience : 'prospect';
-    const systemPrompt = `${KB_CONTEXT}\n\n${AUDIENCE_PROMPTS[aud]}`;
+    let systemPrompt = `${KB_CONTEXT}\n\n${AUDIENCE_PROMPTS[aud]}`;
 
     // Attribution for the admin inbox comes from the auth token, not the
     // client-supplied body: an in-app help chat must always carry its agency,
@@ -336,6 +504,7 @@ router.post('/chat', async (req, res) => {
     // orphaned. Falls back to the body values only for an anonymous prospect.
     let originUserType = aud;
     let originAgencyId = agencyId || null;
+    let originClientId = null;
     try {
       const token = req.headers.authorization?.replace('Bearer ', '');
       if (token) {
@@ -346,14 +515,20 @@ router.post('/chat', async (req, res) => {
         const tokClient = decoded.clientId || decoded.client_id || null;
         if (tokClient && !tokAgency) {
           originUserType = 'client';
+          originClientId = tokClient;
           const { data: c } = await supabase.from('clients').select('agency_id').eq('id', tokClient).single();
           originAgencyId = (c && c.agency_id) || null;
         } else if (tokAgency) {
           originUserType = (role && String(role).startsWith('client')) ? 'client' : 'agency';
           originAgencyId = tokAgency;
+          if (tokClient) originClientId = tokClient;
         }
       }
     } catch { /* no/invalid token: anonymous prospect, keep body values */ }
+
+    // Fold in this account's live data (plan, trial, their own demo number) so
+    // the bot answers account-specific questions accurately instead of guessing.
+    systemPrompt += await buildAccountContext({ userType: originUserType, agencyId: originAgencyId, clientId: originClientId });
     const sourceMap = { prospect: 'marketing', agency: 'agency_dashboard', client: 'client_dashboard' };
     const origin = { userType: originUserType, agencyId: originAgencyId, source: sourceMap[originUserType] || sourceMap[aud] };
 
