@@ -465,17 +465,20 @@ async function getWebcallConfig(req, res) {
 
     let assistantId = null;
     let label = agency.name || 'AI Receptionist';
+    let phoneNumber = null;
     if (mode === 'client' && clientId) {
       if (!uuid.test(String(clientId))) return res.status(400).json({ error: 'invalid client id' });
       const { data: client } = await supabase
         .from('clients')
-        .select('id, business_name, vapi_assistant_id, agency_id')
+        .select('id, business_name, vapi_assistant_id, vapi_phone_number, agency_id')
         .eq('id', clientId).eq('agency_id', agency.id).maybeSingle();
       if (!client) return res.status(404).json({ error: 'Client not found' });
       assistantId = client.vapi_assistant_id || null;
       label = client.business_name || label;
+      phoneNumber = client.vapi_phone_number || null;
     } else {
       assistantId = agency.demo_assistant_id || null;
+      phoneNumber = agency.demo_phone_number || null;
     }
     if (!assistantId) return res.status(409).json({ error: 'No assistant is set up for this web call yet' });
 
@@ -485,6 +488,7 @@ async function getWebcallConfig(req, res) {
       config: {
         assistantId,
         label,
+        phoneNumber,
         agencyName: agency.name || null,
         logoUrl: agency.logo_url || null,
         primaryColor: agency.primary_color || '#01f5d1',
