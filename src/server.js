@@ -289,6 +289,7 @@ const { handleJarvisWebhook } = require('./webhooks/vapi-jarvis-webhook');
 
 const {
   createAgencyCheckout,
+  changeBillingInterval,
   createAgencySetupCheckout,
   getAgencyCardStatus,
   createAgencyPortal,
@@ -616,6 +617,7 @@ app.post('/api/agency/:agencyId/domain/verify', verifyAgencyDomain);
 // during signup before a token exists, so the soft guard is required here -
 // it only blocks an authenticated staff member who lacks 'billing'.
 app.post('/api/agency/checkout', requirePermissionIfAuthed('billing'), createAgencyCheckout);
+app.post('/api/agency/change-billing-interval', requireAgencyAccessFromBody('billing'), changeBillingInterval);
 app.post('/api/agency/portal', requireAgencyAccessFromBody('billing'), createAgencyPortal);
 app.post('/api/agency/add-payment-method', requireAgencyAccessFromBody('billing'), createAgencySetupCheckout);
 app.get('/api/agency/:agencyId/card-status', requireAgencyAccess('billing'), getAgencyCardStatus);
@@ -662,7 +664,7 @@ app.post('/api/agency/cancel', requireAgencyAccessFromBody('billing'), async (re
   try {
     const { data: agency, error } = await supabase
       .from('agencies')
-      .select('id, name, email, plan_type, subscription_status, stripe_subscription_id, demo_vapi_phone_id, demo_phone_number, demo_assistant_id, twilio_account_sid, twilio_api_key_encrypted, twilio_api_secret_encrypted')
+      .select('id, name, email, plan_type, subscription_status, stripe_subscription_id, stripe_annual_subscription_id, billing_interval, demo_vapi_phone_id, demo_phone_number, demo_assistant_id, twilio_account_sid, twilio_api_key_encrypted, twilio_api_secret_encrypted')
       .eq('id', agency_id)
       .single();
 
@@ -688,6 +690,24 @@ app.post('/api/agency/cancel', requireAgencyAccessFromBody('billing'), async (re
         console.log('✅ Stripe subscription canceled');
       } catch (stripeErr) {
         console.error('Stripe cancel error (continuing):', stripeErr.message);
+      }
+    }
+
+    // Annual agencies also carry a separate yearly flat-fee subscription. Cancel
+    // it too, otherwise the annual charge keeps auto-renewing after the agency
+    // has canceled. Best-effort: a failure here must not block the cancellation.
+    if (agency.stripe_annual_subscription_id) {
+      const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+      try {
+        await stripe.subscriptions.cancel(agency.stripe_annual_subscription_id, {
+          cancellation_details: {
+            feedback: reason || undefined,
+            comment: feedback || undefined,
+          },
+        });
+        console.log('✅ Stripe annual (yearly) subscription canceled');
+      } catch (stripeErr) {
+        console.error('Stripe annual cancel error (continuing):', stripeErr.message);
       }
     }
 
@@ -2342,6 +2362,7 @@ app.use('/api/admin', adminCallsRoutes);
 app.use('/api/admin', adminAgencyDetail);
 app.use('/api/admin', require('./routes/support-thread').adminRouter);
 app.use('/api/admin', require('./routes/orphan-cleanup'));
+app.use('/api/admin', require('./routes/create-annual-prices')); // one-off: create yearly platform prices
 app.use('/api/admin', require('./routes/sms-number-assignment'));
 app.use('/api/admin', require('./routes/admin-impersonate'));
 app.use('/api/admin', require('./routes/admin-widget-chats'));
