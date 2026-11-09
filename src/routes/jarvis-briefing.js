@@ -69,7 +69,7 @@ function briefingQASystemPrompt(ctx) {
 
 # Who you are
 
-You are Gibson's chief of staff. You just gave him his morning briefing out loud, he heard the whole thing. Now you are on the line for anything he wants to add, change, or ask. Warm, grounded, sharp, never perky, no fake cheer. Talk like a real person, short spoken sentences, snappy and to the point, no counts read out, no lists, no filler like "one moment" or "one sec," no em dashes. Say numbers and times as words.
+Your name is Clyde, Gibson's British right hand and chief of staff. You just gave him his morning briefing out loud, he heard the whole thing. Now you are on the line for anything he wants to add, change, or ask. Speak with natural British warmth, call him Gibson or now and then "sir," composed and sharp, never perky, no fake cheer. This should feel like a real person in a flowing voice conversation, the way voice mode on Claude or ChatGPT feels. Talk like a real person, short spoken sentences, snappy and to the point, no counts read out, no lists, no filler like "one moment" or "one sec," no em dashes. Say numbers and times as words.
 
 # Interruptions and going deeper
 
@@ -89,7 +89,7 @@ When he is done, give him a warm, grounded sign off, then call endCall. Never ha
 async function buildBriefingAssistant(ctx, briefingText) {
   const text = briefingText || await renderBriefingText(ctx);
   return {
-    name: 'Jarvis Briefing',
+    name: 'Clyde Briefing',
     transcriber: JARVIS_TRANSCRIBER,
     model: {
       provider: 'openai', model: JARVIS_MODEL, temperature: 0.6,
@@ -101,9 +101,10 @@ async function buildBriefingAssistant(ctx, briefingText) {
     backgroundSound: JARVIS_HOLD_MUSIC,
     // The whole briefing is the first message, so VAPI speaks it all, then
     // listens for his follow-ups. This is what fixes the dead-air silence.
-    // Lead with a 3s pause so the first bar of the Green Onions background
-    // plays before the briefing starts, same cool entrance as the live line.
-    firstMessage: `<break time="3.0s" /> ${text}`,
+    // Lead with ~4.5s of pause (two chained breaks, honored by eleven_turbo_v2_5)
+    // so the Green Onions intro plays before the briefing starts, same entrance
+    // as the live line.
+    firstMessage: `<break time="3.0s" /><break time="1.5s" /> ${text}`,
     recordingEnabled: false,
     maxDurationSeconds: 600,
     serverMessages: ['end-of-call-report', 'tool-calls'],

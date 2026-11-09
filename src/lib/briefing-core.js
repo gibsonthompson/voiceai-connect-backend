@@ -225,11 +225,12 @@ async function assembleBriefing() {
   // day instead of guessing "tonight" off a headline.
   const falconsGame = await news.nextFalconsGame().catch(() => null);
 
-  const [hqSchedule, openMovers, goals, weather, ai, local, politics, falcons, voiceai, trades, crypto, gcalEvents] = await Promise.all([
+  const [hqSchedule, openMovers, goals, weather, headlines, ai, local, politics, falcons, voiceai, trades, crypto, gcalEvents] = await Promise.all([
     ready ? hq.listScheduleForDate(etDate, dow) : Promise.resolve([]),
     ready ? hq.listOpenMovers() : Promise.resolve([]),
     ready ? hq.listGoals() : Promise.resolve([]),
     fetchWeather(),
+    news.briefHeadlines(todayStr),
     news.briefAI(todayStr),
     news.briefLocal(weekend, todayStr),
     news.briefPolitics(todayStr),
@@ -266,7 +267,7 @@ async function assembleBriefing() {
     openTasks,
     goal: (goals && goals[0]) ? goals[0].title : null,
     weatherLine: weatherLine(weather),
-    news: { ai, voiceai, local, politics, trades, crypto, falcons },
+    news: { headlines, ai, voiceai, local, politics, trades, crypto, falcons },
   };
 }
 
@@ -275,13 +276,10 @@ async function assembleBriefing() {
 // A spoken fallback if the Claude render fails, so the first message is never
 // empty and the call can never go silent.
 function buildFallbackBriefing(ctx) {
-  const p = ['Good morning Gibson. Here is your day.'];
+  const p = ['Good morning Gibson, Clyde here. Here is your day.'];
   if (ctx.schedule && ctx.schedule !== 'clear') p.push(`On your calendar, ${ctx.schedule}.`);
   else p.push('Your calendar is open today.');
-  if (ctx.openTasks && ctx.openTasks.length) {
-    const top = ctx.openTasks[0];
-    p.push(`Top of your list, ${top.text}${top.venture && top.venture !== 'General' ? ', for ' + top.venture : ''}.`);
-  }
+  if (ctx.news.headlines) p.push(`The big headlines, ${ctx.news.headlines}`);
   if (ctx.goal) p.push(`You're pushing toward ${ctx.goal}.`);
   if (ctx.weatherLine) p.push(ctx.weatherLine);
   if (ctx.news.ai) p.push(`In AI, ${ctx.news.ai}`);
@@ -304,7 +302,7 @@ You are Gibson's chief of staff delivering his morning briefing out loud over th
 
 Deliver in this order, and skip anything with no data without mentioning it:
 1. His day. Walk through today's calendar in time order, a sentence or two. If the schedule shows clear, tell him his calendar is open today.
-2. His single highest-leverage move from his open tasks, with one line on why. Weigh how long it has sat and that VoiceAI Connect is his main business. Pick exactly one, do not list them.
+2. The biggest headlines today, from the headlines summary: the few stories everyone is talking about, so he has the general picture. Neutral and factual.
 3. The goal he is pushing, one quick line, only if there is one.
 4. Weather, give him the real read from the weather data provided: what it is doing right now, where the day is headed with the high and low, any rain, the wind, and when the sun sets. A few natural sentences, not one clipped line.
 5. AI news, from the ai summary.

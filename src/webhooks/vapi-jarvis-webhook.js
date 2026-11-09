@@ -56,13 +56,16 @@ function etToday() {
     timeZone: 'America/New_York', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   }).format(new Date());
 }
-// Clear, calm ElevenLabs voice (Sarah) and a strong, current conversational
-// model. Baked in on purpose; change these constants if you want to swap them.
+// Clyde's voice: a warm British male (ElevenLabs "George"), for the composed
+// right-hand/butler feel. The accent comes from the voice, so swap this ID to
+// change it ("Daniel" onwK4e9ZLuTAKqWW03F9 is a deeper, more formal British
+// male alternative). The voice MODEL is set on JARVIS_VOICE below: eleven_turbo_v2_5
+// reliably honors the SSML <break> we use to let the intro music play first.
 // JARVIS_MODEL is gpt-4.1: on VAPI's current OpenAI list and the most reliable
 // at actually CALLING tools (old gpt-4o is no longer a primary listing). A
 // chattier model will narrate doing things without doing them; 4.1 won't. The
 // refusal line uses a cheap model (one spoken line).
-const JARVIS_VOICE_ID = 'zGjIP4SZlMnY9m93k97r';
+const JARVIS_VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb'; // ElevenLabs "George", warm British male
 const JARVIS_MODEL = 'gpt-4.1';
 const JARVIS_REFUSAL_MODEL = 'gpt-4o-mini';
 
@@ -198,7 +201,11 @@ function getJarvisSystemPrompt(plate) {
 
 # Who you are
 
-You are Gibson's personal secretary and right hand, on the phone with him. Not an assistant reading responses, a real person who works for him and knows his whole world, the businesses, the goals, what is on his plate. Warm, sharp, calm, and genuinely in his corner. Think of the best executive assistant you can picture, the one who anticipates, connects the dots, and quietly keeps anything from slipping.
+Your name is Clyde. You are Gibson's personal secretary and right hand, on the phone with him. You are British, composed, and quietly brilliant, think a sharp British chief of staff or butler who genuinely runs his world. Not an assistant reading responses, a real person who works for him and knows his whole world, the businesses, the goals, what is on his plate. Warm, sharp, calm, and genuinely in his corner. The one who anticipates, connects the dots, and quietly keeps anything from slipping.
+
+You speak with natural British warmth. Call him Gibson, and now and then "sir," the way a trusted right hand would. Open the way a proper gentleman would, with the time of day ("good morning," "good day," "good evening"). Let a little British politeness come through, the odd "of course," "right then," "certainly," "very good," but keep it natural and real, never a stiff caricature or a put-on butler act.
+
+This should feel like he is talking to a real, intelligent person in a flowing voice conversation, the way voice mode on Claude or ChatGPT feels, not a phone robot reading lines. Think with him, react, have a point of view.
 
 # The one rule that matters most
 
@@ -220,7 +227,7 @@ Capture what he actually needs to do, in a few clear words. If he says "make a t
 - Let him finish. He thinks out loud and trails off mid sentence. Give him room, sit through his pauses, and do not jump in. A little silence is fine. Talking over him is not.
 - Keep each turn short, a sentence or two, this is a call, but make it human.
 - Say numbers, dates, and times as words. Never read a count out loud, never number a list, never read symbols.
-- No corporate voice, no jargon, no em dashes.
+- No corporate voice, no jargon, no em dashes. Never use stiff filler words no real person says on a call, above all never say "tackle" or "tackling," and skip things like "dive in," "circle back," "touch base," "leverage," or "let's get started." Just talk plainly.
 
 # Be his secretary, not a clerk
 
@@ -274,20 +281,37 @@ function buildPlateContext(openTasks, goals, ventures) {
   return out;
 }
 
+function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
 // Time-of-day greeting in Gibson's timezone, so the opener matches when he calls.
+// A small pool per part of day, picked at random, with "Good day" mixed in for
+// the British flavor, so the opener is never the same twice.
 function timeGreeting() {
   const h = parseInt(new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York', hour: '2-digit', hour12: false, hourCycle: 'h23',
   }).format(new Date()), 10);
-  if (h < 12) return 'Good morning';
-  if (h < 17) return 'Good afternoon';
-  return 'Good evening';
+  if (h < 12) return pick(['Good morning', 'Good day', 'Morning']);
+  if (h < 17) return pick(['Good afternoon', 'Good day']);
+  return pick(['Good evening', 'Evening']);
 }
 
+// Clyde introduces himself fresh every call: a British, right-hand opener that
+// states the time of day, says who he is, and offers to help, varied each time
+// so it never sounds canned. Leads with ~4.5s of SSML pause (two chained breaks,
+// honored by eleven_turbo_v2_5) so the Green Onions intro music plays first.
 function getJarvisFirstMessage() {
-  // Lead with a 3s pause (the max ElevenLabs flash honors) so the first bar of
-  // the Green Onions background plays before he speaks, a cool entrance.
-  return `<break time="3.0s" /> ${timeGreeting()} Gibson. How can I help? Want your briefing, something added to the list, or a note jotted down?`;
+  const g = timeGreeting();
+  const addr = pick(['Gibson', 'sir', 'Gibson']);
+  const line = pick([
+    `${g}, ${addr}. Clyde here. How can I help?`,
+    `${g}, ${addr}. It's Clyde. What can I do for you?`,
+    `${g}, ${addr}. Clyde at your service. What can I do for you?`,
+    `${g}, ${addr}. Clyde here. Where shall we start?`,
+    `${g}, ${addr}. Clyde on the line. What do you need?`,
+    `${g}, ${addr}. Clyde speaking. What's first today?`,
+    `${g}, ${addr}. Clyde here. Want your briefing, or shall I add something to the list?`,
+  ]);
+  return `<break time="3.0s" /><break time="1.5s" /> ${line}`;
 }
 
 // ── tool schemas (VAPI function tools) ─────────────────────────────────────
@@ -350,7 +374,7 @@ function getJarvisTools() {
       // 40s window so a thorough multi-step search has room to finish and answer
       // before VAPI gives up on it (the search itself aborts at 35s to stay under).
       { server: { url: JARVIS_SERVER_URL, secret: process.env.VAPI_WEBHOOK_SECRET, timeoutSeconds: 40 } }),
-    fn('hq_todays_briefing', "Assemble and deliver today's full briefing on demand: his calendar, top move, weather, and AI, local, and politics news. Use when he asks for his briefing or rundown.",
+    fn('hq_todays_briefing', "Assemble and deliver today's full briefing on demand: his calendar, the biggest headlines, weather, and AI, voice AI, local, and politics news. Use when he asks for his briefing or rundown.",
       {}, []),
     { type: 'endCall' },
   ];
@@ -361,7 +385,9 @@ function getJarvisTools() {
 const JARVIS_VOICE = {
   provider: '11labs',
   voiceId: JARVIS_VOICE_ID,
-  model: 'eleven_v4_turbo', // eleven_v4_turbo is now VAPI-supported and is the fleet default
+  // eleven_turbo_v2_5: low latency AND honors the SSML <break> in the first
+  // message, which is what lets the intro music play before Clyde speaks.
+  model: 'eleven_turbo_v2_5',
   stability: 0.4,
   similarityBoost: 0.85,
   style: 0.35,
@@ -369,6 +395,13 @@ const JARVIS_VOICE = {
   speed: 1.0,
   optimizeStreamingLatency: 3,
 };
+
+// Best-in-class speech-to-text so it hears him correctly, especially task text
+// and "make a to-do." Deepgram nova-3 is their most accurate model and is
+// VAPI-supported. Exported so the morning briefing uses the SAME transcriber as
+// the live line (the briefing route imports this; it was undefined before, so
+// the briefing call silently had no transcriber override).
+const JARVIS_TRANSCRIBER = { provider: 'deepgram', model: 'nova-3', language: 'en' };
 
 // Turn-taking: responds a little quicker than before but still holds through
 // his pauses instead of jumping in, so it feels attentive, not robotic.
@@ -393,8 +426,8 @@ async function buildJarvisConfig() {
     console.error('⚠️ Jarvis: could not load plate context:', e.message);
   }
   return {
-    name: 'Jarvis',
-    transcriber: { provider: 'deepgram', model: 'nova-2', language: 'en' },
+    name: 'Clyde',
+    transcriber: JARVIS_TRANSCRIBER,
     model: {
       provider: 'openai',
       model: JARVIS_MODEL,
@@ -418,7 +451,7 @@ async function buildJarvisConfig() {
 // callers so the private line never exposes the tools.
 function buildRefusalConfig(line) {
   return {
-    name: 'Jarvis (private)',
+    name: 'Clyde (private)',
     model: {
       provider: 'openai', model: JARVIS_REFUSAL_MODEL, temperature: 0.1,
       messages: [{ role: 'system', content: `Say exactly: "${line}" Then end the call.` }],
@@ -722,6 +755,7 @@ async function handleJarvisWebhook(req, res) {
 module.exports = {
   handleJarvisWebhook,
   JARVIS_VOICE,
+  JARVIS_TRANSCRIBER,
   JARVIS_SPEAKING_PLANS,
   JARVIS_MODEL,
   getJarvisTools,

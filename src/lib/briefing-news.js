@@ -256,8 +256,8 @@ async function answerWithWebSearch(query, todayStr) {
 
 async function briefAI(todayStr) {
   const items = await gatherTopic(
-    ['artificial intelligence news', 'OpenAI OR Anthropic OR Google DeepMind', 'new AI model OR AI product launch'],
-    4, 10,
+    ['artificial intelligence news today', 'OpenAI OR Anthropic OR Google DeepMind OR Meta AI', 'new AI model OR AI product launch', 'AI industry news OR AI funding today'],
+    5, 12,
   );
   return summarize(
     `${datePre(todayStr)}You are briefing a sharp solo founder who builds AI voice software, on today's AI news. In two or three spoken sentences, tell him the few things that actually matter today: new model or product releases, major company moves, anything relevant to someone building with AI. Be specific, name the companies and models. Cut the hype.`,
@@ -280,8 +280,8 @@ async function briefLocal(weekend, todayStr) {
 
 async function briefPolitics(todayStr) {
   const items = await gatherTopic(
-    ['US national news today', 'Congress legislation OR federal policy', 'US economy OR inflation OR gas prices'],
-    4, 12,
+    ['US national news today', 'Congress legislation OR federal policy', 'US economy OR inflation OR gas prices', 'White House OR Supreme Court decision', 'US jobs report OR stock market today'],
+    5, 14,
   );
   return summarize(
     `${datePre(todayStr)}You are giving a strictly nonpartisan, high-level briefing of the US national news every American should know today. In two or three spoken sentences, cover only the consequential things: major legislation or government decisions, the economy, anything with real impact on an ordinary person. No spin, no opinion, no partisan framing, no political horse-race noise.`,
@@ -303,8 +303,8 @@ async function briefFalcons(todayStr, nextGame) {
 // Voice AI industry, the space Gibson builds in (VoiceAI Connect).
 async function briefVoiceAI(todayStr) {
   const items = await gatherTopic(
-    ['voice AI agents', 'Vapi OR Retell OR Bland AI OR ElevenLabs OR Synthflow', 'AI voice receptionist OR AI phone agent', 'conversational voice AI funding OR launch'],
-    4, 10,
+    ['voice AI agents', 'Vapi OR Retell OR Bland AI OR ElevenLabs OR Synthflow OR Deepgram', 'AI voice receptionist OR AI phone agent', 'conversational voice AI funding OR launch', 'speech to text OR text to speech model', 'AI contact center OR call center AI'],
+    5, 12,
   );
   return summarize(
     `${datePre(todayStr)}You are briefing a founder who builds and sells a white-label AI voice receptionist platform (VoiceAI Connect). In two or three spoken sentences, tell him what actually matters in the voice AI space today: new voice or speech models, moves by the platforms and competitors he builds around or against (Vapi, Retell, Bland, ElevenLabs, Synthflow, and the like), funding, pricing or product changes that affect someone building phone agents. Be specific, name names, cut the hype.`,
@@ -336,4 +336,19 @@ async function briefCrypto(todayStr) {
   );
 }
 
-module.exports = { briefAI, briefLocal, briefPolitics, briefFalcons, briefVoiceAI, briefTrades, briefCrypto, nextFalconsGame, answerWithWebSearch, fetchRssItems, gatherTopic, summarize };
+// The biggest general headlines of the day, so the briefing opens with the big
+// picture ("what's everyone talking about today"). Pulls from several broad
+// queries across many outlets for wide source coverage, then digests the few
+// stories that actually lead the news.
+async function briefHeadlines(todayStr) {
+  const items = await gatherTopic(
+    ['top news today', 'breaking news today', 'biggest headlines today', 'top US headlines', 'world news today', 'top stories today'],
+    5, 16,
+  );
+  return summarize(
+    `${datePre(todayStr)}You are giving Gibson the biggest headlines of the day so he has the general picture, the handful of stories everyone is talking about right now. In two or three spoken sentences, cover the most important national and world stories leading the news today, whatever actually dominates. Neutral and factual, no spin, no opinion, name the specifics.`,
+    items, 340,
+  );
+}
+
+module.exports = { briefHeadlines, briefAI, briefLocal, briefPolitics, briefFalcons, briefVoiceAI, briefTrades, briefCrypto, nextFalconsGame, answerWithWebSearch, fetchRssItems, gatherTopic, summarize };
