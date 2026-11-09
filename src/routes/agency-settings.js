@@ -1351,6 +1351,16 @@ async function updateAgencySettings(req, res) {
           }
         }
 
+        // Annual price (cents). Optional; null means "use the default 3 months
+        // free (9x monthly)" wherever the annual price is needed.
+        let price_annual_cents = null;
+        if (p.price_annual_cents !== null && p.price_annual_cents !== undefined && p.price_annual_cents !== '') {
+          price_annual_cents = Number(p.price_annual_cents);
+          if (!Number.isInteger(price_annual_cents) || price_annual_cents < 0 || price_annual_cents > 1000000000) {
+            return res.status(400).json({ error: `Plan "${name}" has an invalid annual price` });
+          }
+        }
+
         let call_limit = Number(p.call_limit);
         if (!Number.isInteger(call_limit) || call_limit < -1) call_limit = 50; // -1 = unlimited
 
@@ -1371,7 +1381,7 @@ async function updateAgencySettings(req, res) {
         const features = (p.features && typeof p.features === 'object' && !Array.isArray(p.features)) ? p.features : {};
         const visible = p.visible !== false;
 
-        normalized.push({ key, name, price_cents, call_limit, description, setup_fee_cents, included_minutes, features, visible, order: i });
+        normalized.push({ key, name, price_cents, price_annual_cents, call_limit, description, setup_fee_cents, included_minutes, features, visible, order: i });
       }
 
       // Removal guard: a plan can only be dropped if no active client is on it,

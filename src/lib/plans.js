@@ -38,6 +38,9 @@ function normalizePlan(raw, order) {
     key: String(raw.key),
     name: raw.name || raw.key,
     price_cents: raw.price_cents != null ? Number(raw.price_cents) : null,
+    // Annual price (cents) for yearly client billing. null = fall back to the
+    // default 3-months-free (9x monthly) at render/checkout time.
+    price_annual_cents: raw.price_annual_cents != null ? Number(raw.price_annual_cents) : null,
     call_limit: raw.call_limit != null ? Number(raw.call_limit) : 50, // -1 = unlimited
     description: typeof raw.description === 'string' ? raw.description : '',
     setup_fee_cents: raw.setup_fee_cents != null ? Number(raw.setup_fee_cents) : null,
