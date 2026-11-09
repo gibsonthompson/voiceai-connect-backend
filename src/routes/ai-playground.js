@@ -55,7 +55,7 @@ router.get('/:agencyId/ai-playground/clients', async (req, res) => {
     const { agencyId } = req.params;
     const { data: clients, error } = await supabase
       .from('clients')
-      .select('id, business_name, industry, owner_name, owner_phone, email, vapi_assistant_id, vapi_phone_number, vapi_phone_id, knowledge_base_id, subscription_status, status, plan_type, business_city, business_state, call_mode')
+      .select('id, business_name, industry, owner_name, owner_phone, email, vapi_assistant_id, vapi_phone_number, vapi_phone_id, knowledge_base_id, subscription_status, status, plan_type, business_city, business_state, call_mode, is_test_client')
       .eq('agency_id', agencyId)
       .neq('status', 'deleted')
       .order('created_at', { ascending: false });
