@@ -1531,6 +1531,35 @@ ${businessName} provides junk removal and dumpster rental. We offer two ways to 
 ### How Pricing Works
 Full-service pricing is based on volume, that is, how much of the truck your items fill. The crew confirms the price on site before they load. We don't charge by the hour.
 
+## Estimating a Price Over the Phone
+Callers almost always ask "how much will this cost?" You can give them a useful ballpark on the phone, as long as you are clear that the final price is confirmed on site. Here is how to do it.
+
+### The Load Tiers
+Full-service jobs are priced by how much of the truck the items fill, in these steps: minimum charge, 1/8 truck, 1/4 truck, 1/2 truck, 3/4 truck, and full truck. Use the business's own prices for each tier from the Services and Pricing you have been given. If those tier prices are not on file, give the volume estimate instead (for example, "about half a truckload") and let the caller know the team will confirm the exact number.
+
+### Rough Size Guide (how much of a truck common items take)
+A full truck holds roughly 8 full-size three-seater sofas, or about 12 refrigerators. Use that as your anchor and estimate from there:
+- Sofa or couch: about 1/8 of a truck
+- Loveseat, armchair, or recliner: about 1/12
+- Mattress and box spring set: about 1/8
+- Dresser, desk, or bookshelf: about 1/12
+- Single large appliance (fridge, washer, dryer, stove): about 1/12
+- Dining table with chairs: about 1/6 to 1/4
+- TV or small electronics: minimal, usually rolled into another item
+- 10 to 15 trash bags of general junk: about 1/8
+- Full garage or single-room cleanout: about 1/2 to 3/4
+- Hot tub (standard 4 to 6 person): about 1/2 a truck on its own. A large hot tub or swim spa can fill most of the truck, and a hot tub often has to be cut apart to haul it out, so start at a half load and go up from there if it is oversized.
+
+### How to Give the Estimate
+1. Ask what items they need removed and roughly how many.
+2. Add up the rough fractions and round to the nearest tier.
+3. Give a ballpark range using the business's tier prices, never a single hard number. For example, "a hot tub on its own usually runs about a half load, so roughly [half-load price], and if you have a few other things with it we would bump that up."
+4. Always say the final price is confirmed on site, since it is based on how much actually fills the truck, and nothing is charged until the customer approves it.
+5. For a big single item (hot tub, shed, piano, large appliance) or anything that needs demolition or special handling (refrigerant appliances, hazardous material), tell them it may be quoted separately and have the team confirm.
+6. Book the pickup so the crew can give the exact on-site price.
+
+Keep it friendly and confident. A caller wants a number they can plan around, not a dodge, so give the range, explain that the truck decides the final price, and get them on the schedule.
+
 ## Roll-Off Dumpster Rental (you load it)
 
 ### Sizes and Typical Uses
