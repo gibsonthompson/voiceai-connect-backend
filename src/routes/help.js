@@ -496,7 +496,11 @@ router.post('/chat', async (req, res) => {
     // Who is asking decides how to frame the same knowledge base. Default to
     // prospect (the public bot) when the caller did not say.
     const aud = ['prospect', 'agency', 'client'].includes(audience) ? audience : 'prospect';
-    let systemPrompt = `${KB_CONTEXT}\n\n${AUDIENCE_PROMPTS[aud]}`;
+    // The big static prefix (product knowledge base + audience lens) is identical
+    // across every chat for a given audience, so it is cached (prompt caching) and
+    // reused on every later turn and session instead of being reprocessed. The
+    // small per-account context is appended as its own uncached block below.
+    const systemBase = `${KB_CONTEXT}\n\n${AUDIENCE_PROMPTS[aud]}`;
 
     // Attribution for the admin inbox comes from the auth token, not the
     // client-supplied body: an in-app help chat must always carry its agency,
@@ -528,7 +532,7 @@ router.post('/chat', async (req, res) => {
 
     // Fold in this account's live data (plan, trial, their own demo number) so
     // the bot answers account-specific questions accurately instead of guessing.
-    systemPrompt += await buildAccountContext({ userType: originUserType, agencyId: originAgencyId, clientId: originClientId });
+    const accountContext = await buildAccountContext({ userType: originUserType, agencyId: originAgencyId, clientId: originClientId });
     const sourceMap = { prospect: 'marketing', agency: 'agency_dashboard', client: 'client_dashboard' };
     const origin = { userType: originUserType, agencyId: originAgencyId, source: sourceMap[originUserType] || sourceMap[aud] };
 
@@ -546,10 +550,16 @@ router.post('/chat', async (req, res) => {
     // Add current message
     messages.push({ role: 'user', content: message.trim() });
 
+    // Static, shared prefix gets the cache breakpoint; the per-account tail (if
+    // any) rides after it uncached. Skipping an empty tail avoids an empty-text
+    // block, which the API rejects.
+    const systemBlocks = [{ type: 'text', text: systemBase, cache_control: { type: 'ephemeral' } }];
+    if (accountContext && accountContext.trim()) systemBlocks.push({ type: 'text', text: accountContext });
+
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 500,
-      system: systemPrompt,
+      system: systemBlocks,
       messages,
     });
 
