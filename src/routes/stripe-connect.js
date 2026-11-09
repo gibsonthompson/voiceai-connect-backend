@@ -281,6 +281,28 @@ function minutePassThroughActive(agency) {
     && Number(agency.client_minute_rate_cents) > 0);
 }
 
+// Annual billing is offered to clients only when the agency does NOT pass
+// per-minute usage through to them. A yearly flat price and a monthly metered
+// item can't live in one Stripe subscription, so pass-through agencies' annual
+// is handled separately (a later step). For a flat-plan agency, annual is one
+// clean yearly subscription.
+function clientAnnualAllowed(agency) {
+  return !minutePassThroughActive(agency);
+}
+
+// Resolve the ANNUAL amount (cents) a client pays for a plan on yearly billing.
+// Prefers the agency's custom per-plan annual price (plans[].price_annual_cents);
+// otherwise defaults to 9x the monthly base passed in (3 months free). The
+// monthly fallback is the already-resolved monthly amount, so custom per-client
+// pricing flows through to annual as 9x that custom monthly.
+function annualAmountForPlan(agency, plan, monthlyFallbackCents) {
+  const def = getPlan(agency, plan);
+  const custom = (def && def.price_annual_cents != null) ? Number(def.price_annual_cents) : null;
+  if (Number.isFinite(custom) && custom > 0) return Math.round(custom);
+  const m = Number(monthlyFallbackCents);
+  return (Number.isFinite(m) && m > 0) ? Math.round(m * 9) : 0;
+}
+
 // True for a subscription item backed by a Stripe meter (the per-minute item).
 // The flat base-plan item has no recurring.meter, so this reliably tells the
 // two apart. Used everywhere we must touch the minute item WITHOUT disturbing
@@ -1368,7 +1390,7 @@ async function createDiscountCoupon(agency, codeRecord, applyToProducts = null) 
   return coupon.id;
 }
 
-async function createTrialCheckoutForSignup({ client, agency, plan, passwordToken, trialDays, discountCode }) {
+async function createTrialCheckoutForSignup({ client, agency, plan, passwordToken, trialDays, discountCode, interval }) {
   // Manual-billing clients never take a card and have no Stripe subscription.
   // The signup handler already skips this path for a manual client; this is the
   // hard backstop so a manual client can never be routed into a Stripe trial
@@ -1412,6 +1434,17 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
   const _planCallLimit = (_planDef && _planDef.call_limit != null) ? _planDef.call_limit : (callLimits[plan] || 50);
   if (!priceAmount) throw new Error(`Invalid plan: ${plan}`);
 
+  // Annual billing: a single yearly flat subscription at the agency's annual
+  // price (custom per-plan, or 3 months free by default). Only when the agency
+  // allows it (no per-minute pass-through); otherwise this stays monthly. The
+  // frontend only offers annual to clients of allowed agencies, and this is the
+  // backstop so a stray year request can never land on a pass-through agency.
+  const isAnnual = interval === 'year' && clientAnnualAllowed(agency);
+  const flatInterval = isAnnual ? 'year' : 'month';
+  const flatUnitAmount = isAnnual
+    ? ((cpTrial && cpTrial.baseCents > 0) ? Math.round(cpTrial.baseCents * 9) : annualAmountForPlan(agency, plan, priceAmount))
+    : priceAmount;
+
   const currency = getCurrencyForCountry(agency.country || 'US');
   let _moDisplay;
   try { _moDisplay = (priceAmount / 100).toLocaleString('en-US', { style: 'currency', currency: (currency || 'usd').toUpperCase() }); }
@@ -1444,9 +1477,9 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
 
   const price = await stripe.prices.create({
     product: product.id,
-    unit_amount: priceAmount,
+    unit_amount: flatUnitAmount,
     currency,
-    recurring: { interval: 'month' },
+    recurring: { interval: flatInterval },
   }, { stripeAccount: agency.stripe_account_id });
 
   const agencyUrl = agency.marketing_domain && agency.domain_verified
@@ -1532,6 +1565,15 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
     catch { _moDisplayEff = `$${(_netMo / 100).toFixed(2)}`; }
   }
 
+  // Interval-aware figure + label for the submit-button copy. Annual shows the
+  // yearly amount and "/year"; monthly keeps the existing discounted figure.
+  const _perLabel = isAnnual ? 'year' : 'month';
+  let _flatDisplayEff = _moDisplayEff;
+  if (isAnnual) {
+    try { _flatDisplayEff = (flatUnitAmount / 100).toLocaleString('en-US', { style: 'currency', currency: (currency || 'usd').toUpperCase() }); }
+    catch { _flatDisplayEff = `$${(flatUnitAmount / 100).toFixed(2)}`; }
+  }
+
   // The monthly coupon is scoped to the recurring products, so it can be applied
   // whenever it exists without ever discounting the setup-fee line. The setup fee
   // is already net-priced, so there is no separate setup coupon: the monthly
@@ -1594,9 +1636,9 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
         ? `Your card won't be charged during the free trial. When your ${days}-day trial ends, your first invoice adds ${_setupFeePhrase} on top of your plan.`
         : (days > 0
           ? (setupFeeItem
-            ? `Your one-time setup fee is due today. After your ${days}-day free trial, your plan continues at ${_moDisplayEff}/month.`
-            : `Your card won't be charged during the free trial. When your ${days}-day trial ends, your plan continues at ${_moDisplayEff}/month.`)
-          : `You'll be charged today to start your plan${setupFeeItem ? ', including the one-time setup fee' : ''}, then ${_moDisplayEff}/month after that.`) } },
+            ? `Your one-time setup fee is due today. After your ${days}-day free trial, your plan continues at ${_flatDisplayEff}/${_perLabel}.`
+            : `Your card won't be charged during the free trial. When your ${days}-day trial ends, your plan continues at ${_flatDisplayEff}/${_perLabel}.`)
+          : `You'll be charged today to start your plan${setupFeeItem ? ', including the one-time setup fee' : ''}, then ${_flatDisplayEff}/${_perLabel} after that.`) } },
     ...(sessionDiscounts ? { discounts: sessionDiscounts } : {}),
     metadata: {
       client_id: client.id,
@@ -1604,6 +1646,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
       plan,
       call_limit: String(_planCallLimit),
       type: 'trial_signup', // distinguishes from upgrade-mode checkouts
+      billing_interval: flatInterval,
       ...(_discount ? { discount_code_id: _discount.id } : {}),
       ...(_deferSetup ? { deferred_setup_fee_cents: String(setupFeeItem.feeCents), deferred_setup_fee_pct_off: String(_setupPct), ...(_discount && _discount.code ? { discount_code: _discount.code } : {}) } : {}),
     },
@@ -1611,11 +1654,11 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
       // days=0 omits the trial entirely so Stripe charges immediately at
       // checkout and the subscription starts 'active' (no trialing status).
       ...(days > 0 ? { trial_period_days: days } : {}),
-      metadata: { client_id: client.id, agency_id: agency.id, plan, type: 'trial_signup' },
+      metadata: { client_id: client.id, agency_id: agency.id, plan, type: 'trial_signup', billing_interval: flatInterval },
     },
   }, { stripeAccount: agency.stripe_account_id });
 
-  console.log(`✅ Trial checkout created for client ${client.id}: session ${session.id}, plan ${plan}, currency ${currency}, trialDays ${days}`);
+  console.log(`✅ Trial checkout created for client ${client.id}: session ${session.id}, plan ${plan}, currency ${currency}, trialDays ${days}, interval ${flatInterval}`);
   return { url: session.url, sessionId: session.id };
 }
 
@@ -1626,6 +1669,7 @@ async function createTrialCheckoutForSignup({ client, agency, plan, passwordToke
 async function createClientCheckout(req, res) {
   try {
     const { client_id, plan } = req.body;
+    const reqInterval = req.body.interval === 'year' ? 'year' : 'month';
 
     if (!client_id || !plan) {
       return res.status(400).json({ error: 'Missing required fields', required: ['client_id', 'plan'] });
@@ -1718,6 +1762,14 @@ async function createClientCheckout(req, res) {
     const _planCallLimitChk = (_planDefChk && _planDefChk.call_limit != null) ? _planDefChk.call_limit : (callLimits[plan] || 50);
     if (!priceAmount) return res.status(400).json({ error: 'Invalid plan' });
 
+    // Annual: one yearly flat subscription at the agency's annual price. Only
+    // when the agency allows it (no per-minute pass-through); otherwise monthly.
+    const isAnnual = reqInterval === 'year' && clientAnnualAllowed(agency);
+    const flatInterval = isAnnual ? 'year' : 'month';
+    const flatUnitAmount = isAnnual
+      ? ((cpChk && cpChk.baseCents > 0) ? Math.round(cpChk.baseCents * 9) : annualAmountForPlan(agency, plan, priceAmount))
+      : priceAmount;
+
     const currency = getCurrencyForCountry(agency.country || 'US');
 
     let connectedCustomerId = client.stripe_connected_customer_id;
@@ -1738,8 +1790,8 @@ async function createClientCheckout(req, res) {
     }, { stripeAccount: agency.stripe_account_id });
 
     const price = await stripe.prices.create({
-      product: product.id, unit_amount: priceAmount, currency: currency,
-      recurring: { interval: 'month' }
+      product: product.id, unit_amount: flatUnitAmount, currency: currency,
+      recurring: { interval: flatInterval }
     }, { stripeAccount: agency.stripe_account_id });
 
     const agencyUrl = agency.marketing_domain && agency.domain_verified
@@ -1783,8 +1835,8 @@ async function createClientCheckout(req, res) {
       success_url: `${agencyUrl}/client/dashboard?upgrade=success`,
       cancel_url: `${agencyUrl}/client/upgrade-required?canceled=true`,
       ...(_couponId ? { discounts: [{ coupon: _couponId }] } : {}),
-      metadata: { client_id, agency_id: agency.id, plan, call_limit: String(_planCallLimitChk), type: 'client_subscription', ...(_discount ? { discount_code_id: _discount.id } : {}) },
-      subscription_data: { metadata: { client_id, agency_id: agency.id, plan } }
+      metadata: { client_id, agency_id: agency.id, plan, call_limit: String(_planCallLimitChk), type: 'client_subscription', billing_interval: flatInterval, ...(_discount ? { discount_code_id: _discount.id } : {}) },
+      subscription_data: { metadata: { client_id, agency_id: agency.id, plan, billing_interval: flatInterval } }
     }, { stripeAccount: agency.stripe_account_id });
 
     console.log('✅ Client checkout created:', session.id, '| Currency:', currency, '| Amount:', priceAmount);
@@ -2055,6 +2107,16 @@ async function changeClientPlan(req, res) {
     const callLimit = Number.isInteger(targetPlan.call_limit) ? targetPlan.call_limit : 50;
     const currency = getCurrencyForCountry(agency.country || 'US');
 
+    // Preserve the client's current billing interval across a plan change. If
+    // their flat item is yearly (annual client), the new plan's flat item is
+    // yearly too, priced at the target plan's annual amount, so they stay annual
+    // instead of being silently flipped to monthly.
+    const isAnnual = flatItem?.price?.recurring?.interval === 'year';
+    const flatInterval = isAnnual ? 'year' : 'month';
+    const flatUnitAmount = isAnnual
+      ? ((cpPlan && cpPlan.baseCents > 0) ? Math.round(cpPlan.baseCents * 9) : annualAmountForPlan(agency, plan, priceAmount))
+      : priceAmount;
+
     // Fresh product + price for the target plan on the connected account.
     const product = await stripe.products.create({
       name: `AI Receptionist - ${plan.charAt(0).toUpperCase() + plan.slice(1)}`,
@@ -2062,8 +2124,8 @@ async function changeClientPlan(req, res) {
     }, { stripeAccount: agency.stripe_account_id });
 
     const price = await stripe.prices.create({
-      product: product.id, unit_amount: priceAmount, currency,
-      recurring: { interval: 'month' },
+      product: product.id, unit_amount: flatUnitAmount, currency,
+      recurring: { interval: flatInterval },
     }, { stripeAccount: agency.stripe_account_id });
 
     // Build the items update: always swap the flat base item to the new plan
@@ -3189,6 +3251,7 @@ async function handleClientCheckoutCompleted(session, stripeAccountId) {
     status: 'active',
     calls_this_month: 0,
     minutes_this_period: 0,
+    billing_interval: session.metadata?.billing_interval === 'year' ? 'annual' : 'monthly',
   }).eq('id', clientId);
 
   if (updateError) { console.error('Failed to update client:', updateError); return; }

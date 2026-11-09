@@ -267,6 +267,14 @@ function publicAgencyShape(agency) {
 
     // Plans as data (resolved: array if present, else synthesized from columns)
     plans: getAgencyPlans(agency),
+    // The agency's own on/off switch for offering clients annual billing.
+    show_annual_plans: agency.show_annual_plans === true,
+    // Whether clients can actually pick ANNUAL billing on the signup/plan page
+    // and marketing site. Requires BOTH the agency turning it on AND the agency
+    // not passing per-minute usage through to clients (an annual flat plan plus
+    // a monthly metered item can't share one Stripe subscription, so pass-through
+    // agencies' annual lands in a later step).
+    annual_billing_available: agency.show_annual_plans === true && agency.minute_pass_through !== true,
     // Custom feature bullets + built-in feature renames/removals, so the
     // marketing site can render them (publicAgencyShape feeds getAgencyByHost).
     custom_features: Array.isArray(agency.custom_features) ? agency.custom_features : [],
@@ -900,6 +908,9 @@ async function updateAgencySettings(req, res) {
       'client_billing_mode',
       // Show/hide the discount-code input on the client signup page.
       'show_client_discount_code',
+      // Whether clients are offered annual (yearly) billing on the signup/plan
+      // page and marketing site. Default false (opt-in).
+      'show_annual_plans',
       // Client upgrade page: show lower plans + agency-configurable plan badges,
       // and whether clients can cancel from their dashboard.
       'show_lower_plans_on_upgrade',
@@ -1019,6 +1030,7 @@ async function updateAgencySettings(req, res) {
     if (updates.show_client_call_usage !== undefined) updates.show_client_call_usage = updates.show_client_call_usage === true;
     if (updates.show_client_subscription !== undefined) updates.show_client_subscription = updates.show_client_subscription === true;
     if (updates.show_client_discount_code !== undefined) updates.show_client_discount_code = updates.show_client_discount_code === true;
+    if (updates.show_annual_plans !== undefined) updates.show_annual_plans = updates.show_annual_plans === true;
     if (updates.show_lower_plans_on_upgrade !== undefined) updates.show_lower_plans_on_upgrade = updates.show_lower_plans_on_upgrade === true;
     if (updates.allow_client_cancel !== undefined) updates.allow_client_cancel = updates.allow_client_cancel === true;
     // Only the two valid modes persist; anything else falls back to the default.
