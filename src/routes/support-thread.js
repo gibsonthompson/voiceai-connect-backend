@@ -659,6 +659,75 @@ async function upsertThreadState(threadKey, patch) {
   const { error } = await supabase.from('inbox_thread_state').upsert(row, { onConflict: 'thread_key' });
   if (error) throw error;
 }
+// ---------------------------------------------------------------------------
+// GET /inbox/agency-facts/:agencyId
+// Quick facts about the agency a thread is with, shown as a stat strip at the
+// top of the admin inbox so support has context while replying: plan and trial
+// state, how many clients they have, whether they have called their own demo
+// line, and whether they have set up a test client.
+// ---------------------------------------------------------------------------
+adminRouter.get('/inbox/agency-facts/:agencyId', requireAdmin, async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const { data: a } = await supabase
+      .from('agencies')
+      .select('id, name, plan_type, access_plan, subscription_status, status, trial_ends_at, demo_free_used, demo_assistant_id, demo_phone_number, test_client_id, onboarding_completed, onboarding_step, last_active_at, created_at')
+      .eq('id', agencyId)
+      .maybeSingle();
+    if (!a) return res.status(404).json({ error: 'Agency not found' });
+
+    // Real (non-test) client count.
+    const { count: clientCount } = await supabase
+      .from('clients')
+      .select('id', { count: 'exact', head: true })
+      .eq('agency_id', agencyId)
+      .eq('is_test_client', false);
+
+    // Test client details, if one is provisioned.
+    let testClientName = null;
+    let testClientStatus = null;
+    if (a.test_client_id) {
+      const { data: tc } = await supabase
+        .from('clients')
+        .select('business_name, status, subscription_status')
+        .eq('id', a.test_client_id)
+        .maybeSingle();
+      if (tc) {
+        testClientName = tc.business_name || null;
+        testClientStatus = tc.subscription_status || tc.status || null;
+      }
+    }
+
+    const statusRaw = String(a.subscription_status || a.status || '').toLowerCase();
+    const isTrial = statusRaw === 'trial' || statusRaw === 'trialing';
+
+    return res.json({
+      success: true,
+      facts: {
+        plan: a.access_plan || a.plan_type || null,
+        comped: !!a.access_plan,
+        status: a.subscription_status || a.status || null,
+        isTrial,
+        trialEndsAt: a.trial_ends_at || null,
+        clientCount: clientCount || 0,
+        demoCalled: !!a.demo_free_used,
+        hasDemo: !!a.demo_assistant_id,
+        demoPhone: a.demo_phone_number || null,
+        hasTestClient: !!a.test_client_id,
+        testClientName,
+        testClientStatus,
+        onboardingCompleted: !!a.onboarding_completed,
+        onboardingStep: a.onboarding_step != null ? a.onboarding_step : null,
+        lastActiveAt: a.last_active_at || null,
+        createdAt: a.created_at || null,
+      },
+    });
+  } catch (e) {
+    console.error('admin inbox agency-facts error:', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 adminRouter.post('/inbox/mark-support', requireAdmin, async (req, res) => {
   try {
     const threadKey = clean(req.body && req.body.threadKey, 128);
