@@ -50,6 +50,12 @@ Client level: the trial for the businesses an agency onboards is fully customiza
 - Handles unlimited simultaneous calls, so there are no busy signals and no hold music.
 - Sends a summary after every call with the intent and sentiment, and everything is saved with recordings and time-coded transcripts in the client dashboard.
 
+## AUTOMATIONS AND APPOINTMENT REMINDERS (PRO AND SCALE)
+The Automations tab lets an agency build automated text workflows that run off call and appointment events, on Pro and Scale (not Free). This is built in, not something that has to be built with the API.
+- Appointment reminders are a built-in automation. A ready-made "Appointment reminders" template texts the customer a reminder the day before, then again a couple of hours before their appointment, from the client's own number, with editable timing and wording. So yes, the platform can send appointment reminders to callers ahead of their appointment.
+- Triggers include appointment booked and call completed (plus billing events). Steps include Send SMS, AI SMS (grounded in the client's knowledge base and call context), Wait, and Appointment reminder (waits until a set time relative to the appointment). Other ready-made templates: missed-call follow-up, post-call follow-up, appointment confirmation, and review request.
+- Reminders need the appointment to have a real date and time, which an AI booking into Google Calendar always has.
+
 ## ONBOARDING A CLIENT (UNDER 60 SECONDS)
 A local business signs up through the agency's branded page with just its name, email, phone, business name, industry, and city. The system provisions the AI assistant, a voice, and a local phone number automatically in under a minute. The client gets a welcome text (SMS) with their AI number and a link to finish setup and turn on call forwarding. No welcome email is sent. If the business has a website, the AI reads it automatically to learn the business. There is no A2P registration delay, no files to send, and no technical setup on the client's end. The client forwards their business line to the AI number or uses it directly.
 

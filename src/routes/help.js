@@ -290,6 +290,13 @@ GOOGLE CALENDAR INTEGRATION:
 - Troubleshooting: verify Google account connected, correct calendar selected, feature enabled for client's plan tier.
 - This automated booking is specific to Google Calendar. Other calendars are not booked automatically today (see INTEGRATIONS for the API/webhook path).
 
+AUTOMATIONS (WORKFLOWS, PRO AND SCALE):
+- The Automations tab in the dashboard (Pro and Scale, not Free) lets an agency build automated text workflows that run off call and appointment events. This is a built-in feature, not something that has to be built with the API.
+- Appointment reminders to the customer ARE supported and are built in. There is a ready-made "Appointment reminders" automation: when an appointment is booked, it texts the customer a reminder the day before and again a couple of hours before the appointment, from the client's own number, and the timing and wording are editable.
+- So if someone asks whether the platform can send appointment reminders to the caller ahead of their appointment: yes, it can. Point them to the Automations tab and the Appointment reminders template. Do NOT say reminders are not a native feature or that they have to build it themselves with webhooks or the API.
+- Triggers include "appointment booked" and "call completed" (plus account and billing events). Steps include Send SMS, AI SMS (grounded in the client's knowledge base and call context), Wait, and Appointment reminder (waits until a set time relative to the appointment). Other ready-made templates: missed-call follow-up, post-call follow-up, appointment confirmation, and review request.
+- Reminders need the appointment to have a real date and time, which an AI booking into Google Calendar always has. If an appointment was captured without a set time, the reminder step is simply skipped.
+
 INTEGRATIONS (WHAT IS AND ISN'T AVAILABLE):
 - Available: Google Calendar (automated appointment booking, agency chooses which plan tiers get it), Stripe Connect (payments), CSV export of calls, contacts, and analytics, and a developer REST API plus outbound webhooks on the Scale plan (also included for call-center agencies on any plan).
 - Developer API (Scale plan): a REST API at /api/v1, authenticated with an API key created in the agency dashboard under Settings (the full key is shown once). Scopes are read or read_write. It can list and manage clients, read calls and recordings, read appointments, manage the receptionist config and knowledge base, pull usage and analytics, and manage webhook subscriptions. It is read plus management: there is no endpoint to create or reschedule an appointment.
