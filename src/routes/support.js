@@ -52,7 +52,7 @@ A logged-in agency operator who can see their dashboard. Give real, specific ste
 - When something depends on the agency's own setup (for example the trial length or the pricing they set for their clients), say it is theirs to configure and tell them where, instead of quoting one fixed value as if it were the same for everyone.
 
 ## FORMATTING
-Keep replies clean and conversational. A short bold label or a tight numbered list of steps is fine when it genuinely helps, nothing more. If you include a link, write it as a clean markdown link with a short plain label like [dashboard walkthrough](url), never a raw URL and never with stray asterisks or punctuation around it.
+Reply in plain, conversational sentences. Do NOT use markdown styling: no asterisks for bold, no "**" around words, no bullet characters, no headings. These replies also show up in places that display raw text, where "**like this**" leaks through as literal asterisks and looks broken. When you need to give steps, write them as a short plain numbered list (1., 2., 3.) with no bold. If you include a link, write it as a clean markdown link with a short plain label like [dashboard walkthrough](url), never a raw URL and never with stray asterisks around it.
 
 ## HARD RULES
 - Only discuss VoiceAI Connect, AI receptionists, agency operations, billing, and platform features. If asked something unrelated, redirect politely to how you can help with their agency.
@@ -84,15 +84,12 @@ router.post('/:agencyId/support/chat', async (req, res) => {
     let contextPrompt = `${OPERATOR_LENS}\n\nKNOWLEDGE BASE:\n${knowledge}`;
     if (agencyName) contextPrompt += `\n\nYou are currently helping ${agencyName}.`;
     if (agencyPlan) {
-      contextPrompt += ` They are on the ${agencyPlan} plan.`;
-      // Add plan-specific context
-      if (agencyPlan === 'free' || agencyPlan === 'starter') {
-        contextPrompt += ' As a Free plan user, they pay $29.99/client/mo + $0.12/min with no platform fee. They do not have white-label branding, marketing website, or custom domain. They can upgrade to Pro or Scale from Settings → Billing.';
-      } else if (agencyPlan === 'pro' || agencyPlan === 'professional') {
-        contextPrompt += ' As a Pro plan user, they pay $99/mo + $9.99/client/mo + $0.10/min. They have full white-label branding, marketing website, custom domain, and up to 5 team members. They can upgrade to Scale from Settings → Billing.';
-      } else if (agencyPlan === 'scale' || agencyPlan === 'enterprise') {
-        contextPrompt += ' As a Scale plan user, they pay $499/mo + $0/client + $0.05/min. They have all features including AI Lab, industry templates, and unlimited team members.';
-      }
+      // State only WHICH plan they are on. Every plan specific (pricing,
+      // per-client fee, per-minute rate, features, trial terms) must come from
+      // the KNOWLEDGE BASE above so there is one source of truth. Hardcoding
+      // numbers here let the bot quote stale figures that admin edits to the
+      // knowledge base could never correct.
+      contextPrompt += ` The operator you are helping is on the ${agencyPlan} plan. Answer any plan, pricing, fee, or feature question using the facts for that plan in the KNOWLEDGE BASE, never from memory. They manage or change their plan in Settings, then Billing.`;
     }
 
     // Format messages for Claude API
@@ -200,7 +197,7 @@ router.post('/:agencyId/support/escalate', async (req, res) => {
     // then a compact transcript of what they already tried with the bot so the
     // owner has full context in one glance.
     const parts = [];
-    parts.push(note || '(Escalated from the support assistant — see the conversation below.)');
+    parts.push(note || '(Escalated from the support assistant, see the conversation below.)');
     if (convo) {
       parts.push('');
       parts.push('--- Conversation with the support assistant ---');
@@ -209,30 +206,63 @@ router.post('/:agencyId/support/escalate', async (req, res) => {
     const composed = parts.join('\n').slice(0, 4000);
 
     // 1) Persist to support_requests (admin inbox + agency Inbox platform thread).
+    // Dedupe: the "escalated" flag on the client is React state only, so a page
+    // reload lets the same operator hit escalate again and open a second
+    // identical thread (seen in the wild: two threads 13 minutes apart from the
+    // same agency, same transcript). Before inserting, reuse any OPEN
+    // support_chat thread for this agency from the last 2 hours: bump it unread
+    // again instead of creating a duplicate. A genuinely new escalation hours
+    // later (or after the team resolves the thread) still opens a fresh one.
     let requestId = null;
+    let reusedExisting = false;
     try {
-      const { data: created, error } = await supabase
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+      const { data: existing } = await supabase
         .from('support_requests')
-        .insert({
-          agency_id: agencyId,
-          user_type: 'agency',
-          message: composed,
-          source: 'support_chat',
-          status: 'open',
-          last_sender: 'agency',
-          admin_unread: 1,
-        })
         .select('id')
-        .single();
-      if (error) throw error;
-      requestId = created.id;
+        .eq('agency_id', agencyId)
+        .eq('source', 'support_chat')
+        .eq('status', 'open')
+        .gte('created_at', twoHoursAgo)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (existing && existing.id) {
+        // Reuse the open thread. Re-flag it unread for the admin and refresh the
+        // activity time so it surfaces, but do not insert a second row or re-send
+        // the SMS (that is the reload spam we are preventing).
+        await supabase
+          .from('support_requests')
+          .update({ admin_unread: 1, last_sender: 'agency', last_reply_at: new Date().toISOString() })
+          .eq('id', existing.id);
+        requestId = existing.id;
+        reusedExisting = true;
+      } else {
+        const { data: created, error } = await supabase
+          .from('support_requests')
+          .insert({
+            agency_id: agencyId,
+            user_type: 'agency',
+            message: composed,
+            source: 'support_chat',
+            status: 'open',
+            last_sender: 'agency',
+            admin_unread: 1,
+          })
+          .select('id')
+          .single();
+        if (error) throw error;
+        requestId = created.id;
+      }
     } catch (dbErr) {
       console.error('support escalate insert failed:', dbErr.message);
       return res.status(500).json({ error: 'Could not send to the team. Please try again.' });
     }
 
-    // 2) Text the owner (best-effort; never blocks the success response).
-    if (SUPPORT_PHONE) {
+    // 2) Text the owner (best-effort; never blocks the success response). Skipped
+    // when we reused an existing open thread, so reloads do not re-page.
+    if (SUPPORT_PHONE && !reusedExisting) {
       try {
         await sendAndLogSMS({
           phone: SUPPORT_PHONE,

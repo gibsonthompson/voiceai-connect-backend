@@ -2375,7 +2375,8 @@ app.use('/api/admin', require('./routes/admin-broadcasts').adminRouter); // plat
 app.use('/api/admin', errorReportRoutes);
 app.use('/api/admin', require('./routes/admin-expenses'));
 app.use('/api/admin', require('./routes/admin-margin'));
-app.use('/api/admin', require('./routes/admin-support'));  
+app.use('/api/admin', require('./routes/admin-support'));
+app.use('/api/admin', require('./routes/admin-knowledge')); // Support Brain editor: persists the support knowledge doc to platform_settings so bot edits go live
 // ============================================================================
 // CRON ROUTES (Trial Expiration)
 // ============================================================================
