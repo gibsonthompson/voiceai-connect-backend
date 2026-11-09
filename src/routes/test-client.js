@@ -412,4 +412,125 @@ router.delete('/:agencyId/test-client', async (req, res) => {
   }
 });
 
+// ============================================================================
+// POST /api/agency/:agencyId/test-client/convert
+// Promote the agency's test client into a real, billable client IN PLACE.
+//
+// Why in place (not a copy): the prospect has been calling the test client's
+// number, so keeping the same number, assistant, knowledge base, services and
+// call history is the whole point. The business keeps the line it already
+// knows, and nothing has to be rebuilt.
+//
+// What changes:
+//   - is_test_client false         → now counts as a real client, billed, and
+//                                     never swept by expire-test-clients.
+//   - monthly_call_limit lifted     → off the 30-minute test cap, onto the
+//                                     agency's real per-plan limit.
+//   - subscription_status 'manual'  → lands in the standard manual-billing
+//     billing_mode 'manual'           state (a first-class, supported state).
+//                                     No card is charged and nothing auto-bills:
+//                                     the agency collects payment through the
+//                                     normal client billing controls afterward.
+//   - usage_resets_at +1 month      → the monthly cap-reset cron picks it up.
+//   - calls_this_month 0            → fresh billing month for a real client.
+//
+// The agency's test_client_id pointer is cleared so the slot frees up and a
+// brand-new test client can be provisioned for the next prospect. The number is
+// NOT released (that is the opposite of what we want here).
+//
+// Guarded to is_test_client=true, so a real client can never be touched through
+// this path, and a second call is a no-op 404 (the row is no longer a test client).
+// ============================================================================
+router.post('/:agencyId/test-client/convert', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const agency = await getAgencyById(agencyId);
+    if (!agency) return res.status(404).json({ error: 'Agency not found' });
+
+    // Find the test client: prefer the pointer, fall back to a scan.
+    const cols = 'id, business_name, vapi_phone_number, plan_type, is_test_client';
+    let testClient = null;
+    if (agency.test_client_id) {
+      const { data } = await supabase
+        .from('clients').select(cols)
+        .eq('id', agency.test_client_id)
+        .eq('is_test_client', true)
+        .maybeSingle();
+      testClient = data || null;
+    }
+    if (!testClient) {
+      const { data } = await supabase
+        .from('clients').select(cols)
+        .eq('agency_id', agencyId)
+        .eq('is_test_client', true)
+        .limit(1)
+        .maybeSingle();
+      testClient = data || null;
+    }
+
+    if (!testClient) {
+      return res.status(404).json({ error: 'No test client to convert' });
+    }
+
+    // Real per-plan call limit for this client's plan, read straight off the
+    // agency row (getAgencyById may not select the limit_* columns).
+    const planType = String(testClient.plan_type || 'starter').toLowerCase();
+    const limitKey = `limit_${planType}`;
+    const { data: limRow } = await supabase
+      .from('agencies')
+      .select(`${limitKey}, limit_starter`)
+      .eq('id', agencyId)
+      .single();
+    const callLimit = (limRow && limRow[limitKey] != null)
+      ? limRow[limitKey]
+      : (limRow?.limit_starter ?? 50);
+
+    // One month out so the monthly cap-reset cron refreshes usage.
+    const resetAt = new Date();
+    resetAt.setMonth(resetAt.getMonth() + 1);
+
+    const { data: updated, error: updErr } = await supabase
+      .from('clients')
+      .update({
+        is_test_client: false,
+        subscription_status: 'manual',
+        billing_mode: 'manual',
+        status: 'active',
+        trial_ends_at: null,
+        usage_resets_at: resetAt.toISOString(),
+        monthly_call_limit: callLimit,
+        calls_this_month: 0,
+      })
+      .eq('id', testClient.id)
+      .eq('is_test_client', true)
+      .select('id, business_name, vapi_phone_number, industry')
+      .single();
+
+    if (updErr) {
+      console.error('❌ Test client convert failed:', updErr.message);
+      return res.status(500).json({ error: 'Failed to convert test client' });
+    }
+
+    // Free the test slot so a fresh test client can be provisioned next.
+    await supabase.from('agencies').update({ test_client_id: null }).eq('id', agencyId);
+
+    console.log(`⬆️ Test client converted to real client for ${agency.name}: ${updated.business_name} (${updated.vapi_phone_number || 'no number'})`);
+
+    return res.json({
+      success: true,
+      message: 'Test client converted to a real client. Set up billing for it whenever you are ready.',
+      client: {
+        id: updated.id,
+        business_name: updated.business_name,
+        vapi_phone_number: updated.vapi_phone_number || null,
+        industry: updated.industry || null,
+        is_test_client: false,
+      },
+    });
+  } catch (error) {
+    console.error('❌ Test client convert error:', error);
+    return res.status(500).json({ error: error.message || 'Convert failed' });
+  }
+});
+
 module.exports = router;
