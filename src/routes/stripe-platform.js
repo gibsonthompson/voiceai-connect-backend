@@ -69,6 +69,10 @@ const PLATFORM_PLANS = {
     name: 'Pro',
     price: 9900, // $99/mo flat
     platformPrice: process.env.STRIPE_PRICE_PRO_PLATFORM,
+    // Annual flat fee (yearly recurring, 3 months free => 9x monthly = $891/yr).
+    // Billed on a SEPARATE yearly subscription; usage (per-minute + per-client)
+    // always stays monthly on stripe_subscription_id. See the annual flow below.
+    platformPriceAnnual: process.env.STRIPE_PRICE_PRO_PLATFORM_ANNUAL,
     clientPrice: process.env.STRIPE_PRICE_PRO_CLIENT,
     minutePrice: process.env.STRIPE_PRICE_PRO_MINUTE,
     clientLimit: -1, // unlimited
@@ -77,6 +81,7 @@ const PLATFORM_PLANS = {
     name: 'Scale',
     price: 49900, // $499/mo flat
     platformPrice: process.env.STRIPE_PRICE_SCALE_PLATFORM,
+    platformPriceAnnual: process.env.STRIPE_PRICE_SCALE_PLATFORM_ANNUAL, // $4,491/yr
     clientPrice: null, // Scale is unlimited clients at $0, no per-client item
     minutePrice: process.env.STRIPE_PRICE_SCALE_MINUTE,
     clientLimit: -1,
@@ -512,9 +517,156 @@ async function convertFreeUsageToPaid(agency, sub, plan, planConfig, noTrial) {
   }
 }
 
+// ============================================================================
+// SWITCH BILLING INTERVAL (monthly <-> annual) for a PAID agency (Pro/Scale).
+// ----------------------------------------------------------------------------
+// monthly -> annual: create the yearly flat-fee sub and drop the monthly sub's
+//   flat item to $0 (usage keeps billing monthly on the same sub).
+// annual -> monthly: restore the monthly flat item to the plan price, clear the
+//   annual tracking in the DB, then cancel the yearly sub. Clearing the DB
+//   BEFORE the cancel makes the yearly sub.deleted event read as stale, so it
+//   does NOT run the full-cancellation teardown (usage sub + agency stay intact).
+// ============================================================================
+async function changeBillingInterval(req, res) {
+  try {
+    const { agency_id } = req.body || {};
+    const interval = req.body.interval === 'year' ? 'year' : 'month';
+    if (!agency_id) return res.status(400).json({ error: 'agency_id is required' });
+
+    const { data: agency, error } = await supabase
+      .from('agencies')
+      .select('id, plan_type, billing_interval, stripe_customer_id, stripe_subscription_id, stripe_annual_subscription_id')
+      .eq('id', agency_id)
+      .single();
+    if (error || !agency) return res.status(404).json({ error: 'Agency not found' });
+
+    const plan = String(agency.plan_type || '').toLowerCase();
+    const planConfig = PLATFORM_PLANS[plan];
+    if (!planConfig || (plan !== 'pro' && plan !== 'scale')) {
+      return res.status(400).json({ error: 'Annual billing is only available on Pro or Scale.' });
+    }
+    if (!agency.stripe_subscription_id) {
+      return res.status(409).json({ error: 'no_active_subscription', message: 'No active subscription to switch yet.' });
+    }
+
+    const current = agency.billing_interval === 'annual' ? 'year' : 'month';
+    if (interval === current) return res.json({ success: true, no_change: true, interval });
+
+    const freePlatform = process.env.STRIPE_PRICE_FREE_PLATFORM;
+
+    if (interval === 'year') {
+      if (!planConfig.platformPriceAnnual) {
+        console.error(`❌ change-interval: missing STRIPE_PRICE_${plan.toUpperCase()}_PLATFORM_ANNUAL`);
+        return res.status(500).json({ error: 'Annual price not configured yet. Contact support.' });
+      }
+      let monthlySub;
+      try { monthlySub = await stripe.subscriptions.retrieve(agency.stripe_subscription_id); }
+      catch (e) { return res.status(409).json({ error: 'subscription_unavailable', message: e.message }); }
+      if (!['active', 'trialing', 'past_due'].includes(monthlySub.status)) {
+        return res.status(409).json({ error: 'subscription_not_switchable', message: `Subscription is ${monthlySub.status}.` });
+      }
+
+      // 1) Create the yearly flat-fee sub (charges the annual amount now).
+      let yearly;
+      try {
+        yearly = await stripe.subscriptions.create({
+          customer: agency.stripe_customer_id,
+          items: [{ price: planConfig.platformPriceAnnual, quantity: 1 }],
+          metadata: { agency_id, plan, interval: 'year' },
+          proration_behavior: 'none',
+        });
+      } catch (e) {
+        console.error('change-interval ->annual: yearly sub create failed:', e.message);
+        return res.status(502).json({ error: 'annual_create_failed', message: 'Could not start the annual subscription. Please try again.' });
+      }
+
+      // 2) Mark the DB annual FIRST, so the subscription.updated event fired by
+      //    the flat-item swap below reads billing_interval='annual' and never
+      //    mis-detects the agency as 'free' from the $0 platform price.
+      const renewsAt = yearly.current_period_end ? new Date(yearly.current_period_end * 1000).toISOString() : null;
+      await supabase.from('agencies').update({
+        billing_interval: 'annual',
+        stripe_annual_subscription_id: yearly.id,
+        annual_renews_at: renewsAt,
+        updated_at: new Date().toISOString(),
+      }).eq('id', agency_id);
+
+      // 3) Drop the monthly sub's flat item to $0 (usage stays monthly) and tag
+      //    it as the annual usage sub so price-based plan detection skips it even
+      //    independent of DB timing. Credit the unused monthly flat via prorations.
+      try {
+        const allPlatformPrices = Object.values(PLATFORM_PLANS).map((p) => p.platformPrice).filter(Boolean);
+        const platformItem = (monthlySub.items?.data || []).find((i) => i.price && allPlatformPrices.includes(i.price.id));
+        if (platformItem && freePlatform && platformItem.price.id !== freePlatform) {
+          await stripe.subscriptions.update(agency.stripe_subscription_id, {
+            items: [{ id: platformItem.id, price: freePlatform }],
+            proration_behavior: 'create_prorations',
+            metadata: { ...(monthlySub.metadata || {}), type: 'annual_usage', plan, agency_id },
+          });
+        } else {
+          // Flat item already $0 (or none): just tag the metadata.
+          await stripe.subscriptions.update(agency.stripe_subscription_id, {
+            metadata: { ...(monthlySub.metadata || {}), type: 'annual_usage', plan, agency_id },
+          });
+        }
+      } catch (e) {
+        console.error('change-interval ->annual: could not zero monthly flat item (yearly sub is live):', e.message);
+      }
+
+      console.log(`🗓️  Agency ${agency_id} switched monthly -> annual (${plan}); yearly=${yearly.id}`);
+      return res.json({ success: true, interval: 'year', renews_at: renewsAt });
+    }
+
+    // interval === 'month': annual -> monthly.
+    // 1) Restore the monthly sub's flat item to the plan's platform price AND
+    //    clear the annual_usage metadata tag, so the sub is a normal monthly sub
+    //    again and price-based plan detection resumes working for it. This swap
+    //    fires while billing_interval is still 'annual' (cleared in step 2), so
+    //    the detection guard still suppresses any spurious plan flip here.
+    try {
+      const monthlySub = await stripe.subscriptions.retrieve(agency.stripe_subscription_id);
+      const flatItem = (monthlySub.items?.data || []).find((i) => i.price && i.price.id === freePlatform);
+      const restoreParams = { metadata: { agency_id, plan } };
+      if (flatItem && planConfig.platformPrice) {
+        restoreParams.items = [{ id: flatItem.id, price: planConfig.platformPrice }];
+        restoreParams.proration_behavior = 'create_prorations';
+      }
+      await stripe.subscriptions.update(agency.stripe_subscription_id, restoreParams);
+    } catch (e) {
+      console.error('change-interval ->monthly: failed to restore monthly flat item:', e.message);
+      return res.status(502).json({ error: 'restore_failed', message: 'Could not restore monthly billing. Please try again.' });
+    }
+
+    // 2) Clear annual tracking BEFORE canceling the yearly sub (makes its
+    //    deleted event read as stale, not a full cancellation).
+    await supabase.from('agencies').update({
+      billing_interval: 'monthly',
+      stripe_annual_subscription_id: null,
+      annual_renews_at: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', agency_id);
+
+    // 3) Cancel the yearly sub.
+    if (agency.stripe_annual_subscription_id) {
+      try { await stripe.subscriptions.cancel(agency.stripe_annual_subscription_id); }
+      catch (e) { console.error('change-interval ->monthly: yearly cancel failed (continuing):', e.message); }
+    }
+
+    console.log(`🗓️  Agency ${agency_id} switched annual -> monthly (${plan})`);
+    return res.json({ success: true, interval: 'month' });
+  } catch (err) {
+    console.error('changeBillingInterval error:', err);
+    return res.status(500).json({ error: 'Failed to change billing interval', detail: err.message });
+  }
+}
+
 async function createAgencyCheckout(req, res) {
   try {
     const { agency_id, plan, skipTrial } = req.body;
+    // 'year' = annual flat fee on a yearly subscription, with usage billed
+    // monthly on a separate subscription. Only Pro/Scale support annual (Free
+    // has no flat fee). Anything else falls back to monthly, unchanged.
+    const interval = (req.body.interval === 'year' && plan !== 'free') ? 'year' : 'month';
 
     if (!agency_id || !plan) {
       return res.status(400).json({
@@ -534,6 +686,11 @@ async function createAgencyCheckout(req, res) {
     if (!planConfig.platformPrice) {
       console.error(`❌ Missing env var: STRIPE_PRICE_${plan.toUpperCase()}_PLATFORM`);
       return res.status(500).json({ error: 'Platform price not configured. Contact support.' });
+    }
+
+    if (interval === 'year' && !planConfig.platformPriceAnnual) {
+      console.error(`❌ Missing env var: STRIPE_PRICE_${plan.toUpperCase()}_PLATFORM_ANNUAL`);
+      return res.status(500).json({ error: 'Annual price not configured yet. Contact support.' });
     }
 
     // Get agency
@@ -563,6 +720,16 @@ async function createAgencyCheckout(req, res) {
         const existingSub = await stripe.subscriptions.retrieve(agency.stripe_subscription_id);
         const blockingStatuses = ['active', 'trialing', 'past_due'];
         if (blockingStatuses.includes(existingSub.status)) {
+          // Switching an agency that already has an active subscription over to
+          // ANNUAL is handled by the dedicated switch flow, not by minting a
+          // fresh checkout here. Guard it so an annual request can never silently
+          // convert a free_usage sub into a MONTHLY paid plan via the path below.
+          if (interval === 'year') {
+            return res.status(409).json({
+              error: 'annual_switch_unsupported_here',
+              message: 'Switching to annual from your current plan is handled in billing settings. Please use the switch option there.',
+            });
+          }
           // A Free agency that has added a client carries a metered "free_usage"
           // subscription. Upgrading to a paid plan is that SAME subscription
           // converting up, not a duplicate, so convert it in place (card already
@@ -629,14 +796,27 @@ async function createAgencyCheckout(req, res) {
     // Waived base fee (comped partner): charge the $0 platform price instead of
     // the plan's, which keeps qty>=1 for Stripe Checkout. Per-client + minutes
     // still bill from the real plan.
-    const basePlatformPrice = (agency.platform_fee_waived === true)
-      ? process.env.STRIPE_PRICE_FREE_PLATFORM
-      : planConfig.platformPrice;
-    const lineItems = [
-      { price: basePlatformPrice, quantity: 1 },
-    ];
-    if (planConfig.minutePrice) {
-      lineItems.push({ price: planConfig.minutePrice });
+    // Annual: the Checkout session carries ONLY the yearly flat fee. Stripe
+    // rejects mixing a yearly item with the monthly metered/per-client items in
+    // one subscription, so the monthly usage sub ($0 flat + per-minute +
+    // per-client) is created programmatically right after the yearly sub exists,
+    // in handleAgencyCheckoutCompleted.
+    let lineItems;
+    if (interval === 'year') {
+      lineItems = [{ price: planConfig.platformPriceAnnual, quantity: 1 }];
+    } else {
+      // Monthly (unchanged): platform fee (flat, qty 1) + metered minute price
+      // (no quantity; Stripe rejects it on metered prices). Per-client is added
+      // after subscription creation in the checkout.session.completed handler.
+      // Waived base fee (comped partner) uses the $0 platform price to keep
+      // qty>=1 while per-client + minutes still bill from the real plan.
+      const basePlatformPrice = (agency.platform_fee_waived === true)
+        ? process.env.STRIPE_PRICE_FREE_PLATFORM
+        : planConfig.platformPrice;
+      lineItems = [{ price: basePlatformPrice, quantity: 1 }];
+      if (planConfig.minutePrice) {
+        lineItems.push({ price: planConfig.minutePrice });
+      }
     }
 
     // subscription_data: attach a 14-day trial ONLY when not skipping. On a
@@ -647,6 +827,7 @@ async function createAgencyCheckout(req, res) {
       metadata: {
         agency_id: agency_id,
         plan: plan,
+        ...(interval === 'year' ? { interval: 'year' } : {}),
       },
     };
     if (noTrial) {
@@ -686,6 +867,7 @@ async function createAgencyCheckout(req, res) {
         agency_id: agency_id,
         plan: plan,
         type: 'agency_subscription',
+        interval,
         skip_trial: noTrial ? 'true' : 'false',
       },
     });
@@ -934,6 +1116,41 @@ async function getAgencyCardStatus(req, res) {
   }
 }
 
+// Creates the MONTHLY usage subscription that sits alongside an agency's annual
+// (yearly) flat-fee subscription. It carries the $0 platform price (so the flat
+// fee is never double-charged) plus the plan's metered minute price; per-client
+// is reconciled separately by syncPerClientSubscriptionItem. It mirrors the
+// yearly sub's trial so both read 'trialing' together during the trial window.
+// Metered minutes are reported to the shared voice meter keyed on the customer,
+// so this sub meters correctly with no extra item bookkeeping. Returns the
+// Stripe subscription, or null on failure (caller logs/activates best-effort).
+async function createAnnualUsageSub(customerId, agencyId, plan, planConfig, skipTrial, trialEndUnix) {
+  if (!customerId) return null;
+  const freePlatform = process.env.STRIPE_PRICE_FREE_PLATFORM;
+  if (!freePlatform) {
+    console.error('createAnnualUsageSub: STRIPE_PRICE_FREE_PLATFORM not configured');
+    return null;
+  }
+  const items = [{ price: freePlatform, quantity: 1 }];
+  if (planConfig.minutePrice) items.push({ price: planConfig.minutePrice });
+  try {
+    const params = {
+      customer: customerId,
+      items,
+      metadata: { agency_id: agencyId, plan, type: 'annual_usage' },
+      proration_behavior: 'none',
+    };
+    if (!skipTrial) {
+      if (trialEndUnix) params.trial_end = trialEndUnix;
+      else params.trial_period_days = 14;
+    }
+    return await stripe.subscriptions.create(params);
+  } catch (e) {
+    console.error(`createAnnualUsageSub failed for agency ${agencyId}:`, e.message);
+    return null;
+  }
+}
+
 async function handleAgencyCheckoutCompleted(session) {
   console.log('🎉 Agency checkout completed:', session.id);
 
@@ -970,6 +1187,73 @@ async function handleAgencyCheckoutCompleted(session) {
   const isFirstActivation =
     !!agencyBefore &&
     (agencyBefore.status === 'pending' || agencyBefore.status === 'pending_payment');
+
+  // ── ANNUAL branch ──────────────────────────────────────────────────────────
+  // The Checkout that just completed is the YEARLY flat-fee subscription. Record
+  // it as stripe_annual_subscription_id, then stand up the monthly usage sub
+  // ($0 flat + metered minutes + per-client) which becomes stripe_subscription_id
+  // so every existing usage/per-client/overage flow keeps working unchanged.
+  if (session.metadata?.interval === 'year') {
+    const yearlySubId = session.subscription;
+    let yearlySub = null;
+    try { yearlySub = await stripe.subscriptions.retrieve(yearlySubId); }
+    catch (e) { console.error('annual: could not retrieve yearly sub', e.message); }
+    const annualRenewsAt = yearlySub?.current_period_end ? new Date(yearlySub.current_period_end * 1000).toISOString() : null;
+    const trialEndUnix = (!skipTrial && yearlySub?.trial_end) ? yearlySub.trial_end : null;
+
+    const usageSub = await createAnnualUsageSub(session.customer, agencyId, plan, planConfig, skipTrial, trialEndUnix);
+    if (!usageSub) {
+      console.error(`❌ annual: monthly usage sub creation FAILED for agency ${agencyId}; activated on the yearly fee only (usage will not meter until fixed)`);
+    }
+
+    const trialEndsAt = skipTrial
+      ? null
+      : (trialEndUnix ? new Date(trialEndUnix * 1000).toISOString() : new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString());
+
+    await supabase
+      .from('agencies')
+      .update({
+        status: skipTrial ? 'active' : 'trial',
+        subscription_status: skipTrial ? 'active' : 'trial',
+        plan_type: plan,
+        billing_interval: 'annual',
+        stripe_annual_subscription_id: yearlySubId,
+        stripe_subscription_id: usageSub?.id || null,
+        usage_billing_enabled: true,
+        trial_ends_at: trialEndsAt,
+        annual_renews_at: annualRenewsAt,
+        numbers_release_at: null,
+        data_retention_until: null,
+        data_purged_at: null,
+        max_team_members_agency: null,
+        max_team_members_client: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', agencyId);
+
+    if (usageSub?.id) {
+      await syncPerClientSubscriptionItem(agencyId, plan, usageSub.id);
+    }
+
+    console.log(`✅ Agency activated ANNUAL (${plan}${skipTrial ? '' : ', trial'}): ${agencyId} [yearly=${yearlySubId} usage=${usageSub?.id || 'none'}]`);
+
+    try {
+      const { error: evtErr } = await supabase.from('agency_subscription_events').insert({
+        agency_id: agencyId,
+        event_type: 'checkout_completed',
+        stripe_event_id: session.id,
+        metadata: { plan, skip_trial: skipTrial, interval: 'annual' },
+      });
+      if (evtErr) console.warn('agency_subscription_events insert failed (non-fatal):', evtErr.message);
+    } catch (e) { console.warn('agency_subscription_events insert threw (non-fatal):', e.message); }
+
+    if (isFirstActivation) {
+      try { await sendAgencySignupNotificationSMS({ ...agencyBefore, plan_type: plan }); }
+      catch (e) { console.error('Failed to send agency activation SMS:', e.message); }
+    }
+    return;
+  }
+  // ── end ANNUAL branch; monthly flow below is unchanged ─────────────────────
 
   if (skipTrial) {
     // Reactivation / resubscribe: no new trial. Stripe charged the card at
@@ -1067,6 +1351,17 @@ async function handleAgencyCheckoutCompleted(session) {
 async function handleAgencySubscriptionCreated(subscription) {
   console.log('📝 Agency subscription created:', subscription.id);
 
+  // Annual flat-fee subscription (yearly interval). This is NOT the agency's
+  // primary usage subscription: usage lives on a separate monthly sub which is
+  // stripe_subscription_id. handleAgencyCheckoutCompleted wires both ids, so
+  // this created event must not overwrite stripe_subscription_id with the
+  // yearly sub. Skip it here; renewals/cancels of the yearly sub are handled by
+  // the payment/deleted handlers keyed on stripe_annual_subscription_id.
+  if (subscription.metadata?.interval === 'year') {
+    console.log(`   ↳ yearly flat-fee sub ${subscription.id}; skipping primary-sub wiring`);
+    return;
+  }
+
   const agency = await getAgencyByStripeCustomerId(subscription.customer);
   if (!agency) return;
 
@@ -1107,6 +1402,18 @@ async function handleAgencySubscriptionUpdated(subscription) {
   const agency = await getAgencyByStripeCustomerId(subscription.customer);
   if (!agency) return;
 
+  // Annual flat-fee (yearly) subscription updates: refresh annual_renews_at (and
+  // the trial window while trialing) but do NOT run the usage-sub status wiring
+  // below. The stale guard would ignore it anyway, but this keeps renews_at live.
+  if (agency.stripe_annual_subscription_id && subscription.id === agency.stripe_annual_subscription_id) {
+    const renewsAt = subscription.current_period_end ? new Date(subscription.current_period_end * 1000).toISOString() : null;
+    const upd = { annual_renews_at: renewsAt };
+    if (subscription.trial_end) upd.trial_ends_at = new Date(subscription.trial_end * 1000).toISOString();
+    await supabase.from('agencies').update(upd).eq('id', agency.id);
+    console.log(`🗓️  Annual flat-fee sub updated for ${agency.id}; renews_at=${renewsAt}`);
+    return;
+  }
+
   // Stale-event guard: see handleAgencySubscriptionDeleted comment. An old
   // canceled subscription can still emit updated events (e.g., refund
   // processing) after we've moved to a new subscription on the same
@@ -1143,7 +1450,12 @@ async function handleAgencySubscriptionUpdated(subscription) {
   // syncPerClientSubscriptionItem (removes Pro $9.99 item on upgrade to
   // Scale, adds it on downgrade to Pro, no-op otherwise).
   const detectedPlan = detectPlanFromSubscription(subscription);
-  const planChanged = detectedPlan && detectedPlan !== agency.plan_type;
+  // Annual agencies' monthly usage sub carries the $0 FREE platform price (the
+  // real flat fee is the separate yearly sub), so price-based plan detection on
+  // it would wrongly read "free". Never infer a plan change from the annual
+  // usage sub; the plan is managed by the checkout/switch flows instead.
+  const isAnnualUsageSub = subscription.metadata?.type === 'annual_usage' || agency.billing_interval === 'annual';
+  const planChanged = detectedPlan && detectedPlan !== agency.plan_type && !isAnnualUsageSub;
 
   const updates = {
     subscription_status: status,
@@ -1196,6 +1508,23 @@ async function handleAgencySubscriptionDeleted(subscription) {
 
   const agency = await getAgencyByStripeCustomerId(subscription.customer);
   if (!agency) return;
+
+  // Annual flat-fee (yearly) subscription was deleted (canceled or ended). The
+  // annual plan has lapsed, so cancel the paired monthly usage sub too; that
+  // sub's own deleted event then runs the normal suspension + number-grace flow
+  // below. Clear the annual tracking here so the record reflects no annual.
+  if (agency.stripe_annual_subscription_id && subscription.id === agency.stripe_annual_subscription_id) {
+    console.log(`❌ Annual flat-fee sub deleted for ${agency.id}; canceling paired usage sub ${agency.stripe_subscription_id || 'none'}`);
+    if (agency.stripe_subscription_id) {
+      try { await stripe.subscriptions.cancel(agency.stripe_subscription_id); }
+      catch (e) { console.error('annual delete: usage sub cancel failed (continuing):', e.message); }
+    }
+    await supabase
+      .from('agencies')
+      .update({ stripe_annual_subscription_id: null, annual_renews_at: null, billing_interval: 'monthly' })
+      .eq('id', agency.id);
+    return;
+  }
 
   // Stale-event guard: an agency that cancels and re-subscribes quickly can
   // receive delete events for the OLD subscription AFTER we've already
@@ -1788,6 +2117,7 @@ const CANCELLATION_REASON_LABELS = {
 // ============================================================================
 module.exports = {
   createAgencyCheckout,
+  changeBillingInterval,
   createAgencySetupCheckout,
   getAgencyCardStatus,
   createAgencyPortal,

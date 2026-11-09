@@ -191,7 +191,7 @@ async function changeAgencyPlan(req, res) {
 
     const { data: agency, error } = await supabase
       .from('agencies')
-      .select('id, plan_type, stripe_subscription_id, stripe_customer_id, subscription_status, status')
+      .select('id, plan_type, stripe_subscription_id, stripe_customer_id, subscription_status, status, billing_interval')
       .eq('id', agency_id)
       .single();
     if (error || !agency) {
@@ -202,6 +202,19 @@ async function changeAgencyPlan(req, res) {
     if (agency.plan_type === plan) {
       console.log(`change-plan: agency ${agency_id} already on ${plan}, no-op`);
       return res.json({ success: true, already_on_plan: true, plan });
+    }
+
+    // Annual agencies: their stripe_subscription_id is the $0-flat monthly usage
+    // sub, with the real flat fee on a separate yearly sub. Swapping the plan's
+    // platform item here would re-add a monthly flat fee on top of the annual
+    // one. Plan changes while on annual are not handled yet, so block them with
+    // a clear message instead of mis-billing. (Switch to monthly first.)
+    if (agency.billing_interval === 'annual') {
+      console.warn(`change-plan: agency ${agency_id} is on annual billing; plan switch blocked`);
+      return res.status(409).json({
+        error: 'annual_plan_change_unsupported',
+        message: 'You are on annual billing. To change plans, switch to monthly billing first, or contact support.',
+      });
     }
 
     // No live subscription (Free agency): this is a NEW subscription, not a
