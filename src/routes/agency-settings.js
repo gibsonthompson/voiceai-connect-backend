@@ -792,6 +792,11 @@ async function getAgencySettings(req, res) {
         stripe_account_id: agency.stripe_account_id,
         stripe_customer_id: agency.stripe_customer_id,
         stripe_subscription_id: agency.stripe_subscription_id,
+        // Platform billing interval ('monthly' | 'annual') + yearly renewal date,
+        // so the billing tab can show the agency's current interval and let them
+        // switch between monthly and annual.
+        billing_interval: agency.billing_interval || 'monthly',
+        annual_renews_at: agency.annual_renews_at || null,
         stripe_onboarding_complete: agency.stripe_onboarding_complete,
         stripe_charges_enabled: agency.stripe_charges_enabled,
         stripe_payouts_enabled: agency.stripe_payouts_enabled,
