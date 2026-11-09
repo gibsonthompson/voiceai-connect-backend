@@ -1463,7 +1463,7 @@ async function updateAgencySettings(req, res) {
         }
         const validKeys = [
           'nav_bg', 'nav_text', 'nav_accent', 'page_bg', 'card_bg', 'card_border',
-          'button_text', 'text_primary', 'text_muted'
+          'button_bg', 'button_text', 'text_primary', 'text_muted'
         ];
         // Strip any invalid keys
         const cleaned = {};
