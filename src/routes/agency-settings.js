@@ -510,6 +510,9 @@ async function getWebcallConfig(req, res) {
         websiteTheme: agency.website_theme || 'dark',
         displayFont: agency.marketing_display_font || agency.display_font || null,
         bodyFont: agency.marketing_body_font || agency.body_font || null,
+        // Visual style the agency set in the Embed-tab editor (lives under
+        // marketing_config.webcall). The widget resolves this into a palette.
+        style: (agency.marketing_config && agency.marketing_config.webcall) || {},
       }
     });
   } catch (error) {
