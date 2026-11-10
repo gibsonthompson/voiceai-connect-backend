@@ -50,6 +50,24 @@ const { generatePersonalizedLine } = require('../lib/personalized-line');
 
 // Pull a city/area hint out of the free-text notes the lead finder writes
 // ("Address: 123 Main St, Atlanta, GA"), to give the opener a location anchor.
+// Flatten an HTML signature to readable plain text for the plain-body append,
+// the text/plain clipboard, and the logged record.
+function htmlToPlainText(html) {
+  return String(html || '')
+    .replace(/<\s*br\s*\/?\s*>/gi, '\n')
+    .replace(/<\/\s*(p|div|h[1-6]|li|tr)\s*>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .split('\n').map((l) => l.replace(/\s+$/g, '')).join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function cityFromNotes(notes) {
   const line = String(notes || '').split('\n').find((l) => /^\s*address:/i.test(l));
   if (!line) return '';
@@ -460,6 +478,7 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
     // Get template if provided
     let subject = customSubject || '';
     let body = customBody || '';
+    let templateType = '';
 
     if (templateId) {
       const { data: template } = await supabase
@@ -471,6 +490,7 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
       if (template) {
         subject = customSubject || template.subject || '';
         body = customBody || template.body || '';
+        templateType = template.type || '';
       }
     }
 
@@ -566,14 +586,31 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
       '{personalized_line}': personalizedLine,
     };
 
-    // Perform replacements
-    let composedSubject = subject;
-    let composedBody = body;
+    // Shared substitution so the signature resolves the same merge fields.
+    const applyVars = (str) => {
+      let out = str || '';
+      for (const [variable, value] of Object.entries(replacements)) {
+        out = out.replace(new RegExp(variable.replace(/[{}]/g, '\\$&'), 'g'), value);
+      }
+      return out;
+    };
 
-    for (const [variable, value] of Object.entries(replacements)) {
-      composedSubject = composedSubject.replace(new RegExp(variable.replace(/[{}]/g, '\\$&'), 'g'), value);
-      composedBody = composedBody.replace(new RegExp(variable.replace(/[{}]/g, '\\$&'), 'g'), value);
+    let composedSubject = applyVars(subject).replace(/\{agency_signature\}/g, '');
+    let composedBody = applyVars(body);
+
+    // White-label email signature, stored as HTML (logo + formatting). Resolve
+    // its merge fields, derive a plain-text version, and return BOTH: the HTML
+    // powers a rich clipboard copy (pastes into Gmail with the logo/formatting),
+    // the text fills the plain body + the logged record. Email templates only.
+    const sigHtmlRaw = (templateType === 'email' && agency?.outreach_signature) ? String(agency.outreach_signature) : '';
+    const signatureHtml = sigHtmlRaw ? applyVars(sigHtmlRaw) : '';
+    const signatureText = signatureHtml ? htmlToPlainText(signatureHtml) : '';
+    if (composedBody.includes('{agency_signature}')) {
+      composedBody = composedBody.replace(/\{agency_signature\}/g, signatureText);
+    } else if (signatureText) {
+      composedBody = composedBody.replace(/\s*$/, '') + '\n\n' + signatureText;
     }
+
     // If the opener dropped out (disabled, no website, or nothing good to say),
     // don't leave a double blank gap where it was.
     composedBody = composedBody.replace(/\n{3,}/g, '\n\n').trim();
@@ -584,6 +621,8 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
       toAddress: lead?.email || '',
       toPhone: lead?.phone || '',
       personalizedLine,
+      signatureHtml,
+      signatureText,
       variables: replacements
     });
   } catch (error) {
