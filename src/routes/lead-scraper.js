@@ -410,6 +410,9 @@ router.post('/save-to-crm', async (req, res) => {
           source: sourceLabel,
           status: 'new',
           estimated_value: 0,
+          // Lightweight Google Place id (not the photos): lets the lead-detail
+          // profile card pull live photos + context cheaply without re-searching.
+          place_id: lead.placeId || null,
           notes,
         });
 

@@ -18,6 +18,18 @@ const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { logActivity, ACTION_TYPES } = require('./activity');
 const { requireAgencyAccess } = require('./auth');
+const { getPlaceRichDetails, resolvePlaceIdByText, fetchPlacePhoto } = require('../../services/google-maps-source');
+
+// Ephemeral in-memory cache of built lead place-context, keyed by place_id. This
+// is NOT persistent storage (nothing hits the DB or disk): it just avoids
+// re-calling Google on repeated views of the same lead within the TTL.
+const PLACE_CONTEXT_CACHE = new Map(); // placeId -> { ctx, exp }
+const PLACE_CONTEXT_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+// Reviews that evidence phone / responsiveness problems are gold for outreach:
+// they let the agency owner reference a real, specific pain point ("I saw a
+// couple reviews mention trouble reaching you"). Flag them.
+const MISSED_CALL_RE = /(never (answer|called back|got back|returned|pick(ed)? up)|no one (answered|picked up|ever answered)|couldn'?t (reach|get (a hold|ahold)|get through)|can'?t (reach|get (a hold|ahold))|didn'?t (answer|call back|pick up|return)|no (answer|response)|straight to voicemail|went to voicemail|left (a )?(voicemail|message)|unresponsive|hard to reach|(doesn'?t|don'?t|won'?t) answer|phone (just )?rings|never return(ed)? (my|the) call)/i;
 
 // ----------------------------------------------------------------------------
 // OWNERSHIP GUARD (must be registered before the routes below).
@@ -690,6 +702,106 @@ router.get('/:agencyId/leads/:leadId', async (req, res) => {
   } catch (error) {
     console.error('Error fetching lead:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// GET /api/agency/:agencyId/leads/:leadId/place-context
+// Live Google business-profile context for the lead detail card: a few photo
+// references plus outreach-useful signals (rating, hours, website, status, and
+// reviews that hint at missed-call pain). Nothing is stored: details are cached
+// in memory for an hour; images are proxied separately and never persisted.
+// ============================================================================
+router.get('/:agencyId/leads/:leadId/place-context', async (req, res) => {
+  try {
+    const { agencyId, leadId } = req.params;
+    const { data: lead, error } = await supabase
+      .from('leads')
+      .select('id, business_name, place_id, notes')
+      .eq('id', leadId)
+      .eq('agency_id', agencyId)
+      .single();
+    if (error || !lead) return res.status(404).json({ error: 'Lead not found' });
+
+    if (!process.env.GOOGLE_PLACES_API_KEY) return res.json({ available: false, reason: 'not_configured' });
+
+    // Resolve the place id: stored first; otherwise text-search by name + any
+    // address captured in notes, and backfill the tiny id for next time.
+    let placeId = lead.place_id || null;
+    if (!placeId) {
+      const addrLine = (lead.notes || '').split('\n').find((l) => /^\s*address:/i.test(l));
+      const addr = addrLine ? addrLine.replace(/^\s*address:/i, '').trim() : '';
+      const q = [lead.business_name, addr].filter(Boolean).join(' ');
+      placeId = await resolvePlaceIdByText(q);
+      if (placeId) {
+        supabase.from('leads').update({ place_id: placeId }).eq('id', leadId).eq('agency_id', agencyId).then(() => {}, () => {});
+      }
+    }
+    if (!placeId) return res.json({ available: false, reason: 'no_match' });
+
+    const cached = PLACE_CONTEXT_CACHE.get(placeId);
+    if (cached && cached.exp > Date.now()) return res.json(cached.ctx);
+
+    const d = await getPlaceRichDetails(placeId);
+    if (!d) return res.json({ available: false, reason: 'no_details' });
+
+    const photos = Array.isArray(d.photos)
+      ? d.photos.slice(0, 5).map((p) => ({ ref: p.photo_reference, width: p.width || null, height: p.height || null })).filter((p) => p.ref)
+      : [];
+    const reviews = Array.isArray(d.reviews) ? d.reviews : [];
+    const mapReview = (r) => ({ author: r.author_name || 'Google user', rating: typeof r.rating === 'number' ? r.rating : null, relative: r.relative_time_description || '', text: (r.text || '').slice(0, 320) });
+    const missedCallSignals = reviews.filter((r) => r.text && MISSED_CALL_RE.test(r.text)).map(mapReview).slice(0, 3);
+    const topReviews = reviews.slice().sort((a, b) => (b.time || 0) - (a.time || 0)).slice(0, 3).map(mapReview);
+
+    const oh = d.opening_hours || null;
+    const ctx = {
+      available: true,
+      placeId,
+      name: d.name || null,
+      address: d.formatted_address || null,
+      phone: d.formatted_phone_number || null,
+      website: d.website || null,
+      mapsUrl: d.url || null,
+      businessStatus: d.business_status || null,
+      rating: typeof d.rating === 'number' ? d.rating : null,
+      reviewCount: typeof d.user_ratings_total === 'number' ? d.user_ratings_total : null,
+      priceLevel: typeof d.price_level === 'number' ? d.price_level : null,
+      types: Array.isArray(d.types) ? d.types.filter((t) => !['point_of_interest', 'establishment'].includes(t)).slice(0, 4) : [],
+      openNow: oh && typeof oh.open_now === 'boolean' ? oh.open_now : null,
+      hours: oh && Array.isArray(oh.weekday_text) ? oh.weekday_text : [],
+      photos,
+      missedCallSignals,
+      topReviews,
+    };
+    PLACE_CONTEXT_CACHE.set(placeId, { ctx, exp: Date.now() + PLACE_CONTEXT_TTL_MS });
+    res.json(ctx);
+  } catch (e) {
+    console.error('place-context error:', e.message);
+    res.status(500).json({ error: 'Failed to load business profile' });
+  }
+});
+
+// ============================================================================
+// GET /api/agency/:agencyId/leads/:leadId/photo?ref=<photoRef>&max=<px>
+// Live proxy for a single Google place photo. The key stays server-side and the
+// bytes are streamed through, never written to disk or DB. Authed via the leads
+// guard; the browser fetches this with its token and shows it as a blob URL.
+// ============================================================================
+router.get('/:agencyId/leads/:leadId/photo', async (req, res) => {
+  try {
+    const { agencyId, leadId } = req.params;
+    const ref = req.query.ref;
+    if (!ref || typeof ref !== 'string') return res.status(400).json({ error: 'ref required' });
+    const { data: lead } = await supabase.from('leads').select('id').eq('id', leadId).eq('agency_id', agencyId).single();
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    const photo = await fetchPlacePhoto(ref, req.query.max);
+    if (!photo) return res.status(404).json({ error: 'photo unavailable' });
+    res.set('Content-Type', photo.contentType);
+    res.set('Cache-Control', 'private, max-age=600');
+    return res.send(photo.buffer);
+  } catch (e) {
+    console.error('lead photo proxy error:', e.message);
+    res.status(500).json({ error: 'Failed to load photo' });
   }
 });
 

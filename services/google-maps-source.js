@@ -320,4 +320,76 @@ async function getPlaceDetails(placeId) {
   }
 }
 
-module.exports = { searchGoogleMaps, getPlaceDetails, INDUSTRY_QUERIES };
+// ============================================================================
+// Lead-detail enrichment (live, nothing stored). Used by the lead profile card
+// to show a few Google photos plus outreach context (rating, hours, reviews).
+// ============================================================================
+
+// Rich Place Details: like getPlaceDetails but also pulls photos, reviews, and
+// price level, for the lead-detail "business profile" panel.
+async function getPlaceRichDetails(placeId) {
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+  if (!apiKey) throw new Error("GOOGLE_PLACES_API_KEY not set");
+  if (!placeId) return null;
+
+  const fields = [
+    "name", "formatted_address", "formatted_phone_number", "international_phone_number",
+    "website", "url", "types", "business_status", "rating", "user_ratings_total",
+    "price_level", "opening_hours", "photos", "reviews",
+  ].join(",");
+
+  const url = `${PLACES_BASE}/details/json?place_id=${encodeURIComponent(placeId)}&fields=${fields}&key=${apiKey}`;
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.status !== "OK" || !data.result) return null;
+    return data.result;
+  } catch (error) {
+    console.error(`[GoogleMaps] Rich details failed for ${placeId}:`, error.message);
+    return null;
+  }
+}
+
+// Resolve a place_id for a lead that was imported without one (older leads), by
+// text-searching its name + location. Lets the caller backfill the tiny id so
+// future loads skip this lookup. Returns null when nothing confident matches.
+async function resolvePlaceIdByText(query) {
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+  if (!apiKey || !query || !query.trim()) return null;
+  const url = `${PLACES_BASE}/textsearch/json?query=${encodeURIComponent(query.trim())}&key=${apiKey}`;
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.status === "OK" && Array.isArray(data.results) && data.results[0]) {
+      return data.results[0].place_id || null;
+    }
+    return null;
+  } catch (error) {
+    console.error(`[GoogleMaps] resolvePlaceIdByText failed:`, error.message);
+    return null;
+  }
+}
+
+// Stream a Google place photo by reference. Returns the raw bytes so the API can
+// proxy them to the browser live (key never leaves the server, nothing stored).
+async function fetchPlacePhoto(photoRef, maxwidth) {
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+  if (!apiKey) throw new Error("GOOGLE_PLACES_API_KEY not set");
+  if (!photoRef) return null;
+  const mw = Math.min(Math.max(parseInt(maxwidth, 10) || 400, 80), 800);
+  const url = `${PLACES_BASE}/photo?maxwidth=${mw}&photo_reference=${encodeURIComponent(photoRef)}&key=${apiKey}`;
+  const res = await fetch(url); // follows the redirect to the actual image
+  if (!res.ok) return null;
+  const contentType = res.headers.get("content-type") || "image/jpeg";
+  const arrayBuf = await res.arrayBuffer();
+  return { buffer: Buffer.from(arrayBuf), contentType };
+}
+
+module.exports = {
+  searchGoogleMaps,
+  getPlaceDetails,
+  getPlaceRichDetails,
+  resolvePlaceIdByText,
+  fetchPlacePhoto,
+  INDUSTRY_QUERIES,
+};
