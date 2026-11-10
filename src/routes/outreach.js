@@ -68,6 +68,25 @@ function htmlToPlainText(html) {
     .trim();
 }
 
+// Default white-label email signature: the agency's own logo, name, website,
+// and AI demo line. Text uses merge fields (resolved per send); the logo URL is
+// inlined. Used as the fallback when an agency has not set their own, and the
+// dashboard editor pre-fills with the same template. Keep this in sync with the
+// frontend copy in lib/default-signature.ts.
+function buildDefaultSignatureHtml(logoUrl, includeDemo) {
+  const logo = logoUrl
+    ? `<div style="margin-bottom:8px"><img src="${logoUrl}" alt="{agency_name}" style="max-height:48px;max-width:200px;display:inline-block" /></div>`
+    : '';
+  const demo = includeDemo ? `<div>Hear our AI receptionist: {agency_demo_number}</div>` : '';
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.6;color:#333333">`
+    + logo
+    + `<div style="font-weight:bold;color:#111111">{agency_owner_name}</div>`
+    + `<div>{agency_name}</div>`
+    + `<div><a href="https://{agency_website}" style="color:#2563eb;text-decoration:none">{agency_website}</a></div>`
+    + demo
+    + `</div>`;
+}
+
 function cityFromNotes(notes) {
   const line = String(notes || '').split('\n').find((l) => /^\s*address:/i.test(l));
   if (!line) return '';
@@ -602,7 +621,12 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
     // its merge fields, derive a plain-text version, and return BOTH: the HTML
     // powers a rich clipboard copy (pastes into Gmail with the logo/formatting),
     // the text fills the plain body + the logged record. Email templates only.
-    const sigHtmlRaw = (templateType === 'email' && agency?.outreach_signature) ? String(agency.outreach_signature) : '';
+    let sigHtmlRaw = '';
+    if (templateType === 'email') {
+      sigHtmlRaw = (agency?.outreach_signature && String(agency.outreach_signature).trim())
+        ? String(agency.outreach_signature)
+        : buildDefaultSignatureHtml(agency?.logo_url, !!agency?.demo_phone_number);
+    }
     const signatureHtml = sigHtmlRaw ? applyVars(sigHtmlRaw) : '';
     const signatureText = signatureHtml ? htmlToPlainText(signatureHtml) : '';
     if (composedBody.includes('{agency_signature}')) {
