@@ -46,6 +46,17 @@ const router = express.Router();
 const { supabase } = require('../lib/supabase');
 const { logActivity, ACTION_TYPES } = require('./activity');
 const { requireAgencyAccess } = require('./auth');
+const { generatePersonalizedLine } = require('../lib/personalized-line');
+
+// Pull a city/area hint out of the free-text notes the lead finder writes
+// ("Address: 123 Main St, Atlanta, GA"), to give the opener a location anchor.
+function cityFromNotes(notes) {
+  const line = String(notes || '').split('\n').find((l) => /^\s*address:/i.test(l));
+  if (!line) return '';
+  const addr = line.replace(/^\s*address:/i, '').trim();
+  const parts = addr.split(',').map((p) => p.trim()).filter(Boolean);
+  return parts.length >= 2 ? parts[parts.length - 2] : '';
+}
 
 // ----------------------------------------------------------------------------
 // OWNERSHIP GUARDS — cover both path roots this router serves.
@@ -417,7 +428,7 @@ router.post('/:agencyId/templates/:templateId/duplicate', async (req, res) => {
 router.post('/:agencyId/outreach/compose', async (req, res) => {
   try {
     const { agencyId } = req.params;
-    const { templateId, leadId, customSubject, customBody } = req.body;
+    const { templateId, leadId, customSubject, customBody, regeneratePersonalized } = req.body;
 
     // Get agency data
     const { data: agency } = await supabase
@@ -460,6 +471,35 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
       if (template) {
         subject = customSubject || template.subject || '';
         body = customBody || template.body || '';
+      }
+    }
+
+    // Resolve the AI personalized opener ({personalized_line}) only when the
+    // template actually uses it, so nothing is scraped or generated for leads or
+    // templates that don't need it. Generated once per lead, then cached on the
+    // lead and reused for the whole sequence. Empty is a safe fallback (the token
+    // just drops out and the email still reads fine).
+    let personalizedLine = '';
+    const needsPersonalized = `${subject} ${body}`.includes('{personalized_line}');
+    if (needsPersonalized && lead && agency?.personalized_line_enabled !== false) {
+      if (lead.personalized_line && !regeneratePersonalized) {
+        personalizedLine = lead.personalized_line;
+      } else if (lead.website) {
+        const gen = await generatePersonalizedLine({
+          website: lead.website,
+          businessName: lead.business_name,
+          industry: lead.industry,
+          city: cityFromNotes(lead.notes),
+          extraInstructions: agency?.personalized_line_instructions || '',
+        });
+        if (gen) {
+          personalizedLine = gen;
+          try {
+            await supabase.from('leads')
+              .update({ personalized_line: gen, personalized_line_at: new Date().toISOString() })
+              .eq('id', lead.id).eq('agency_id', agencyId);
+          } catch (e) { /* cache write is best-effort */ }
+        }
       }
     }
 
@@ -523,7 +563,7 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
         hour: '2-digit',
         minute: '2-digit',
       }),
-      '{personalized_line}': '[Personalized line - generate with AI]',
+      '{personalized_line}': personalizedLine,
     };
 
     // Perform replacements
@@ -534,17 +574,53 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
       composedSubject = composedSubject.replace(new RegExp(variable.replace(/[{}]/g, '\\$&'), 'g'), value);
       composedBody = composedBody.replace(new RegExp(variable.replace(/[{}]/g, '\\$&'), 'g'), value);
     }
+    // If the opener dropped out (disabled, no website, or nothing good to say),
+    // don't leave a double blank gap where it was.
+    composedBody = composedBody.replace(/\n{3,}/g, '\n\n').trim();
 
     res.json({
       subject: composedSubject,
       body: composedBody,
       toAddress: lead?.email || '',
       toPhone: lead?.phone || '',
+      personalizedLine,
       variables: replacements
     });
   } catch (error) {
     console.error('Error composing message:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================================
+// POST /api/agency/:agencyId/outreach/personalized-line/test
+// Preview the AI opener for a given website using the agency's settings (or the
+// unsaved instructions passed in). Writes nothing; used by the Outreach page so
+// an agency can see and tune the opener before it goes out.
+// ============================================================================
+router.post('/:agencyId/outreach/personalized-line/test', async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const { website, instructions, businessName, industry } = req.body || {};
+    if (!website || typeof website !== 'string') return res.status(400).json({ error: 'A website is required' });
+
+    let instr = instructions;
+    if (instr === undefined) {
+      const { data: agency } = await supabase.from('agencies').select('personalized_line_instructions').eq('id', agencyId).single();
+      instr = agency?.personalized_line_instructions || '';
+    }
+
+    const line = await generatePersonalizedLine({
+      website,
+      businessName: businessName || '',
+      industry: industry || '',
+      city: '',
+      extraInstructions: instr || '',
+    });
+    res.json({ line: line || '', ok: !!line });
+  } catch (error) {
+    console.error('personalized-line test error:', error.message);
+    res.status(500).json({ error: 'Could not generate a preview right now' });
   }
 });
 

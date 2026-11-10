@@ -935,6 +935,9 @@ async function updateAgencySettings(req, res) {
       'webcall_title',
       'webcall_subtitle',
       'webcall_cta',
+      // AI personalized-opener settings (outreach)
+      'personalized_line_enabled',
+      'personalized_line_instructions',
       'marketing_config',
       'marketing_template',
       'marketing_site_enabled',
