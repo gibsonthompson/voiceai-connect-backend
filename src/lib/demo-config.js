@@ -165,9 +165,12 @@ const DEMO_ANALYSIS_PLAN = {
   },
 };
 
-function getDemoTools() {
-  return [
-    {
+function getDemoTools(web = false) {
+  const tools = [];
+  // A web call has no caller phone number, so send_demo_sms has nobody to text.
+  // Omit it there; the prompt describes the text feature verbally instead.
+  if (!web) {
+    tools.push({
       type: 'function',
       function: {
         name: 'send_demo_sms',
@@ -183,9 +186,10 @@ function getDemoTools() {
           required: ['business_name', 'service_requested', 'customer_name'],
         },
       },
-    },
-    { type: 'endCall' },
-  ];
+    });
+  }
+  tools.push({ type: 'endCall' });
+  return tools;
 }
 
 // ── Product Knowledge (shared across all demo prompts) ────────────────────
@@ -244,7 +248,18 @@ Use this to answer questions after the roleplay. Keep answers to one or two sent
 // ============================================================================
 
 function getDemoSystemPromptV3(agencyName, options = {}) {
-  const { skipSignupMention = false, knownIndustry = null } = options;
+  const { skipSignupMention = false, knownIndustry = null, web = false } = options;
+  // On a web call there is no caller phone number, so the mid-call text tool
+  // (send_demo_sms) cannot send anything. In that case describe the feature
+  // verbally instead of calling a tool, and drop the tool section entirely.
+  const smsStep = web
+    ? `Then mention the text feature verbally, as something their real setup does, NOT as an action to perform now: "One of the best parts, in your real setup every call automatically texts your team the caller's info and what they need." Do not try to send a text on this web demo and do not call any tool for it, there is no phone number to text here.`
+    : `Then CALL the send_demo_sms tool. This is the ONLY thing that actually sends the text, so you MUST invoke the tool, saying you sent a text without calling it sends nothing. Lead in naturally as you call it: "One of the best parts, after every call your team automatically gets a text with the caller's info and what they need." Then let the tool run and read its result back to the caller word for word, it will either confirm the text is on its way or tell you it couldn't send. NEVER tell the caller a text was sent unless the tool itself confirmed it.`;
+  const smsToolSection = web
+    ? ''
+    : `# send_demo_sms Tool
+
+Call exactly ONE time, after getting their feedback in Part 3. This tool is the ONLY way a text actually reaches the caller, invoking it is mandatory; narrating that you sent one without calling it sends nothing at all. Pass: business_name, business_type, service_requested (be specific about what was roleplayed), customer_name (the name from the roleplay). After it runs, relay the tool's result to the caller rather than inventing your own confirmation.`;
   const wrapUpLine = skipSignupMention
     ? "Then wrap up naturally: this works twenty four seven, setup takes a few minutes. Ask if they have any questions."
     : "Then wrap up naturally: this works twenty four seven, setup takes a few minutes, they'll get another text after this call with a link to start a free trial. Ask if they have any questions.";
@@ -472,7 +487,7 @@ Then ask: "Is there anything specific you'd need handled for your business?"
 
 Listen to their feedback.
 
-Then CALL the send_demo_sms tool. This is the ONLY thing that actually sends the text, so you MUST invoke the tool, saying you sent a text without calling it sends nothing. Lead in naturally as you call it: "One of the best parts, after every call your team automatically gets a text with the caller's info and what they need." Then let the tool run and read its result back to the caller word for word, it will either confirm the text is on its way or tell you it couldn't send. NEVER tell the caller a text was sent unless the tool itself confirmed it.
+${smsStep}
 
 ${wrapUpLine}
 
@@ -482,9 +497,7 @@ When done: "${goodbyeLine}" THEN call endCall.
 
 CRITICAL: Never call endCall without saying goodbye first.
 
-# send_demo_sms Tool
-
-Call exactly ONE time, after getting their feedback in Part 3. This tool is the ONLY way a text actually reaches the caller, invoking it is mandatory; narrating that you sent one without calling it sends nothing at all. Pass: business_name, business_type, service_requested (be specific about what was roleplayed), customer_name (the name from the roleplay). After it runs, relay the tool's result to the caller rather than inventing your own confirmation.
+${smsToolSection}
 
 ${PRODUCT_KNOWLEDGE}
 
@@ -576,12 +589,13 @@ function buildIndustryDemoConfig(industryKey, agency) {
  * Build demo config for generic agency demo numbers.
  * Uses V3 prompt — caller tells us their industry during the call.
  */
-function buildDemoDynamicConfig(agency) {
+function buildDemoDynamicConfig(agency, options = {}) {
+  const web = !!options.web;
   const agencyName = agency.name || 'CallBird AI';
   const skipSignupMention = !!agency.demo_followup_sms_override;
   const _custom = applyDemoCustomization(agency, {
     voiceId: DEMO_VOICE_ID,
-    systemPrompt: getDemoSystemPromptV3(agencyName, { skipSignupMention }) + DEMO_NATURALNESS,
+    systemPrompt: getDemoSystemPromptV3(agencyName, { skipSignupMention, web }) + DEMO_NATURALNESS,
     firstMessage: getDemoFirstMessageV3(agencyName),
   });
 
@@ -591,7 +605,7 @@ function buildDemoDynamicConfig(agency) {
     model: {
       provider: 'openai', model: 'gpt-4o', temperature: 0.6,
       messages: [{ role: 'system', content: _custom.systemPrompt }],
-      tools: getDemoTools(),
+      tools: getDemoTools(web),
     },
     voice: { provider: '11labs', voiceId: _custom.voiceId, ...DEMO_VOICE_SETTINGS },
     ...DEMO_SPEAKING_PLANS,

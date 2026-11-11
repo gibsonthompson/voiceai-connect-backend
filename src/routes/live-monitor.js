@@ -217,6 +217,24 @@ router.get('/:id/live/info', async (req, res) => {
     }
   } catch (e) { /* branding is optional */ }
 
+  // Web-call modal (?webcall=1) gets a TRANSIENT assistant config built fresh
+  // from the client's current receptionist, so a browser test call behaves like
+  // a real phone call instead of a possibly-stale static assistant. Built only
+  // on demand so the monitor's own boot path stays light. Best-effort: on any
+  // failure the modal falls back to the static assistant_id below.
+  let webAssistant = null;
+  if (req.query.webcall) {
+    try {
+      let fullAgency = null;
+      if (auth.client.agency_id) {
+        const { data: ag2 } = await supabase.from('agencies').select('*').eq('id', auth.client.agency_id).single();
+        fullAgency = ag2 || null;
+      }
+      const { buildDynamicAssistantConfig } = require('../lib/assistant-config-builder');
+      webAssistant = await buildDynamicAssistantConfig(auth.client, fullAgency || {}, null);
+    } catch (e) { console.warn('live/info webcall config build failed:', e.message); }
+  }
+
   res.json({
     success: true,
     client: {
@@ -227,6 +245,8 @@ router.get('/:id/live/info', async (req, res) => {
       phone_number: auth.client.vapi_phone_number || null,
       // The web demo places a browser call straight to this assistant.
       assistant_id: auth.client.vapi_assistant_id || null,
+      // Transient config for the in-dashboard web-call test (?webcall=1 only).
+      assistant: webAssistant,
       industry: auth.client.industry || null,
     },
     // White-label: the page shows the agency's brand, never the platform's.

@@ -474,30 +474,43 @@ async function getWebcallConfig(req, res) {
     if (!agency) return res.status(404).json({ error: 'Agency not found' });
     if (agency.status !== 'active' && agency.status !== 'trial') return res.status(403).json({ error: 'Agency not active' });
 
-    let assistantId = null;
+    // We return a TRANSIENT assistant config the web SDK starts the call with,
+    // built fresh from current data, instead of a static assistant id. That way
+    // a demo always uses the live V3 demo flow with the agency's current name
+    // (no stale baked-in "Demo Assistant"), and a client web call uses the
+    // client's current receptionist config, exactly like a real phone call.
     let label = agency.name || 'AI Receptionist';
     let phoneNumber = null;
-    if (mode === 'client' && clientId) {
-      if (!uuid.test(String(clientId))) return res.status(400).json({ error: 'invalid client id' });
-      const { data: client } = await supabase
-        .from('clients')
-        .select('id, business_name, vapi_assistant_id, vapi_phone_number, agency_id')
-        .eq('id', clientId).eq('agency_id', agency.id).maybeSingle();
-      if (!client) return res.status(404).json({ error: 'Client not found' });
-      assistantId = client.vapi_assistant_id || null;
-      label = client.business_name || label;
-      phoneNumber = client.vapi_phone_number || null;
-    } else {
-      assistantId = agency.demo_assistant_id || null;
-      phoneNumber = agency.demo_phone_number || null;
+    let assistant = null;
+    try {
+      if (mode === 'client' && clientId) {
+        if (!uuid.test(String(clientId))) return res.status(400).json({ error: 'invalid client id' });
+        const { data: client } = await supabase
+          .from('clients')
+          .select('*')
+          .eq('id', clientId).eq('agency_id', agency.id).maybeSingle();
+        if (!client) return res.status(404).json({ error: 'Client not found' });
+        label = client.business_name || label;
+        phoneNumber = client.vapi_phone_number || null;
+        const { buildDynamicAssistantConfig } = require('../lib/assistant-config-builder');
+        assistant = await buildDynamicAssistantConfig(client, agency, null);
+      } else {
+        phoneNumber = agency.demo_phone_number || null;
+        const { buildDemoDynamicConfig } = require('../lib/demo-config');
+        // web:true drops the mid-call SMS tool (a browser caller has no phone to text).
+        assistant = buildDemoDynamicConfig(agency, { web: true });
+      }
+    } catch (buildErr) {
+      console.error('❌ webcall assistant build failed:', buildErr.message);
+      return res.status(500).json({ error: 'Failed to build web call assistant' });
     }
-    if (!assistantId) return res.status(409).json({ error: 'No assistant is set up for this web call yet' });
+    if (!assistant) return res.status(409).json({ error: 'No assistant is set up for this web call yet' });
 
     // Public fonts: marketing override first, then the dashboard fonts.
     res.json({
       success: true,
       config: {
-        assistantId,
+        assistant,
         label,
         phoneNumber,
         title: agency.webcall_title || null,
