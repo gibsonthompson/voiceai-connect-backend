@@ -74,6 +74,10 @@ Branding covers the logo, colors, light or dark theme, custom domain with SSL, t
 ## BILLING AND PAYMENTS
 Agencies pay VoiceAI Connect based on usage (platform fee plus per-client fee plus per-minute voice), viewable in Settings, then Billing. Per-client fees count only active, non-test clients. Client payments run through Stripe Connect: the agency sets its own client prices, payments flow directly to the agency's bank account, and VoiceAI Connect never touches those funds, so the agency keeps 100% of what it charges. The agency completes Stripe Connect onboarding in Settings, then Payments before clients can pay.
 
+## DISCOUNT CODES (AGENCY-CREATED, FOR CLIENTS AT SIGNUP)
+An agency can create discount codes that their clients enter at signup. A code can take a percentage off the client's monthly price, waive the setup fee entirely, or take a percentage off the setup fee, in any combination. Codes are managed at the bottom of Settings, then Pricing (Pro and Scale), where the agency sets the code, the percent off, how long it lasts, an optional usage limit, and an optional expiry date.
+The monthly percent-off runs for one of three durations the agency chooses: ongoing (every month, no end), the first month only, or a set number of months. When a code is set to a set number of months, the system automatically charges the client the discounted price for exactly that many months and then returns to the regular price on the next billing cycle on its own. The agency does not change anything by hand and there is no manual accounting to do; the billing applies the discount and switches back automatically. The setup-fee discount applies only when the agency charges a setup fee and is separate from the monthly percent-off.
+
 ## LEAD GENERATION AND ACQUIRING CLIENTS
 The built-in CRM finds local businesses from Google Maps by category and radius, runs them through 13 conversion-tested outreach templates, and tracks every reply on a visual pipeline. The strongest conversion tool is the branded AI demo line (Pro): a prospect calls it, hears the AI, and usually converts without a sales call.
 
