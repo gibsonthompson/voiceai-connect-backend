@@ -47,6 +47,70 @@ const { supabase } = require('../lib/supabase');
 const { logActivity, ACTION_TYPES } = require('./activity');
 const { requireAgencyAccess } = require('./auth');
 const { generatePersonalizedLine } = require('../lib/personalized-line');
+const crypto = require('crypto');
+
+// ----------------------------------------------------------------------------
+// Email-safe logo hosting.
+// A freshly uploaded agency logo is stored as a base64 data: URL. Gmail (and
+// most email clients) strip data: image URIs on paste/send, so a signature that
+// inlines one shows a broken logo - and an oversized data: blob in the pasted
+// HTML can make Gmail drop the surrounding formatting too. So before a signature
+// goes out, every data: image in it is uploaded to public storage once and
+// swapped for its https URL, which email clients can actually fetch. Keyed by a
+// content hash (same logo -> same object/URL) and cached in-process so repeat
+// composes don't re-upload. This also fixes signatures already saved with a
+// data: logo, with no re-save needed.
+// ----------------------------------------------------------------------------
+const EMAIL_IMG_BUCKET = 'content-media';
+const EMAIL_IMG_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
+const emailLogoCache = new Map(); // sha1(bytes) -> public https url
+
+async function hostDataUri(agencyId, dataUri) {
+  try {
+    const m = /^data:(image\/[a-z+]+);base64,(.+)$/i.exec(dataUri);
+    if (!m) return null;
+    let mime = m[1].toLowerCase();
+    if (mime === 'image/jpg') mime = 'image/jpeg';
+    const ext = EMAIL_IMG_EXT[mime];
+    if (!ext) return null; // svg/unknown: email clients block these regardless
+    const buffer = Buffer.from(m[2], 'base64');
+    if (!buffer.length || buffer.length > 5 * 1024 * 1024) return null;
+    const hash = crypto.createHash('sha1').update(buffer).digest('hex').slice(0, 16);
+    if (emailLogoCache.has(hash)) return emailLogoCache.get(hash);
+    const key = `agency-email-logos/${agencyId || 'x'}-${hash}.${ext}`;
+    const { error } = await supabase.storage.from(EMAIL_IMG_BUCKET).upload(key, buffer, { contentType: mime, upsert: true });
+    if (error) console.warn('email logo upload failed:', error.message || error);
+    const { data: pub } = supabase.storage.from(EMAIL_IMG_BUCKET).getPublicUrl(key);
+    const url = (pub && pub.publicUrl) || null;
+    if (url) emailLogoCache.set(hash, url);
+    return url;
+  } catch (e) {
+    console.warn('hostDataUri error:', e.message);
+    return null;
+  }
+}
+
+// Swap every data: image src in a signature for a hosted https URL. Best-effort:
+// an image that can't be hosted is left untouched rather than dropped.
+async function hostEmailImages(agencyId, html) {
+  if (!html || html.indexOf('data:image') === -1) return html;
+  const re = /src\s*=\s*(["'])(data:image\/[a-z+]+;base64,[^"']+)\1/gi;
+  const uniq = new Map(); // dataUri -> hosted url
+  const jobs = [];
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const uri = m[2];
+    if (!uniq.has(uri)) {
+      uniq.set(uri, null);
+      jobs.push(hostDataUri(agencyId, uri).then((url) => uniq.set(uri, url)));
+    }
+  }
+  await Promise.all(jobs);
+  return html.replace(re, (full, q, uri) => {
+    const url = uniq.get(uri);
+    return url ? `src=${q}${url}${q}` : full;
+  });
+}
 
 // Pull a city/area hint out of the free-text notes the lead finder writes
 // ("Address: 123 Main St, Atlanta, GA"), to give the opener a location anchor.
@@ -627,7 +691,10 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
         ? String(agency.outreach_signature)
         : buildDefaultSignatureHtml(agency?.logo_url, !!agency?.demo_phone_number);
     }
-    const signatureHtml = sigHtmlRaw ? applyVars(sigHtmlRaw) : '';
+    let signatureHtml = sigHtmlRaw ? applyVars(sigHtmlRaw) : '';
+    // Make the logo email-safe: a data: URL won't render in Gmail, so host it
+    // and reference the https URL instead (see hostEmailImages above).
+    if (signatureHtml) signatureHtml = await hostEmailImages(agency?.id, signatureHtml);
     const signatureText = signatureHtml ? htmlToPlainText(signatureHtml) : '';
     if (composedBody.includes('{agency_signature}')) {
       composedBody = composedBody.replace(/\{agency_signature\}/g, signatureText);
