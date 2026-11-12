@@ -244,6 +244,7 @@ const pwaTrackingRoutes = require('./routes/pwa-tracking');
 const leadRoutes = require('./routes/leads');
 const activityRoutes = require('./routes/activity');
 const outreachRoutes = require('./routes/outreach');
+const intakeRoutes = require('./routes/intake');
 const agencyTemplatesRoutes = require('./routes/agency-templates');
 const aiPlaygroundRoutes = require('./routes/ai-playground');
 const leadScraperRoutes = require('./routes/lead-scraper');
@@ -2037,6 +2038,7 @@ app.get('/api/agency/:agencyId/analytics', requireAgencyAccess('analytics'), asy
 // ============================================================================
 
 app.use('/api/agency', referralRoutes);
+app.use('/api/agency', intakeRoutes);
 
 // ============================================================================
 // DOMAIN MANAGEMENT ROUTES (Automated Vercel Provisioning)
