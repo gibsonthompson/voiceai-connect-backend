@@ -1783,6 +1783,16 @@ async function handleVapiWebhook(req, res) {
         await supabase.from('calls').update({ followup_outcome: followupOutcome, caller_spoke: callerSpoke }).eq('id', savedCallId);
       } catch (e) { console.warn('followup_outcome tag failed (non-fatal):', e.message); }
 
+      // Structured intake: if this client runs an intake template, extract the
+      // order/request from the transcript, store it, and text the owner. Fully
+      // guarded, never disturbs the call pipeline. Skips spam calls.
+      if (client.intake_enabled && !isSpam) {
+        try {
+          const { captureIntake } = require('../lib/intake-capture');
+          await captureIntake({ client, agency, transcript, callId: savedCallId, callerPhone, supabase });
+        } catch (e) { console.warn('⚠️ intake capture failed (non-fatal):', e.message); }
+      }
+
       // Persist who listened / jumped in onto the call for the post-call review.
       // Covers listen-only calls (no takeover recording, so the telnyx-voice recap
       // path never runs). Idempotent with that path: both write the full array.
