@@ -244,7 +244,7 @@ const pwaTrackingRoutes = require('./routes/pwa-tracking');
 const leadRoutes = require('./routes/leads');
 const activityRoutes = require('./routes/activity');
 const outreachRoutes = require('./routes/outreach');
-const intakeRoutes = require('./routes/intake');
+const { agencyRouter: intakeAgencyRoutes, clientRouter: intakeClientRoutes } = require('./routes/intake');
 const agencyTemplatesRoutes = require('./routes/agency-templates');
 const aiPlaygroundRoutes = require('./routes/ai-playground');
 const leadScraperRoutes = require('./routes/lead-scraper');
@@ -2038,7 +2038,7 @@ app.get('/api/agency/:agencyId/analytics', requireAgencyAccess('analytics'), asy
 // ============================================================================
 
 app.use('/api/agency', referralRoutes);
-app.use('/api/agency', intakeRoutes);
+app.use('/api/agency', intakeAgencyRoutes);
 
 // ============================================================================
 // DOMAIN MANAGEMENT ROUTES (Automated Vercel Provisioning)
@@ -2194,6 +2194,7 @@ app.use('/api/client', toolConfigRoutes);
 app.use('/api/client', require('./routes/live-monitor')); // live call demo + monitor (SSE stream, takeover)
 app.use('/api/client', pwaTrackingRoutes);
 app.use('/api/client', require('./routes/agency-client-thread').clientRouter); // agency<->client threads (behind requireClientAccess above)
+app.use('/api/client', intakeClientRoutes); // business-owner intake view + edit (requireClientAccess per route)
 app.use('/api/client', clientWorkflowRoutes); // business owner's view + toggle of their automations
 app.use('/api/sms', smsRoutes);
 
