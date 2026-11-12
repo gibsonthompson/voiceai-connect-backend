@@ -10,7 +10,7 @@
 // ============================================================================
 
 const { getIntakeTemplate } = require('./intake-templates');
-const { normalizeIntakeSchema, buildIntakeExtractionSchema } = require('./intake-prompt');
+const { normalizeIntakeSchema, buildIntakeExtractionSchema, computeOrderTotals } = require('./intake-prompt');
 const { sendAndLogSMS } = require('./sms-logger');
 
 const INTAKE_MODEL = process.env.INTAKE_MODEL || 'claude-sonnet-4-6';
@@ -47,6 +47,8 @@ async function extractRecord(transcript, schema) {
     // Keep only keys the schema defines.
     const clean = {};
     for (const f of schema.fields) clean[f.key] = parsed[f.key] === undefined ? null : parsed[f.key];
+    // Priced order lines ride alongside the fields when the form has a price list.
+    if (schema.pricing && schema.pricing.length && Array.isArray(parsed.order_items)) clean.order_items = parsed.order_items;
     return clean;
   } catch (e) {
     console.warn('⚠️ intake extraction failed:', e && e.message);
@@ -66,6 +68,13 @@ function formatRecordSms(schema, data, businessName) {
     if (v === null || v === undefined || String(v).trim() === '') continue;
     lines.push(`${f.label}: ${v}`);
   }
+  if (Array.isArray(data.order_items) && data.order_items.length) {
+    lines.push('Order:');
+    for (const li of data.order_items) {
+      lines.push(`  ${li.quantity} x ${li.item}${li.unit ? ` (${li.unit})` : ''} - $${Number(li.subtotal).toFixed(2)}`);
+    }
+    if (data.order_total != null) lines.push(`Total: $${Number(data.order_total).toFixed(2)}`);
+  }
   return lines.join('\n');
 }
 
@@ -78,6 +87,14 @@ async function captureIntake({ client, agency, transcript, callId, callerPhone, 
 
     const data = await extractRecord(transcript, schema);
     if (!data || !hasContent(schema, data)) return false;
+
+    // Price the order in code: replace the raw order_items with priced line items
+    // and a computed total, so money is never left to the model's arithmetic.
+    if (schema.pricing && schema.pricing.length && Array.isArray(data.order_items)) {
+      const totals = computeOrderTotals(schema.pricing, data.order_items);
+      if (totals) { data.order_items = totals.lineItems; data.order_total = totals.total; }
+      else { delete data.order_items; }
+    }
 
     try {
       await supabase.from('intake_records').insert([{

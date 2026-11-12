@@ -39,6 +39,68 @@ async function agencyTemplates(agencyId) {
   } catch (e) { return []; }
 }
 
+// Pull the business's own knowledge-base text (the human-readable notes plus the
+// structured services list) so prices already written there can seed the order
+// form instead of being retyped.
+async function getClientKbText(clientId) {
+  try {
+    const { data: client } = await supabase.from('clients')
+      .select('knowledge_base_content, knowledge_base_data').eq('id', clientId).single();
+    if (!client) return '';
+    const parts = [];
+    if (client.knowledge_base_content && String(client.knowledge_base_content).trim()) parts.push(String(client.knowledge_base_content));
+    const kb = client.knowledge_base_data;
+    if (kb && typeof kb === 'object') {
+      if (kb.services && String(kb.services).trim()) parts.push(String(kb.services));
+      if (kb.additionalInfo && String(kb.additionalInfo).trim()) parts.push(String(kb.additionalInfo));
+    }
+    return parts.join('\n\n').slice(0, 12000);
+  } catch (e) { return ''; }
+}
+
+// Ask Claude to pull a clean price list out of the KB text. Never invents a
+// price: items without a clear amount are skipped. Returns [] on any failure so
+// the caller can simply show "nothing found".
+async function parseKbPrices(kbText) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey || !kbText || !kbText.trim()) return [];
+  const model = process.env.INTAKE_MODEL || 'claude-sonnet-4-6';
+  const prompt = `From the business notes below, extract the price list.\n\n`
+    + `Return ONLY a JSON array of objects, each {"item": string, "price": number, "unit": string}. `
+    + `"unit" is how the price is charged ("each", "per lb", "per acre", "per hour") or "" for a flat price. `
+    + `Include an item only when the notes give it a clear price. Never invent or estimate a price.\n\n`
+    + `Notes:\n${kbText}\n\nReturn ONLY the JSON array, no prose, no code fences.`;
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model, max_tokens: 900, temperature: 0, messages: [{ role: 'user', content: prompt }] }),
+    });
+    const data = await res.json();
+    const text = (data && data.content && data.content[0] && data.content[0].text) || '';
+    const m = text.match(/\[[\s\S]*\]/);
+    if (!m) return [];
+    const arr = JSON.parse(m[0]);
+    if (!Array.isArray(arr)) return [];
+    const out = [];
+    const seen = new Set();
+    for (const p of arr) {
+      if (!p || typeof p !== 'object') continue;
+      const item = String(p.item || '').trim();
+      const price = Number(p.price);
+      if (!item || !Number.isFinite(price) || price < 0) continue;
+      const dedupe = item.toLowerCase();
+      if (seen.has(dedupe)) continue;
+      seen.add(dedupe);
+      const entry = { item, price: Math.round(price * 100) / 100 };
+      const unit = String(p.unit || '').trim();
+      if (unit) entry.unit = unit;
+      out.push(entry);
+    }
+    return out;
+  } catch (e) { console.warn('⚠️ KB price parse failed:', e && e.message); return []; }
+}
+
 // ============================================================================
 // AGENCY ROUTER
 // ============================================================================
@@ -131,6 +193,19 @@ agencyRouter.put('/:agencyId/clients/:clientId/intake', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Failed to save intake' }); }
 });
 
+// Suggest a price list from the client's knowledge base (the owner reviews and
+// accepts the rows into the form). Read-only: never writes the config.
+agencyRouter.post('/:agencyId/clients/:clientId/intake/pricing-from-kb', async (req, res) => {
+  try {
+    const { agencyId, clientId } = req.params;
+    const { data: client } = await supabase.from('clients').select('id').eq('id', clientId).eq('agency_id', agencyId).single();
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const kbText = await getClientKbText(clientId);
+    const pricing = await parseKbPrices(kbText);
+    res.json({ pricing, found: pricing.length });
+  } catch (e) { res.status(500).json({ error: 'Failed to read pricing from knowledge base' }); }
+});
+
 agencyRouter.get('/:agencyId/clients/:clientId/intake/records', async (req, res) => {
   try {
     const { agencyId, clientId } = req.params;
@@ -214,6 +289,16 @@ clientRouter.get('/:clientId/intake/records', requireClientAccess('settings'), a
       .order('created_at', { ascending: false }).limit(limit);
     res.json({ records: data || [] });
   } catch (e) { res.status(500).json({ error: 'Failed to load records' }); }
+});
+
+// Suggest a price list from this business's own knowledge base. Read-only.
+clientRouter.post('/:clientId/intake/pricing-from-kb', requireClientAccess('settings'), async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const kbText = await getClientKbText(clientId);
+    const pricing = await parseKbPrices(kbText);
+    res.json({ pricing, found: pricing.length });
+  } catch (e) { res.status(500).json({ error: 'Failed to read pricing from knowledge base' }); }
 });
 
 module.exports = { agencyRouter, clientRouter };
