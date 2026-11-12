@@ -189,8 +189,11 @@ clientRouter.put('/:clientId/intake', requireClientAccess('settings'), async (re
     const upd = {};
     if (sms_enabled !== undefined) upd.intake_sms_enabled = !!sms_enabled;
     if (sms_number !== undefined) upd.intake_sms_number = (sms_number && String(sms_number).trim()) || null;
+    // Whether the business uses the order form at all (on/off) is always the
+    // client's to set from My Business, even when the agency white-gloved and
+    // locked the form. The lock only governs the field configuration below.
+    if (enabled !== undefined) upd.intake_enabled = !!enabled;
     if (!locked) {
-      if (enabled !== undefined) upd.intake_enabled = !!enabled;
       if (template_key !== undefined) upd.intake_template_key = template_key || null;
       if (config !== undefined) upd.intake_config = config || null;
     }
