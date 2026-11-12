@@ -587,12 +587,13 @@ router.post('/:agencyId/outreach/compose', async (req, res) => {
     if (needsPersonalized && lead && agency?.personalized_line_enabled !== false) {
       if (lead.personalized_line && !regeneratePersonalized) {
         personalizedLine = lead.personalized_line;
-      } else if (lead.website) {
+      } else if (lead.website || lead.place_id) {
         const gen = await generatePersonalizedLine({
           website: lead.website,
           businessName: lead.business_name,
           industry: lead.industry,
           city: cityFromNotes(lead.notes),
+          placeId: lead.place_id,
           extraInstructions: agency?.personalized_line_instructions || '',
         });
         if (gen) {

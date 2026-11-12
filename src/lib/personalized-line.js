@@ -1,32 +1,62 @@
 // ============================================================================
 // Personalized opener line for cold outreach ({personalized_line}).
-// Reads a lead's website once and writes a single, specific opening sentence so
-// the first email reads as hand-written. Cost control lives in the caller: this
-// only runs for a lead that is actually being emailed and has a website, and the
-// result is cached on the lead so it is generated exactly once.
+// Writes a single opening sentence so the first email reads as hand-written.
 //
-// The PROMPT below is a working placeholder. Swap PERSONALIZED_LINE_SYSTEM with
-// the tuned prompt from the outreach-voice chat; nothing else needs to change.
+// FRAMING (important): the opener's job is NOT to state a trivia fact about the
+// business ("open since 2008, so what?"). It is to name the ONE signal that best
+// shows this business has real customer demand or money actively flowing in, and
+// frame it so that demand is the point. The next line of the email is about the
+// money they lose when an incoming customer can't get through, so the opener
+// primes the reader to feel they have real inbound worth capturing. The fact
+// (years, rating, reviews, area, specialty) is just the evidence; the money
+// meaning is the message.
+//
+// Inputs are a lead's own website text PLUS the demand signals already available
+// from their Google listing (rating, review count, categories, recent reviews).
+// Generated once per lead and cached by the caller, so the one Google Places
+// lookup here is paid at most once per lead.
 // ============================================================================
 
 const Anthropic = require('@anthropic-ai/sdk');
 const cheerio = require('cheerio');
+const { getPlaceRichDetails } = require('../../services/google-maps-source');
 
 const MODEL = process.env.PERSONALIZED_LINE_MODEL || 'claude-sonnet-4-6';
 const FETCH_TIMEOUT_MS = 7000;
 const MAX_INPUT_CHARS = 2500;
 const MAX_LINE_CHARS = 220;
 
-// --- PLACEHOLDER PROMPT (swap with the tuned version) -----------------------
-const PERSONALIZED_LINE_SYSTEM = `You write ONE short opening sentence for a cold email sent from an AI-receptionist agency to a local business owner. You are given text pulled from the business's own website.
+// Reviews that mention not being able to reach the business are the PITCH's
+// ammunition, not the opener's (the opener must never mention phones). We filter
+// them out of the review snippets fed to the opener so it stays on demand, not
+// pain. Kept in sync with the copy in src/routes/leads.js.
+const MISSED_CALL_RE = /(never (answer|called back|got back|returned|pick(ed)? up)|no one (answered|picked up|ever answered)|couldn'?t (reach|get (a hold|ahold)|get through)|can'?t (reach|get (a hold|ahold))|didn'?t (answer|call back|pick up|return)|no (answer|response)|straight to voicemail|went to voicemail|left (a )?(voicemail|message)|unresponsive|hard to reach|(doesn'?t|don'?t|won'?t) answer|phone (just )?rings|never return(ed)? (my|the) call)/i;
+
+// --- PROMPT: demand/money framing -------------------------------------------
+const PERSONALIZED_LINE_SYSTEM = `You write ONE short opening sentence for a cold email from an AI-receptionist agency to the owner of a local service business. You are given signals about their business, pulled from their website and their Google listing.
+
+Your job is NOT to state a fact about them. It is to name the ONE signal that best shows this business has real customer demand or money actively flowing in, and write your sentence so that demand is the point. The next line of the email is about the money they lose every time an incoming customer cannot get through, so your sentence should make the reader feel they already have real inbound worth capturing.
+
+Turn the fact into its money meaning:
+- NOT "You have been open since 2008" but "Sixteen years in Marietta means you are the name people call first."
+- NOT "You are rated 4.9 stars" but "A 4.9 across 400 reviews means you are the default pick in the area."
+- NOT "You do water damage restoration" but "Water damage is all emergency work, and those jobs go to whoever gets there first."
+
+Pick the strongest demand or money signal available, for example:
+- A strong reputation or rating (people are told to call them first)
+- Years established in a specific area (a known name that pulls steady inbound)
+- A wide service area or more than one location (volume of new-customer demand)
+- The urgency of their trade (emergency / same-day work, where the job goes to whoever responds first)
+- Signs they are busy or growing (hiring, expanding, booked out)
+- A specialty people specifically seek them out for
 
 Rules:
-- Exactly one sentence, under 25 words. Plain, human, specific.
-- Reference something REAL and concrete from their site: a specific service, their specialty, or the area/city they serve.
-- Make it an observation, not a compliment. Never say "I love", "I came across your website", or praise the website itself.
-- The email's next line is about missed calls, so do NOT mention phones, calls, voicemail, or receptionists yourself.
-- No em dash, no emojis, no hashtags, no "guru". Sound like a real person who glanced at their business for a few seconds.
-- If the text is too thin to say anything specific and true, reply with exactly: NONE
+- Exactly one sentence, under 25 words. Plain, human, specific, confident.
+- Use a REAL, concrete detail from the signals given (service, area, rating, review count, years, specialty). Never invent a number or a fact you were not given.
+- It is an observation about their demand, never a compliment. Never say "I love", "I came across your website", or praise the website itself.
+- Do NOT mention phones, calls, voicemail, missed calls, answering, or receptionists yourself. The next line does that.
+- No em dash, no emojis, no hashtags, no "guru". Sound like a real person who sized up their business in a few seconds.
+- If the signals are too thin to say anything specific and true about their demand, reply with exactly: NONE
 
 Output only the sentence (or NONE). No quotes, no preamble.`;
 
@@ -66,6 +96,50 @@ async function fetchHomepageText(websiteUrl) {
   }
 }
 
+// Demand signals from the lead's Google listing. Best-effort: any failure (no
+// key, no place id, API error) just returns null and the opener falls back to
+// the website text alone.
+async function fetchPlaceSignals(placeId) {
+  if (!placeId || !process.env.GOOGLE_PLACES_API_KEY) return null;
+  try {
+    const d = await getPlaceRichDetails(placeId);
+    if (!d) return null;
+    const rating = typeof d.rating === 'number' ? d.rating : null;
+    const reviewCount = typeof d.user_ratings_total === 'number' ? d.user_ratings_total : null;
+    const categories = Array.isArray(d.types)
+      ? d.types.filter((t) => !['point_of_interest', 'establishment'].includes(t)).slice(0, 4).map((t) => t.replace(/_/g, ' '))
+      : [];
+    const reviews = Array.isArray(d.reviews) ? d.reviews : [];
+    // Most recent reviews, dropping any that are about not reaching the business
+    // (that is the pitch's job), so the opener only ever sees praise/demand.
+    const snippets = reviews
+      .slice()
+      .sort((a, b) => (b.time || 0) - (a.time || 0))
+      .filter((r) => r && r.text && !MISSED_CALL_RE.test(r.text))
+      .slice(0, 2)
+      .map((r) => (r.text || '').replace(/\s+/g, ' ').trim().slice(0, 200))
+      .filter(Boolean);
+    const weekday = d.opening_hours && Array.isArray(d.opening_hours.weekday_text) ? d.opening_hours.weekday_text : [];
+    const open247 = weekday.length > 0 && weekday.every((l) => /open 24 hours/i.test(l));
+    if (rating == null && reviewCount == null && categories.length === 0 && snippets.length === 0) return null;
+    return { rating, reviewCount, categories, snippets, open247 };
+  } catch (e) {
+    return null;
+  }
+}
+
+function buildSignalsBlock(s) {
+  if (!s) return '';
+  const lines = [];
+  if (s.rating != null && s.reviewCount != null) lines.push(`Google rating: ${s.rating} stars across ${s.reviewCount} reviews`);
+  else if (s.rating != null) lines.push(`Google rating: ${s.rating} stars`);
+  else if (s.reviewCount != null) lines.push(`Google reviews: ${s.reviewCount}`);
+  if (s.categories && s.categories.length) lines.push(`Categories: ${s.categories.join(', ')}`);
+  if (s.open247) lines.push(`Hours: open 24 hours`);
+  if (s.snippets && s.snippets.length) lines.push(`Recent customer reviews:\n- ${s.snippets.join('\n- ')}`);
+  return lines.length ? `Google listing signals:\n${lines.join('\n')}` : '';
+}
+
 function cleanLine(raw) {
   let s = (raw || '').trim();
   if (!s) return null;
@@ -79,15 +153,20 @@ function cleanLine(raw) {
 }
 
 // Generate the opener. Returns a cleaned single-line string, or null if there is
-// nothing good to say (no key, no site content, model declined, or an error).
-// extraInstructions: optional agency-specific guidance appended to the prompt
-// (their own angle, tone, or anything they want the opener to keep in mind).
-async function generatePersonalizedLine({ website, businessName, industry, city, extraInstructions }) {
+// nothing good to say (no key, no usable signals, model declined, or an error).
+// extraInstructions: optional agency-specific guidance appended to the prompt.
+async function generatePersonalizedLine({ website, businessName, industry, city, placeId, extraInstructions }) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey || !website) return null;
+  if (!apiKey) return null;
 
-  const text = await fetchHomepageText(website);
-  if (!text || text.length < 40) return null;
+  // Gather the two sources in parallel; either can be empty.
+  const [text, signals] = await Promise.all([
+    website ? fetchHomepageText(website) : Promise.resolve(''),
+    fetchPlaceSignals(placeId),
+  ]);
+  const signalsBlock = buildSignalsBlock(signals);
+  const hasText = !!text && text.length >= 40;
+  if (!hasText && !signalsBlock) return null;
 
   try {
     const client = new Anthropic({ apiKey });
@@ -100,10 +179,9 @@ async function generatePersonalizedLine({ website, businessName, industry, city,
       businessName ? `Business name: ${businessName}` : '',
       industry ? `Industry: ${industry}` : '',
       city ? `Area: ${city}` : '',
-      '',
-      'Website text:',
-      text,
-    ].filter((l) => l !== undefined).join('\n');
+      signalsBlock ? `\n${signalsBlock}` : '',
+      hasText ? `\nWebsite text:\n${text}` : '',
+    ].filter(Boolean).join('\n');
 
     const resp = await client.messages.create({
       model: MODEL,
