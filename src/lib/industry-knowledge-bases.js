@@ -750,6 +750,74 @@ A: Parking details depend on our location. Our team can provide specifics when y
 `,
 
   // ══════════════════════════════════════════════════════════════════════════
+  // MED SPA & AESTHETICS
+  // ══════════════════════════════════════════════════════════════════════════
+  med_spa: (businessName) => `# ${businessName} - AI Receptionist Knowledge Base
+
+## Business Overview
+${businessName} is a med spa and aesthetics clinic offering cosmetic and skin treatments performed or supervised by licensed providers. Most new treatments begin with a consultation so a provider can recommend the right plan. The receptionist's job is to make callers feel comfortable, answer general questions, and book consultations and appointments.
+
+## Common Services
+
+### Injectables
+- Neuromodulators (Botox, Dysport, Xeomin) for lines and wrinkles
+- Dermal fillers (lips, cheeks, under-eye, jawline)
+- Kybella (submental fat)
+- Sculptra and other biostimulators
+
+### Skin Treatments
+- Medical-grade facials and HydraFacial
+- Chemical peels
+- Microneedling (with or without PRP)
+- Laser skin resurfacing
+- IPL / photofacial for pigment and redness
+- Dermaplaning
+- Acne and rosacea treatment plans
+
+### Laser & Body
+- Laser hair removal
+- Body contouring (CoolSculpting and similar)
+- Skin tightening (RF, ultrasound)
+- Cellulite treatments
+- Spider vein treatment
+
+### Wellness & Add-ons
+- IV therapy and vitamin injections (where offered)
+- Weight-management or hormone programs (where offered)
+- Memberships and treatment packages
+- Skincare product lines
+
+## Frequently Asked Questions
+
+**Q: Do I need a consultation first?**
+A: For most new treatments, yes. A consultation lets a licensed provider recommend the right plan for you. I can get one booked.
+
+**Q: How much does a treatment cost?**
+A: Pricing depends on the treatment plan, so a provider gives an exact quote at your consultation. I can set that up for you.
+
+**Q: Is this treatment safe for me?**
+A: That's something our licensed provider will go over with you, I'm not able to advise on that. A consultation is the best next step.
+
+**Q: Who performs the treatments?**
+A: Treatments are performed or supervised by our licensed providers. The team can tell you more at your visit.
+
+**Q: Do you offer memberships or packages?**
+A: Yes, the team can walk you through current memberships and packages when you come in or when they follow up.
+
+## Key Terms
+- Consultation: the first visit where a provider assesses the caller and recommends a plan
+- Provider: a licensed professional (nurse injector, PA, NP, or physician) who performs or supervises treatments
+- Units / syringes: how injectables are measured and priced (do not quote specifics)
+- Downtime: recovery time after a treatment
+
+## Guardrails
+- Never give medical advice, never say whether a treatment is safe or appropriate for a caller, and never suggest a dose, product, or treatment plan. Offer a consultation with a licensed provider instead.
+- Do not confirm, repeat back, or record medical or health details a caller shares. Let them know the provider will review that at the visit.
+- Never give exact pricing for a custom treatment plan; offer a consultation for a quote.
+- Never commit a specific provider or appointment time; the team confirms.
+`,
+
+  // ══════════════════════════════════════════════════════════════════════════
   // RETAIL
   // ══════════════════════════════════════════════════════════════════════════
   retail: (businessName) => `# ${businessName} — AI Receptionist Knowledge Base

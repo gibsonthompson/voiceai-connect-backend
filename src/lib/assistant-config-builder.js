@@ -554,6 +554,8 @@ const STAFF_TERMS = {
   salon_spa: { one: 'stylist', many: 'stylists' },
   salon: { one: 'stylist', many: 'stylists' },
   spa: { one: 'specialist', many: 'specialists' },
+  med_spa: { one: 'provider', many: 'providers' },
+  medspa: { one: 'provider', many: 'providers' },
   legal: { one: 'attorney', many: 'attorneys' },
   law: { one: 'attorney', many: 'attorneys' },
   law_firm: { one: 'attorney', many: 'attorneys' },
