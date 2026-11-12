@@ -84,6 +84,8 @@
 
 const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, TRANSFER_KEYWORDS_BLOCK, VOICES,
         sanitizeAssistantName, formatPhoneE164, isValidE164 } = require('./vapi');
+const { buildIntakeInstructions } = require('./intake-prompt');
+const { getIntakeTemplate } = require('./intake-templates');
 
 let supabase;
 try {
@@ -295,8 +297,9 @@ You are answering because the caller could not reach the business directly. Thei
 const RESPONSE_GUIDELINES_BLOCK = `
 
 # How you speak
+- Your one job is to serve this caller and give them the best possible experience. Everything else follows from that: understand what they need, make it easy, and get them a real outcome. A caller who feels genuinely helped is the whole point.
 - Keep every reply to one or two sentences. This is a phone call: the caller hears you, they can't read.
-- Ask one question at a time, then stop and let them answer.
+- Ask exactly ONE question per turn, then stop and wait for the answer. Never put two questions in one reply, and never ask for the next detail in the same breath as offering choices ("whole or deer corn? and what name?" is two questions, split them). When you need several things (an order, a message, a booking, the caller's details), collect them one at a time: ask the first, wait, acknowledge in a few words, then ask the next. Even when you still need more information, ask only the single next thing. Stacking two or three questions together confuses callers, especially older ones, and they end up answering only part.
 - Talk like a real person. Use contractions and natural acknowledgments ("sure," "got it," "no problem"). Never sound like a form or a script.
 - Say numbers, dates, and times as words: "two thirty this afternoon," "March fourth." Read a phone number one digit at a time. Spell an email slowly ("j-o-h-n at gmail dot com").
 - Acknowledge briefly and move forward. Don't repeat the caller's whole sentence back.
@@ -1293,6 +1296,23 @@ async function buildSystemPrompt(client, agency, callerContext, toolConfig, isAf
 
   // Phase 1: Priority rules
   systemPrompt += buildPriorityRulesBlock(client.priority_rules);
+
+  // Structured intake: when the client has an intake template enabled, drive the
+  // order/request collection from its schema (ordered, one question at a time,
+  // if-then branches). The same schema is also used post-call to extract a
+  // clean record (wired separately).
+  if (client.intake_enabled) {
+    try {
+      // A client's own customized schema wins; otherwise fall back to the
+      // platform template named by intake_template_key.
+      const intakeCfg = client.intake_config
+        || (client.intake_template_key ? getIntakeTemplate(client.intake_template_key) : null);
+      const intakeBlock = intakeCfg ? buildIntakeInstructions(intakeCfg) : '';
+      if (intakeBlock) systemPrompt += intakeBlock;
+    } catch (e) {
+      console.warn('⚠️ intake instructions skipped:', e && e.message);
+    }
+  }
 
   // Texting the caller: tell the AI which saved texts exist (address, website,
   // review, payment presets plus any custom saved links) and when to send them,
