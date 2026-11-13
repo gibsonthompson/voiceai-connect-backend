@@ -383,6 +383,7 @@ const passwordResetRoutes = require('./routes/password-reset');
 const { googleAuth, googleCallback } = require('./routes/google-auth');
 const calendarRoutes = require('./routes/calendar');
 const googleCalendarAuthRoutes = require('./routes/google-calendar-auth');
+const microsoftCalendarAuthRoutes = require('./routes/microsoft-calendar-auth');
 const ghlAuthRoutes = require('./routes/ghl-auth');
 const { updateAssistantCalendar } = require('./lib/calendar-tools');
 const adminRoutes = require('./routes/admin');
@@ -2617,6 +2618,7 @@ app.post('/api/knowledge-base/update', async (req, res) => {
 // ============================================================================
 
 app.use('/api/auth/google-calendar', googleCalendarAuthRoutes);
+app.use('/api/auth/microsoft-calendar', microsoftCalendarAuthRoutes);
 app.use('/api/auth/crm-calendar', ghlAuthRoutes);
 // Legacy alias: the client dashboard and the OAuth redirect URI use the neutral
 // /api/auth/crm-calendar path, but the marketplace app (or older clients) may

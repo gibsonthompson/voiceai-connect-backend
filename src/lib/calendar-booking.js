@@ -18,6 +18,7 @@
 // ====================================================================
 const { supabase } = require('./supabase');
 const ghl = require('./ghl-calendar');
+const mscal = require('./microsoft-calendar');
 
 // Short local-time label for a slot ISO in a timezone (GHL availability hints).
 function ghlSlotLabel(iso, timeZone) {
@@ -279,6 +280,13 @@ async function getAvailableSlots(clientId, date, options) {
     // below. No external calendar is read or written.
     if (client.calendar_provider === 'native') {
       return getNativeAvailableSlots(client, date, options);
+    }
+
+    // Microsoft 365 / Outlook: same slot engine as the Google path below, but
+    // busy times come from Microsoft Graph. Routed by provider before the Google
+    // connection check so a Microsoft client never falls through to Google.
+    if (client.calendar_provider === 'microsoft') {
+      return getMicrosoftAvailableSlots(client, date, options);
     }
 
     if (!client.google_calendar_connected) {
@@ -598,6 +606,127 @@ async function getNativeAvailableSlots(client, date, options) {
 }
 
 // ====================================================================
+// Microsoft 365 / Outlook calendar availability.
+// Mirrors the Google slot engine in getAvailableSlots (business-hours slots in
+// the client's timezone, min-notice + horizon from client/agency defaults, the
+// same overlap test and SLOT_STEP), but sources busy ranges from Microsoft
+// Graph via microsoft-calendar.getMicrosoftBusy. An all-day event blocks the
+// day; a calendar read failure fails safe (no slots offered), exactly like the
+// Google path.
+// ====================================================================
+async function getMicrosoftAvailableSlots(client, date, options) {
+  try {
+    if (!client.microsoft_calendar_connected) {
+      return { success: false, error: 'Calendar not connected' };
+    }
+
+    const accessToken = await mscal.refreshMicrosoftToken(client);
+    if (!accessToken) {
+      return { success: false, error: 'Calendar authentication failed' };
+    }
+
+    const timezone = client.timezone || 'America/New_York';
+
+    // Booking window: min notice + max horizon, client value then agency default
+    // then platform default (identical to the Google path).
+    let agencyDefaults = {};
+    if (client.agency_id) {
+      try {
+        const { data: ag } = await supabase
+          .from('agencies')
+          .select('default_min_booking_notice_minutes, default_max_booking_days_ahead')
+          .eq('id', client.agency_id)
+          .single();
+        agencyDefaults = ag || {};
+      } catch (e) { /* defaults below */ }
+    }
+    const pickNum = (...vals) => {
+      for (const v of vals) { const n = Number(v); if (v !== null && v !== undefined && v !== '' && !isNaN(n)) return n; }
+      return null;
+    };
+    const leadMinutes = pickNum(client.min_booking_notice_minutes, agencyDefaults.default_min_booking_notice_minutes, LEAD_TIME_MINUTES);
+    const maxDaysAhead = pickNum(client.max_booking_days_ahead, agencyDefaults.default_max_booking_days_ahead, 60);
+
+    if (maxDaysAhead != null && maxDaysAhead > 0) {
+      const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+      const [ty, tmo, td] = todayStr.split('-').map(Number);
+      const [ry, rmo, rd] = date.split('-').map(Number);
+      const daysOut = Math.round((Date.UTC(ry, rmo - 1, rd) - Date.UTC(ty, tmo - 1, td)) / 86400000);
+      if (daysOut > maxDaysAhead) {
+        return { success: true, slots: [], message: `We only take bookings up to ${maxDaysAhead} days ahead.`, provider: 'microsoft' };
+      }
+    }
+
+    const businessHours = client.business_hours || {
+      monday: { open: '09:00', close: '17:00' },
+      tuesday: { open: '09:00', close: '17:00' },
+      wednesday: { open: '09:00', close: '17:00' },
+      thursday: { open: '09:00', close: '17:00' },
+      friday: { open: '09:00', close: '17:00' },
+      saturday: null,
+      sunday: null,
+    };
+
+    const [yy, mm, dd] = date.split('-').map(Number);
+    const noonLocal = zonedWallTimeToUTC(yy, mm, dd, 12, 0, timezone);
+    const dayName = noonLocal.toLocaleString('en-US', { timeZone: timezone, weekday: 'long' }).toLowerCase();
+    const hours = businessHours[dayName];
+    if (!hours || hours.closed === true || !hours.open || !hours.close) {
+      return { success: true, slots: [], message: 'Closed on this day', provider: 'microsoft' };
+    }
+
+    const openTotal = parseTimeToMinutes(hours.open);
+    const closeTotal = parseTimeToMinutes(hours.close);
+    if (openTotal == null || closeTotal == null || closeTotal <= openTotal) {
+      return { success: true, slots: [], message: 'Closed on this day', provider: 'microsoft' };
+    }
+
+    // Fetch events on the client-local calendar day (local midnight to next local
+    // midnight, as UTC instants), exactly like the Google path.
+    const dayStartUTC = zonedWallTimeToUTC(yy, mm, dd, 0, 0, timezone);
+    const baseNoonUTC = new Date(Date.UTC(yy, mm - 1, dd, 12, 0, 0));
+    const nextNoonUTC = new Date(baseNoonUTC.getTime() + 24 * 60 * 60 * 1000);
+    const dayEndUTC = zonedWallTimeToUTC(nextNoonUTC.getUTCFullYear(), nextNoonUTC.getUTCMonth() + 1, nextNoonUTC.getUTCDate(), 0, 0, timezone);
+
+    const busyRes = await mscal.getMicrosoftBusy(client, accessToken, dayStartUTC.toISOString(), dayEndUTC.toISOString());
+    if (!busyRes.ok) {
+      return { success: false, error: 'Failed to read the calendar' };
+    }
+    if (busyRes.allDay) {
+      console.log(`📅 All-day event on ${date} (Outlook) - treating the day as unavailable`);
+      return { success: true, slots: [], message: 'Unavailable this day', provider: 'microsoft' };
+    }
+    const busy = busyRes.busy;
+
+    const duration = (options && options.durationOverride) || client.appointment_duration || 30;
+    const buffer = (options && options.bufferMinutes) || 0;
+    const nowMs = Date.now();
+    const leadMs = (leadMinutes != null ? leadMinutes : LEAD_TIME_MINUTES) * 60000;
+    const slots = [];
+    const taken = [];
+
+    for (let cur = openTotal; cur + duration <= closeTotal; cur += SLOT_STEP_MINUTES) {
+      const hr = Math.floor(cur / 60);
+      const min = cur % 60;
+      const slotStartMs = zonedWallTimeToUTC(yy, mm, dd, hr, min, timezone).getTime();
+      const slotEndMs = slotStartMs + duration * 60000;
+      if (slotStartMs < nowMs + leadMs) continue;
+      const bufStartMs = slotStartMs - buffer * 60000;
+      const bufEndMs = slotEndMs + buffer * 60000;
+      const hasConflict = busy.some(b => bufStartMs < b.end.getTime() && bufEndMs > b.start.getTime());
+      if (!hasConflict) slots.push(formatSlotLabel(hr, min));
+      else if (taken.length < 4) taken.push(formatSlotLabel(hr, min));
+    }
+
+    console.log(`📅 Outlook availability for ${date} (${timezone}): ${slots.length} slots (duration: ${duration}min, buffer: ${buffer}min)`);
+    return { success: true, slots, date, dayName, taken, provider: 'microsoft' };
+  } catch (err) {
+    console.error('getMicrosoftAvailableSlots error:', err);
+    return { success: false, error: 'Failed to get availability' };
+  }
+}
+
+// ====================================================================
 // Entitlement for the CUSTOMER booking-confirmation SMS (a paid capability).
 //   - A reseller agency can offer it only on the Scale plan (trial counts as
 //     Scale, matching hasScale()).
@@ -643,17 +772,27 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     // Google. The live receptionist books into whichever the client connected.
     const useGhl = client.calendar_provider === 'ghl' && client.ghl_connected === true && !!client.ghl_access_token && !!client.ghl_calendar_id;
     const useNative = client.calendar_provider === 'native';
+    const useMicrosoft = client.calendar_provider === 'microsoft' && client.microsoft_calendar_connected === true;
     const googleConnected = client.google_calendar_connected === true;
-    if (!useGhl && !useNative && !googleConnected) {
+    if (!useGhl && !useNative && !useMicrosoft && !googleConnected) {
       return { success: false, error: 'Calendar not connected - appointment request noted for callback' };
     }
 
     // Google needs its access token up front; the GHL branch below fetches its
     // own token when it writes the appointment. Native writes no external event.
     let accessToken = null;
-    if (googleConnected && !useGhl && !useNative) {
+    if (googleConnected && !useGhl && !useNative && !useMicrosoft) {
       accessToken = await refreshAccessToken(client);
       if (!accessToken) {
+        return { success: false, error: 'Calendar authentication failed' };
+      }
+    }
+
+    // Microsoft needs its access token up front too (refreshed + persisted).
+    let msAccessToken = null;
+    if (useMicrosoft) {
+      msAccessToken = await mscal.refreshMicrosoftToken(client);
+      if (!msAccessToken) {
         return { success: false, error: 'Calendar authentication failed' };
       }
     }
@@ -760,6 +899,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     // post-booking logic (DB row, webhook, confirmation SMS) is shared below.
     let googleEventId = null;
     let ghlEventId = null;
+    let microsoftEventId = null;
     let calendarLink = null;
 
     if (useGhl) {
@@ -791,6 +931,26 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
       // external event is written; googleEventId/ghlEventId stay null and it
       // reaches the shared DB insert + webhook below.
       console.log('✅ Appointment booked on the native calendar');
+    } else if (useMicrosoft) {
+      // Microsoft 365 / Outlook: write a real event via Graph. Wall-clock times
+      // plus the client's IANA timezone, so Graph resolves them exactly like the
+      // Google path. The event id is stored on the row's google_event_id column
+      // (the generic external-event handle reschedule/cancel read), while the
+      // stored instant below is computed from the client timezone.
+      const msEvent = await mscal.createMicrosoftEvent(msAccessToken, {
+        subject: eventTitle,
+        description: descParts.join('\n'),
+        startDateTime,
+        endDateTime,
+        timeZone: timezone,
+      });
+      if (!msEvent.ok) {
+        console.error('Failed to create Outlook event');
+        return { success: false, error: 'Failed to create appointment' };
+      }
+      microsoftEventId = msEvent.id;
+      calendarLink = msEvent.webLink || null;
+      console.log('✅ Appointment booked in Outlook:', msEvent.id);
     } else {
       const event = {
         summary: eventTitle,
@@ -848,7 +1008,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
       : zonedWallTimeToUTC(aptY, aptMo, aptD, hr, min, timezone).toISOString();
     const appointmentRecord = {
       client_id: clientId,
-      google_event_id: googleEventId,
+      google_event_id: googleEventId || microsoftEventId,
       customer_name: customerName,
       customer_phone: customerPhone,
       appointment_time: apptStartIso,
@@ -895,7 +1055,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
           notes: notes || null,
           status: 'confirmed',
           booking_source: 'ai_receptionist',
-          google_event_id: googleEventId,
+          google_event_id: googleEventId || microsoftEventId,
           ghl_event_id: ghlEventId,
           google_calendar_id: googleEventId ? (client.google_calendar_id || 'primary') : null,
           calendar_link: calendarLink,
@@ -1105,6 +1265,7 @@ async function createAppointmentApi(params) {
     // Google when connected; else record-only (a real row, no external write).
     const useGhl = client.calendar_provider === 'ghl' && client.ghl_connected === true && !!client.ghl_access_token && !!client.ghl_calendar_id;
     const useNative = client.calendar_provider === 'native';
+    const useMicrosoft = client.calendar_provider === 'microsoft' && client.microsoft_calendar_connected === true;
     const googleConnected = client.google_calendar_connected === true;
     let googleEventId = null;
     let ghlEventId = null;
@@ -1182,6 +1343,41 @@ async function createAppointmentApi(params) {
       if (!resp.ok) { console.error('API createAppointment Google error:', await resp.text().catch(() => '')); return { ok: false, code: 'calendar_error', error: 'Failed to create the calendar event.' }; }
       googleEventId = (await resp.json()).id;
       bookingSource = 'api';
+    } else if (useMicrosoft) {
+      // Microsoft 365 / Outlook path: availability-check (unless disabled), then
+      // write the event via Graph. startIso was computed above from the client
+      // timezone, so the record instant is correct; the Graph event id is stored
+      // on google_event_id (the generic external-event handle).
+      if (p.checkAvailability !== false) {
+        const avail = await getAvailableSlots(p.clientId, p.date, { durationOverride: duration, bufferMinutes });
+        if (!avail.success) return { ok: false, code: 'calendar_error', error: 'Could not read the calendar to confirm availability.' };
+        const want = formatSlotLabel(reqHr, reqMin).replace(/\s+/g, ' ').trim().toLowerCase();
+        const free = (avail.slots || []).some((s) => s.replace(/\s+/g, ' ').trim().toLowerCase() === want);
+        if (!free) return { ok: false, code: 'slot_unavailable', error: 'That time is not available.', available_slots: avail.slots || [] };
+      }
+      const msToken = await mscal.refreshMicrosoftToken(client);
+      if (!msToken) return { ok: false, code: 'calendar_error', error: 'Calendar authentication failed.' };
+      const startDateTime = `${p.date}T${time24}:00`;
+      const totalMinutes = reqHr * 60 + reqMin + duration;
+      const endDateTime = `${p.date}T${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}:00`;
+      const titleParts = [p.serviceType || 'Appointment'];
+      if (p.staffName) titleParts.push(p.staffName);
+      titleParts.push(p.customerName);
+      const descParts = [`Customer: ${p.customerName}`, `Phone: ${p.customerPhone || ''}`];
+      if (p.staffName) descParts.push(`Provider: ${p.staffName}`);
+      if (p.serviceType) descParts.push(`Service: ${p.serviceType}`);
+      if (p.notes) descParts.push(`Notes: ${p.notes}`);
+      descParts.push('', 'Booked via API');
+      const msEvent = await mscal.createMicrosoftEvent(msToken, {
+        subject: titleParts.join(' - '),
+        description: descParts.join('\n'),
+        startDateTime,
+        endDateTime,
+        timeZone: timezone,
+      });
+      if (!msEvent.ok) { console.error('API createAppointment Microsoft error'); return { ok: false, code: 'calendar_error', error: 'Failed to create the calendar event.' }; }
+      googleEventId = msEvent.id;
+      bookingSource = 'api_microsoft';
     } else if (useNative) {
       // Native path: confirm the slot against our own availability (which reads
       // the appointments table), then record it. No external write.
@@ -1258,6 +1454,23 @@ async function rescheduleAppointmentApi(appt, params) {
       }
       const up = await ghl.updateAppointment(token, appt.ghl_event_id, { startTime: newStart, endTime: newEnd });
       if (!up.ok) { console.error('API reschedule GHL error:', up.status, up.error); return { ok: false, code: 'calendar_error', error: 'Failed to update the GoHighLevel appointment.' }; }
+    } else if (appt.google_event_id && client.calendar_provider === 'microsoft' && client.microsoft_calendar_connected === true) {
+      // Microsoft 365 / Outlook reschedule: validate the new slot, then PATCH the
+      // Graph event. The event id lives on google_event_id (the generic handle).
+      if (p.checkAvailability !== false) {
+        const avail = await getAvailableSlots(appt.client_id, p.date, { durationOverride: duration, bufferMinutes: 0 });
+        if (!avail.success) return { ok: false, code: 'calendar_error', error: 'Could not read the calendar to confirm availability.' };
+        const want = formatSlotLabel(reqHr, reqMin).replace(/\s+/g, ' ').trim().toLowerCase();
+        const free = (avail.slots || []).some((s) => s.replace(/\s+/g, ' ').trim().toLowerCase() === want);
+        if (!free) return { ok: false, code: 'slot_unavailable', error: 'That time is not available.', available_slots: avail.slots || [] };
+      }
+      const msToken = await mscal.refreshMicrosoftToken(client);
+      if (!msToken) return { ok: false, code: 'calendar_error', error: 'Calendar authentication failed.' };
+      const startDateTime = `${p.date}T${time24}:00`;
+      const totalMinutes = reqHr * 60 + reqMin + duration;
+      const endDateTime = `${p.date}T${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}:00`;
+      const up = await mscal.updateMicrosoftEvent(msToken, appt.google_event_id, { startDateTime, endDateTime, timeZone: timezone });
+      if (!up.ok) { console.error('API reschedule Microsoft error'); return { ok: false, code: 'calendar_error', error: 'Failed to update the calendar event.' }; }
     } else if (appt.google_event_id && client.google_calendar_connected === true) {
       if (p.checkAvailability !== false) {
         const avail = await getAvailableSlots(appt.client_id, p.date, { durationOverride: duration, bufferMinutes: 0 });
@@ -1325,6 +1538,14 @@ async function cancelAppointmentApi(appt, params) {
       if (token) {
         const r = await ghl.cancelAppointment(token, appt.ghl_event_id);
         if (!r.ok) { console.error('API cancel GHL error:', r.status, r.error); return { ok: false, code: 'calendar_error', error: 'Failed to cancel the GoHighLevel appointment.' }; }
+      }
+    } else if (appt.google_event_id && client.calendar_provider === 'microsoft' && client.microsoft_calendar_connected === true) {
+      // Microsoft 365 / Outlook cancel: delete the Graph event (404/410 treated as
+      // already-gone inside cancelMicrosoftEvent, so cancel is idempotent).
+      const msToken = await mscal.refreshMicrosoftToken(client);
+      if (msToken) {
+        const r = await mscal.cancelMicrosoftEvent(msToken, appt.google_event_id);
+        if (!r.ok) { console.error('API cancel Microsoft error'); return { ok: false, code: 'calendar_error', error: 'Failed to remove the calendar event.' }; }
       }
     } else if (appt.google_event_id && client.google_calendar_connected === true) {
       const accessToken = await refreshAccessToken(client);
