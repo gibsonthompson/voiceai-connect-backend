@@ -460,6 +460,24 @@ clientRouter.post('/:clientId/provider-inbox/reply', async (req, res) => {
 const DEMO_SMS_TYPES = ['demo_followup', 'demo_followup_industry', 'demo_followup_custom', 'demo_reply_inbound', 'demo_reply_outbound'];
 function inboxLast10(p) { const d = String(p || '').replace(/\D/g, ''); return d.length > 10 ? d.slice(-10) : d; }
 function looksLikePhone(s) { return !!s && /\d/.test(s) && String(s).replace(/\D/g, '').length >= 10 && !/@/.test(s); }
+
+// ---------------------------------------------------------------------------
+// SENT (outbound notifications): texts the AI/platform sent on the agency's
+// behalf during or after a call/demo. Surfaced read-only in the inbox so an
+// agency (or client) can see exactly what a customer received, e.g. when a
+// transcript says "I sent the details to Sean", this is Sean's actual text.
+// ---------------------------------------------------------------------------
+const SENT_SMS_TYPES = ['ai_call_sms', 'client_call_notification', 'client_inbound_sms_notify', 'demo_admin', 'demo_sample_summary'];
+function sentSmsLabel(t) {
+  switch (t) {
+    case 'ai_call_sms': return 'Texted during call';
+    case 'client_call_notification': return 'Call recap';
+    case 'client_inbound_sms_notify': return 'Inbound text alert';
+    case 'demo_admin': return 'Demo recap';
+    case 'demo_sample_summary': return 'Demo sample';
+    default: return 'Notification';
+  }
+}
 function finalizeConvo(c) {
   const n = c.messages.length;
   c.lastAt = n ? c.messages[n - 1].at : null;
@@ -741,6 +759,76 @@ agencyRouter.get('/:agencyId/inbox/facts', requireAgencyAccess('dashboard'), asy
   } catch (e) {
     console.error('inbox facts error:', e.message);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/agency/:agencyId/sent-sms  -> read-only feed of outbound AI texts
+// ---------------------------------------------------------------------------
+agencyRouter.get('/:agencyId/sent-sms', requireAgencyAccess('dashboard'), async (req, res) => {
+  try {
+    const { agencyId } = req.params;
+    const { data: rows } = await supabase
+      .from('sms_log')
+      .select('id, recipient_phone, recipient_type, message_type, message_body, metadata, created_at')
+      .eq('agency_id', agencyId)
+      .in('message_type', SENT_SMS_TYPES)
+      .order('created_at', { ascending: false })
+      .limit(400);
+
+    const clientIds = [...new Set((rows || []).map(r => r.metadata && r.metadata.client_id).filter(Boolean))];
+    const nameById = {}, nameByPhone = {};
+    if (clientIds.length) {
+      const { data: cs } = await supabase.from('clients').select('id, business_name').in('id', clientIds);
+      (cs || []).forEach(c => { nameById[c.id] = c.business_name; });
+    }
+    const { data: owners } = await supabase.from('clients').select('business_name, owner_phone').eq('agency_id', agencyId).limit(2000);
+    (owners || []).forEach(c => { const k = inboxLast10(c.owner_phone); if (k) nameByPhone[k] = c.business_name; });
+
+    const messages = (rows || []).map(r => {
+      const cid = r.metadata && r.metadata.client_id;
+      const business = (cid && nameById[cid]) || nameByPhone[inboxLast10(r.recipient_phone)] || null;
+      return { id: r.id, sender: 'out', body: r.message_body || '', at: r.created_at, kind: sentSmsLabel(r.message_type), to: r.recipient_phone, business };
+    }).reverse();
+
+    res.json({ success: true, messages });
+  } catch (error) {
+    console.error('Agency sent-sms load error:', error.message);
+    res.status(500).json({ error: 'Failed to load sent messages' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/client/:clientId/sent-sms  -> the texts this client's AI sent
+// ---------------------------------------------------------------------------
+clientRouter.get('/:clientId/sent-sms', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { data: client } = await supabase.from('clients').select('id, agency_id, business_name, owner_phone').eq('id', clientId).single();
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const ownerLast10 = inboxLast10(client.owner_phone);
+
+    const { data: rows } = await supabase
+      .from('sms_log')
+      .select('id, recipient_phone, recipient_type, message_type, message_body, metadata, created_at')
+      .eq('agency_id', client.agency_id)
+      .in('message_type', SENT_SMS_TYPES)
+      .order('created_at', { ascending: false })
+      .limit(400);
+
+    const mine = (rows || []).filter(r => {
+      const cid = r.metadata && r.metadata.client_id;
+      if (cid && String(cid) === String(clientId)) return true;
+      if (r.recipient_type === 'client_owner' && ownerLast10 && inboxLast10(r.recipient_phone) === ownerLast10) return true;
+      return false;
+    });
+
+    const messages = mine.map(r => ({ id: r.id, sender: 'out', body: r.message_body || '', at: r.created_at, kind: sentSmsLabel(r.message_type), to: r.recipient_phone, business: client.business_name })).reverse();
+
+    res.json({ success: true, messages });
+  } catch (error) {
+    console.error('Client sent-sms load error:', error.message);
+    res.status(500).json({ error: 'Failed to load sent messages' });
   }
 });
 
