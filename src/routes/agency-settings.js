@@ -805,6 +805,13 @@ async function getAgencySettings(req, res) {
         // re-seeds to the default after save and the UI appears to revert.
         setup_fee_timing: agency.setup_fee_timing || 'upfront',
         signup_logo_align: agency.signup_logo_align || 'left',
+        // Outreach email settings. Returned here (not just whitelisted on write)
+        // because the agency context is built from THIS response, and the
+        // composer reads the signature + chosen email app from that context.
+        // Without these a saved signature re-seeds to default on reload and the
+        // email-provider picker never reaches the composer.
+        outreach_signature: agency.outreach_signature || null,
+        outreach_email_provider: agency.outreach_email_provider || 'gmail',
         
         // Demo phone (auto-provisioned per agency via VAPI)
         demo_phone_number: agency.demo_phone_number || null,
@@ -965,6 +972,8 @@ async function updateAgencySettings(req, res) {
       // the PUT silently dropped it and the saved signature never reached the
       // composer. The compose endpoint and agency context both read the full row.
       'outreach_signature',
+      // Which email app the outreach composer's one-click opens.
+      'outreach_email_provider',
       'marketing_config',
       'marketing_template',
       'marketing_site_enabled',
@@ -1068,6 +1077,10 @@ async function updateAgencySettings(req, res) {
     if (updates.show_annual_plans !== undefined) updates.show_annual_plans = updates.show_annual_plans === true;
     if (updates.show_lower_plans_on_upgrade !== undefined) updates.show_lower_plans_on_upgrade = updates.show_lower_plans_on_upgrade === true;
     if (updates.allow_client_cancel !== undefined) updates.allow_client_cancel = updates.allow_client_cancel === true;
+    if (updates.outreach_email_provider !== undefined) {
+      const VALID_EMAIL_PROVIDERS = ['gmail', 'outlook365', 'outlookcom', 'yahoo', 'default'];
+      updates.outreach_email_provider = VALID_EMAIL_PROVIDERS.includes(updates.outreach_email_provider) ? updates.outreach_email_provider : 'gmail';
+    }
     // Only the two valid modes persist; anything else falls back to the default.
     if (updates.client_cancel_mode !== undefined) updates.client_cancel_mode = updates.client_cancel_mode === 'immediate' ? 'immediate' : 'period_end';
     for (const _bk of ['plan_badge_1', 'plan_badge_2', 'plan_badge_3']) {
