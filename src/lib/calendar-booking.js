@@ -191,6 +191,48 @@ function formatSlotLabel(hr, min) {
   return hour12 + minStr + ' ' + ampm;
 }
 
+// Title-case a phrase for calendar event titles. Capitalizes the first letter
+// of each all-lowercase word (so "general inspection" -> "General Inspection")
+// while leaving words that already carry an uppercase letter untouched, so
+// acronyms and proper names are preserved ("HVAC", "AC", "Gibson" stay as-is).
+function toTitleCase(s) {
+  return String(s || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .map((w) => (!w || /[A-Z]/.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(' ');
+}
+
+// Build a clean, Title Cased calendar event title from the service, staff, and
+// customer. Examples: "General Inspection - Gibson Thompson", or with a staff
+// member "Teeth Cleaning - Jane Doe (with Dr. Smith)". Shared by the voice
+// booking path and every REST provider branch so titles read the same anywhere.
+function buildEventTitle(serviceType, staffName, customerName) {
+  const service = toTitleCase(serviceType) || 'Appointment';
+  const customer = toTitleCase(customerName);
+  let title = customer ? `${service} - ${customer}` : service;
+  if (staffName && String(staffName).trim()) title += ` (with ${toTitleCase(staffName)})`;
+  return title;
+}
+
+// Build the event body/notes written onto the calendar event. Leads with a
+// clear "booked by" line so whoever opens the event knows it came from the AI
+// receptionist, followed by the caller and appointment details. Plain text so
+// it renders the same in Outlook, Google, and anywhere else.
+function buildEventDetails({ businessName, via, customerName, customerPhone, serviceType, staffName, notes }) {
+  const header = via === 'ai'
+    ? `Booked by the AI receptionist${businessName ? ` for ${businessName}` : ''}.`
+    : 'Booked via the VoiceAI API.';
+  const lines = [header, ''];
+  if (customerName) lines.push(`Customer: ${customerName}`);
+  if (customerPhone) lines.push(`Phone: ${customerPhone}`);
+  if (serviceType) lines.push(`Service: ${serviceType}`);
+  if (staffName) lines.push(`Provider: ${staffName}`);
+  if (notes) lines.push(`Notes: ${notes}`);
+  return lines.join('\n');
+}
+
 // ====================================================================
 // PHASE 3B: Look up service by name in client_services table
 // Returns { duration_minutes, buffer_minutes, booking_mode } or null
@@ -882,18 +924,11 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     console.log(`📅 Event time: ${startDateTime} to ${endDateTime} (${timezone})`);
 
     // ── Phase 3B: Build event title with service + staff + customer ──
-    const titleParts = [];
-    titleParts.push(serviceType || 'Appointment');
-    if (staffName) titleParts.push(staffName);
-    titleParts.push(customerName);
-    const eventTitle = titleParts.join(' - ');
+    // Title Cased and formatted (e.g. "General Inspection - Gibson Thompson").
+    const eventTitle = buildEventTitle(serviceType, staffName, customerName);
 
-    // Build description
-    const descParts = [`Customer: ${customerName}`, `Phone: ${customerPhone}`];
-    if (staffName) descParts.push(`Provider: ${staffName}`);
-    if (serviceType) descParts.push(`Service: ${serviceType}`);
-    if (notes) descParts.push(`Notes: ${notes}`);
-    descParts.push('', 'Booked via AI Receptionist');
+    // Build description/body (led by a clear "booked by the AI receptionist" line).
+    const descBody = buildEventDetails({ businessName: client.business_name, via: 'ai', customerName, customerPhone, serviceType, staffName, notes });
 
     // Provider write. Either path produces an event id we store on the row; the
     // post-booking logic (DB row, webhook, confirmation SMS) is shared below.
@@ -939,7 +974,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
       // stored instant below is computed from the client timezone.
       const msEvent = await mscal.createMicrosoftEvent(msAccessToken, {
         subject: eventTitle,
-        description: descParts.join('\n'),
+        description: descBody,
         startDateTime,
         endDateTime,
         timeZone: timezone,
@@ -954,7 +989,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     } else {
       const event = {
         summary: eventTitle,
-        description: descParts.join('\n'),
+        description: descBody,
         start: {
           dateTime: startDateTime,
           timeZone: timezone,
@@ -1287,16 +1322,14 @@ async function createAppointmentApi(params) {
       }
       const uc = await ghl.upsertContact(token, client.ghl_location_id, { name: p.customerName, phone: p.customerPhone || undefined, email: p.customerEmail || undefined });
       if (!uc.ok || !uc.id) return { ok: false, code: 'calendar_error', error: 'Could not create the contact in GoHighLevel.' };
-      const titleParts = [p.serviceType || 'Appointment'];
-      if (p.staffName) titleParts.push(p.staffName);
-      titleParts.push(p.customerName);
+      const eventTitle = buildEventTitle(p.serviceType, p.staffName, p.customerName);
       // Assign a user so GHL renders it on the calendar grid (not just the
       // contact): a calendar team member if there is one, else the user who
       // connected the account.
       const assignedUserId = await ghl.resolveAssignedUserId(token, client.ghl_calendar_id, client.ghl_user_id);
       const ca = await ghl.createAppointment(token, {
         calendarId: client.ghl_calendar_id, locationId: client.ghl_location_id, contactId: uc.id,
-        startTime: startIso, endTime: endIso, title: titleParts.join(' - '),
+        startTime: startIso, endTime: endIso, title: eventTitle,
         assignedUserId: assignedUserId || undefined,
       });
       if (!ca.ok) {
@@ -1320,17 +1353,11 @@ async function createAppointmentApi(params) {
       const startDateTime = `${p.date}T${time24}:00`;
       const totalMinutes = reqHr * 60 + reqMin + duration;
       const endDateTime = `${p.date}T${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}:00`;
-      const titleParts = [p.serviceType || 'Appointment'];
-      if (p.staffName) titleParts.push(p.staffName);
-      titleParts.push(p.customerName);
-      const descParts = [`Customer: ${p.customerName}`, `Phone: ${p.customerPhone || ''}`];
-      if (p.staffName) descParts.push(`Provider: ${p.staffName}`);
-      if (p.serviceType) descParts.push(`Service: ${p.serviceType}`);
-      if (p.notes) descParts.push(`Notes: ${p.notes}`);
-      descParts.push('', 'Booked via API');
+      const eventTitle = buildEventTitle(p.serviceType, p.staffName, p.customerName);
+      const descBody = buildEventDetails({ businessName: client.business_name, via: 'api', customerName: p.customerName, customerPhone: p.customerPhone, serviceType: p.serviceType, staffName: p.staffName, notes: p.notes });
       const event = {
-        summary: titleParts.join(' - '),
-        description: descParts.join('\n'),
+        summary: eventTitle,
+        description: descBody,
         start: { dateTime: startDateTime, timeZone: timezone },
         end: { dateTime: endDateTime, timeZone: timezone },
         reminders: { useDefault: false, overrides: [{ method: 'email', minutes: 60 }, { method: 'popup', minutes: 30 }] },
@@ -1360,17 +1387,11 @@ async function createAppointmentApi(params) {
       const startDateTime = `${p.date}T${time24}:00`;
       const totalMinutes = reqHr * 60 + reqMin + duration;
       const endDateTime = `${p.date}T${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}:00`;
-      const titleParts = [p.serviceType || 'Appointment'];
-      if (p.staffName) titleParts.push(p.staffName);
-      titleParts.push(p.customerName);
-      const descParts = [`Customer: ${p.customerName}`, `Phone: ${p.customerPhone || ''}`];
-      if (p.staffName) descParts.push(`Provider: ${p.staffName}`);
-      if (p.serviceType) descParts.push(`Service: ${p.serviceType}`);
-      if (p.notes) descParts.push(`Notes: ${p.notes}`);
-      descParts.push('', 'Booked via API');
+      const eventTitle = buildEventTitle(p.serviceType, p.staffName, p.customerName);
+      const descBody = buildEventDetails({ businessName: client.business_name, via: 'api', customerName: p.customerName, customerPhone: p.customerPhone, serviceType: p.serviceType, staffName: p.staffName, notes: p.notes });
       const msEvent = await mscal.createMicrosoftEvent(msToken, {
-        subject: titleParts.join(' - '),
-        description: descParts.join('\n'),
+        subject: eventTitle,
+        description: descBody,
         startDateTime,
         endDateTime,
         timeZone: timezone,
