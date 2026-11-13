@@ -2115,7 +2115,87 @@ const CANCELLATION_REASON_LABELS = {
 // ============================================================================
 // EXPORTS
 // ============================================================================
+// ============================================================================
+// EXTRA PHONE NUMBERS — platform charge to the agency
+// ----------------------------------------------------------------------------
+// An agency can give a client extra phone numbers that all ring the same AI.
+// The platform bills the AGENCY a flat $9.99/mo per extra number (the same as
+// the Pro per-client fee), regardless of the agency's plan and regardless of
+// what the agency charges its own client for the number (which can be nothing).
+// It is a dedicated subscription item on the agency's platform subscription,
+// with quantity = the agency's count of active extra numbers. Kept separate
+// from the per-client item so the per-client reconcile never clobbers it and so
+// it still applies on Scale (which has no per-client item).
+// ============================================================================
+const EXTRA_NUMBER_PRICE_CENTS = 999;
+
+async function getExtraNumberPriceId() {
+  if (process.env.STRIPE_PRICE_EXTRA_NUMBER) return process.env.STRIPE_PRICE_EXTRA_NUMBER;
+  // No env price configured: create one once on the platform account and cache
+  // its id in platform_settings so we never create a duplicate price.
+  const { getPlatformSetting, setPlatformSetting } = require('../lib/vapi');
+  const cached = await getPlatformSetting('stripe_price_extra_number');
+  if (cached) return cached;
+  const product = await stripe.products.create({ name: 'Additional phone number' });
+  const price = await stripe.prices.create({
+    product: product.id,
+    currency: 'usd',
+    unit_amount: EXTRA_NUMBER_PRICE_CENTS,
+    recurring: { interval: 'month' },
+  });
+  await setPlatformSetting('stripe_price_extra_number', price.id);
+  console.log(`✅ Created platform extra-number price: ${price.id}`);
+  return price.id;
+}
+
+// Reconcile the agency's extra-number subscription item quantity to its current
+// count of active extra numbers. Safe to call after any add/remove. Non-fatal.
+async function syncExtraNumberBillingQuantity(agencyId) {
+  try {
+    const { data: agency } = await supabase
+      .from('agencies')
+      .select('stripe_subscription_id')
+      .eq('id', agencyId)
+      .single();
+    const subscriptionId = agency && agency.stripe_subscription_id;
+    if (!subscriptionId) return; // no platform subscription to bill against yet
+
+    const { count } = await supabase
+      .from('client_phone_numbers')
+      .select('id', { count: 'exact', head: true })
+      .eq('agency_id', agencyId)
+      .eq('status', 'active');
+    const qty = count || 0;
+
+    const priceId = await getExtraNumberPriceId();
+    const list = await stripe.subscriptionItems.list({ subscription: subscriptionId, limit: 100 });
+    const existing = (list.data || []).find((it) => it.price && it.price.id === priceId);
+
+    if (qty <= 0) {
+      if (existing) await stripe.subscriptionItems.del(existing.id, { proration_behavior: 'create_prorations' });
+      return;
+    }
+    if (existing) {
+      if (existing.quantity !== qty) {
+        await stripe.subscriptionItems.update(existing.id, { quantity: qty, proration_behavior: 'create_prorations' });
+        console.log(`✅ Extra-number item ${existing.id} qty -> ${qty} for agency ${String(agencyId).slice(0, 8)}`);
+      }
+    } else {
+      await stripe.subscriptionItems.create({
+        subscription: subscriptionId,
+        price: priceId,
+        quantity: qty,
+        proration_behavior: 'create_prorations',
+      });
+      console.log(`✅ Added extra-number item (qty=${qty}) for agency ${String(agencyId).slice(0, 8)}`);
+    }
+  } catch (e) {
+    console.error('syncExtraNumberBillingQuantity failed (non-fatal):', e.message);
+  }
+}
+
 module.exports = {
+  syncExtraNumberBillingQuantity,
   createAgencyCheckout,
   changeBillingInterval,
   createAgencySetupCheckout,

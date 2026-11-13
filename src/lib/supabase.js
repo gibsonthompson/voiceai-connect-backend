@@ -129,7 +129,27 @@ async function getClientByVapiPhoneNumber(phoneNumber) {
     .or(`vapi_phone_number.ilike.*${last10},phone_number.ilike.*${last10}`)
     .limit(1);
   if (error) { console.error('❌ getClientByVapiPhoneNumber error:', error.message); return null; }
-  return (data && data[0]) || null;
+  if (data && data[0]) return data[0];
+
+  // Additional lines: an agency can give a client extra numbers (client_phone_numbers)
+  // that all ring the SAME AI. Those numbers are not in the clients columns above,
+  // so resolve them here and return their owning client. Keeps every inbound path
+  // (assistant-request, end-of-call, demo fallback) working through this one helper.
+  const { data: extra } = await supabase
+    .from('client_phone_numbers')
+    .select('client_id')
+    .eq('status', 'active')
+    .ilike('e164', `*${last10}`)
+    .limit(1);
+  if (extra && extra[0] && extra[0].client_id) {
+    const { data: owner } = await supabase
+      .from('clients')
+      .select(sel)
+      .eq('id', extra[0].client_id)
+      .limit(1);
+    if (owner && owner[0]) return owner[0];
+  }
+  return null;
 }
 
 async function getClientByEmail(email, agencyId = null) {

@@ -2116,6 +2116,7 @@ app.use('/api/agency', supportRoutes);
 app.use('/api/agency', require('./routes/agency-support-requests'));
 app.use('/api/agency', require('./routes/support-thread').agencyRouter);
 app.use('/api/agency', require('./routes/agency-client-thread').agencyRouter);
+app.use('/api/agency', require('./routes/client-numbers')); // extra client phone numbers (add/remove/list)
 app.use('/api/agency', require('./routes/admin-broadcasts').agencyRouter); // platform broadcast banner (dashboard)
 app.use('/api/agency', require('./routes/agency-og-upload'));
 app.use('/api/help', helpRoutes);
