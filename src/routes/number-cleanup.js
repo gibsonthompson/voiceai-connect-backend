@@ -204,12 +204,59 @@ async function releaseClientEverywhere(client, { agency = null, retries = 4, ret
   out.assistantDeleted = await deleteVapiResource('assistant', client.vapi_assistant_id);
   out.toolDeleted = await deleteVapiResource('tool', client.vapi_query_tool_id);
 
+  // 4b. Extra phone numbers (client_phone_numbers). Each is a separately-rented
+  // Telnyx line billed to the agency, so a dead client must release them too or
+  // the platform keeps paying for the line. Same release + retry path as the
+  // primary; only delete the row once the carrier release is confirmed, then
+  // reconcile the agency's extra-number charge down. Gives extra numbers the
+  // exact same teardown coverage and cadence as the primary number.
+  out.extraNumbers = { released: 0, stillLeaking: 0 };
+  try {
+    const { data: extras } = await supabase
+      .from('client_phone_numbers')
+      .select('id, e164, vapi_phone_number_id, agency_id')
+      .eq('client_id', client.id);
+    if (extras && extras.length) {
+      let touchedAgency = null;
+      for (const ex of extras) {
+        const exNum = normalizeE164(ex.e164);
+        let rel = { telnyxReleased: false };
+        try { rel = await fullyReleaseNumber(ex.vapi_phone_number_id, exNum); }
+        catch (e) { console.error(`extra-number release failed for ${exNum}: ${e.message}`); }
+        if (!rel.telnyxReleased && exNum) {
+          for (let i = 0; i < retries && !rel.telnyxReleased; i++) {
+            await sleep(retryDelayMs);
+            rel.telnyxReleased = await releaseTelnyxNumber(exNum);
+          }
+        }
+        if (rel.telnyxReleased) {
+          await supabase.from('client_phone_numbers').delete().eq('id', ex.id);
+          out.extraNumbers.released++;
+          touchedAgency = ex.agency_id;
+        } else {
+          out.extraNumbers.stillLeaking++;
+        }
+      }
+      if (touchedAgency) {
+        try {
+          const { syncExtraNumberBillingQuantity } = require('./stripe-platform');
+          await syncExtraNumberBillingQuantity(touchedAgency);
+        } catch (e) { console.error('extra-number billing resync failed:', e.message); }
+      }
+    }
+  } catch (e) {
+    console.error(`extra-number teardown failed for ${client.business_name}: ${e.message}`);
+  }
+
   // Did the carrier release actually confirm? For BYOT the carrier is Twilio;
   // for everything else it is Telnyx. A number we could not confirm-release is
   // flagged so the caller (and the operator) can see what still needs the
   // reconcile sweep.
   const carrierOk = method === 'byot' ? out.byotReleased === true : (!e164 || out.telnyxReleased === true);
   out.stillLeaking = !!e164 && !carrierOk;
+  // An extra number we could not confirm-release is a leak too, so the sweep
+  // reports this client as still needing attention.
+  if (out.extraNumbers && out.extraNumbers.stillLeaking > 0) out.stillLeaking = true;
   return out;
 }
 
