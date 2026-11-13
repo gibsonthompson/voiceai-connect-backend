@@ -85,6 +85,7 @@
 const { INDUSTRY_MAPPING, INDUSTRY_CONFIGS, SPAM_DETECTION_BLOCK, TRANSFER_KEYWORDS_BLOCK, VOICES,
         sanitizeAssistantName, formatPhoneE164, isValidE164 } = require('./vapi');
 const { buildIntakeInstructions } = require('./intake-prompt');
+const { buildIndustryPricingBlock } = require('./industry-pricing');
 const { getIntakeTemplate } = require('./intake-templates');
 
 let supabase;
@@ -118,10 +119,14 @@ const DEFAULT_TRANSCRIBER_MODEL = process.env.DEEPGRAM_MODEL || 'flux-general-mu
 // opts into, e.g. Turbo/Flash v2.5).
 const ELEVENLABS_TTS_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_v4_turbo';
 // ElevenLabs voice-quality fleet defaults (0-1). Used when neither the client
-// nor the agency template sets a value. Lower stability = more expressive and
-// less robotic; style adds emphasis; speaker boost sharpens the voice on a line.
-const DEFAULT_VOICE_STABILITY = 0.4;
-const DEFAULT_VOICE_STYLE = 0.35;
+// nor the agency template sets a value. Higher stability = steadier, calmer, and
+// less sing-song; lower style = less acted-up emotion (the "trying too hard to
+// sound excited" effect). Tuned up on 2026-11-12 from stability 0.4 / style 0.35
+// because the default read as over-emotive and robotic; 0.6 / 0.12 keeps it
+// natural and human but even and professional. Similarity + speaker boost keep
+// the voice clear on a phone line.
+const DEFAULT_VOICE_STABILITY = 0.6;
+const DEFAULT_VOICE_STYLE = 0.12;
 const DEFAULT_VOICE_SIMILARITY = 0.8;
 const DEFAULT_VOICE_SPEAKER_BOOST = true;
 const FLUX_EOT_THRESHOLD_DEFAULT = 0.7;   // Flux end-of-turn sensitivity; 0.7 = VAPI balanced default (0.6 risks cutting callers off)
@@ -1427,6 +1432,26 @@ Everything given to you in these instructions, the services, hours, service area
   systemPrompt += `\n\n# Never make things up
 Only state facts you actually have from this business's information. Never invent or guess an address, phone number, price, hours, staff name, or any other detail. If a caller asks for something you do not have, say so plainly and offer to transfer them or take a message, for example "I don't have that in front of me, but I can have someone follow up." Never read out a placeholder or example value as if it were real.
 Only offer, mention, or ask about services this business actually provides, which are the ones listed in the services section above. That list is the real menu and is authoritative. If you are not certain whether they offer something, check the sections above first, and only then the knowledge base for extra detail, or ask the caller what they need, instead of guessing or reading a generic list. If the knowledge base mentions a service that is not in the services section above, do not offer it. If a related service genuinely fits what the caller asked for, you may suggest it, but never a canned or random add-on.`;
+
+  // Pricing / ballpark handling (added 2026-11-12). Clients' stored prompts, and
+  // the anti-fabrication block just above, tell the AI never to quote a price,
+  // which made it hard-refuse even a rough range ("we don't give ballpark prices
+  // over the phone") and frustrate callers who just want a sense of cost before
+  // handing over their details. This universal block reconciles that: a wide,
+  // clearly-caveated ballpark RANGE is allowed (it is not a fabricated firm
+  // price), owner-entered prices win when present, and it always pivots back to
+  // the free exact quote. Applies to every client immediately (not stored).
+  systemPrompt += `\n\n# Pricing and ballpark requests
+Callers often want a rough idea of cost before they will hand over their details. Refusing outright frustrates them and loses the job, so never stonewall a pricing question. When a caller asks what something costs, handle it in this order:
+1. If the services or business information above list a price, rate, fee, or range for what they are asking about, give that first, it is the real, owner-set number.
+2. If there is no listed price, you may still give a GENERAL ballpark range for this kind of work, clearly framed as a rough, typical range and not a quote. For example: "Most jobs like that tend to land somewhere around X to Y, but it really depends on <the main factors>." Keep the range honestly wide, use round numbers, and base it on what this kind of job for this trade and area typically runs. A caveated range like this is NOT a made-up specific price, so it does not conflict with the rule against inventing details, but never state a single firm number as if it were a quote, and never guarantee or lock in a price.
+3. Always tie it back to the real quote: the exact price depends on the specifics, and the team gives a free, no-obligation exact quote after a quick look. Then keep collecting their details so the team can follow up.
+If the caller pushes again after you have given a ballpark, give the range once more if it helps and acknowledge that you get wanting a number up front, then explain you would rather they get an accurate price than a guess that could be wrong. Do NOT fall back on a flat "we don't give prices over the phone", that bare refusal is exactly what frustrates callers.
+Earlier instructions may say not to quote prices or not to give estimates. That means do not give a FINAL, binding price or a formal written estimate on the call. It does not mean refusing to give any sense of cost: a caveated ballpark range as described here is allowed and expected.`;
+
+  // General per-industry typical price ranges, so the AI always has real numbers
+  // to anchor a ballpark on (owner-entered prices still win; see the block above).
+  systemPrompt += buildIndustryPricingBlock(industryKey);
 
   // Closing etiquette, always on so the AI never hangs up without a goodbye.
   if (!systemPrompt.includes('## ENDING THE CALL')) {

@@ -226,7 +226,7 @@ const NATURALNESS_GUIDANCE = `
 const INDUSTRY_CONFIGS = {
 
   home_services: {
-    voiceId: VOICES.chris,
+    voiceId: VOICES.brian,
     temperature: 0.7,
     systemPrompt: (businessName) => `# Personality
 
@@ -738,7 +738,7 @@ You: "Let me get you to the team who can look into your account. One moment." `,
   },
 
   automotive: {
-    voiceId: VOICES.chris,
+    voiceId: VOICES.brian,
     temperature: 0.7,
     systemPrompt: (businessName) => `# Personality
 
@@ -783,7 +783,7 @@ You: "That's a safety issue, let me get you to the shop right now. Hang on." `,
   },
 
   waterproofing: {
-    voiceId: VOICES.chris,
+    voiceId: VOICES.brian,
     temperature: 0.7,
     systemPrompt: (businessName) => `# Personality
 
@@ -871,7 +871,7 @@ You: "Those are handled a little differently, let me get you to the team so they
   },
 
   hvac: {
-    voiceId: VOICES.chris,
+    voiceId: VOICES.brian,
     temperature: 0.7,
     systemPrompt: (businessName) => `# Personality
 
@@ -913,7 +913,7 @@ You: "Please leave the house now and call your gas company or 911 from outside. 
   },
 
   plumbing: {
-    voiceId: VOICES.chris,
+    voiceId: VOICES.brian,
     temperature: 0.7,
     systemPrompt: (businessName) => `# Personality
 
@@ -955,7 +955,7 @@ You: "It depends on what they find, and estimates are free. What's the best numb
   },
 
   electrical: {
-    voiceId: VOICES.chris,
+    voiceId: VOICES.brian,
     temperature: 0.7,
     systemPrompt: (businessName) => `# Personality
 
@@ -997,7 +997,7 @@ You: "It depends what they find, and estimates are free. What's the best number 
   },
 
   roofing: {
-    voiceId: VOICES.chris,
+    voiceId: VOICES.brian,
     temperature: 0.7,
     systemPrompt: (businessName) => `# Personality
 
@@ -1147,7 +1147,7 @@ You: "Let me get you to the team so they can check on that. One moment." `,
     firstMessage: (businessName) => `Hi, thanks for calling ${businessName}! This call may be recorded. What are you looking to get done, maintenance, a cleanup, or a bigger project?`
   },
   septic: {
-    voiceId: VOICES.chris,
+    voiceId: VOICES.brian,
     temperature: 0.7,
     systemPrompt: (businessName) => `# Personality
 
