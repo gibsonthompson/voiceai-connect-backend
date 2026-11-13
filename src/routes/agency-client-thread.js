@@ -768,6 +768,19 @@ agencyRouter.get('/:agencyId/inbox/facts', requireAgencyAccess('dashboard'), asy
 agencyRouter.get('/:agencyId/sent-sms', requireAgencyAccess('dashboard'), async (req, res) => {
   try {
     const { agencyId } = req.params;
+
+    // Optional ?clientId= scopes the feed to ONE of this agency's clients, for
+    // the client detail page. The client is confirmed to belong to this agency
+    // first, so an agency can never read another agency's client by id.
+    const filterClientId = (req.query.clientId || req.query.client || '').toString().trim() || null;
+    let ownerLast10 = null;
+    if (filterClientId) {
+      const { data: fc } = await supabase
+        .from('clients').select('id, owner_phone').eq('id', filterClientId).eq('agency_id', agencyId).single();
+      if (!fc) return res.json({ success: true, messages: [] });
+      ownerLast10 = inboxLast10(fc.owner_phone);
+    }
+
     const { data: rows } = await supabase
       .from('sms_log')
       .select('id, recipient_phone, recipient_type, message_type, message_body, metadata, created_at')
@@ -776,7 +789,18 @@ agencyRouter.get('/:agencyId/sent-sms', requireAgencyAccess('dashboard'), async 
       .order('created_at', { ascending: false })
       .limit(400);
 
-    const clientIds = [...new Set((rows || []).map(r => r.metadata && r.metadata.client_id).filter(Boolean))];
+    // When scoped to one client, keep only texts tied to that client: AI call
+    // texts carry metadata.client_id; owner notifications match the owner phone.
+    const scoped = filterClientId
+      ? (rows || []).filter(r => {
+          const cid = r.metadata && r.metadata.client_id;
+          if (cid && String(cid) === String(filterClientId)) return true;
+          if (r.recipient_type === 'client_owner' && ownerLast10 && inboxLast10(r.recipient_phone) === ownerLast10) return true;
+          return false;
+        })
+      : (rows || []);
+
+    const clientIds = [...new Set(scoped.map(r => r.metadata && r.metadata.client_id).filter(Boolean))];
     const nameById = {}, nameByPhone = {};
     if (clientIds.length) {
       const { data: cs } = await supabase.from('clients').select('id, business_name').in('id', clientIds);
@@ -785,7 +809,7 @@ agencyRouter.get('/:agencyId/sent-sms', requireAgencyAccess('dashboard'), async 
     const { data: owners } = await supabase.from('clients').select('business_name, owner_phone').eq('agency_id', agencyId).limit(2000);
     (owners || []).forEach(c => { const k = inboxLast10(c.owner_phone); if (k) nameByPhone[k] = c.business_name; });
 
-    const messages = (rows || []).map(r => {
+    const messages = scoped.map(r => {
       const cid = r.metadata && r.metadata.client_id;
       const business = (cid && nameById[cid]) || nameByPhone[inboxLast10(r.recipient_phone)] || null;
       return { id: r.id, sender: 'out', body: r.message_body || '', at: r.created_at, kind: sentSmsLabel(r.message_type), to: r.recipient_phone, business };
