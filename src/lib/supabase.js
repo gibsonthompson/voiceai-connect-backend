@@ -40,17 +40,29 @@ async function getAgencyBySlug(slug) {
 
 async function getAgencyByDomain(domain) {
   const cleanDomain = domain.replace('www.', '');
-  
-  const { data, error } = await supabase
+
+  // An agency can connect two custom domains: a marketing_domain (public site)
+  // and an app_domain (the client app, e.g. app.covercall.ca). A host resolves
+  // to the agency when it matches EITHER, and only when that domain is verified.
+  // Two parameterized lookups (marketing first, then app) so the host value is
+  // never interpolated into a filter string.
+  const { data: byMarketing } = await supabase
     .from('agencies')
     .select('*')
     .eq('marketing_domain', cleanDomain)
     .eq('domain_verified', true)
     .in('status', ['active', 'trial'])
-    .single();
-  
-  if (error) return null;
-  return data;
+    .maybeSingle();
+  if (byMarketing) return byMarketing;
+
+  const { data: byApp } = await supabase
+    .from('agencies')
+    .select('*')
+    .eq('app_domain', cleanDomain)
+    .eq('app_domain_verified', true)
+    .in('status', ['active', 'trial'])
+    .maybeSingle();
+  return byApp || null;
 }
 
 async function getAgencyByStripeCustomerId(customerId) {

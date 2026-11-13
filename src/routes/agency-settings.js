@@ -353,7 +353,12 @@ function publicAgencyShape(agency) {
 
     // Marketing domain (used by the embed widget for cross-origin auth handoff)
     marketing_domain: agency.marketing_domain || null,
-    domain_verified: agency.domain_verified || false
+    domain_verified: agency.domain_verified || false,
+    // App/client domain (optional second custom domain for the client app, e.g.
+    // app.covercall.ca). Lets the site route client-facing links to it while
+    // the marketing site stays on marketing_domain.
+    app_domain: agency.app_domain || null,
+    app_domain_verified: agency.app_domain_verified || false
   };
 }
 
@@ -717,7 +722,9 @@ async function getAgencySettings(req, res) {
         // Domain
         marketing_domain: agency.marketing_domain,
         domain_verified: agency.domain_verified,
-        
+        app_domain: agency.app_domain,
+        app_domain_verified: agency.app_domain_verified,
+
         // Plans as data (resolved)
         plans: getAgencyPlans(agency),
         // True once the agency saved custom plans (raw column populated). The
@@ -1816,21 +1823,26 @@ async function updateAgencySettings(req, res) {
 async function verifyAgencyDomain(req, res) {
   try {
     const { agencyId } = req.params;
-    
+
+    // Which custom domain is being verified: 'marketing' (default) or 'app'.
+    const domainType = ((req.body && req.body.type) || req.query.type) === 'app' ? 'app' : 'marketing';
+    const domainCol = domainType === 'app' ? 'app_domain' : 'marketing_domain';
+    const verifiedCol = domainType === 'app' ? 'app_domain_verified' : 'domain_verified';
+
     const { data: agency, error } = await supabase
       .from('agencies')
-      .select('marketing_domain')
+      .select(domainCol)
       .eq('id', agencyId)
       .single();
-    
-    if (error || !agency?.marketing_domain) {
-      return res.status(404).json({ 
-        verified: false, 
-        error: 'No custom domain configured' 
+
+    if (error || !agency?.[domainCol]) {
+      return res.status(404).json({
+        verified: false,
+        error: 'No custom domain configured'
       });
     }
-    
-    const domain = agency.marketing_domain;
+
+    const domain = agency[domainCol];
     const platformDomain = process.env.PLATFORM_DOMAIN || 'myvoiceaiconnect.com';
     const expectedCname = `cname.${platformDomain}`;
     
@@ -1849,9 +1861,9 @@ async function verifyAgencyDomain(req, res) {
       if (verified) {
         await supabase
           .from('agencies')
-          .update({ domain_verified: true, updated_at: new Date().toISOString() })
+          .update({ [verifiedCol]: true, updated_at: new Date().toISOString() })
           .eq('id', agencyId);
-        
+
         console.log(`✅ Domain verified: ${domain}`);
         
         return res.json({ 
@@ -1880,9 +1892,9 @@ async function verifyAgencyDomain(req, res) {
         if (hasVercelIp) {
           await supabase
             .from('agencies')
-            .update({ domain_verified: true, updated_at: new Date().toISOString() })
+            .update({ [verifiedCol]: true, updated_at: new Date().toISOString() })
             .eq('id', agencyId);
-          
+
           console.log(`✅ Domain verified via A record: ${domain}`);
           
           return res.json({

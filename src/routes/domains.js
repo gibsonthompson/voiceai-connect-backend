@@ -300,9 +300,17 @@ router.post('/:agencyId/domain', async (req, res) => {
     const { domain } = req.body;
     if (!domain) return res.status(400).json({ error: 'Domain is required' });
 
+    // Which custom-domain slot is being set: 'marketing' (default, the public
+    // site) or 'app' (the client app, e.g. app.covercall.ca). Both provision
+    // through the same Vercel project; only the stored column differs.
+    const domainType = req.body.type === 'app' ? 'app' : 'marketing';
+    const domainCol = domainType === 'app' ? 'app_domain' : 'marketing_domain';
+    const verifiedCol = domainType === 'app' ? 'app_domain_verified' : 'domain_verified';
+    const otherCol = domainType === 'app' ? 'marketing_domain' : 'app_domain';
+
     // Normalize
     let normalizedDomain = domain.toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '').trim();
-    console.log(`   📝 Normalized domain: ${normalizedDomain}`);
+    console.log(`   📝 Normalized domain: ${normalizedDomain} (${domainType})`);
 
     // Validate format
     const domainRegex = /^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,}$/;
@@ -323,27 +331,32 @@ router.post('/:agencyId/domain', async (req, res) => {
       });
     }
 
-    // Check if already used by another agency
-    const { data: existing } = await supabase
+    // Reject if the domain is taken as either a marketing or app domain. Another
+    // agency using it at all is a conflict; the same agency using it in its OTHER
+    // slot would double-book one domain, so block that too.
+    const { data: conflicts } = await supabase
       .from('agencies')
-      .select('id, name')
-      .eq('marketing_domain', normalizedDomain)
-      .neq('id', agencyId)
-      .maybeSingle();
-    if (existing) {
-      return res.status(400).json({ error: 'Domain is already in use by another agency' });
+      .select('id, name, marketing_domain, app_domain')
+      .or(`marketing_domain.eq.${normalizedDomain},app_domain.eq.${normalizedDomain}`);
+    for (const c of conflicts || []) {
+      if (c.id !== agencyId) {
+        return res.status(400).json({ error: 'Domain is already in use by another agency' });
+      }
+      if (c[otherCol] === normalizedDomain) {
+        return res.status(400).json({ error: `This domain is already set as your ${domainType === 'app' ? 'marketing' : 'app'} domain. Use a different domain for each.` });
+      }
     }
 
-    // Capture the agency's CURRENT domain before we overwrite it, so we can
-    // detach it from Vercel after saving. Changing domains previously left the
-    // old one attached to the Vercel project, where it kept serving/redirecting,
-    // which is why a freshly verified new domain still showed the original.
+    // Capture the agency's CURRENT domain (this slot) before we overwrite it, so
+    // we can detach it from Vercel after saving. Changing domains previously left
+    // the old one attached to the Vercel project, where it kept serving, which is
+    // why a freshly verified new domain still showed the original.
     const { data: prevRow } = await supabase
       .from('agencies')
-      .select('marketing_domain')
+      .select(domainCol)
       .eq('id', agencyId)
       .maybeSingle();
-    const previousDomain = prevRow?.marketing_domain || null;
+    const previousDomain = prevRow?.[domainCol] || null;
 
     // ── Detect apex vs subdomain ──────────────────────────────────────
     const apex = isApexDomain(normalizedDomain);
@@ -415,8 +428,8 @@ router.post('/:agencyId/domain', async (req, res) => {
     const { data: agency, error: dbError } = await supabase
       .from('agencies')
       .update({
-        marketing_domain: normalizedDomain,
-        domain_verified: false,
+        [domainCol]: normalizedDomain,
+        [verifiedCol]: false,
         updated_at: new Date().toISOString(),
       })
       .eq('id', agencyId)
@@ -489,17 +502,21 @@ router.get('/:agencyId/domain/status', async (req, res) => {
   console.log(`\n🔍 ===== DOMAIN STATUS REQUEST =====`);
 
   try {
+    const domainType = req.query.type === 'app' ? 'app' : 'marketing';
+    const domainCol = domainType === 'app' ? 'app_domain' : 'marketing_domain';
+    const verifiedCol = domainType === 'app' ? 'app_domain_verified' : 'domain_verified';
+
     const { data: agency, error } = await supabase
       .from('agencies')
-      .select('marketing_domain, domain_verified')
+      .select(`${domainCol}, ${verifiedCol}`)
       .eq('id', agencyId)
       .single();
 
-    if (error || !agency?.marketing_domain) {
+    if (error || !agency?.[domainCol]) {
       return res.json({ configured: false, message: 'No custom domain configured' });
     }
 
-    const domain = agency.marketing_domain;
+    const domain = agency[domainCol];
     const apex = isApexDomain(domain);
     const subPrefix = !apex ? getSubdomainPrefix(domain) : null;
     console.log(`   Domain: ${domain} (${apex ? 'apex' : `subdomain, prefix: ${subPrefix}`})`);
@@ -538,7 +555,7 @@ router.get('/:agencyId/domain/status', async (req, res) => {
       domain,
       is_subdomain: !apex,
       subdomain_prefix: subPrefix,
-      verified: agency.domain_verified,
+      verified: agency[verifiedCol],
       vercel_verified: vercelStatus?.verified || false,
       verification_needed: verificationRecords.length > 0,
       verification_records: verificationRecords,
@@ -679,17 +696,21 @@ router.delete('/:agencyId/domain', async (req, res) => {
   console.log(`\n🗑️ ===== REMOVE DOMAIN REQUEST =====`);
 
   try {
+    const domainType = (req.body && req.body.type) === 'app' ? 'app' : 'marketing';
+    const domainCol = domainType === 'app' ? 'app_domain' : 'marketing_domain';
+    const verifiedCol = domainType === 'app' ? 'app_domain_verified' : 'domain_verified';
+
     const { data: agency, error } = await supabase
       .from('agencies')
-      .select('marketing_domain')
+      .select(domainCol)
       .eq('id', agencyId)
       .single();
 
-    if (error || !agency?.marketing_domain) {
+    if (error || !agency?.[domainCol]) {
       return res.status(404).json({ error: 'No domain to remove' });
     }
 
-    const domain = agency.marketing_domain;
+    const domain = agency[domainCol];
     const apex = isApexDomain(domain);
     console.log(`   Removing domain: ${domain} (${apex ? 'apex' : 'subdomain'})`);
 
@@ -716,7 +737,7 @@ router.delete('/:agencyId/domain', async (req, res) => {
 
     const { error: dbError } = await supabase
       .from('agencies')
-      .update({ marketing_domain: null, domain_verified: false, updated_at: new Date().toISOString() })
+      .update({ [domainCol]: null, [verifiedCol]: false, updated_at: new Date().toISOString() })
       .eq('id', agencyId);
 
     if (dbError) return res.status(500).json({ error: 'Failed to remove domain' });
