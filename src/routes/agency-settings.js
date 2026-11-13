@@ -1776,6 +1776,21 @@ async function updateAgencySettings(req, res) {
       console.log(`🔧 setup_fee_timing save: agency ${String(agencyId).slice(0, 8)} -> ${sanitizedUpdates.setup_fee_timing}`);
     }
 
+    // Capture each plan's call_limit BEFORE the save, so the cascade below only
+    // touches plans whose limit actually changed in this request (not every plan
+    // every time an unrelated setting is saved).
+    const planLimitFieldsTouched = ['plans', 'limit_starter', 'limit_pro', 'limit_growth']
+      .some((f) => f in sanitizedUpdates);
+    let planLimitsBefore = new Map();
+    if (planLimitFieldsTouched) {
+      const { data: beforeRow } = await supabase
+        .from('agencies')
+        .select('plans, limit_starter, limit_pro, limit_growth, price_starter, price_pro, price_growth')
+        .eq('id', agencyId)
+        .single();
+      if (beforeRow) planLimitsBefore = new Map(getAgencyPlans(beforeRow).map((p) => [p.key, p.call_limit]));
+    }
+
     const { data: agency, error } = await supabase
       .from('agencies')
       .update(sanitizedUpdates)
@@ -1796,6 +1811,41 @@ async function updateAgencySettings(req, res) {
 
     console.log('✅ Agency settings updated:', agency.name,
       sanitizedUpdates.setup_fee_timing !== undefined ? `| setup_fee_timing persisted as: ${agency.setup_fee_timing}` : '');
+
+    // Plan-limit cascade: keep each client's enforced monthly_call_limit in
+    // lockstep with its plan. A client's limit is stamped at signup / plan-change
+    // and was NOT re-synced when the agency later edited the plan, so clients
+    // drifted from the limit the plans editor shows (the bug behind CoverCall's
+    // "Acme Window Repair" sitting at 150 after Pro moved to 250). We re-stamp
+    // active standard-plan clients for any plan whose call_limit changed in THIS
+    // save. Excludes test clients (is_test_client — intentional caps like the 30
+    // on a demo client) and custom-priced clients (pricing_mode='custom' — their
+    // limit is bespoke). Best-effort and non-fatal: a cascade failure never fails
+    // the settings save that already succeeded above.
+    if (planLimitFieldsTouched) {
+      try {
+        const newLimits = new Map(getAgencyPlans(agency).map((p) => [p.key, p.call_limit]));
+        for (const [key, limit] of newLimits) {
+          if (planLimitsBefore.get(key) === limit) continue; // plan limit unchanged — leave its clients alone
+          const { error: cascadeErr, count } = await supabase
+            .from('clients')
+            .update({ monthly_call_limit: limit, updated_at: new Date().toISOString() }, { count: 'exact' })
+            .eq('agency_id', agencyId)
+            .eq('plan_type', key)
+            .eq('is_test_client', false)
+            .neq('pricing_mode', 'custom')
+            .in('status', ['active', 'trial', 'pending_payment'])
+            .neq('monthly_call_limit', limit);
+          if (cascadeErr) {
+            console.error(`Plan-limit cascade failed for plan '${key}' (non-fatal):`, cascadeErr.message);
+          } else if (count) {
+            console.log(`Plan-limit cascade: ${count} client(s) on '${key}' re-stamped to ${limit === -1 ? 'unlimited' : limit}`);
+          }
+        }
+      } catch (e) {
+        console.error('Plan-limit cascade error (non-fatal):', e.message);
+      }
+    }
 
     // If the per-minute rate or any plan's included minutes changed, re-point
     // existing clients' metered items to a fresh price at the new values.
