@@ -39,7 +39,7 @@ Your job is NOT to state a fact about them. It is to name the ONE signal that be
 
 Turn the fact into its money meaning:
 - NOT "You have been open since 2008" but "Sixteen years in Marietta means you are the name people call first."
-- NOT "You are rated 4.9 stars" but "A 4.9 across 400 reviews means you are the default pick in the area."
+- NOT "You are rated 4.9 stars" but "A 4.9 across over 400 reviews means you are the default pick in the area."
 - NOT "You do water damage restoration" but "Water damage is all emergency work, and those jobs go to whoever gets there first."
 
 Pick the strongest demand or money signal available, for example:
@@ -52,7 +52,7 @@ Pick the strongest demand or money signal available, for example:
 
 Rules:
 - Exactly one sentence, under 25 words. Plain, human, specific, confident.
-- Use a REAL, concrete detail from the signals given (service, area, rating, review count, years, specialty). Never invent a number or a fact you were not given.
+- Use a REAL, concrete detail from the signals given (service, area, rating, review count, years, specialty). Never invent a number or a fact you were not given. When a review count is given as an approximate like "over 500", use it exactly that way, never a precise figure.
 - It is an observation about their demand, never a compliment. Never say "I love", "I came across your website", or praise the website itself.
 - Do NOT mention phones, calls, voicemail, missed calls, answering, or receptionists yourself. The next line does that.
 - No em dash, no emojis, no hashtags, no "guru". Sound like a real person who sized up their business in a few seconds.
@@ -128,12 +128,29 @@ async function fetchPlaceSignals(placeId) {
   }
 }
 
+// Round a raw review count to an approximate "over N" phrase so the opener
+// never cites a precise, oddly specific number (e.g. 546). Buckets widen as the
+// count grows. Tiny counts (<25) stay exact, since "over 10" reads worse than
+// the real number. Returns null for no/zero reviews.
+function roundedReviews(n) {
+  if (typeof n !== 'number' || !isFinite(n) || n < 1) return null;
+  if (n < 25) return `${n}`;
+  let floor;
+  if (n < 100) floor = Math.floor(n / 25) * 25;
+  else if (n < 500) floor = Math.floor(n / 50) * 50;
+  else if (n < 1000) floor = Math.floor(n / 100) * 100;
+  else if (n < 5000) floor = Math.floor(n / 500) * 500;
+  else floor = Math.floor(n / 1000) * 1000;
+  return `over ${floor.toLocaleString('en-US')}`;
+}
+
 function buildSignalsBlock(s) {
   if (!s) return '';
   const lines = [];
-  if (s.rating != null && s.reviewCount != null) lines.push(`Google rating: ${s.rating} stars across ${s.reviewCount} reviews`);
+  const rc = roundedReviews(s.reviewCount);
+  if (s.rating != null && rc) lines.push(`Google rating: ${s.rating} stars across ${rc} reviews`);
   else if (s.rating != null) lines.push(`Google rating: ${s.rating} stars`);
-  else if (s.reviewCount != null) lines.push(`Google reviews: ${s.reviewCount}`);
+  else if (rc) lines.push(`Google reviews: ${rc}`);
   if (s.categories && s.categories.length) lines.push(`Categories: ${s.categories.join(', ')}`);
   if (s.open247) lines.push(`Hours: open 24 hours`);
   if (s.snippets && s.snippets.length) lines.push(`Recent customer reviews:\n- ${s.snippets.join('\n- ')}`);

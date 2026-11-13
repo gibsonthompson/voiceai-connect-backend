@@ -961,6 +961,10 @@ async function updateAgencySettings(req, res) {
       // AI personalized-opener settings (outreach)
       'personalized_line_enabled',
       'personalized_line_instructions',
+      // White-label email signature (HTML). Was missing from this allowlist, so
+      // the PUT silently dropped it and the saved signature never reached the
+      // composer. The compose endpoint and agency context both read the full row.
+      'outreach_signature',
       'marketing_config',
       'marketing_template',
       'marketing_site_enabled',
