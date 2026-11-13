@@ -1041,9 +1041,40 @@ app.get('/api/agency/:agencyId/dashboard', requireAgencyAccess('dashboard'), asy
     const totalCalls = clientList.reduce((sum, c) => sum + (liveCalls[c.id] || 0), 0);
     const recentClients = clientList.slice(0, 5).map(c => ({ ...c, calls_this_month: liveCalls[c.id] || 0 }));
 
+    // Recent calls across every client in the agency. The calls table has no
+    // agency_id, so it is scoped by this agency's client ids and the client's
+    // business name is joined back on from the list already in hand.
+    let recentCalls = [];
+    const clientIds = clientList.map(c => c.id);
+    if (clientIds.length > 0) {
+      const { data: callsData, error: callsError } = await supabase
+        .from('calls')
+        .select('id, client_id, created_at, customer_name, caller_phone, customer_phone, duration_seconds, call_status, urgency_level, is_spam')
+        .in('client_id', clientIds)
+        .order('created_at', { ascending: false })
+        .limit(6);
+      if (callsError) {
+        console.error('Error fetching agency recent calls:', callsError);
+      } else {
+        const nameById = Object.fromEntries(clientList.map(c => [c.id, c.business_name]));
+        recentCalls = (callsData || []).map(call => ({
+          id: call.id,
+          client_id: call.client_id,
+          business_name: nameById[call.client_id] || 'Unknown client',
+          customer_name: call.customer_name || null,
+          caller_phone: call.caller_phone || call.customer_phone || null,
+          duration_seconds: call.duration_seconds || 0,
+          call_status: call.call_status || null,
+          urgency_level: call.urgency_level || null,
+          is_spam: !!call.is_spam,
+          created_at: call.created_at,
+        }));
+      }
+    }
+
     console.log(`📊 Dashboard loaded for agency ${agencyId}: ${clientList.length} clients (${realClients.length} real), $${mrr/100} MRR`);
 
-    res.json({ clientCount: realClients.length, mrr, totalCalls, recentClients });
+    res.json({ clientCount: realClients.length, mrr, totalCalls, recentClients, recentCalls });
   } catch (error) {
     console.error('Error fetching dashboard:', error);
     res.status(500).json({ error: 'Server error' });
