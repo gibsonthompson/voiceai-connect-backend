@@ -19,6 +19,7 @@
 const { supabase } = require('./supabase');
 const ghl = require('./ghl-calendar');
 const mscal = require('./microsoft-calendar');
+const caldav = require('./caldav-calendar');
 
 // Short local-time label for a slot ISO in a timezone (GHL availability hints).
 function ghlSlotLabel(iso, timeZone) {
@@ -352,6 +353,12 @@ async function getAvailableSlots(clientId, date, options) {
     // connection check so a Microsoft client never falls through to Google.
     if (client.calendar_provider === 'microsoft') {
       return getMicrosoftAvailableSlots(client, date, options);
+    }
+
+    // CalDAV (iCloud, Fastmail, Nextcloud, ...): same slot engine, busy times
+    // from the client's CalDAV server.
+    if (client.calendar_provider === 'caldav') {
+      return getCaldavAvailableSlots(client, date, options);
     }
 
     if (!client.google_calendar_connected) {
@@ -795,6 +802,117 @@ async function getMicrosoftAvailableSlots(client, date, options) {
 }
 
 // ====================================================================
+// CalDAV calendar availability (iCloud, Fastmail, Nextcloud, ...).
+// Same slot engine as the Google/Outlook paths; busy times come from the
+// client's CalDAV server via caldav.getCaldavBusy. No token refresh: CalDAV
+// uses the stored username + app password. An all-day event blocks the day;
+// a read failure fails safe (no slots offered).
+// ====================================================================
+async function getCaldavAvailableSlots(client, date, options) {
+  try {
+    if (!client.caldav_connected || !client.caldav_calendar_url) {
+      return { success: false, error: 'Calendar not connected' };
+    }
+
+    const timezone = client.timezone || 'America/New_York';
+
+    let agencyDefaults = {};
+    if (client.agency_id) {
+      try {
+        const { data: ag } = await supabase
+          .from('agencies')
+          .select('default_min_booking_notice_minutes, default_max_booking_days_ahead')
+          .eq('id', client.agency_id)
+          .single();
+        agencyDefaults = ag || {};
+      } catch (e) { /* defaults below */ }
+    }
+    const pickNum = (...vals) => {
+      for (const v of vals) { const n = Number(v); if (v !== null && v !== undefined && v !== '' && !isNaN(n)) return n; }
+      return null;
+    };
+    const leadMinutes = pickNum(client.min_booking_notice_minutes, agencyDefaults.default_min_booking_notice_minutes, LEAD_TIME_MINUTES);
+    const maxDaysAhead = pickNum(client.max_booking_days_ahead, agencyDefaults.default_max_booking_days_ahead, 60);
+
+    if (maxDaysAhead != null && maxDaysAhead > 0) {
+      const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+      const [ty, tmo, td] = todayStr.split('-').map(Number);
+      const [ry, rmo, rd] = date.split('-').map(Number);
+      const daysOut = Math.round((Date.UTC(ry, rmo - 1, rd) - Date.UTC(ty, tmo - 1, td)) / 86400000);
+      if (daysOut > maxDaysAhead) {
+        return { success: true, slots: [], message: `We only take bookings up to ${maxDaysAhead} days ahead.`, provider: 'caldav' };
+      }
+    }
+
+    const businessHours = client.business_hours || {
+      monday: { open: '09:00', close: '17:00' },
+      tuesday: { open: '09:00', close: '17:00' },
+      wednesday: { open: '09:00', close: '17:00' },
+      thursday: { open: '09:00', close: '17:00' },
+      friday: { open: '09:00', close: '17:00' },
+      saturday: null,
+      sunday: null,
+    };
+
+    const [yy, mm, dd] = date.split('-').map(Number);
+    const noonLocal = zonedWallTimeToUTC(yy, mm, dd, 12, 0, timezone);
+    const dayName = noonLocal.toLocaleString('en-US', { timeZone: timezone, weekday: 'long' }).toLowerCase();
+    const hours = businessHours[dayName];
+    if (!hours || hours.closed === true || !hours.open || !hours.close) {
+      return { success: true, slots: [], message: 'Closed on this day', provider: 'caldav' };
+    }
+
+    const openTotal = parseTimeToMinutes(hours.open);
+    const closeTotal = parseTimeToMinutes(hours.close);
+    if (openTotal == null || closeTotal == null || closeTotal <= openTotal) {
+      return { success: true, slots: [], message: 'Closed on this day', provider: 'caldav' };
+    }
+
+    const dayStartUTC = zonedWallTimeToUTC(yy, mm, dd, 0, 0, timezone);
+    const baseNoonUTC = new Date(Date.UTC(yy, mm - 1, dd, 12, 0, 0));
+    const nextNoonUTC = new Date(baseNoonUTC.getTime() + 24 * 60 * 60 * 1000);
+    const dayEndUTC = zonedWallTimeToUTC(nextNoonUTC.getUTCFullYear(), nextNoonUTC.getUTCMonth() + 1, nextNoonUTC.getUTCDate(), 0, 0, timezone);
+
+    const busyRes = await caldav.getCaldavBusy(client, dayStartUTC.toISOString(), dayEndUTC.toISOString());
+    if (!busyRes.ok) {
+      return { success: false, error: 'Failed to read the calendar' };
+    }
+    if (busyRes.allDay) {
+      console.log(`📅 All-day event on ${date} (CalDAV) - treating the day as unavailable`);
+      return { success: true, slots: [], message: 'Unavailable this day', provider: 'caldav' };
+    }
+    const busy = busyRes.busy;
+
+    const duration = (options && options.durationOverride) || client.appointment_duration || 30;
+    const buffer = (options && options.bufferMinutes) || 0;
+    const nowMs = Date.now();
+    const leadMs = (leadMinutes != null ? leadMinutes : LEAD_TIME_MINUTES) * 60000;
+    const slots = [];
+    const taken = [];
+
+    for (let cur = openTotal; cur + duration <= closeTotal; cur += getSlotStepMinutes(client)) {
+      const hr = Math.floor(cur / 60);
+      const min = cur % 60;
+      const slotStartMs = zonedWallTimeToUTC(yy, mm, dd, hr, min, timezone).getTime();
+      const slotEndMs = slotStartMs + duration * 60000;
+      if (slotStartMs < nowMs + leadMs) continue;
+      if (!slotAllowedByWindows(cur, client)) continue;
+      const bufStartMs = slotStartMs - buffer * 60000;
+      const bufEndMs = slotEndMs + buffer * 60000;
+      const hasConflict = busy.some(b => bufStartMs < b.end.getTime() && bufEndMs > b.start.getTime());
+      if (!hasConflict) slots.push(formatSlotLabel(hr, min));
+      else if (taken.length < 4) taken.push(formatSlotLabel(hr, min));
+    }
+
+    console.log(`📅 CalDAV availability for ${date} (${timezone}): ${slots.length} slots (duration: ${duration}min, buffer: ${buffer}min)`);
+    return { success: true, slots, date, dayName, taken, provider: 'caldav' };
+  } catch (err) {
+    console.error('getCaldavAvailableSlots error:', err);
+    return { success: false, error: 'Failed to get availability' };
+  }
+}
+
+// ====================================================================
 // Entitlement for the CUSTOMER booking-confirmation SMS (a paid capability).
 //   - A reseller agency can offer it only on the Scale plan (trial counts as
 //     Scale, matching hasScale()).
@@ -841,15 +959,16 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     const useGhl = client.calendar_provider === 'ghl' && client.ghl_connected === true && !!client.ghl_access_token && !!client.ghl_calendar_id;
     const useNative = client.calendar_provider === 'native';
     const useMicrosoft = client.calendar_provider === 'microsoft' && client.microsoft_calendar_connected === true;
+    const useCaldav = client.calendar_provider === 'caldav' && client.caldav_connected === true;
     const googleConnected = client.google_calendar_connected === true;
-    if (!useGhl && !useNative && !useMicrosoft && !googleConnected) {
+    if (!useGhl && !useNative && !useMicrosoft && !useCaldav && !googleConnected) {
       return { success: false, error: 'Calendar not connected - appointment request noted for callback' };
     }
 
     // Google needs its access token up front; the GHL branch below fetches its
     // own token when it writes the appointment. Native writes no external event.
     let accessToken = null;
-    if (googleConnected && !useGhl && !useNative && !useMicrosoft) {
+    if (googleConnected && !useGhl && !useNative && !useMicrosoft && !useCaldav) {
       accessToken = await refreshAccessToken(client);
       if (!accessToken) {
         return { success: false, error: 'Calendar authentication failed' };
@@ -961,6 +1080,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
     let googleEventId = null;
     let ghlEventId = null;
     let microsoftEventId = null;
+    let caldavHref = null;
     let calendarLink = null;
 
     if (useGhl) {
@@ -1012,6 +1132,20 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
       microsoftEventId = msEvent.id;
       calendarLink = msEvent.webLink || null;
       console.log('✅ Appointment booked in Outlook:', msEvent.id);
+    } else if (useCaldav) {
+      // CalDAV (iCloud, Fastmail, ...): PUT an event in UTC computed from the
+      // client's timezone. The event href is stored on google_event_id (the
+      // generic external-event handle reschedule/cancel read).
+      const [cY, cMo, cD] = date.split('-').map(Number);
+      const cdStart = zonedWallTimeToUTC(cY, cMo, cD, hr, min, timezone);
+      const cdEnd = new Date(cdStart.getTime() + duration * 60000);
+      const cdEvent = await caldav.createCaldavEvent(client, { summary: eventTitle, description: descBody, startUtc: cdStart, endUtc: cdEnd });
+      if (!cdEvent.ok) {
+        console.error('Failed to create CalDAV event');
+        return { success: false, error: 'Failed to create appointment' };
+      }
+      caldavHref = cdEvent.href;
+      console.log('✅ Appointment booked via CalDAV:', cdEvent.href);
     } else {
       const event = {
         summary: eventTitle,
@@ -1069,7 +1203,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
       : zonedWallTimeToUTC(aptY, aptMo, aptD, hr, min, timezone).toISOString();
     const appointmentRecord = {
       client_id: clientId,
-      google_event_id: googleEventId || microsoftEventId,
+      google_event_id: googleEventId || microsoftEventId || caldavHref,
       customer_name: customerName,
       customer_phone: customerPhone,
       appointment_time: apptStartIso,
@@ -1116,7 +1250,7 @@ async function bookAppointment(clientId, customerName, customerPhone, date, time
           notes: notes || null,
           status: 'confirmed',
           booking_source: 'ai_receptionist',
-          google_event_id: googleEventId || microsoftEventId,
+          google_event_id: googleEventId || microsoftEventId || caldavHref,
           ghl_event_id: ghlEventId,
           google_calendar_id: googleEventId ? (client.google_calendar_id || 'primary') : null,
           calendar_link: calendarLink,
@@ -1327,6 +1461,7 @@ async function createAppointmentApi(params) {
     const useGhl = client.calendar_provider === 'ghl' && client.ghl_connected === true && !!client.ghl_access_token && !!client.ghl_calendar_id;
     const useNative = client.calendar_provider === 'native';
     const useMicrosoft = client.calendar_provider === 'microsoft' && client.microsoft_calendar_connected === true;
+    const useCaldav = client.calendar_provider === 'caldav' && client.caldav_connected === true;
     const googleConnected = client.google_calendar_connected === true;
     let googleEventId = null;
     let ghlEventId = null;
@@ -1425,6 +1560,23 @@ async function createAppointmentApi(params) {
       if (!msEvent.ok) { console.error('API createAppointment Microsoft error'); return { ok: false, code: 'calendar_error', error: 'Failed to create the calendar event.' }; }
       googleEventId = msEvent.id;
       bookingSource = 'api_microsoft';
+    } else if (useCaldav) {
+      // CalDAV path: availability-check (unless disabled), then PUT the event in
+      // UTC (startIso/endIso were computed from the client timezone above). The
+      // event href is stored on google_event_id (the generic external handle).
+      if (p.checkAvailability !== false) {
+        const avail = await getAvailableSlots(p.clientId, p.date, { durationOverride: duration, bufferMinutes });
+        if (!avail.success) return { ok: false, code: 'calendar_error', error: 'Could not read the calendar to confirm availability.' };
+        const want = formatSlotLabel(reqHr, reqMin).replace(/\s+/g, ' ').trim().toLowerCase();
+        const free = (avail.slots || []).some((s) => s.replace(/\s+/g, ' ').trim().toLowerCase() === want);
+        if (!free) return { ok: false, code: 'slot_unavailable', error: 'That time is not available.', available_slots: avail.slots || [] };
+      }
+      const eventTitle = buildEventTitle(p.serviceType, p.staffName, p.customerName);
+      const descBody = buildEventDetails({ businessName: client.business_name, via: 'api', customerName: p.customerName, customerPhone: p.customerPhone, serviceType: p.serviceType, staffName: p.staffName, notes: p.notes });
+      const cdEvent = await caldav.createCaldavEvent(client, { summary: eventTitle, description: descBody, startUtc: startIso, endUtc: endIso });
+      if (!cdEvent.ok) { console.error('API createAppointment CalDAV error'); return { ok: false, code: 'calendar_error', error: 'Failed to create the calendar event.' }; }
+      googleEventId = cdEvent.href;
+      bookingSource = 'api_caldav';
     } else if (useNative) {
       // Native path: confirm the slot against our own availability (which reads
       // the appointments table), then record it. No external write.
@@ -1518,6 +1670,25 @@ async function rescheduleAppointmentApi(appt, params) {
       const endDateTime = `${p.date}T${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}:00`;
       const up = await mscal.updateMicrosoftEvent(msToken, appt.google_event_id, { startDateTime, endDateTime, timeZone: timezone });
       if (!up.ok) { console.error('API reschedule Microsoft error'); return { ok: false, code: 'calendar_error', error: 'Failed to update the calendar event.' }; }
+    } else if (appt.google_event_id && client.calendar_provider === 'caldav' && client.caldav_connected === true) {
+      // CalDAV reschedule: validate the new slot, then re-PUT the .ics at its
+      // existing href (google_event_id holds the href) with the same UID so it
+      // overwrites in place. CalDAV has no partial update, so the whole VEVENT is
+      // rebuilt from the stored appointment fields.
+      if (p.checkAvailability !== false) {
+        const avail = await getAvailableSlots(appt.client_id, p.date, { durationOverride: duration, bufferMinutes: 0 });
+        if (!avail.success) return { ok: false, code: 'calendar_error', error: 'Could not read the calendar to confirm availability.' };
+        const want = formatSlotLabel(reqHr, reqMin).replace(/\s+/g, ' ').trim().toLowerCase();
+        const free = (avail.slots || []).some((s) => s.replace(/\s+/g, ' ').trim().toLowerCase() === want);
+        if (!free) return { ok: false, code: 'slot_unavailable', error: 'That time is not available.', available_slots: avail.slots || [] };
+      }
+      const [cY, cMo, cD] = p.date.split('-').map(Number);
+      const cdStart = zonedWallTimeToUTC(cY, cMo, cD, reqHr, reqMin, timezone).toISOString();
+      const cdEnd = new Date(new Date(cdStart).getTime() + duration * 60000).toISOString();
+      const cdTitle = buildEventTitle(appt.service_type, appt.staff_name, appt.customer_name);
+      const cdDesc = buildEventDetails({ businessName: client.business_name, via: 'api', customerName: appt.customer_name, customerPhone: appt.customer_phone, serviceType: appt.service_type, staffName: appt.staff_name, notes: appt.notes });
+      const up = await caldav.updateCaldavEvent(client, appt.google_event_id, { summary: cdTitle, description: cdDesc, startUtc: cdStart, endUtc: cdEnd });
+      if (!up.ok) { console.error('API reschedule CalDAV error'); return { ok: false, code: 'calendar_error', error: 'Failed to update the calendar event.' }; }
     } else if (appt.google_event_id && client.google_calendar_connected === true) {
       if (p.checkAvailability !== false) {
         const avail = await getAvailableSlots(appt.client_id, p.date, { durationOverride: duration, bufferMinutes: 0 });
@@ -1594,6 +1765,11 @@ async function cancelAppointmentApi(appt, params) {
         const r = await mscal.cancelMicrosoftEvent(msToken, appt.google_event_id);
         if (!r.ok) { console.error('API cancel Microsoft error'); return { ok: false, code: 'calendar_error', error: 'Failed to remove the calendar event.' }; }
       }
+    } else if (appt.google_event_id && client.calendar_provider === 'caldav' && client.caldav_connected === true) {
+      // CalDAV cancel: DELETE the .ics at its href (404/410 treated as already-gone
+      // inside cancelCaldavEvent, so cancel is idempotent).
+      const r = await caldav.cancelCaldavEvent(client, appt.google_event_id);
+      if (!r.ok) { console.error('API cancel CalDAV error'); return { ok: false, code: 'calendar_error', error: 'Failed to remove the calendar event.' }; }
     } else if (appt.google_event_id && client.google_calendar_connected === true) {
       const accessToken = await refreshAccessToken(client);
       if (accessToken) {
