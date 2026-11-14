@@ -61,7 +61,7 @@ router.get('/:clientId/calendar/settings', async (req, res) => {
   try {
     const { data: client, error } = await supabase
       .from('clients')
-      .select('id, calendar_provider, google_calendar_connected, ghl_connected, show_client_calendar, business_hours, appointment_duration, timezone, min_booking_notice_minutes, max_booking_days_ahead')
+      .select('id, calendar_provider, google_calendar_connected, ghl_connected, show_client_calendar, business_hours, appointment_duration, timezone, min_booking_notice_minutes, max_booking_days_ahead, booking_slot_interval, booking_time_windows')
       .eq('id', req.params.clientId)
       .single();
     if (error || !client) return res.status(404).json({ success: false, error: 'Client not found' });
@@ -77,6 +77,8 @@ router.get('/:clientId/calendar/settings', async (req, res) => {
       timezone: client.timezone || 'America/New_York',
       min_booking_notice_minutes: client.min_booking_notice_minutes ?? null,
       max_booking_days_ahead: client.max_booking_days_ahead ?? null,
+      booking_slot_interval: client.booking_slot_interval ?? null,
+      booking_time_windows: Array.isArray(client.booking_time_windows) ? client.booking_time_windows : null,
     });
   } catch (e) {
     console.error('native-calendar GET settings:', e);
@@ -158,6 +160,32 @@ router.put('/:clientId/calendar/native/settings', async (req, res) => {
     if (b.timezone !== undefined && b.timezone) updates.timezone = String(b.timezone);
     if (b.min_booking_notice_minutes !== undefined) updates.min_booking_notice_minutes = b.min_booking_notice_minutes === null ? null : Number(b.min_booking_notice_minutes);
     if (b.max_booking_days_ahead !== undefined) updates.max_booking_days_ahead = b.max_booking_days_ahead === null ? null : Number(b.max_booking_days_ahead);
+    // Spacing between offered appointment times (minutes). null clears it back to
+    // the platform default. Clamped to a sane range.
+    if (b.booking_slot_interval !== undefined) {
+      if (b.booking_slot_interval === null) {
+        updates.booking_slot_interval = null;
+      } else {
+        const iv = Number(b.booking_slot_interval);
+        if (!Number.isFinite(iv) || iv <= 0) return res.status(400).json({ success: false, error: 'booking_slot_interval must be a positive number of minutes' });
+        updates.booking_slot_interval = Math.min(240, Math.max(5, Math.round(iv)));
+      }
+    }
+    // Allowed day-parts for offered slots. Accepts any subset of morning /
+    // afternoon / evening; empty or null means all day (within business hours).
+    if (b.booking_time_windows !== undefined) {
+      if (b.booking_time_windows === null) {
+        updates.booking_time_windows = null;
+      } else {
+        const allowed = ['morning', 'afternoon', 'evening'];
+        const clean = (Array.isArray(b.booking_time_windows) ? b.booking_time_windows : [])
+          .map((w) => String(w).toLowerCase())
+          .filter((w) => allowed.includes(w));
+        // De-duplicate, preserve canonical order. Empty array stored as null (all day).
+        const uniq = allowed.filter((w) => clean.includes(w));
+        updates.booking_time_windows = uniq.length ? uniq : null;
+      }
+    }
     if (Object.keys(updates).length === 0) return res.status(400).json({ success: false, error: 'No settings to update' });
 
     const { error } = await supabase.from('clients').update(updates).eq('id', req.params.clientId);

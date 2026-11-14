@@ -33,8 +33,31 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CALENDAR_CLIENT_SECRET || proces
 // Minimum notice before a slot can be offered/booked (avoids "today at a time
 // that already passed" and gives the business a little lead time).
 const LEAD_TIME_MINUTES = 30;
-// Granularity of offered start times.
+// Granularity of offered start times (platform default when a client has not
+// set its own booking_slot_interval).
 const SLOT_STEP_MINUTES = 30;
+
+// Day-parts a slot's local start time can fall in, as [startMinute, endMinute)
+// since local midnight. Morning before noon, afternoon noon-5pm, evening 5pm on.
+const DAY_WINDOWS = { morning: [0, 12 * 60], afternoon: [12 * 60, 17 * 60], evening: [17 * 60, 24 * 60] };
+
+// Minutes between offered appointment start times for this client: its own
+// booking_slot_interval when set, else the platform default. Clamped to 5..240.
+function getSlotStepMinutes(client) {
+  const n = Number(client && client.booking_slot_interval);
+  if (!isFinite(n) || n <= 0) return SLOT_STEP_MINUTES;
+  return Math.min(240, Math.max(5, Math.round(n)));
+}
+
+// Whether a candidate slot (minutes since local midnight) falls within one of
+// the client's allowed day-parts. No windows configured means all day is open
+// (within business hours), so behavior is unchanged for clients who set none.
+function slotAllowedByWindows(curMinutes, client) {
+  let w = client && client.booking_time_windows;
+  if (typeof w === 'string') { try { w = JSON.parse(w); } catch (e) { w = null; } }
+  if (!Array.isArray(w) || w.length === 0) return true;
+  return w.some((name) => { const r = DAY_WINDOWS[String(name).toLowerCase()]; return !!r && curMinutes >= r[0] && curMinutes < r[1]; });
+}
 
 // Parse a business-hours time into minutes-since-midnight, accepting BOTH the
 // 12-hour format the dashboard saves ("9:00 AM", "5:00 PM") and the 24-hour
@@ -222,7 +245,7 @@ function buildEventTitle(serviceType, staffName, customerName) {
 // it renders the same in Outlook, Google, and anywhere else.
 function buildEventDetails({ businessName, via, customerName, customerPhone, serviceType, staffName, notes }) {
   const header = via === 'ai'
-    ? `Booked by the AI receptionist${businessName ? ` for ${businessName}` : ''}.`
+    ? `Booked by ${businessName ? businessName + "'s" : 'your'} AI receptionist.`
     : 'Booked via the VoiceAI API.';
   const lines = [header, ''];
   if (customerName) lines.push(`Customer: ${customerName}`);
@@ -479,7 +502,7 @@ async function getAvailableSlots(clientId, date, options) {
     // (a few, not all). Only real conflicts within business hours land here.
     const taken = [];
 
-    for (let cur = openTotal; cur + duration <= closeTotal; cur += SLOT_STEP_MINUTES) {
+    for (let cur = openTotal; cur + duration <= closeTotal; cur += getSlotStepMinutes(client)) {
       const hr = Math.floor(cur / 60);
       const min = cur % 60;
 
@@ -488,6 +511,7 @@ async function getAvailableSlots(clientId, date, options) {
 
       // Skip slots that are in the past or too soon (same-day protection).
       if (slotStartMs < nowMs + leadMs) continue;
+      if (!slotAllowedByWindows(cur, client)) continue;
 
       // Buffer expands the slot's protected window symmetrically. With buffer 0
       // this is a plain overlap test; abutting events (busy.end === slotStart)
@@ -626,12 +650,13 @@ async function getNativeAvailableSlots(client, date, options) {
     const slots = [];
     const taken = [];
 
-    for (let cur = openTotal; cur + duration <= closeTotal; cur += SLOT_STEP_MINUTES) {
+    for (let cur = openTotal; cur + duration <= closeTotal; cur += getSlotStepMinutes(client)) {
       const hr = Math.floor(cur / 60);
       const min = cur % 60;
       const slotStartMs = zonedWallTimeToUTC(yy, mm, dd, hr, min, timezone).getTime();
       const slotEndMs = slotStartMs + duration * 60000;
       if (slotStartMs < nowMs + leadMs) continue;
+      if (!slotAllowedByWindows(cur, client)) continue;
       const bufStartMs = slotStartMs - buffer * 60000;
       const bufEndMs = slotEndMs + buffer * 60000;
       const hasConflict = busy.some(b => bufStartMs < b.end.getTime() && bufEndMs > b.start.getTime());
@@ -747,12 +772,13 @@ async function getMicrosoftAvailableSlots(client, date, options) {
     const slots = [];
     const taken = [];
 
-    for (let cur = openTotal; cur + duration <= closeTotal; cur += SLOT_STEP_MINUTES) {
+    for (let cur = openTotal; cur + duration <= closeTotal; cur += getSlotStepMinutes(client)) {
       const hr = Math.floor(cur / 60);
       const min = cur % 60;
       const slotStartMs = zonedWallTimeToUTC(yy, mm, dd, hr, min, timezone).getTime();
       const slotEndMs = slotStartMs + duration * 60000;
       if (slotStartMs < nowMs + leadMs) continue;
+      if (!slotAllowedByWindows(cur, client)) continue;
       const bufStartMs = slotStartMs - buffer * 60000;
       const bufEndMs = slotEndMs + buffer * 60000;
       const hasConflict = busy.some(b => bufStartMs < b.end.getTime() && bufEndMs > b.start.getTime());
